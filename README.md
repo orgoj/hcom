@@ -277,6 +277,7 @@ hcom launch flags:
 
 | Flag | Purpose |
 |---|---|
+| `--as <name>` | Explicit agent name (single-agent launch only) |
 | `--tag <name>` | Group label — agents can be addressed as `@tag` |
 | `--terminal <preset>` | Where windows open: `default` (auto-detect), `kitty`, `wezterm`, `tmux`, `cmux`, `iterm`, etc… |
 | `--dir <path>` | Directory where the agent launches |

@@ -32,7 +32,11 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     if count > max_count {
         bail!("Too many agents requested (max {}).", max_count);
     }
+    if hcom_flags.name.is_some() && count > 1 {
+        bail!("Cannot use explicit name with count > 1 (count={count})");
+    }
 
+    let explicit_name = hcom_flags.name;
     let tag = hcom_flags.tag;
     let terminal = hcom_flags.terminal;
     let headless = hcom_flags.headless;
@@ -84,6 +88,7 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
         let params = json!({
             "tool": tool,
             "count": count,
+            "name": explicit_name,
             "args": tool_args,
             "tag": tag,
             "launcher": launcher_name,
@@ -195,7 +200,7 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
             launcher: Some(launcher_name.clone()),
             run_here: hcom_flags.run_here,
             batch_id: hcom_flags.batch_id,
-            name: None, // --name is caller identity, not instance name
+            name: explicit_name,
             skip_validation: false,
             terminal,
             append_reply_handoff: true,
@@ -431,6 +436,7 @@ pub(crate) fn print_launch_preview(preview: LaunchPreview<'_>) {
 /// Hcom-level flags extracted from launch argv.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct HcomLaunchFlags {
+    pub name: Option<String>,
     pub tag: Option<String>,
     pub terminal: Option<String>,
     pub device: Option<String>,
@@ -587,6 +593,11 @@ pub(crate) fn extract_launch_flags(args: &[String]) -> (HcomLaunchFlags, Vec<Str
             i += 1;
             continue;
         }
+        if args[i].starts_with("--as=") {
+            flags.name = Some(args[i][5..].to_string());
+            i += 1;
+            continue;
+        }
         if args[i].starts_with("--terminal=") {
             flags.terminal = Some(args[i][11..].to_string());
             i += 1;
@@ -603,6 +614,10 @@ pub(crate) fn extract_launch_flags(args: &[String]) -> (HcomLaunchFlags, Vec<Str
             continue;
         }
         match args[i].as_str() {
+            "--as" if i + 1 < args.len() => {
+                flags.name = Some(args[i + 1].clone());
+                i += 2;
+            }
             "--tag" if i + 1 < args.len() => {
                 flags.tag = Some(args[i + 1].clone());
                 i += 2;
@@ -896,6 +911,16 @@ mod tests {
         assert_eq!(tool, "claude");
         assert_eq!(flags.tag, Some("test".to_string()));
         assert_eq!(args, s(&["--model", "haiku"]));
+    }
+
+    #[test]
+    fn test_parse_launch_argv_with_explicit_name() {
+        let (count, tool, flags, args) =
+            parse_launch_argv(&s(&["codex", "--as", "karel", "--model", "gpt-5"])).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(tool, "codex");
+        assert_eq!(flags.name, Some("karel".to_string()));
+        assert_eq!(args, s(&["--model", "gpt-5"]));
     }
 
     #[test]

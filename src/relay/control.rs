@@ -680,6 +680,7 @@ fn normalize_config_field(field: &str) -> String {
 struct RemoteLaunchRequest {
     tool: String,
     count: usize,
+    name: Option<String>,
     args: Vec<String>,
     tag: Option<String>,
     launcher: Option<String>,
@@ -699,6 +700,7 @@ impl RemoteLaunchRequest {
         Ok(Self {
             tool: required_param(params, "tool")?.to_string(),
             count,
+            name: optional_param(params, "name").map(ToString::to_string),
             args: string_list_param(params, "args"),
             tag: optional_param(params, "tag").map(ToString::to_string),
             launcher: optional_param(params, "launcher").map(ToString::to_string),
@@ -790,7 +792,7 @@ fn handle_remote_launch(
             // is not safe even for single interactive launches.
             run_here: Some(false),
             batch_id: None,
-            name: None,
+            name: request.name,
             skip_validation: false,
             terminal: request.terminal,
             append_reply_handoff: false,

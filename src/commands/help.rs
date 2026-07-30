@@ -715,6 +715,10 @@ fn generate_tool_help(spec: &crate::integration_spec::IntegrationSpec) -> String
     }
     lines.push(format!(
         "    {:<29}{}",
+        "--as <name>", "Explicit name (single agent only)"
+    ));
+    lines.push(format!(
+        "    {:<29}{}",
         "--device <name>", "Launch on a remote relay device"
     ));
 
