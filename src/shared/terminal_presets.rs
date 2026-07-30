@@ -420,7 +420,15 @@ pub static TERMINAL_PRESETS: LazyLock<Vec<(&'static str, TerminalPreset)>> = Laz
             p(
                 Some("tmux"),
                 None,
-                argv(&["tmux", "new-session", "-d", "bash", "{script}"]),
+                argv(&[
+                    "tmux",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    "hcom-{instance_name}",
+                    "bash",
+                    "{script}",
+                ]),
                 argv(&["tmux", "kill-pane", "-t", "{pane_id}"]),
                 Some("TMUX_PANE"),
                 DL,
@@ -648,6 +656,23 @@ mod tests {
         assert_eq!(
             preset.close.select(false),
             Some(&["kitten", "@", "close-window", "--match", "id:{pane_id}"] as ArgvTemplate)
+        );
+    }
+
+    #[test]
+    fn test_tmux_session_name_matches_instance_name() {
+        let preset = get_terminal_preset("tmux").unwrap();
+        assert_eq!(
+            preset.open.select(false),
+            Some(&[
+                "tmux",
+                "new-session",
+                "-d",
+                "-s",
+                "hcom-{instance_name}",
+                "bash",
+                "{script}",
+            ] as ArgvTemplate)
         );
     }
 

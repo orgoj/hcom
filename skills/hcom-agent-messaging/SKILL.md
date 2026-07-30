@@ -48,6 +48,26 @@ run `hcom --help` for full command syntax and flags.
 
 ---
 
+## spawning named agents with terminal access
+
+Use `--as` for one intentional, stable agent name. It is valid only when launching one agent:
+
+```bash
+hcom codex --as audit_api --dir /path/to/repo --terminal tmux --hcom-prompt "Inspect authentication and report back" --go
+```
+
+The `tmux` preset creates a detached session named `hcom-audit_api`. A human can access it later:
+
+```bash
+tmux attach -t hcom-audit_api
+```
+
+Use `--terminal tmux-split` instead when the child should open as a pane beside the launching agent. Always pass `--dir` when the child must work in another repository. Use `hcom send @audit_api -- "..."` for follow-up work and `hcom kill audit_api` to stop the agent and close its managed tmux pane.
+
+For multiple agents, omit `--as` and capture the generated names from launch output; one explicit name cannot be assigned to a multi-agent launch.
+
+---
+
 ## tool support
 
 | tool | delivery | connect |
@@ -136,7 +156,7 @@ place scripts in `~/.hcom/scripts/` as `.sh` or `.py`. run with `hcom run <name>
 ### key rules
 
 - **never use `sleep`** — use `hcom events --wait` or `hcom listen`
-- **never hardcode agent names** — parse from `grep '^Names: '` in launch output
+- **never hardcode generated agent names** — parse them from `grep '^Names: '` in launch output; `--as` is only for intentional single-agent names
 - **always use `--thread`** — without it, messages leak across workflows
 - **always use `trap cleanup ERR INT TERM`** — orphan headless agents run indefinitely
 - **always use `hcom kill` for cleanup** (not `stop`) — kill also closes the terminal pane

@@ -1688,7 +1688,7 @@ pub fn terminal_help_text(show_current: bool) -> String {
     const MANAGED_PARENTS: &[(&str, &str)] = &[
         ("kitty", "auto split/tab/window"),
         ("wezterm", "auto tab/split/window"),
-        ("tmux", "detached sessions"),
+        ("tmux", "named detached sessions"),
         ("cmux", "workspaces"),
         ("zellij", "panes"),
         ("waveterm", "blocks"),
