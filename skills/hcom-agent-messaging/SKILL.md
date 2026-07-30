@@ -53,16 +53,18 @@ run `hcom --help` for full command syntax and flags.
 Use `--as` for one intentional, stable agent name. It is valid only when launching one agent:
 
 ```bash
-hcom codex --as audit_api --dir /path/to/repo --terminal tmux --hcom-prompt "Inspect authentication and report back" --go
+hcom codex --as audit_api --dir /path/to/repo --terminal tmux-window --hcom-prompt "Inspect authentication and report back" --go
 ```
 
-The `tmux` preset creates a detached session named `hcom-audit_api`. A human can access it later:
+The `tmux-window` preset creates a window named `hcom-audit_api` in the launching agent's current tmux session. Switch to it with normal tmux window navigation.
+
+Use `--terminal tmux` when the child needs its own detached session. A human can access that session later:
 
 ```bash
 tmux attach -t hcom-audit_api
 ```
 
-Use `--terminal tmux-split` instead when the child should open as a pane beside the launching agent. Always pass `--dir` when the child must work in another repository. Use `hcom send @audit_api -- "..."` for follow-up work and `hcom kill audit_api` to stop the agent and close its managed tmux pane.
+Use `--terminal tmux-split` only when the child should split the launching agent's current window. Always pass `--dir` when the child must work in another repository. Use `hcom send @audit_api -- "..."` for follow-up work and `hcom kill audit_api` to stop the agent and close its managed tmux pane.
 
 For multiple agents, omit `--as` and capture the generated names from launch output; one explicit name cannot be assigned to a multi-agent launch.
 

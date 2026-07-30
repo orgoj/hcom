@@ -446,6 +446,23 @@ pub static TERMINAL_PRESETS: LazyLock<Vec<(&'static str, TerminalPreset)>> = Laz
             ),
         ),
         (
+            "tmux-window",
+            p(
+                Some("tmux"),
+                None,
+                argv(&[
+                    "tmux",
+                    "new-window",
+                    "-n",
+                    "hcom-{instance_name}",
+                    "{script}",
+                ]),
+                argv(&["tmux", "kill-pane", "-t", "{pane_id}"]),
+                Some("TMUX_PANE"),
+                DL,
+            ),
+        ),
+        (
             "wezterm-tab",
             p(
                 Some("wezterm"),
@@ -638,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_terminal_presets_count() {
-        assert_eq!(TERMINAL_PRESETS.len(), 28);
+        assert_eq!(TERMINAL_PRESETS.len(), 29);
     }
 
     #[test]
@@ -671,6 +688,21 @@ mod tests {
                 "-s",
                 "hcom-{instance_name}",
                 "bash",
+                "{script}",
+            ] as ArgvTemplate)
+        );
+    }
+
+    #[test]
+    fn test_tmux_window_name_matches_instance_name() {
+        let preset = get_terminal_preset("tmux-window").unwrap();
+        assert_eq!(
+            preset.open.select(false),
+            Some(&[
+                "tmux",
+                "new-window",
+                "-n",
+                "hcom-{instance_name}",
                 "{script}",
             ] as ArgvTemplate)
         );

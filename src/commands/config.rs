@@ -1700,7 +1700,7 @@ pub fn terminal_help_text(show_current: bool) -> String {
             "wezterm",
             &["wezterm-window", "wezterm-tab", "wezterm-split"],
         ),
-        ("tmux", &["tmux-split"]),
+        ("tmux", &["tmux-window", "tmux-split"]),
     ];
 
     let all_managed: std::collections::HashSet<&str> = {
