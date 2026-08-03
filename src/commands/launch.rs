@@ -37,6 +37,7 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     }
 
     let explicit_name = hcom_flags.name;
+    let has_explicit_name = explicit_name.is_some();
     let tag = hcom_flags.tag;
     let terminal = hcom_flags.terminal;
     let headless = hcom_flags.headless;
@@ -201,6 +202,7 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
             run_here: hcom_flags.run_here,
             batch_id: hcom_flags.batch_id,
             name: explicit_name,
+            explicit_identity: has_explicit_name,
             skip_validation: false,
             terminal,
             append_reply_handoff: true,

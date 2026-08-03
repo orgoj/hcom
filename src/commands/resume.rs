@@ -551,6 +551,7 @@ fn prepare_resume_plan_from_source(
             run_here: launch_flags.run_here,
             batch_id: launch_flags.batch_id.clone(),
             name: launch_name,
+            explicit_identity: false,
             skip_validation: false,
             terminal: launch_flags.terminal.clone(),
             // Codex tracked-instance fork uses initial_prompt for an identity
@@ -3162,12 +3163,14 @@ mod tests {
             "plain resume must pre-seed the recreated row with the prior session id \
              so a kill before the first turn (no hook re-bind) stays resumable"
         );
+        assert!(!resume.launch.explicit_identity);
 
         let fork = prepare_resume_plan(&db, "luna", true, &[], &GlobalFlags::default()).unwrap();
         assert_eq!(
             fork.launch.prior_session_id, None,
             "forks bind a fresh session on first turn; must not inherit the parent's"
         );
+        assert!(!fork.launch.explicit_identity);
     }
 
     #[test]

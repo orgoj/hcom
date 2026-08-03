@@ -276,6 +276,15 @@ fn is_true_launch_placeholder(data: Option<&InstanceRow>) -> bool {
         )
 }
 
+fn is_explicit_identity_placeholder(data: Option<&InstanceRow>) -> bool {
+    is_true_launch_placeholder(data)
+        && data
+            .and_then(|row| row.launch_context.as_deref())
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .and_then(|value| value.get("explicit_identity").and_then(|v| v.as_bool()))
+            == Some(true)
+}
+
 fn migrate_placeholder_notify(db: &HcomDb, placeholder_name: &str, canonical_name: &str) -> bool {
     match db.migrate_notify_endpoints(placeholder_name, canonical_name) {
         Ok(()) => true,
@@ -445,6 +454,63 @@ pub fn bind_session_to_process(
             None
         }
     };
+
+    // A direct `hcom <tool> --as NAME --resume ...` explicitly asks to rename
+    // the resumed session. The process placeholder is therefore authoritative,
+    // unlike generated placeholders used by ordinary launch/resume flows.
+    if is_explicit_identity_placeholder(placeholder_data.as_ref())
+        && let Some(ref ph_name) = placeholder_name
+        && canonical.as_deref() != Some(ph_name.as_str())
+    {
+        crate::log::log_info(
+            "binding",
+            "bind_session_to_process.explicit_identity",
+            &format!("placeholder={ph_name}, previous={canonical:?}, session_id={session_id}"),
+        );
+        if let Some(ref old_name) = canonical {
+            crate::instance_lifecycle::set_status(
+                db,
+                old_name,
+                ST_INACTIVE,
+                "exit:explicit_identity",
+                Default::default(),
+            );
+            if let Err(e) = db.delete_session_bindings_for_instance(old_name) {
+                crate::log::log_error(
+                    "binding",
+                    "explicit_identity.delete_session_bindings",
+                    &format!("{e}"),
+                );
+            }
+        }
+        if let Err(e) = db.clear_session_id_from_other_instances(session_id, ph_name) {
+            crate::log::log_error(
+                "binding",
+                "explicit_identity.clear_session",
+                &format!("{e}"),
+            );
+        }
+        let mut updates = serde_json::Map::new();
+        updates.insert("session_id".into(), serde_json::json!(session_id));
+        update_instance_position(db, ph_name, &updates);
+        if let Err(e) = db.rebind_session(session_id, ph_name) {
+            crate::log::log_error(
+                "binding",
+                "explicit_identity.rebind_session",
+                &format!("{e}"),
+            );
+        }
+        if let Some(pid) = process_id
+            && let Err(e) = db.set_process_binding(pid, session_id, ph_name)
+        {
+            crate::log::log_error(
+                "binding",
+                "explicit_identity.set_process_binding",
+                &format!("{e}"),
+            );
+        }
+        return Some(ph_name.clone());
+    }
 
     // Path 1: Canonical exists (session already bound)
     if let Some(ref canonical_name) = canonical {
@@ -1516,6 +1582,69 @@ mod tests {
         assert_eq!(restored.tool, "antigravity");
         assert_eq!(restored.tag.as_deref(), Some("work"));
         assert!(db.get_instance_full("nova").unwrap().is_none());
+
+        cleanup(path);
+    }
+
+    #[test]
+    #[serial]
+    fn test_explicit_identity_placeholder_overrides_stopped_resumed_name() {
+        crate::config::Config::init();
+        let (db, path) = setup_test_db();
+        let now = now_epoch_i64();
+
+        let mut old = serde_json::Map::new();
+        old.insert("name".into(), serde_json::json!("memo"));
+        old.insert("session_id".into(), serde_json::json!("sid-resume"));
+        old.insert("tool".into(), serde_json::json!("claude"));
+        old.insert("created_at".into(), serde_json::json!(now));
+        old.insert("status".into(), serde_json::json!("inactive"));
+        db.save_instance_named("memo", &old).unwrap();
+        db.rebind_session("sid-resume", "memo").unwrap();
+        db.log_life_event(
+            "memo",
+            "stopped",
+            "test",
+            "exit",
+            Some(serde_json::json!({ "session_id": "sid-resume", "tool": "claude" })),
+        )
+        .unwrap();
+        db.delete_instance("memo").unwrap();
+        assert_eq!(db.get_session_binding("sid-resume").unwrap(), None);
+
+        let mut explicit = serde_json::Map::new();
+        explicit.insert("name".into(), serde_json::json!("wdt_main"));
+        explicit.insert("tool".into(), serde_json::json!("claude"));
+        explicit.insert("created_at".into(), serde_json::json!(now));
+        explicit.insert("status".into(), serde_json::json!("pending"));
+        explicit.insert("status_context".into(), serde_json::json!("new"));
+        explicit.insert(
+            "launch_context".into(),
+            serde_json::json!(r#"{"explicit_identity":true}"#),
+        );
+        db.save_instance_named("wdt_main", &explicit).unwrap();
+        db.set_process_binding("pid-claude", "", "wdt_main")
+            .unwrap();
+
+        let result = bind_session_to_process(&db, "sid-resume", Some("pid-claude"));
+        assert_eq!(result.as_deref(), Some("wdt_main"));
+        assert_eq!(
+            db.get_session_binding("sid-resume").unwrap().as_deref(),
+            Some("wdt_main")
+        );
+        assert_eq!(
+            db.get_process_binding("pid-claude").unwrap().as_deref(),
+            Some("wdt_main")
+        );
+        assert_eq!(
+            db.get_instance_full("wdt_main")
+                .unwrap()
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("sid-resume")
+        );
+        assert!(db.get_instance_full("memo").unwrap().is_none());
 
         cleanup(path);
     }

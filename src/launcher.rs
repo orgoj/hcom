@@ -196,6 +196,9 @@ pub struct LaunchParams {
     pub run_here: Option<bool>,
     pub batch_id: Option<String>,
     pub name: Option<String>,
+    /// The name came from the user's `--as`, rather than an internally chosen
+    /// resume/fork identity.
+    pub explicit_identity: bool,
     pub skip_validation: bool,
     pub terminal: Option<String>,
     pub append_reply_handoff: bool,
@@ -219,6 +222,7 @@ impl Default for LaunchParams {
             run_here: None,
             batch_id: None,
             name: None,
+            explicit_identity: false,
             skip_validation: false,
             terminal: None,
             append_reply_handoff: true,
@@ -1989,6 +1993,14 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                 None,              // hints
                 Some(working_dir), // cwd_override: use launch params cwd, not current_dir()
             );
+            // `--as` is an identity choice, not merely a temporary launch name.
+            // Record it on the placeholder so a native tool resume can adopt the
+            // resumed session under this name instead of restoring its old hcom
+            // name. Internal `hcom r/f` launches carry `prior_session_id` and keep
+            // their existing canonical identity semantics.
+            if params.explicit_identity {
+                db.store_launch_context(&instance_name, r#"{"explicit_identity":true}"#)?;
+            }
             db.set_process_binding(&process_id, "", &instance_name)?;
             Ok(())
         })() {

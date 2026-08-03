@@ -773,6 +773,7 @@ fn handle_remote_launch(
     .map_err(|e| e.to_string())?;
     let cwd = resolve_remote_cwd(request.cwd.as_deref())?;
 
+    let has_explicit_name = request.name.is_some();
     let result = launcher::launch(
         db,
         LaunchParams {
@@ -793,6 +794,7 @@ fn handle_remote_launch(
             run_here: Some(false),
             batch_id: None,
             name: request.name,
+            explicit_identity: has_explicit_name,
             skip_validation: false,
             terminal: request.terminal,
             append_reply_handoff: false,
