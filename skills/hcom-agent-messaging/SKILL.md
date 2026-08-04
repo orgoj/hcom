@@ -135,6 +135,22 @@ hcom claude          # fresh start
 | message reaches more than one agent | duplicate base name across tags | target the full `@tag-name` to hit exactly one |
 | messages leaking between workflows | no thread isolation | always use `--thread` |
 
+### "Instance '<name>' already exists"
+
+Preserve evidence before running `hcom list`, because listing may reconcile stale rows:
+
+```bash
+sqlite3 ~/.hcom/hcom.db \
+  "SELECT name, status, status_time, status_context, pid, session_id
+   FROM instances WHERE name = '<name>'"
+hcom events --agent <name> --last 20
+```
+
+Then check whether the process or terminal still exists. If the instance is dead, run
+`hcom list` to trigger normal stale reconciliation and retry the launch. Use
+`hcom kill <name>` only for a genuinely live managed instance. Do not use
+`hcom reset all` for a single-name collision.
+
 ### intent system
 
 agents follow these rules from their bootstrap:

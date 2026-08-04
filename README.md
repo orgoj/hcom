@@ -200,8 +200,15 @@ To keep using relay after a leak, create a new relay with `hcom relay new` and m
 
 ```bash
 hcom status                  # diagnostics
-hcom reset all               # clear and archive: database + hooks + config
+hcom list                    # reconcile and show live agents
+hcom list --stopped --all    # inspect stopped/stale history
+hcom kill <name>             # remove one live managed instance
+hcom reset all               # last resort: archive database, hooks, and config
 ```
+
+For `Instance '<name>' already exists` after a reboot, run `hcom list` and retry.
+Current releases also reconcile stale launch records automatically when reusing an
+explicit name.
 
 ---
 

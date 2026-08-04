@@ -1507,6 +1507,19 @@ fn resolve_explicit_name_conflict(db: &HcomDb, name: &str) -> Result<()> {
     {
         return Ok(());
     }
+    // A machine restart can leave an active/blocked row behind even though its
+    // PTY and agent process are gone. Reconcile only the requested name; a
+    // launch must not clean unrelated stale agents as a side effect.
+    if let Ok(Some(instance)) = db.get_instance_full(name) {
+        let computed = crate::instance_lifecycle::get_instance_status(&instance, db);
+        if computed.status == crate::shared::ST_INACTIVE
+            && computed.context == "stale"
+            && computed.age_seconds > 3600
+        {
+            crate::hooks::common::stop_instance(db, name, "system", "stale_cleanup");
+            return Ok(());
+        }
+    }
     bail!(
         "Instance '{}' already exists (stop it first or use a different name)",
         name
@@ -3557,7 +3570,8 @@ mod tests {
         let now = chrono::Utc::now().timestamp() as f64;
         db.conn()
             .execute(
-                "INSERT INTO instances (name, status, created_at, tool) VALUES (?1, ?2, ?3, 'antigravity')",
+                "INSERT INTO instances (name, status, status_time, created_at, tool) \
+                 VALUES (?1, ?2, CAST(?3 AS INTEGER), ?3, 'antigravity')",
                 rusqlite::params![name, status, now],
             )
             .unwrap();
@@ -3612,6 +3626,25 @@ mod tests {
         assert!(err.contains("already exists"), "unexpected: {err}");
         // Row should still be present — no deletion on conflict.
         assert!(db.get_instance("rune").unwrap().is_some());
+    }
+
+    #[test]
+    fn resolve_explicit_name_conflict_cleans_stale_row() {
+        let db = launcher_test_db();
+        let old = chrono::Utc::now().timestamp() as f64 - 7200.0;
+        for name in ["rune", "other"] {
+            db.conn()
+                .execute(
+                    "INSERT INTO instances (name, status, status_time, created_at, tool) \
+                     VALUES (?1, 'blocked', CAST(?2 AS INTEGER), ?2, 'claude')",
+                    rusqlite::params![name, old],
+                )
+                .unwrap();
+        }
+
+        assert!(resolve_explicit_name_conflict(&db, "rune").is_ok());
+        assert!(db.get_instance("rune").unwrap().is_none());
+        assert!(db.get_instance("other").unwrap().is_some());
     }
 
     // ── inject_workspace_trust_args ──────────────────────────────────────────
