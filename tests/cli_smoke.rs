@@ -62,6 +62,20 @@ fn help_prints_and_exits_zero() {
 }
 
 #[test]
+fn config_terminal_accepts_here_mode() {
+    let h = Hcom::new();
+
+    let (code, stdout, stderr) = h.run(["config", "terminal", "here"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("Terminal set to: here"), "stdout={stdout}");
+
+    let (code, stdout, stderr) = h.run(["config", "terminal"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("Terminal: here"), "stdout={stdout}");
+    assert!(stdout.contains("here ← current"), "stdout={stdout}");
+}
+
+#[test]
 fn status_json_in_fresh_dir() {
     let h = Hcom::new();
     let (code, stdout, _stderr) = h.run(["status", "--json"]);

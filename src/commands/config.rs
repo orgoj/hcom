@@ -1767,7 +1767,9 @@ pub fn terminal_help_text(show_current: bool) -> String {
             };
             lines.push(format!("Current: default (auto-detect){suffix}"));
         } else {
-            let kind = if crate::config::get_merged_preset(&current)
+            let kind = if current == "here" {
+                "current terminal"
+            } else if crate::config::get_merged_preset(&current)
                 .is_some_and(|p| p.has_close(cfg!(windows)))
             {
                 "managed"
@@ -1822,6 +1824,11 @@ pub fn terminal_help_text(show_current: bool) -> String {
         let mark = if is_available(name) { "[+]" } else { "[-]" };
         lines.push(format!("  {mark} {name}"));
     }
+
+    lines.push(String::new());
+    lines.push("Current terminal:".to_string());
+    lines.push("  here            run the agent in the invoking terminal".to_string());
+    lines.push("                  Example: hcom codex --terminal here".to_string());
 
     // TOML-defined presets not in built-ins
     let toml_path = crate::paths::config_toml_path();
@@ -1978,6 +1985,12 @@ fn config_terminal(argv: &[String], setup_mode: bool) -> i32 {
                 };
             println!("  {name}{availability}{marker}");
         }
+        let here_marker = if current == "here" {
+            " ← current"
+        } else {
+            ""
+        };
+        println!("  here{here_marker}");
         // Include TOML-defined presets not in built-ins
         let toml_path = crate::paths::config_toml_path();
         if let Some(toml_presets) = crate::config::load_toml_presets(&toml_path)
@@ -2036,10 +2049,13 @@ fn config_terminal(argv: &[String], setup_mode: bool) -> i32 {
     let builtin = TERMINAL_PRESETS
         .iter()
         .find(|(name, _)| *name == preset_name.as_str());
-    let valid = builtin.is_some() || crate::config::is_user_defined_preset(preset_name);
+    let valid = preset_name == "here"
+        || builtin.is_some()
+        || crate::config::is_user_defined_preset(preset_name);
 
     if !valid {
         let mut available: Vec<&str> = TERMINAL_PRESETS.iter().map(|(name, _)| *name).collect();
+        available.push("here");
         // Include user-defined presets
         let toml_path = crate::paths::config_toml_path();
         let user_names: Vec<String> = crate::config::load_toml_presets(&toml_path)
@@ -2420,6 +2436,13 @@ mod tests {
                 "missing {placeholder} placeholder docs",
             );
         }
+    }
+
+    #[test]
+    fn test_terminal_help_text_documents_here_mode() {
+        let help = terminal_help_text(false);
+        assert!(help.contains("here            run the agent in the invoking terminal"));
+        assert!(help.contains("hcom codex --terminal here"));
     }
 
     #[test]
