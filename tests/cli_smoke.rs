@@ -1179,3 +1179,87 @@ fn pi_e2e_hook_dispatch() {
         .unwrap_or_else(|| panic!("stopped event missing: {stdout}"));
     assert_eq!(stopped["data"]["action"].as_str(), Some("stopped"));
 }
+
+#[test]
+fn agent_help_lists_catalog_layers() {
+    let h = Hcom::new();
+    let (code, stdout, stderr) = h.run(["agent", "--help"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.starts_with("Usage:"), "stdout={stdout}");
+    assert!(stdout.contains("agents.json"), "stdout={stdout}");
+    assert!(stdout.contains(".hcom-agents.json"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_ls_without_catalog_points_at_the_global_file() {
+    let h = Hcom::new();
+    let (code, stdout, stderr) = h.run(["agent", "ls"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("No agents defined"), "stdout={stdout}");
+    assert!(stdout.contains("agents.json"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_unknown_name_suggests_a_close_match() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"wdt_main":{"dir":"/tmp","cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, _stdout, stderr) = h.run(["agent", "wdt_mian"]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(stderr.contains("unknown agent 'wdt_mian'"), "stderr={stderr}");
+    assert!(stderr.contains("did you mean 'wdt_main'"), "stderr={stderr}");
+}
+
+#[test]
+fn agent_dry_run_renders_the_hcom_command_without_launching() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"defaults":{"cli":"claude"},
+            "agents":{"solo":{"dir":"/tmp","cli":"codex","terminal":"wezterm-tab",
+                              "env":{"AWS_PROFILE":"wdt"},"args":["--from-catalog"]}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--model", "gpt-5", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("AWS_PROFILE=wdt"), "stdout={stdout}");
+    assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
+    assert!(stdout.contains("--dir /tmp"), "stdout={stdout}");
+    assert!(stdout.contains("--terminal wezterm-tab"), "stdout={stdout}");
+    assert!(stdout.contains("--model gpt-5"), "stdout={stdout}");
+    assert!(stdout.contains("--from-catalog"), "stdout={stdout}");
+
+    // Nothing was launched.
+    let (code, list, _stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(list.trim(), "[]", "dry-run must not create an instance");
+}
+
+#[test]
+fn agent_session_uses_tmux_window_with_terminal_here() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"solo":{"dir":"/tmp","cli":"codex","session":"work","window":"main",
+                              "pre":"echo ready"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    if stderr.contains("tmux not found") {
+        // No tmux on this machine: the session must degrade to a plain launch.
+        assert!(!stdout.contains("tmux "), "stdout={stdout}");
+        return;
+    }
+    assert!(stdout.contains("-s work"), "stdout={stdout}");
+    assert!(stdout.contains("-n main"), "stdout={stdout}");
+    assert!(stdout.contains("echo ready &&"), "stdout={stdout}");
+    assert!(stdout.contains("--terminal here"), "stdout={stdout}");
+    assert!(stdout.contains(r#"exec "${SHELL:-sh}""#), "stdout={stdout}");
+}

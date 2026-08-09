@@ -23,6 +23,7 @@ pub mod term;
 pub mod transcript;
 
 // Management
+pub mod agent;
 pub mod archive;
 pub mod config;
 pub mod help;

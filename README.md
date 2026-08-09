@@ -295,6 +295,50 @@ hcom launch flags:
 
 Anything else is forwarded to the tool: `--model sonnet`, `--yolo`, etc.
 
+### Named agents
+
+`hcom agent` launches an agent from a JSON catalog, so a machine's recurring agents stop living in
+shell history. A named agent is unique: launching one that already runs prints its status and exits.
+
+```bash
+hcom agent wdt_main                 # launch (or report that it already runs)
+hcom agent wdt_main --cli codex     # unknown flags are forwarded to `hcom <cli>`
+hcom agent ls                       # catalog + live status + which file defined it
+hcom agent show wdt_main            # effective config and the exact command
+hcom agent edit                     # open the catalog in $EDITOR (creates a starter file)
+```
+
+`~/.hcom/agents.json` (override with `HCOM_AGENTS_FILE`) holds the machine's agents; a
+`.hcom-agents.json` found upward from the current directory adds or overrides entries for one repo.
+A file's `defaults` apply only to the agents that same file defines. Relative `dir` resolves against
+`$HOME` for the global catalog and against the catalog's own directory for a project one.
+
+```jsonc
+{
+  "defaults": { "cli": "claude" },
+  "agents": {
+    "wdt_main": {
+      "dir": "~/work/wdt/ansible-wdt",
+      "cli": "codex",
+      "session": "wdt",                  // tmux session; window defaults to the agent name
+      "env": { "AWS_PROFILE": "wdt" },
+      "pre": "source .venv/bin/activate",
+      "args": ["--dangerously-skip-permissions"]
+    },
+    "gtm_cli": { "dir": "~/projects/gtm-cli", "cli": "codex", "terminal": "wezterm-tab" }
+  }
+}
+```
+
+Where the window opens, in order: `terminal_command` (passed to hcom as `HCOM_TERMINAL`), then
+`session` when tmux is available (the window is prepared first, the agent runs with
+`--terminal here`, so `hcom kill` still closes the pane), otherwise `--terminal <preset>` and hcom
+opens the window itself. Without tmux — Windows, for instance — `session` is ignored with a warning
+and the preset takes over.
+
+`--dry-run` prints the commands instead of running them; `--restart` replaces a running agent;
+`--fresh` starts a new session instead of resuming a stopped one. `hcom agent --help` lists the rest.
+
 ### Other commands
 
 ```bash
@@ -302,6 +346,7 @@ hcom                                # TUI dashboard
 hcom send -b @luna -- hey           # one-off message to an agent
 hcom list                           # show all active agents
 hcom term [name]                    # view/inject into an agent's PTY screen
+hcom agent <name>                   # launch a named agent from the catalog
 hcom events --wait <filters>         # Block until match for scripting
 hcom update                         # update hcom version
 ```

@@ -926,6 +926,7 @@ Commands:\n\
   stop         Disconnect from hcom\n\
   config       Get/set global and per-agent settings\n\
   run          Execute workflow scripts\n\
+  agent        Launch named agents from a JSON catalog\n\
   relay        Cross-device sync + relay daemon\n\
   archive      Query past hcom sessions\n\
   reset        Archive and clear database\n\
@@ -995,6 +996,10 @@ fn resume_fork_help(usage_line: &str, blurb: &str, see_also_line: &str) -> Strin
 /// Get formatted help for a single command.
 pub fn get_command_help(name: &str) -> String {
     let mut lines = vec!["Usage:".to_string()];
+
+    if name == "agent" {
+        return crate::commands::agent::help_text();
+    }
 
     // Tool launch commands use the template generator
     if let Some(spec) = get_tool_spec(name) {
