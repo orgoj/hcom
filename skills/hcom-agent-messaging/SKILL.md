@@ -158,6 +158,20 @@ agents follow these rules from their bootstrap:
 - `--intent inform` -> agent responds only if useful
 - `--intent ack` -> agent does not respond
 
+Choose replies from the received intent, not from conversational politeness:
+
+- Do not send receipt acknowledgements, work-started notices, progress updates,
+  status messages, or conversational filler. For a request, work silently and
+  send one completed result as `--intent inform --reply-to <request-id>`.
+- If blocked on missing information, send one concrete question as
+  `--intent request --reply-to <request-id>`, then continue after the answer.
+- Do not reply to `inform` unless it requires a concrete substantive response.
+- Reserve `ack` for an explicit protocol that specifically requires a receipt;
+  ordinary agent tasks never require it.
+- Treat a message as delivered only when `hcom send` exits successfully and
+  prints `Sent to:`. On any CLI error, the message was not delivered; correct
+  the command and retry before proceeding or reporting success.
+
 ### sandbox / permission issues
 
 ```bash

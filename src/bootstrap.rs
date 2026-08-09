@@ -58,7 +58,7 @@ You MUST use `hcom <cmd+flags> --name {instance_name}` for all hcom commands:
 
 - Message: send {target_name_s} [--intent request|inform|ack] [--reply-to <id>] [--thread <thread_name>] -- 'plain text'
   Or (for code/md/backticks) instead of --: --file <path> | --base64 <string> | pipe/heredoc
-  Example: send {target_luna} {target_nova} --intent ack --reply-to 82 --name {instance_name} -- 'ok'
+  Example: send {target_luna} {target_nova} --intent inform --reply-to 82 --name {instance_name} -- 'Completed: ...'
 - See who's active: list [-v] [--json] [--names] [--format '{{name}} {{status}}'] [name]
 - Read another's conversation: transcript [name] [N-M] [--last N] [--full] | transcript search 'text' [--all]
 - View events: events [--last N] [--all] [--sql EXPR] [filters]
@@ -78,9 +78,9 @@ If unsure about syntax, always run `hcom <command> --help` FIRST. Do not guess.
 
 ## RULES
 
-1. Task via hcom → ack immediately, do work, report via hcom
-2. No filler messages (greetings, thanks, congratulations).
-3. Use --intent on sends: request (want reply), inform (dont need reply), ack (responding).
+1. Task via hcom → work silently, then send one final answer via hcom. If blocked, send only the concrete question needed to continue.
+2. No receipt acknowledgements, progress/status updates, greetings, thanks, or other filler.
+3. Use --intent on sends: request (need an answer), inform (final result or necessary substantive information), ack only when an explicit protocol requires a receipt.
 4. User says 'the gemini/claude/codex agent' or unclear → run `hcom list` to resolve name
 
 Agent names are 4-letter CVCV words. When user mentions one, they mean an agent.
@@ -192,7 +192,6 @@ You're participating in the hcom multi-agent network.
 - Your name: {subagent_name}
 - Your parent: {parent_name}
 - Use "--name {subagent_name}" for all hcom commands
-- Announce to parent once: send {target_parent} --intent inform -- "Connected as {subagent_name}"
 
 Messages instantly auto-arrive via <hcom> tags — end your turn to receive them.
 
@@ -208,15 +207,16 @@ hcom message → respond via hcom send
 
 Commands:
   {hcom_cmd} send {target_name_s} [--intent request|inform|ack] [--reply-to <id>] [--thread <thread_name>] -- <"message"> (or --stdin, --file <path>, --base64 <string>)
-  Example: {hcom_cmd} send {target_luna} {target_nova} --intent ack --reply-to 82 --name {subagent_name} -- "ok"  |  Code/markdown: replace "ok" with --file <path>
+  Example: {hcom_cmd} send {target_parent} --intent inform --reply-to 82 --name {subagent_name} -- "Completed: ..."  |  Code/markdown: replace the message with --file <path>
   {hcom_cmd} list --name {subagent_name}
   {hcom_cmd} events --name {subagent_name}
   {hcom_cmd} <cmd> --help --name {subagent_name}
 
 Rules:
-- Task via hcom → ack, work, report
+- Task via hcom → work silently, then send one final result; if blocked, send only the concrete question needed to continue
+- Do not send receipt acknowledgements, progress/status updates, or filler
 - Authority: @{SENDER} > others
-- Use --intent on sends: request (want reply), inform (FYI), ack (responding)"#;
+- Use --intent on sends: request (need answer), inform (final result or necessary substantive information), ack only for an explicit receipt protocol"#;
 
 // HELPERS
 
