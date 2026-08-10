@@ -10,16 +10,51 @@ duplicate.
 hcom reads these catalogs:
 
 1. `~/.hcom/agents.json` for machine-wide agents. Override its path with `HCOM_AGENTS_FILE`.
-2. The nearest `.hcom-agents.json` found from the working directory upward to the Git root, for
+2. Catalogs listed in `HCOM_AGENT_CATALOGS`, separated with the platform path separator, for
+   additive client-specific views.
+3. The nearest `.hcom-agents.json` found from the working directory upward to the Git root, for
    project-specific additions and overrides.
-3. Command-line flags, which have the highest precedence.
+4. Command-line flags, which have the highest precedence.
 
 Within each catalog, `defaults` apply only to agents defined by that same file. An empty project
 entry such as `"reviewer": {}` opts a global agent into the project defaults. Scalar fields replace
 earlier values; `env`, `args`, and matching `tools` profiles merge. Arguments append in layer order.
 
-Relative `dir` values resolve from `$HOME` in the global catalog and from the catalog directory in a
-project catalog. `~` and environment variables are expanded.
+Relative `dir` values resolve from `$HOME` in the global catalog and from the catalog directory in
+additive, imported, and project catalogs. `~` and environment variables are expanded.
+
+## Imports and additive client catalogs
+
+Every catalog may import all or selected agents from other catalogs. Definitions stay in their
+owning project while an external client can compose a private address book:
+
+```json
+{
+  "imports": [
+    {
+      "from": "~/work/wdt/ansible-wdt/.hcom-agents.json",
+      "agents": ["wdt_main"]
+    }
+  ]
+}
+```
+
+Point only that client's process at the overlay while retaining normal global agents:
+
+```bash
+export HCOM_AGENT_CATALOGS="$HOME/.hermes/profiles/main/hcom-agents.json"
+hcom send @wdt_main --intent request -- "Review the deployment"
+```
+
+Multiple additive catalogs use the operating system's path separator (`:` on Unix, `;` on
+Windows). Their precedence is global catalog, additive catalogs from left to right, project
+catalog, then command-line flags. `HCOM_AGENTS_FILE` keeps its separate replacement semantics for
+the global catalog.
+
+Imports are recursive and load before the importing file's local definitions. Relative `from`
+paths resolve against the importing file. Omitting `agents` imports all agents; an empty list
+imports none. Imported agents retain their source catalog's defaults and relative directory base.
+Missing files, requested names, and import cycles are errors.
 
 ## Basic catalog
 

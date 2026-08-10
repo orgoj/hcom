@@ -1200,6 +1200,45 @@ fn agent_ls_without_catalog_points_at_the_global_file() {
 }
 
 #[test]
+fn additive_catalog_env_keeps_global_agents_and_imports_selected_project_agents() {
+    let h = Hcom::new();
+    let project = h.root_path().join("wdt");
+    std::fs::create_dir_all(&project).expect("create project dir");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"global_main":{"dir":"/tmp"}}}"#,
+    )
+    .expect("write global catalog");
+    std::fs::write(
+        project.join(".hcom-agents.json"),
+        r#"{"agents":{"wdt_main":{"dir":"."},"wdt_private":{"dir":"."}}}"#,
+    )
+    .expect("write project catalog");
+    let overlay = h.root_path().join("hermes-agents.json");
+    std::fs::write(
+        &overlay,
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["wdt_main"]}}]}}"#,
+            serde_json::to_string(&project.join(".hcom-agents.json")).unwrap()
+        ),
+    )
+    .expect("write overlay catalog");
+
+    let output = h
+        .cmd()
+        .env("HCOM_AGENT_CATALOGS", &overlay)
+        .args(["agent", "ls", "--names"])
+        .output()
+        .expect("run hcom agent ls");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.lines().any(|line| line == "global_main"), "stdout={stdout}");
+    assert!(stdout.lines().any(|line| line == "wdt_main"), "stdout={stdout}");
+    assert!(!stdout.contains("wdt_private"), "stdout={stdout}");
+}
+
+#[test]
 fn agent_unknown_name_suggests_a_close_match() {
     let h = Hcom::new();
     std::fs::write(

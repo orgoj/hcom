@@ -312,6 +312,34 @@ hcom agent edit                     # open the catalog in $EDITOR (creates a sta
 A file's `defaults` apply only to the agents that same file defines. Relative `dir` resolves against
 `$HOME` for the global catalog and against the catalog's own directory for a project one.
 
+Set `HCOM_AGENT_CATALOGS` to a platform path-separated list of additive catalogs when one external
+client needs the normal global agents plus its own catalog view. These catalogs load after the
+global catalog and before the current project's catalog. Unlike `HCOM_AGENTS_FILE`, this variable
+does not replace the global catalog.
+
+Any catalog can import all or selected agents from another catalog without copying their
+definitions. Relative `from` paths resolve against the importing catalog; imports are recursive,
+load before the importing file's local entries, and reject missing agents and import cycles.
+
+```json
+{
+  "imports": [
+    {
+      "from": "~/work/wdt/ansible-wdt/.hcom-agents.json",
+      "agents": ["wdt_main"]
+    },
+    { "from": "../shared/.hcom-agents.json" }
+  ],
+  "agents": {
+    "local_override": { "dir": ".", "cli": "codex" }
+  }
+}
+```
+
+Omitting `agents` imports every agent; an empty list imports none. Imported agents keep the
+`defaults` and relative `dir` base of their source catalog. Later layers retain the normal merge
+semantics.
+
 ```jsonc
 {
   "defaults": { "cli": "claude", "resume": false },

@@ -6,7 +6,7 @@
 //! `crate::terminal::which_bin`. No launcher internals are touched, so this
 //! module stays conflict-free across upstream rebases.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -15,6 +15,7 @@ use serde::Deserialize;
 
 const GLOBAL_FILE: &str = "agents.json";
 const PROJECT_FILE: &str = ".hcom-agents.json";
+const EXTRA_CATALOGS_ENV: &str = "HCOM_AGENT_CATALOGS";
 const DEFAULT_CLI: &str = "claude";
 const MAX_WALK_UP: usize = 40;
 
@@ -42,12 +43,15 @@ Catalog (later layers win; env and args merge, scalars replace):
   1. built-in defaults (cli={DEFAULT_CLI})
   2. \"defaults\" in ~/.hcom/{GLOBAL_FILE}          (override path: HCOM_AGENTS_FILE)
   3. agent entry in ~/.hcom/{GLOBAL_FILE}
-  4. \"defaults\" in ./{PROJECT_FILE}               (nearest one up to the git root)
-  5. agent entry in ./{PROJECT_FILE}
+  4. catalogs in {EXTRA_CATALOGS_ENV}                 (platform path-separated)
+  5. \"defaults\" and agent in ./{PROJECT_FILE}      (nearest one up to the git root)
   6. command-line flags
 
-  Relative \"dir\" resolves against $HOME for the global catalog and against the
-  catalog's own directory for a project catalog. ~ and $VAR are expanded.
+  Every catalog may use \"imports\" to reference all or selected agents from other
+  catalogs. Imported layers are applied before the importing file's local entries.
+  Relative import paths resolve against the importing file. Relative \"dir\" resolves
+  against $HOME for the global catalog and against its own file for all other catalogs.
+  ~ and $VAR are expanded.
 
 Flags:
   --cli <tool>              claude | codex | gemini | ... (default: {DEFAULT_CLI})
@@ -211,11 +215,22 @@ struct Catalog {
     #[allow(dead_code)]
     version: Option<u32>,
     #[serde(default)]
+    imports: Vec<CatalogImport>,
+    #[serde(default)]
     defaults: AgentDef,
     #[serde(default)]
     agents: BTreeMap<String, AgentDef>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CatalogImport {
+    from: String,
+    /// Omitted imports every agent; an empty list intentionally imports none.
+    agents: Option<Vec<String>>,
+}
+
+#[derive(Debug)]
 struct CatalogFile {
     path: PathBuf,
     label: String,
@@ -328,6 +343,79 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
     })
 }
 
+/// Load a catalog and its imports in precedence order. Imports are expanded
+/// before the importing file, and may themselves import other catalogs.
+fn load_catalog_tree(
+    path: &Path,
+    base: &Path,
+    label: String,
+    stack: &mut Vec<PathBuf>,
+) -> Result<Vec<CatalogFile>> {
+    let absolute = if path.is_absolute() {
+        normalize(path)
+    } else {
+        normalize(&base.join(path))
+    };
+    let identity = std::fs::canonicalize(&absolute).unwrap_or_else(|_| absolute.clone());
+    if let Some(pos) = stack.iter().position(|p| p == &identity) {
+        let mut cycle = stack[pos..]
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>();
+        cycle.push(identity.display().to_string());
+        bail!("catalog import cycle: {}", cycle.join(" -> "));
+    }
+
+    stack.push(identity);
+    let result = (|| {
+        let file_base = absolute
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let mut current = load_catalog_file(&absolute, base, label.clone())?;
+        let imports = std::mem::take(&mut current.catalog.imports);
+        let mut files = Vec::new();
+
+        for import in imports {
+            let imported_path = PathBuf::from(expand_path(&import.from, &file_base));
+            let imported_label = format!("import:{}", imported_path.display());
+            let imported_base = imported_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let mut imported = load_catalog_tree(
+                &imported_path,
+                &imported_base,
+                imported_label,
+                stack,
+            )?;
+            if let Some(selected) = import.agents {
+                let selected: BTreeSet<String> = selected.into_iter().collect();
+                let available: BTreeSet<String> = imported
+                    .iter()
+                    .flat_map(|f| f.catalog.agents.keys().cloned())
+                    .collect();
+                let missing = selected.difference(&available).cloned().collect::<Vec<_>>();
+                if !missing.is_empty() {
+                    bail!(
+                        "catalog import {} requests unknown agent(s): {}",
+                        imported_path.display(),
+                        missing.join(", ")
+                    );
+                }
+                for file in &mut imported {
+                    file.catalog.agents.retain(|name, _| selected.contains(name));
+                }
+            }
+            files.extend(imported.into_iter().filter(|f| !f.catalog.agents.is_empty()));
+        }
+        files.push(current);
+        Ok(files)
+    })();
+    stack.pop();
+    result
+}
+
 fn global_catalog_path() -> PathBuf {
     match std::env::var_os("HCOM_AGENTS_FILE") {
         Some(p) if !p.is_empty() => PathBuf::from(p),
@@ -360,11 +448,30 @@ struct Catalogs {
 impl Catalogs {
     fn load(no_project: bool, explicit: Option<&Path>) -> Result<Self> {
         let mut files = Vec::new();
+        let mut stack = Vec::new();
 
         let global = global_catalog_path();
         if global.is_file() {
             let base = home_dir().unwrap_or_else(|| PathBuf::from("."));
-            files.push(load_catalog_file(&global, &base, "global".to_string())?);
+            files.extend(load_catalog_tree(&global, &base, "global".to_string(), &mut stack)?);
+        }
+
+        if let Some(raw) = std::env::var_os(EXTRA_CATALOGS_ENV).filter(|v| !v.is_empty()) {
+            for path in std::env::split_paths(&raw) {
+                if !path.is_file() {
+                    bail!("catalog from {EXTRA_CATALOGS_ENV} not found: {}", path.display());
+                }
+                let base = path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| PathBuf::from("."));
+                files.extend(load_catalog_tree(
+                    &path,
+                    &base,
+                    format!("extra:{}", path.display()),
+                    &mut stack,
+                )?);
+            }
         }
 
         let project = match explicit {
@@ -384,7 +491,7 @@ impl Catalogs {
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."));
-            files.push(load_catalog_file(&path, &base, "project".to_string())?);
+            files.extend(load_catalog_tree(&path, &base, "project".to_string(), &mut stack)?);
         }
 
         Ok(Self { files })
@@ -1480,6 +1587,85 @@ mod tests {
         assert_eq!(expand_path("sub/x", Path::new("/base")), "/base/sub/x");
         assert_eq!(expand_path("/abs", Path::new("/base")), "/abs");
         assert_eq!(expand_path("./a/../b", Path::new("/base")), "/base/b");
+    }
+
+    #[test]
+    fn imports_selected_agents_and_keeps_source_relative_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let overlay = tmp.path().join("overlay");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&overlay).unwrap();
+        std::fs::write(
+            project.join(PROJECT_FILE),
+            r#"{"defaults":{"cli":"codex"},"agents":{
+                "wdt_main":{"dir":"work","model":"base"},
+                "private":{"dir":"private"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            overlay.join("hermes.json"),
+            r#"{"imports":[{"from":"../project/.hcom-agents.json","agents":["wdt_main"]}],
+                "agents":{"wdt_main":{"model":"overlay"},"hermes_local":{"dir":"."}}}"#,
+        )
+        .unwrap();
+
+        let files = load_catalog_tree(
+            &overlay.join("hermes.json"),
+            &overlay,
+            "extra".to_string(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let catalogs = Catalogs { files };
+        let wdt = catalogs.resolve("wdt_main").unwrap();
+        assert_eq!(wdt.cli.as_deref(), Some("codex"));
+        assert_eq!(wdt.model.as_deref(), Some("overlay"));
+        assert_eq!(wdt.dir.as_deref(), Some(project.join("work").to_string_lossy().as_ref()));
+        assert!(catalogs.resolve("private").is_none());
+        assert_eq!(
+            catalogs.resolve("hermes_local").unwrap().dir.as_deref(),
+            Some(overlay.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn imports_are_transitive_and_cycles_are_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.json");
+        let b = tmp.path().join("b.json");
+        let c = tmp.path().join("c.json");
+        std::fs::write(&a, r#"{"imports":[{"from":"b.json"}],"agents":{"a":{}}}"#).unwrap();
+        std::fs::write(&b, r#"{"imports":[{"from":"c.json"}],"agents":{"b":{}}}"#).unwrap();
+        std::fs::write(&c, r#"{"agents":{"c":{}}}"#).unwrap();
+
+        let files = load_catalog_tree(&a, tmp.path(), "root".to_string(), &mut Vec::new()).unwrap();
+        let catalogs = Catalogs { files };
+        assert_eq!(catalogs.names().keys().cloned().collect::<Vec<_>>(), ["a", "b", "c"]);
+
+        std::fs::write(&c, r#"{"imports":[{"from":"a.json"}],"agents":{"c":{}}}"#).unwrap();
+        let error = load_catalog_tree(&a, tmp.path(), "root".to_string(), &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("catalog import cycle"), "{error}");
+        assert!(error.contains("a.json"), "{error}");
+    }
+
+    #[test]
+    fn selected_import_rejects_unknown_agents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source.json");
+        let root = tmp.path().join("root.json");
+        std::fs::write(&source, r#"{"agents":{"known":{}}}"#).unwrap();
+        std::fs::write(
+            &root,
+            r#"{"imports":[{"from":"source.json","agents":["missing"]}]}"#,
+        )
+        .unwrap();
+        let error = load_catalog_tree(&root, tmp.path(), "root".to_string(), &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requests unknown agent(s): missing"), "{error}");
     }
 
     #[test]
