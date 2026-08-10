@@ -64,7 +64,8 @@ Flags:
   --no-project              Ignore any {PROJECT_FILE}
   --attach                  Focus the window after launching (or when already running)
   --restart                 Kill a running agent first instead of reporting it
-  --resume                  Continue the agent's previous session instead of starting clean
+  --resume                  Continue the agent's previous session
+  --clean                   Start a clean session (overrides configured resume)
   --dry-run                 Print the commands without running anything
 
   Any other flag is forwarded verbatim to `hcom <cli>`.
@@ -73,6 +74,10 @@ Catalog tool profiles:
   \"tools\": {{ \"claude\": {{ \"model\": \"sonnet\", \"args\": [\"--agent\", \"reviewer\"] }} }}
   The profile for the effective --cli may set model, prompt, system_prompt, and args.
   Common fields are applied first, then the tool profile, then command-line flags.
+
+Start mode:
+  \"resume\": true|false may be set in catalog defaults or an agent entry.
+  Unset falls back to false (clean); --resume and --clean override the catalog.
 
 Terminal strategy, in order:
   1. terminal_command set          -> hcom launches with HCOM_TERMINAL=<cmd>
@@ -129,6 +134,7 @@ struct AgentDef {
     prompt: Option<String>,
     system_prompt: Option<String>,
     pre: Option<String>,
+    resume: Option<bool>,
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
@@ -182,7 +188,8 @@ impl AgentDef {
             model,
             prompt,
             system_prompt,
-            pre
+            pre,
+            resume
         );
         for (k, v) in &over.env {
             self.env.insert(k.clone(), v.clone());
@@ -489,7 +496,7 @@ struct Cli {
     attach: bool,
     dry_run: bool,
     restart: bool,
-    resume: bool,
+    resume: Option<bool>,
     no_project: bool,
     catalog: Option<PathBuf>,
     passthrough: Vec<String>,
@@ -582,7 +589,11 @@ fn parse_cli(argv: &[String]) -> Result<Cli> {
                 i += 1;
             }
             "--resume" => {
-                cli.resume = true;
+                cli.resume = Some(true);
+                i += 1;
+            }
+            "--clean" => {
+                cli.resume = Some(false);
                 i += 1;
             }
             "--dry-run" => {
@@ -613,6 +624,7 @@ struct Effective {
     model: Option<String>,
     prompt: Option<String>,
     system_prompt: Option<String>,
+    resume: bool,
     env: BTreeMap<String, String>,
     extra: Vec<String>,
 }
@@ -663,6 +675,7 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         model: nonempty(def.model),
         prompt: nonempty(def.prompt),
         system_prompt: nonempty(def.system_prompt),
+        resume: cli.resume.or(def.resume).unwrap_or(false),
         env: def.env,
         extra,
     }
@@ -991,8 +1004,7 @@ fn cmd_launch(name: &str, rest: &[String]) -> Result<i32> {
         }
     }
 
-    let resume = live.is_none() && cli.resume;
-    launch(&eff, &cli, resume)
+    launch(&eff, &cli, eff.resume)
 }
 
 fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
@@ -1195,6 +1207,7 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     println!("name:      {}", eff.name);
     println!("cli:       {}", eff.cli);
     println!("dir:       {}", eff.dir);
+    println!("start:     {}", if eff.resume { "resume" } else { "clean" });
     match &strategy {
         Strategy::Tmux { session, window } => println!("terminal:  tmux {session}:{window} (--terminal here)"),
         Strategy::Custom(c) => println!("terminal:  HCOM_TERMINAL={c}"),
@@ -1233,14 +1246,14 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     println!();
     println!("command:");
     match &strategy {
-        Strategy::Tmux { .. } => println!("  {}", window_command(&eff, false)),
+        Strategy::Tmux { .. } => println!("  {}", window_command(&eff, eff.resume)),
         Strategy::Custom(_) | Strategy::Direct(_) => {
             let terminal = match &strategy {
                 Strategy::Direct(t) => t.clone(),
                 _ => None,
             };
             let mut shown = vec![hcom_bin()];
-            shown.extend(hcom_argv(&eff, terminal.as_deref(), false));
+            shown.extend(hcom_argv(&eff, terminal.as_deref(), eff.resume));
             println!("  {}", shell_words::join(shown.iter().map(String::as_str)));
         }
     }
@@ -1363,9 +1376,17 @@ mod tests {
 
     #[test]
     fn merge_keeps_base_when_override_omits_field() {
-        let mut base = def_from(r#"{"session":"wdt"}"#);
+        let mut base = def_from(r#"{"session":"wdt","resume":true}"#);
         base.merge_from(&def_from(r#"{"cli":"codex"}"#));
         assert_eq!(base.session.as_deref(), Some("wdt"));
+        assert_eq!(base.resume, Some(true));
+    }
+
+    #[test]
+    fn merge_replaces_resume_when_override_defines_it() {
+        let mut base = def_from(r#"{"resume":true}"#);
+        base.merge_from(&def_from(r#"{"resume":false}"#));
+        assert_eq!(base.resume, Some(false));
     }
 
     #[test]
@@ -1589,14 +1610,26 @@ mod tests {
     }
 
     #[test]
-    fn resume_is_opt_in() {
+    fn start_mode_defaults_clean_and_cli_flags_override() {
         let parse = |args: &[&str]| {
             parse_cli(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
         };
-        assert!(!parse(&[]).resume, "a plain launch must start clean");
-        assert!(parse(&["--resume"]).resume);
-        // --resume is ours, not something the tool should see.
+        assert_eq!(parse(&[]).resume, None);
+        assert_eq!(parse(&["--resume"]).resume, Some(true));
+        assert_eq!(parse(&["--clean"]).resume, Some(false));
+        assert_eq!(parse(&["--resume", "--clean"]).resume, Some(false));
+        assert_eq!(parse(&["--clean", "--resume"]).resume, Some(true));
+        // Start-mode flags are ours, not something the tool should see.
         assert!(parse(&["--resume"]).passthrough.is_empty());
+        assert!(parse(&["--clean"]).passthrough.is_empty());
+    }
+
+    #[test]
+    fn effective_start_mode_uses_catalog_then_cli_override() {
+        assert!(!eff_of(r#"{}"#, &[]).resume, "default must stay clean");
+        assert!(eff_of(r#"{"resume":true}"#, &[]).resume);
+        assert!(!eff_of(r#"{"resume":true}"#, &["--clean"]).resume);
+        assert!(eff_of(r#"{"resume":false}"#, &["--resume"]).resume);
     }
 
     #[test]

@@ -27,7 +27,8 @@ project catalog. `~` and environment variables are expanded.
 {
   "defaults": {
     "cli": "claude",
-    "terminal": "tmux-window"
+    "terminal": "tmux-window",
+    "resume": false
   },
   "agents": {
     "reviewer": {
@@ -51,9 +52,45 @@ hcom agent ls
 hcom agent attach reviewer
 hcom agent reviewer --restart
 hcom agent reviewer --resume
+hcom agent reviewer --clean
 ```
 
 Use `hcom agent edit` for the global catalog or `hcom agent edit --project` for the project catalog.
+
+## Clean start and resume
+
+`resume` is a scalar boolean accepted in `defaults` and individual agent entries:
+
+- `false` starts a new tool session and is the built-in default.
+- `true` runs `hcom r <name> --go` to continue the agent's previous stopped session.
+- Omitting the field inherits the value from the preceding catalog layer.
+
+Normal catalog precedence applies, so an agent entry can override its catalog's default and a
+project entry can override the global value. Command-line `--resume` and `--clean` have the highest
+precedence. If both occur, the last flag wins, which makes wrapper scripts able to append an
+authoritative choice.
+
+```json
+{
+  "defaults": { "resume": true },
+  "agents": {
+    "reviewer": {},
+    "one_shot": { "resume": false }
+  }
+}
+```
+
+```bash
+hcom agent reviewer              # resumes by catalog default
+hcom agent reviewer --clean      # one clean launch
+hcom agent one_shot --resume     # one resumed launch
+hcom agent reviewer --restart --clean
+hcom agent show reviewer --clean # shows start: clean and the clean command
+```
+
+Resume mode requires an existing stopped session for that name. The selected start mode also
+applies when `--restart` first stops a running agent. Use `hcom agent show <name>` or `--dry-run` to
+inspect the effective mode and command without launching it.
 
 ## Per-CLI tool profiles
 
@@ -125,7 +162,7 @@ Without tmux, `session` is ignored with a warning and terminal selection falls b
 Agent and `defaults` fields:
 
 - `cli`, `dir`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `model`
-- `prompt`, `system_prompt`, `pre`
+- `prompt`, `system_prompt`, `pre`, and boolean `resume`
 - `env` object and `args` array
 - `tools` object keyed by CLI name
 

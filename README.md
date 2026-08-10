@@ -302,7 +302,7 @@ A file's `defaults` apply only to the agents that same file defines. Relative `d
 
 ```jsonc
 {
-  "defaults": { "cli": "claude" },
+  "defaults": { "cli": "claude", "resume": false },
   "agents": {
     "wdt_main": {
       "dir": "~/work/wdt/ansible-wdt",
@@ -338,9 +338,14 @@ Where the window opens, in order: `terminal_command` (passed to hcom as `HCOM_TE
 opens the window itself. Without tmux — Windows, for instance — `session` is ignored with a warning
 and the preset takes over.
 
-Every launch starts a clean session; `--resume` continues the agent's previous one instead.
-`--dry-run` prints the commands instead of running them, `--restart` replaces a running agent.
-`hcom agent --help` lists the rest.
+Start mode follows the same scalar precedence as the other agent fields. Set `"resume": true` in
+`defaults` or an agent entry to continue its previous session by default; `false` means a clean
+start and remains the built-in default. On the command line, `--resume` and `--clean` override the
+catalog (if both are supplied, the last one wins). Resuming requires an existing stopped session.
+The selected mode also applies after `--restart` replaces a running agent. `hcom agent show <name>`
+prints `start: resume|clean` and renders the corresponding command.
+
+`--dry-run` prints the commands instead of running them. `hcom agent --help` lists the rest.
 
 ### Other commands
 

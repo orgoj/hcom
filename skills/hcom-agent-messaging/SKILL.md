@@ -224,7 +224,7 @@ with `HCOM_DIR` set, uses that path instead of `~/.hcom`.
 
 | file | when to read |
 |------|-------------|
-| `references/named-agents.md` | defining or launching recurring agents with `hcom agent`, JSON catalogs, and per-CLI `tools` profiles |
+| `references/named-agents.md` | defining or launching recurring agents with `hcom agent`, JSON catalogs, start-mode overrides, and per-CLI `tools` profiles |
 | `references/patterns.md` | writing multi-agent scripts — 6 tested patterns with full code and real event JSON |
 | `references/cross-tool.md` | claude + codex + gemini + opencode + kilo + pi + omp + antigravity + cursor + kimi + copilot collaboration details and per-tool quirks |
 | `references/gotchas.md` | debugging scripts — timing, message delivery, intent system, cleanup |

@@ -1241,6 +1241,32 @@ fn agent_dry_run_renders_the_hcom_command_without_launching() {
 }
 
 #[test]
+fn agent_start_mode_uses_catalog_and_cli_override() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"defaults":{"resume":true},
+            "agents":{"solo":{"dir":"/tmp","cli":"codex","terminal":"wezterm-tab"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains(" r solo "), "stdout={stdout}");
+    assert!(stdout.contains("--go"), "stdout={stdout}");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--clean", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
+    assert!(!stdout.contains(" r solo "), "stdout={stdout}");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "solo", "--clean"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("start:     clean"), "stdout={stdout}");
+    assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
+}
+
+#[test]
 fn agent_dry_run_selects_the_effective_cli_tool_profile() {
     let h = Hcom::new();
     std::fs::write(
