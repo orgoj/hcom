@@ -317,6 +317,73 @@ fn start_send_events_roundtrip() {
 }
 
 #[test]
+fn manual_ack_listen_redelivers_until_strict_ack() {
+    let h = Hcom::new();
+    let recipient = h.start_with_process_id("manual-ack-recipient");
+    let (code, stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "gateway-test",
+        &format!("@{recipient}"),
+        "--intent",
+        "request",
+        "--thread",
+        "bridge-test",
+        "--",
+        "deliver reliably",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+
+    let receive = || {
+        let (code, stdout, stderr) = h.run([
+            "listen",
+            "--name",
+            &recipient,
+            "--timeout",
+            "1",
+            "--json",
+            "--manual-ack",
+        ]);
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        serde_json::from_str::<serde_json::Value>(stdout.trim()).expect("manual ack envelope")
+    };
+    let first = receive();
+    assert_eq!(first["schema_version"], 1);
+    assert_eq!(first["from"], "gateway-test");
+    assert_eq!(first["to"], recipient);
+    assert_eq!(first["text"], "deliver reliably");
+    assert_eq!(first["intent"], "request");
+    assert_eq!(first["thread"], "bridge-test");
+    assert!(first["timestamp"].is_string());
+    let event_id = first["event_id"].as_i64().expect("event id");
+
+    let second = receive();
+    assert_eq!(second["event_id"].as_i64(), Some(event_id));
+
+    let (code, _stdout, stderr) = h.run(["ack", &(event_id + 1).to_string(), "--name", &recipient]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(stderr.contains("first unread event"), "stderr={stderr}");
+
+    let (code, stdout, stderr) = h.run(["ack", &event_id.to_string(), "--name", &recipient]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+
+    let (code, stdout, stderr) = h.run([
+        "listen",
+        "--name",
+        &recipient,
+        "--timeout",
+        "1",
+        "--json",
+        "--manual-ack",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.trim().is_empty(),
+        "acked event redelivered: {stdout}"
+    );
+}
+
+#[test]
 fn intent_and_reply_to_roundtrip() {
     // Wiki contract (messaging.md §Intent + event-model.md `msg_intent`/`reply_to_local`):
     // request → ack with --reply-to flattens through `events_v` so threads/replies
@@ -1233,8 +1300,14 @@ fn additive_catalog_env_keeps_global_agents_and_imports_selected_project_agents(
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
-    assert!(stdout.lines().any(|line| line == "global_main"), "stdout={stdout}");
-    assert!(stdout.lines().any(|line| line == "wdt_main"), "stdout={stdout}");
+    assert!(
+        stdout.lines().any(|line| line == "global_main"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == "wdt_main"),
+        "stdout={stdout}"
+    );
     assert!(!stdout.contains("wdt_private"), "stdout={stdout}");
 }
 
@@ -1249,8 +1322,14 @@ fn agent_unknown_name_suggests_a_close_match() {
 
     let (code, _stdout, stderr) = h.run(["agent", "wdt_mian"]);
     assert_ne!(code, 0, "stderr={stderr}");
-    assert!(stderr.contains("unknown agent 'wdt_mian'"), "stderr={stderr}");
-    assert!(stderr.contains("did you mean 'wdt_main'"), "stderr={stderr}");
+    assert!(
+        stderr.contains("unknown agent 'wdt_mian'"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("did you mean 'wdt_main'"),
+        "stderr={stderr}"
+    );
 }
 
 #[test]
@@ -1336,7 +1415,8 @@ fn targeted_send_starts_catalog_agent_and_routes_message() {
 
     let (code, instances, stderr) = h.run(["list", "--json"]);
     assert_eq!(code, 0, "instances={instances} stderr={stderr}");
-    let instances: serde_json::Value = serde_json::from_str(&instances).expect("instance list JSON");
+    let instances: serde_json::Value =
+        serde_json::from_str(&instances).expect("instance list JSON");
     let reviewer = instances
         .as_array()
         .and_then(|items| items.iter().find(|item| item["name"] == "reviewer"))
@@ -1363,11 +1443,17 @@ fn catalog_autostart_failure_does_not_write_message() {
         "must not be queued",
     ]);
     assert_ne!(code, 0, "stderr={stderr}");
-    assert!(stderr.contains("could not start catalog agent 'broken'"), "stderr={stderr}");
+    assert!(
+        stderr.contains("could not start catalog agent 'broken'"),
+        "stderr={stderr}"
+    );
 
     let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1"]);
     assert_eq!(code, 0, "events={events} stderr={stderr}");
-    assert!(events.trim().is_empty(), "failed send wrote message: {events}");
+    assert!(
+        events.trim().is_empty(),
+        "failed send wrote message: {events}"
+    );
 }
 
 #[test]
@@ -1386,7 +1472,10 @@ fn agent_dry_run_selects_the_effective_cli_tool_profile() {
     assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
     assert!(stdout.contains("--model gpt-5"), "stdout={stdout}");
     assert!(stdout.contains("--common"), "stdout={stdout}");
-    assert!(stdout.contains("--sandbox workspace-write"), "stdout={stdout}");
+    assert!(
+        stdout.contains("--sandbox workspace-write"),
+        "stdout={stdout}"
+    );
     assert!(!stdout.contains("--agent reviewer"), "stdout={stdout}");
 }
 

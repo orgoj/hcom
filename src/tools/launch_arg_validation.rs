@@ -130,6 +130,34 @@ pub(crate) const GEMINI_REJECTED_ARGS: &[RejectedArg] = &[
     },
 ];
 
+pub(crate) const HERMES_REJECTED_ARGS: &[RejectedArg] = &[
+    RejectedArg {
+        token: "-q",
+        reason: "runs one query non-interactively and exits",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "--query",
+        reason: "runs one query non-interactively and exits",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "-z",
+        reason: "runs a one-shot query without the interactive gateway lifecycle",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "--oneshot",
+        reason: "runs a one-shot query without the interactive gateway lifecycle",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "--tui",
+        reason: "starts the alternate TUI instead of the classic interactive CLI",
+        kind: RejectedArgKind::Flag,
+    },
+];
+
 pub(crate) const ANTIGRAVITY_REJECTED_ARGS: &[RejectedArg] = &[
     RejectedArg {
         token: "-p",

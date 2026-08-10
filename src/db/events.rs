@@ -12,6 +12,7 @@ pub struct Message {
     pub text: String,
     pub intent: Option<String>,
     pub thread: Option<String>,
+    pub reply_to: Option<String>,
     pub event_id: Option<i64>,
     pub timestamp: Option<String>,
     pub delivered_to: Option<Vec<String>>,
@@ -173,6 +174,10 @@ impl HcomDb {
                     .get("thread")
                     .and_then(|v| v.as_str())
                     .map(String::from);
+                let reply_to = json
+                    .get("reply_to")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 let delivered_to = json
                     .get("delivered_to")
                     .and_then(|v| v.as_array())
@@ -195,6 +200,7 @@ impl HcomDb {
                     text,
                     intent,
                     thread,
+                    reply_to,
                     event_id: Some(id),
                     timestamp: Some(timestamp.clone()),
                     delivered_to,
@@ -205,6 +211,50 @@ impl HcomDb {
         }
 
         messages
+    }
+
+    /// Atomically acknowledge exactly the first unread message deliverable to
+    /// `name`. Refuses stale and out-of-order acknowledgements so a failed
+    /// message can never be skipped by advancing the cursor past it.
+    pub fn ack_first_deliverable(&self, name: &str, event_id: i64) -> Result<()> {
+        self.with_immediate_transaction(|txn| {
+            let cursor = txn
+                .query_row(
+                    "SELECT COALESCE(last_event_id, 0) FROM instances WHERE name = ?",
+                    params![name],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|_| anyhow::anyhow!("unknown hcom identity '{name}'"))?;
+
+            let mut stmt = txn.prepare(
+                "SELECT id, data FROM events WHERE id > ? AND type = 'message' ORDER BY id",
+            )?;
+            let rows = stmt.query_map(params![cursor], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut first = None;
+            for row in rows {
+                let (id, data) = row?;
+                let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) else {
+                    continue;
+                };
+                if Self::should_deliver_to(&json, name) {
+                    first = Some(id);
+                    break;
+                }
+            }
+            let expected = first.ok_or_else(|| anyhow::anyhow!("no unread message for '{name}'"))?;
+            if expected != event_id {
+                anyhow::bail!(
+                    "cannot acknowledge event {event_id}: first unread event for '{name}' is {expected}"
+                );
+            }
+            txn.execute(
+                "UPDATE instances SET last_event_id = ? WHERE name = ? AND COALESCE(last_event_id, 0) = ?",
+                params![event_id, name, cursor],
+            )?;
+            Ok(())
+        })
     }
 
     /// Build the shared envelope every launch-lifecycle life event uses

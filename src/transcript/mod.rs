@@ -708,7 +708,11 @@ mod tests {
             seen.push(profile.tool);
         }
         for spec in crate::integration_spec::ALL {
-            if spec.released {
+            // Hermes' canonical transcript boundary is its profile-aware
+            // `sessions export` command, not a stable file format. Until this
+            // module supports command-backed readers, managed Hermes sessions
+            // still use PTY capture but are intentionally absent here.
+            if spec.released && spec.tool != Tool::Hermes {
                 assert!(
                     profile_for_tool(spec.tool).is_some(),
                     "missing transcript profile for {}",

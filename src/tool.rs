@@ -22,6 +22,7 @@ pub enum Tool {
     Copilot,
     Pi,
     Omp,
+    Hermes,
     Adhoc,
 }
 
@@ -105,6 +106,7 @@ impl Tool {
             }
             Tool::Pi => crate::hooks::pi::verify_pi_plugin_installed(),
             Tool::Omp => crate::hooks::omp::verify_omp_plugin_installed(),
+            Tool::Hermes => true,
             Tool::Adhoc => false,
         }
     }
@@ -149,6 +151,7 @@ impl Tool {
                 Ok(false) => Err(String::new()),
                 Err(e) => Err(e.to_string()),
             },
+            Tool::Hermes => Ok(()),
             Tool::Adhoc => Err("Adhoc has no hooks to install".to_string()),
         }
     }
@@ -177,6 +180,7 @@ impl Tool {
             Tool::Omp => crate::hooks::omp::remove_omp_plugin()
                 .map(|_| true)
                 .map_err(|e| e.to_string()),
+            Tool::Hermes => Ok(true),
             Tool::Adhoc => Ok(false),
         }
     }
@@ -196,6 +200,7 @@ impl Tool {
             Tool::Copilot => crate::hooks::copilot::get_copilot_hooks_path(),
             Tool::Pi => crate::hooks::pi::get_pi_plugin_path(),
             Tool::Omp => crate::hooks::omp::get_omp_plugin_path(),
+            Tool::Hermes => return "built-in Hermes CLI lifecycle".to_string(),
             Tool::Adhoc => return String::new(),
         };
         path_buf.to_string_lossy().to_string()

@@ -538,6 +538,7 @@ pub(crate) fn merge_tool_args(
         LaunchTool::Copilot => append_config_args(&config.copilot_args, cli_args),
         LaunchTool::Pi => append_config_args(&config.pi_args, cli_args),
         LaunchTool::Omp => append_config_args(&config.omp_args, cli_args),
+        LaunchTool::Hermes => append_config_args(&config.hermes_args, cli_args),
         LaunchTool::OpenCode => append_config_args(&config.opencode_args, cli_args),
         LaunchTool::Kilo => append_config_args(&config.kilo_args, cli_args),
         LaunchTool::Kimi => append_config_args(&config.kimi_args, cli_args),
@@ -569,6 +570,7 @@ pub(crate) fn is_background_from_args(tool: &LaunchTool, args: &[String]) -> boo
         | LaunchTool::Kimi
         | LaunchTool::Copilot
         | LaunchTool::Omp => false,
+        LaunchTool::Hermes => false,
     }
 }
 

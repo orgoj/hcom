@@ -4,6 +4,7 @@
 //! Supports: message-wait mode, --timeout, --json, --sql filter mode.
 //! Uses TCP notify socket for instant wake on local messages.
 
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -29,6 +30,9 @@ pub struct ListenArgs {
     /// JSON output
     #[arg(long)]
     pub json: bool,
+    /// Emit one full JSON envelope without advancing the delivery cursor
+    #[arg(long)]
+    pub manual_ack: bool,
     /// SQL WHERE filter
     #[arg(long)]
     pub sql: Option<String>,
@@ -178,6 +182,10 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
     }
 
     let json_output = args.json;
+    if args.manual_ack && !json_output {
+        eprintln!("Error: --manual-ack requires --json");
+        return 1;
+    }
 
     // Convert clap filter args to FilterMap
     let mut filters = args.filters.to_filter_map();
@@ -290,6 +298,7 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
         &instance_name,
         timeout,
         json_output,
+        args.manual_ack,
         instance_data.unwrap(),
         start_time,
         notify_server.as_ref(),
@@ -321,6 +330,7 @@ fn listen_loop(
     instance_name: &str,
     timeout: f64,
     json_output: bool,
+    manual_ack: bool,
     instance_data: &serde_json::Value,
     start_time: std::time::Instant,
     notify_server: Option<&NotifyServer>,
@@ -349,7 +359,8 @@ fn listen_loop(
         let messages = db.get_unread_messages(instance_name);
         if !messages.is_empty() {
             // Advance cursor
-            if let Some(last) = messages.last()
+            if !manual_ack
+                && let Some(last) = messages.last()
                 && let Some(id) = last.event_id
             {
                 let mut updates = serde_json::Map::new();
@@ -381,12 +392,30 @@ fn listen_loop(
             }
 
             if json_output {
-                for msg in &messages {
-                    let j = serde_json::json!({
+                if manual_ack {
+                    let msg = &messages[0];
+                    let envelope = serde_json::json!({
+                        "schema_version": 1,
+                        "event_id": msg.event_id,
                         "from": msg.from,
+                        "to": instance_name,
                         "text": msg.text,
+                        "intent": msg.intent,
+                        "thread": msg.thread,
+                        "reply_to": msg.reply_to,
+                        "timestamp": msg.timestamp,
+                        "bundle_id": msg.bundle_id,
                     });
-                    println!("{}", serde_json::to_string(&j).unwrap_or_default());
+                    println!("{}", serde_json::to_string(&envelope).unwrap_or_default());
+                    let _ = std::io::stdout().flush();
+                } else {
+                    for msg in &messages {
+                        let j = serde_json::json!({
+                            "from": msg.from,
+                            "text": msg.text,
+                        });
+                        println!("{}", serde_json::to_string(&j).unwrap_or_default());
+                    }
                 }
             } else {
                 let formatted = format_messages_json(db, &messages, instance_name);

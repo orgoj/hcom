@@ -1028,7 +1028,10 @@ fn merge_resume_args(tool: &str, original: &[String], resume: &[String]) -> Vec<
         .expect("resume tool must be validated before argument merging");
 
     match tool {
-        crate::tool::Tool::Claude | crate::tool::Tool::Gemini | crate::tool::Tool::Codex => {
+        crate::tool::Tool::Claude
+        | crate::tool::Tool::Gemini
+        | crate::tool::Tool::Codex
+        | crate::tool::Tool::Hermes => {
             let mut merged = original.to_vec();
             merged.extend_from_slice(resume);
             merged

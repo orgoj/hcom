@@ -1576,6 +1576,10 @@ mod tests {
         let expected: std::collections::HashSet<&str> =
             crate::integration_spec::released_tool_names()
                 .into_iter()
+                // Hermes stores canonical transcripts in profile-aware SQLite
+                // and exposes them through `hermes sessions export`; it has no
+                // path-signature parser in hcom yet.
+                .filter(|tool| *tool != "hermes")
                 .collect();
         let actual: std::collections::HashSet<&str> = cases
             .iter()

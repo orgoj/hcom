@@ -177,6 +177,21 @@ Choose replies from the received intent, not from conversational politeness:
   prints `Sent to:`. On any CLI error, the message was not delivered; correct
   the command and retry before proceeding or reporting success.
 
+### Hermes / shell delivery guardrails
+
+- Never interpolate message text into a shell command. Send every non-trivial
+  hcom body with `--base64` (or `--file`): Markdown backticks and `$()` inside
+  a double-quoted shell argument are executed by Bash before hcom receives it.
+- `hcom` can append unread messages to the stdout of ordinary identity-bound
+  commands; `listen` is therefore not the only receive path. Inspect every
+  hcom command result for delivered messages before issuing another command.
+- Use foreground `hcom listen` only when the user explicitly wants continuous
+  waiting. After a message arrives, process and report it; do not repeatedly
+  block the parent agent if the result already answers the active task.
+- A CLI-output delivery is not native Hermes gateway injection: it becomes
+  visible only while an hcom command runs. Do not claim automatic inbound
+  delivery without a gateway bridge or another real integration.
+
 ### sandbox / permission issues
 
 ```bash

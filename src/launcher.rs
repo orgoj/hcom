@@ -23,8 +23,9 @@ use crate::shared::constants::HCOM_IDENTITY_VARS;
 use crate::shared::tool_detection::tool_marker_vars;
 use crate::terminal;
 use crate::tools::launch_arg_validation::{
-    ANTIGRAVITY_REJECTED_ARGS, GEMINI_REJECTED_ARGS, KILO_REJECTED_ARGS, KIMI_REJECTED_ARGS,
-    OMP_REJECTED_ARGS, OPENCODE_REJECTED_ARGS, PI_REJECTED_ARGS, validate_rejected_args,
+    ANTIGRAVITY_REJECTED_ARGS, GEMINI_REJECTED_ARGS, HERMES_REJECTED_ARGS, KILO_REJECTED_ARGS,
+    KIMI_REJECTED_ARGS, OMP_REJECTED_ARGS, OPENCODE_REJECTED_ARGS, PI_REJECTED_ARGS,
+    validate_rejected_args,
 };
 use crate::tools::{
     codex_preprocessing, copilot_preprocessing, cursor_preprocessing, opencode_preprocessing,
@@ -45,6 +46,7 @@ pub enum LaunchTool {
     Kimi,
     Copilot,
     Omp,
+    Hermes,
 }
 
 impl LaunchTool {
@@ -63,6 +65,7 @@ impl LaunchTool {
             "cursor" | "cursor-agent" => Ok(LaunchTool::Cursor),
             "kimi" => Ok(LaunchTool::Kimi),
             "copilot" => Ok(LaunchTool::Copilot),
+            "hermes" => Ok(LaunchTool::Hermes),
             _ => bail!("Unknown tool: {}", s),
         }
     }
@@ -81,6 +84,7 @@ impl LaunchTool {
             LaunchTool::Cursor => "cursor",
             LaunchTool::Kimi => "kimi",
             LaunchTool::Copilot => "copilot",
+            LaunchTool::Hermes => "hermes",
         }
     }
 
@@ -101,6 +105,7 @@ impl LaunchTool {
             LaunchTool::Cursor => crate::tool::Tool::Cursor,
             LaunchTool::Kimi => crate::tool::Tool::Kimi,
             LaunchTool::Copilot => crate::tool::Tool::Copilot,
+            LaunchTool::Hermes => crate::tool::Tool::Hermes,
         }
     }
 
@@ -171,6 +176,7 @@ impl LaunchBackend {
             | LaunchTool::Cursor
             | LaunchTool::Kimi
             | LaunchTool::Copilot => LaunchBackend::HeadlessPty,
+            LaunchTool::Hermes => LaunchBackend::HeadlessPty,
         }
     }
 }
@@ -339,6 +345,19 @@ fn apply_inherited_notes(instance_env: &mut HashMap<String, String>, inherited: 
     }
 }
 
+/// Preserve a caller's task-local catalog imports across the sanitized
+/// nested-launch environment. Explicit launch/config values still win.
+fn apply_inherited_agent_catalogs(
+    instance_env: &mut HashMap<String, String>,
+    inherited: Option<String>,
+) {
+    if let Some(val) = inherited {
+        instance_env
+            .entry("HCOM_AGENT_CATALOGS".to_string())
+            .or_insert(val);
+    }
+}
+
 fn build_codex_bootstrap(
     db: &HcomDb,
     hcom_dir: &Path,
@@ -457,7 +476,9 @@ fn isolated_tool_config_dir(tool: &LaunchTool) -> Option<std::path::PathBuf> {
         crate::tool::Tool::Cursor => ".cursor",
         crate::tool::Tool::Kimi => ".kimi",
         crate::tool::Tool::Copilot => ".copilot",
-        crate::tool::Tool::OpenCode | crate::tool::Tool::Adhoc => return None,
+        crate::tool::Tool::OpenCode | crate::tool::Tool::Hermes | crate::tool::Tool::Adhoc => {
+            return None;
+        }
     };
     Some(root.join(dirname))
 }
@@ -561,6 +582,9 @@ fn format_plugin_install_error(
 /// Strict gate: refuses to launch if hooks can't be installed.
 fn ensure_hooks_installed(tool: &LaunchTool, include_permissions: bool) -> Result<()> {
     match tool {
+        // Hermes invokes hcom lifecycle commands directly when HCOM_PROCESS_ID
+        // is present; there is no external hook configuration to install.
+        LaunchTool::Hermes => Ok(()),
         LaunchTool::Claude | LaunchTool::ClaudePty => {
             if crate::hooks::claude::verify_claude_hooks_installed(None, include_permissions) {
                 return Ok(());
@@ -1927,6 +1951,10 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         // launch (an agent that inherited notes spawning a child) doesn't lose
         // them — but only as a fallback (see `apply_inherited_notes`).
         apply_inherited_notes(&mut instance_env, std::env::var("HCOM_NOTES").ok());
+        apply_inherited_agent_catalogs(
+            &mut instance_env,
+            std::env::var("HCOM_AGENT_CATALOGS").ok(),
+        );
 
         let process_id = generate_process_id();
         instance_env.insert("HCOM_PROCESS_ID".to_string(), process_id.clone());
@@ -2400,6 +2428,33 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                         inside_ai_tool,
                     )
                 }
+                LaunchTool::Hermes => {
+                    instances::update_instance_position(
+                        db,
+                        &instance_name,
+                        &serde_json::Map::from_iter([(
+                            "launch_args".to_string(),
+                            json!(&stored_launch_args),
+                        )]),
+                    );
+                    launch_pty_or_background(
+                        &mut BackgroundLaunchCtx {
+                            db,
+                            tool: "hermes",
+                            instance_name: &instance_name,
+                            process_id: &process_id,
+                            terminal_mode,
+                            tag: params.tag.as_deref().unwrap_or(""),
+                            working_dir,
+                            log_files: &mut log_files,
+                            handles: &mut handles,
+                        },
+                        &mut instance_env,
+                        &params.args,
+                        &params,
+                        inside_ai_tool,
+                    )
+                }
             }
         })();
 
@@ -2498,6 +2553,9 @@ pub(crate) fn validate_tool_args(tool: &LaunchTool, args: &[String]) -> Vec<Stri
             ANTIGRAVITY_REJECTED_ARGS,
         ),
         LaunchTool::Copilot => crate::tools::copilot_preprocessing::validate_copilot_args(args),
+        LaunchTool::Hermes => {
+            validate_rejected_args("Hermes", "hcom hermes", args, HERMES_REJECTED_ARGS)
+        }
     }
 }
 
@@ -2761,6 +2819,16 @@ mod tests {
     }
 
     #[test]
+    fn validate_hermes_rejects_noninteractive_modes_but_allows_resume() {
+        for flag in ["-q", "--query", "-z", "--oneshot", "--tui"] {
+            let errors = validate_tool_args(&LaunchTool::Hermes, &[flag.to_string()]);
+            assert_eq!(errors.len(), 1, "{flag}");
+            assert!(errors[0].contains(flag), "{flag}: {}", errors[0]);
+        }
+        assert!(validate_tool_args(&LaunchTool::Hermes, &["--resume".to_string()]).is_empty());
+    }
+
+    #[test]
     fn omp_extension_args_are_injected_once() {
         let mut args = vec!["--model".to_string(), "opus".to_string()];
         inject_omp_extension_args(&LaunchTool::Omp, &mut args);
@@ -2797,6 +2865,7 @@ mod tests {
         assert_eq!(LaunchTool::Gemini.as_str(), "gemini");
         assert_eq!(LaunchTool::Antigravity.as_str(), "antigravity");
         assert_eq!(LaunchTool::Copilot.as_str(), "copilot");
+        assert_eq!(LaunchTool::Hermes.as_str(), "hermes");
     }
 
     #[test]
@@ -3263,6 +3332,26 @@ mod tests {
         let mut env = HashMap::new();
         apply_inherited_notes(&mut env, None);
         assert!(!env.contains_key("HCOM_NOTES"));
+    }
+
+    #[test]
+    fn test_inherited_agent_catalogs_fill_gap_without_overriding_explicit_value() {
+        let mut env = HashMap::new();
+        apply_inherited_agent_catalogs(&mut env, Some("/task/agents.toml".to_string()));
+        assert_eq!(
+            env.get("HCOM_AGENT_CATALOGS").map(String::as_str),
+            Some("/task/agents.toml")
+        );
+
+        env.insert(
+            "HCOM_AGENT_CATALOGS".to_string(),
+            "/explicit/agents.toml".to_string(),
+        );
+        apply_inherited_agent_catalogs(&mut env, Some("/parent/agents.toml".to_string()));
+        assert_eq!(
+            env.get("HCOM_AGENT_CATALOGS").map(String::as_str),
+            Some("/explicit/agents.toml")
+        );
     }
 
     #[test]
