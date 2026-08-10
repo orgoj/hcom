@@ -1,8 +1,8 @@
 # hcom
 
-[![CI](https://github.com/aannoo/hcom/actions/workflows/ci.yml/badge.svg)](https://github.com/aannoo/hcom/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/aannoo/hcom)](https://github.com/aannoo/hcom/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/aannoo/hcom/blob/main/LICENSE)
+[![CI](https://github.com/orgoj/hcom/actions/workflows/ci.yml/badge.svg)](https://github.com/orgoj/hcom/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/orgoj/hcom)](https://github.com/orgoj/hcom/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/orgoj/hcom/blob/orgoj/LICENSE)
 
 > **Hook your coding agents together**
 
@@ -19,32 +19,19 @@ https://github.com/user-attachments/assets/1ce23ed9-f529-4be0-8124-816aa4c2fd43
 ## Install
 
 ```bash
-brew install aannoo/hcom/hcom
-```
-
-<details><summary>Other install options</summary>
-
-```bash
-# With Python
-uv tool install hcom  # or: pip install hcom
-```
-
-```bash
 # macOS, Linux, Android (Termux), and WSL
-curl -fsSL https://github.com/aannoo/hcom/releases/latest/download/hcom-installer.sh | sh
+curl -fsSL https://github.com/orgoj/hcom/releases/latest/download/hcom-installer.sh | sh
 ```
 
 ```powershell
 # Windows (native, Powershell)
-irm https://github.com/aannoo/hcom/releases/latest/download/hcom-installer.ps1 | iex
+irm https://github.com/orgoj/hcom/releases/latest/download/hcom-installer.ps1 | iex
 ```
 
 ```bash
 # Update any existing install to latest hcom version
 hcom update
 ```
-
-</details>
 
 ---
 
@@ -323,11 +310,26 @@ A file's `defaults` apply only to the agents that same file defines. Relative `d
       "session": "wdt",                  // tmux session; window defaults to the agent name
       "env": { "AWS_PROFILE": "wdt" },
       "pre": "source .venv/bin/activate",
-      "args": ["--dangerously-skip-permissions"]
+      "tools": {
+        "claude": { "model": "sonnet", "args": ["--agent", "reviewer"] },
+        "codex": { "model": "gpt-5.4", "args": ["--sandbox", "workspace-write"] }
+      }
     },
     "gtm_cli": { "dir": "~/projects/gtm-cli", "cli": "codex", "terminal": "wezterm-tab" }
   }
 }
+```
+
+An agent can be launched through different CLIs with `--cli`. Shared fields such as `dir`, `env`,
+`prompt`, and `system_prompt` stay at the agent level. Put CLI-specific `model`, `prompt`,
+`system_prompt`, and `args` under `tools.<cli>`. The selected tool profile overrides shared scalar
+fields and appends its arguments; command-line flags override both. Top-level `model` and `args`
+remain supported for simple single-CLI agents and backwards compatibility.
+
+```bash
+hcom agent wdt_main --cli claude
+hcom agent wdt_main --cli codex
+hcom agent show wdt_main --cli codex   # effective config and exact command
 ```
 
 Where the window opens, in order: `terminal_command` (passed to hcom as `HCOM_TERMINAL`), then
@@ -443,7 +445,7 @@ Custom scripts: drop `*.sh` or `*.py` into `~/.hcom/scripts/` — auto-discovere
 ```bash
 # Prerequisites: Rust 1.88+
 
-git clone https://github.com/aannoo/hcom.git
+git clone --branch orgoj https://github.com/orgoj/hcom.git
 cd hcom
 cargo build
 cargo test

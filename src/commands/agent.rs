@@ -69,6 +69,11 @@ Flags:
 
   Any other flag is forwarded verbatim to `hcom <cli>`.
 
+Catalog tool profiles:
+  \"tools\": {{ \"claude\": {{ \"model\": \"sonnet\", \"args\": [\"--agent\", \"reviewer\"] }} }}
+  The profile for the effective --cli may set model, prompt, system_prompt, and args.
+  Common fields are applied first, then the tool profile, then command-line flags.
+
 Terminal strategy, in order:
   1. terminal_command set          -> hcom launches with HCOM_TERMINAL=<cmd>
   2. session set + tmux available  -> window is prepared here, agent runs with --terminal here
@@ -128,6 +133,33 @@ struct AgentDef {
     env: BTreeMap<String, String>,
     #[serde(default)]
     args: Vec<String>,
+    #[serde(default)]
+    tools: BTreeMap<String, ToolDef>,
+}
+
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolDef {
+    model: Option<String>,
+    prompt: Option<String>,
+    system_prompt: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+impl ToolDef {
+    fn merge_from(&mut self, over: &ToolDef) {
+        if over.model.is_some() {
+            self.model = over.model.clone();
+        }
+        if over.prompt.is_some() {
+            self.prompt = over.prompt.clone();
+        }
+        if over.system_prompt.is_some() {
+            self.system_prompt = over.system_prompt.clone();
+        }
+        self.args.extend(over.args.iter().cloned());
+    }
 }
 
 impl AgentDef {
@@ -156,6 +188,12 @@ impl AgentDef {
             self.env.insert(k.clone(), v.clone());
         }
         self.args.extend(over.args.iter().cloned());
+        for (tool, profile) in &over.tools {
+            self.tools
+                .entry(tool.clone())
+                .or_default()
+                .merge_from(profile);
+        }
     }
 }
 
@@ -584,13 +622,33 @@ fn nonempty(v: Option<String>) -> Option<String> {
 }
 
 fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
+    let selected_cli = cli
+        .def
+        .cli
+        .as_deref()
+        .or(def.cli.as_deref())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(DEFAULT_CLI)
+        .to_string();
+    if let Some(profile) = def.tools.get(&selected_cli).cloned() {
+        if profile.model.is_some() {
+            def.model = profile.model;
+        }
+        if profile.prompt.is_some() {
+            def.prompt = profile.prompt;
+        }
+        if profile.system_prompt.is_some() {
+            def.system_prompt = profile.system_prompt;
+        }
+        def.args.extend(profile.args);
+    }
     def.merge_from(&cli.def);
     let mut extra = std::mem::take(&mut def.args);
     extra.extend(cli.passthrough.iter().cloned());
 
     Effective {
         name: name.to_string(),
-        cli: nonempty(def.cli).unwrap_or_else(|| DEFAULT_CLI.to_string()),
+        cli: selected_cli,
         dir: nonempty(def.dir).unwrap_or_else(|| {
             std::env::current_dir()
                 .map(|p| p.to_string_lossy().into_owned())
@@ -1282,6 +1340,21 @@ mod tests {
     }
 
     #[test]
+    fn merge_accumulates_tool_args_and_replaces_tool_scalars() {
+        let mut base = def_from(
+            r#"{"tools":{"claude":{"model":"sonnet","args":["--a"]},"codex":{"model":"gpt-5"}}}"#,
+        );
+        let over = def_from(
+            r#"{"tools":{"claude":{"model":"opus","args":["--b"]}}}"#,
+        );
+        base.merge_from(&over);
+        let claude = &base.tools["claude"];
+        assert_eq!(claude.model.as_deref(), Some("opus"));
+        assert_eq!(claude.args, vec!["--a", "--b"]);
+        assert_eq!(base.tools["codex"].model.as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
     fn merge_keeps_base_when_override_omits_field() {
         let mut base = def_from(r#"{"session":"wdt"}"#);
         base.merge_from(&def_from(r#"{"cli":"codex"}"#));
@@ -1381,6 +1454,44 @@ mod tests {
         assert_eq!(eff.cli, "codex");
         assert_eq!(eff.model.as_deref(), Some("gpt-5"));
         assert_eq!(eff.extra, vec!["--from-catalog", "--dangerously-skip-permissions"]);
+    }
+
+    #[test]
+    fn effective_cli_selects_matching_tool_profile() {
+        let json = r#"{
+            "cli":"claude",
+            "model":"legacy",
+            "prompt":"shared",
+            "args":["--common"],
+            "tools":{
+                "claude":{"model":"sonnet","prompt":"claude prompt","args":["--agent","reviewer"]},
+                "codex":{"model":"gpt-5","system_prompt":"codex system","args":["--sandbox","workspace-write"]}
+            }
+        }"#;
+
+        let claude = eff_of(json, &[]);
+        assert_eq!(claude.cli, "claude");
+        assert_eq!(claude.model.as_deref(), Some("sonnet"));
+        assert_eq!(claude.prompt.as_deref(), Some("claude prompt"));
+        assert_eq!(claude.extra, vec!["--common", "--agent", "reviewer"]);
+
+        let codex = eff_of(json, &["--cli", "codex"]);
+        assert_eq!(codex.cli, "codex");
+        assert_eq!(codex.model.as_deref(), Some("gpt-5"));
+        assert_eq!(codex.prompt.as_deref(), Some("shared"));
+        assert_eq!(codex.system_prompt.as_deref(), Some("codex system"));
+        assert_eq!(codex.extra, vec!["--common", "--sandbox", "workspace-write"]);
+    }
+
+    #[test]
+    fn command_line_overrides_selected_tool_profile() {
+        let eff = eff_of(
+            r#"{"cli":"claude","tools":{"codex":{"model":"profile","prompt":"profile prompt","args":["--profile"]}}}"#,
+            &["--cli", "codex", "--model", "cli", "--prompt", "cli prompt", "--extra"],
+        );
+        assert_eq!(eff.model.as_deref(), Some("cli"));
+        assert_eq!(eff.prompt.as_deref(), Some("cli prompt"));
+        assert_eq!(eff.extra, vec!["--profile", "--extra"]);
     }
 
     #[test]

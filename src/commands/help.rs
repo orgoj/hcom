@@ -605,12 +605,10 @@ const UPDATE_HELP: &[HelpEntry] = &[
     ("", ""),
     (
         "",
-        "Detects install method and runs the right update command:",
+        "Downloads the latest orgoj/hcom release with the platform installer:",
     ),
-    ("", "  brew install    → brew upgrade hcom"),
-    ("", "  uv tool install → uv tool upgrade hcom"),
-    ("", "  pip install     → pip install -U hcom"),
-    ("", "  curl installer  → re-run hcom-installer.sh"),
+    ("", "  Unix   → re-run hcom-installer.sh"),
+    ("", "  Windows → re-run hcom-installer.ps1"),
 ];
 
 const HOOKS_HELP: &[HelpEntry] = &[

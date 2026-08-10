@@ -11,7 +11,7 @@ description: >
 AI agents running in separate terminals are isolated. hcom connects them via hooks and a shared database so they can message, watch, and spawn each other in real-time.
 
 ```bash
-curl -fsSL https://github.com/aannoo/hcom/releases/latest/download/hcom-installer.sh | sh
+curl -fsSL https://github.com/orgoj/hcom/releases/latest/download/hcom-installer.sh | sh
 hcom claude       # or: hcom gemini, hcom codex, hcom opencode, hcom kilo, hcom pi, hcom omp, hcom agy, hcom cursor-agent, hcom kimi, hcom copilot
 hcom              # TUI dashboard
 ```
@@ -93,14 +93,14 @@ if the user invokes this skill without arguments:
 
 1. run `hcom status` — if "command not found", install first:
    ```bash
-   curl -fsSL https://github.com/aannoo/hcom/releases/latest/download/hcom-installer.sh | sh
+   curl -fsSL https://github.com/orgoj/hcom/releases/latest/download/hcom-installer.sh | sh
    ```
 2. run `hcom hooks add` to install hooks for all detected tools
 3. restart the AI tool for hooks to activate
 
 | status output | meaning | action |
 |---------------|---------|--------|
-| command not found | not installed | install via `brew install aannoo/hcom/hcom`, the curl installer above, or `pip install hcom` |
+| command not found | not installed | install with the curl installer above (or the PowerShell installer on Windows) |
 | `[~] claude` | tool exists, hooks not installed | `hcom hooks add` then restart |
 | `[✓] claude` | hooks installed | ready |
 | `[✗] claude` | tool not found | install the AI tool first |
@@ -224,6 +224,7 @@ with `HCOM_DIR` set, uses that path instead of `~/.hcom`.
 
 | file | when to read |
 |------|-------------|
+| `references/named-agents.md` | defining or launching recurring agents with `hcom agent`, JSON catalogs, and per-CLI `tools` profiles |
 | `references/patterns.md` | writing multi-agent scripts — 6 tested patterns with full code and real event JSON |
 | `references/cross-tool.md` | claude + codex + gemini + opencode + kilo + pi + omp + antigravity + cursor + kimi + copilot collaboration details and per-tool quirks |
 | `references/gotchas.md` | debugging scripts — timing, message delivery, intent system, cleanup |
@@ -239,4 +240,4 @@ hcom --help              # all commands
 hcom <command> --help    # command details
 ```
 
-github: https://github.com/aannoo/hcom
+github: https://github.com/orgoj/hcom

@@ -1241,6 +1241,26 @@ fn agent_dry_run_renders_the_hcom_command_without_launching() {
 }
 
 #[test]
+fn agent_dry_run_selects_the_effective_cli_tool_profile() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"solo":{"dir":"/tmp","cli":"claude","args":["--common"],
+            "tools":{"claude":{"model":"sonnet","args":["--agent","reviewer"]},
+                     "codex":{"model":"gpt-5","args":["--sandbox","workspace-write"]}}}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--cli", "codex", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
+    assert!(stdout.contains("--model gpt-5"), "stdout={stdout}");
+    assert!(stdout.contains("--common"), "stdout={stdout}");
+    assert!(stdout.contains("--sandbox workspace-write"), "stdout={stdout}");
+    assert!(!stdout.contains("--agent reviewer"), "stdout={stdout}");
+}
+
+#[test]
 fn agent_session_uses_tmux_window_with_terminal_here() {
     let h = Hcom::new();
     std::fs::write(
