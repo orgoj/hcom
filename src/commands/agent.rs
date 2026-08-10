@@ -781,8 +781,15 @@ fn window_command(eff: &Effective, resume: bool) -> String {
     if let Some(pre) = &eff.pre {
         line = format!("{pre} && {line}");
     }
-    // Keep the pane alive once the agent exits.
-    format!("{line}; exec \"${{SHELL:-sh}}\"")
+    // tmux executes a supplied window command through a non-interactive shell.
+    // Re-enter the user's login+interactive shell from the target directory so
+    // its init files establish the same environment as a normal terminal.
+    // Keep the pane in that initialized shell once the agent exits.
+    line.push_str("; exec \"${SHELL:-/bin/bash}\" -l");
+    format!(
+        "exec \"${{SHELL:-/bin/bash}}\" -lic {}",
+        shell_words::quote(&line)
+    )
 }
 
 // ── Live state ──────────────────────────────────────────────────────────
@@ -1609,9 +1616,10 @@ mod tests {
             &[],
         );
         let cmd = window_command(&eff, false);
-        assert!(cmd.starts_with("source .venv/bin/activate && AWS_PROFILE=wdt "));
+        assert!(cmd.starts_with("exec \"${SHELL:-/bin/bash}\" -lic "));
+        assert!(cmd.contains("source .venv/bin/activate && AWS_PROFILE=wdt "));
         assert!(cmd.contains("--terminal here"));
-        assert!(cmd.ends_with("; exec \"${SHELL:-sh}\""));
+        assert!(cmd.contains("; exec \"${SHELL:-/bin/bash}\" -l"));
     }
 
     #[test]

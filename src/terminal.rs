@@ -958,6 +958,16 @@ pub fn create_bash_script(
     let mut f = fs::File::create(script_file).context("Failed to create script file")?;
 
     writeln!(f, "#!/bin/bash")?;
+
+    // A newly opened terminal must initialize the user's shell before the
+    // agent starts. The first pass prepares hcom's inherited environment and
+    // cwd, then the login+interactive shell may replace any of it from the
+    // user's init files. The second pass skips that preparation so the freshly
+    // initialized environment reaches the agent unchanged.
+    if opens_new_window {
+        writeln!(f, "if [ \"${{HCOM_SHELL_INITIALIZED:-}}\" != 1 ]; then")?;
+    }
+
     writeln!(f, "printf \"\\033]0;hcom: starting {}...\\007\"", tool_name)?;
     writeln!(f, "echo \"Starting {}...\"", tool_name)?;
 
@@ -1006,6 +1016,19 @@ pub fn create_bash_script(
         writeln!(f, "cd {}", shell_quote(dir))?;
     }
 
+    if opens_new_window {
+        writeln!(
+            f,
+            "exec \"${{SHELL:-/bin/bash}}\" -lic {}",
+            shell_quote(&format!(
+                "exec env HCOM_SHELL_INITIALIZED=1 {}",
+                shell_quote(&script_file.to_string_lossy())
+            ))
+        )?;
+        writeln!(f, "fi")?;
+        writeln!(f, "unset HCOM_SHELL_INITIALIZED")?;
+    }
+
     // Resolve tool path for full path execution.
     // On Termux, npm-installed tools have shebangs like #!/usr/bin/env node which
     // fail (no /usr/bin/env). Detect node shebangs and rewrite to: node /path/to/tool args
@@ -1041,7 +1064,7 @@ pub fn create_bash_script(
         leftover_vars.extend(["HCOM_TAG", "HCOM_CODEX_SANDBOX_MODE"]);
         writeln!(f, "unset {}", leftover_vars.join(" "))?;
         writeln!(f, "rm -f {}", shell_quote(&script_file.to_string_lossy()))?;
-        writeln!(f, "exec bash -l")?;
+        writeln!(f, "exec \"${{SHELL:-/bin/bash}}\" -l")?;
     } else if !background {
         writeln!(f, "hcom_status=$?")?;
         writeln!(f, "rm -f {}", shell_quote(&script_file.to_string_lossy()))?;
@@ -3009,6 +3032,43 @@ mod tests {
         assert!(content.contains("$hcom_status = $LASTEXITCODE"));
         assert!(content.contains("exit $hcom_status"));
         assert!(!content.contains("Set-Location"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_create_bash_script_initializes_user_shell_in_target_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("launch.sh");
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), "/old/path".to_string());
+        env.insert("HCOM_TOOL".to_string(), "codex".to_string());
+
+        create_bash_script(
+            &script,
+            &env,
+            Some("/work/project"),
+            "codex",
+            false,
+            Some("codex"),
+            true,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(&script).unwrap();
+        let guard = content.find("if [ \"${HCOM_SHELL_INITIALIZED:-}\" != 1 ]").unwrap();
+        let inherited_path = content.find("export PATH=/old/path;").unwrap();
+        let cwd = content.find("cd /work/project").unwrap();
+        let shell_init = content.find("\"${SHELL:-/bin/bash}\" -lic").unwrap();
+        let guard_end = content.find("unset HCOM_SHELL_INITIALIZED").unwrap();
+        let agent = content.rfind("codex").unwrap();
+
+        assert!(guard < inherited_path);
+        assert!(inherited_path < cwd);
+        assert!(cwd < shell_init);
+        assert!(shell_init < guard_end);
+        assert!(guard_end < agent);
+        assert!(content.contains("exec env HCOM_SHELL_INITIALIZED=1"));
+        assert!(content.contains("exec \"${SHELL:-/bin/bash}\" -l"));
     }
 
     #[test]
