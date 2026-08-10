@@ -64,7 +64,7 @@ Flags:
   --no-project              Ignore any {PROJECT_FILE}
   --attach                  Focus the window after launching (or when already running)
   --restart                 Kill a running agent first instead of reporting it
-  --fresh                   Start a new session instead of resuming a stopped one
+  --resume                  Continue the agent's previous session instead of starting clean
   --dry-run                 Print the commands without running anything
 
   Any other flag is forwarded verbatim to `hcom <cli>`.
@@ -451,7 +451,7 @@ struct Cli {
     attach: bool,
     dry_run: bool,
     restart: bool,
-    fresh: bool,
+    resume: bool,
     no_project: bool,
     catalog: Option<PathBuf>,
     passthrough: Vec<String>,
@@ -543,8 +543,8 @@ fn parse_cli(argv: &[String]) -> Result<Cli> {
                 cli.restart = true;
                 i += 1;
             }
-            "--fresh" => {
-                cli.fresh = true;
+            "--resume" => {
+                cli.resume = true;
                 i += 1;
             }
             "--dry-run" => {
@@ -763,16 +763,6 @@ fn find_live(name: &str) -> Option<LiveAgent> {
     live_agents().into_iter().find(|a| a.name == name)
 }
 
-fn has_stopped_history(name: &str) -> bool {
-    Command::new(hcom_bin())
-        .args(["list", "--stopped", name])
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).starts_with("Stopped:"))
-        .unwrap_or(false)
-}
-
 // ── tmux backend ────────────────────────────────────────────────────────
 
 fn tmux_bin() -> Option<String> {
@@ -936,7 +926,7 @@ fn cmd_launch(name: &str, rest: &[String]) -> Result<i32> {
         }
     }
 
-    let resume = live.is_none() && !cli.fresh && has_stopped_history(name);
+    let resume = live.is_none() && cli.resume;
     launch(&eff, &cli, resume)
 }
 
@@ -946,10 +936,7 @@ fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
         eprintln!("warning: {w}");
     }
     if resume {
-        println!(
-            "resuming '{}' ({}) — use --fresh to start a new session instead",
-            eff.name, eff.cli
-        );
+        println!("resuming '{}' ({})", eff.name, eff.cli);
     }
 
     match strategy {
@@ -1481,6 +1468,17 @@ mod tests {
                 "--foo",
             ]
         );
+    }
+
+    #[test]
+    fn resume_is_opt_in() {
+        let parse = |args: &[&str]| {
+            parse_cli(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap()
+        };
+        assert!(!parse(&[]).resume, "a plain launch must start clean");
+        assert!(parse(&["--resume"]).resume);
+        // --resume is ours, not something the tool should see.
+        assert!(parse(&["--resume"]).passthrough.is_empty());
     }
 
     #[test]

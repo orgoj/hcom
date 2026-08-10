@@ -336,8 +336,9 @@ Where the window opens, in order: `terminal_command` (passed to hcom as `HCOM_TE
 opens the window itself. Without tmux — Windows, for instance — `session` is ignored with a warning
 and the preset takes over.
 
-`--dry-run` prints the commands instead of running them; `--restart` replaces a running agent;
-`--fresh` starts a new session instead of resuming a stopped one. `hcom agent --help` lists the rest.
+Every launch starts a clean session; `--resume` continues the agent's previous one instead.
+`--dry-run` prints the commands instead of running them, `--restart` replaces a running agent.
+`hcom agent --help` lists the rest.
 
 ### Other commands
 
