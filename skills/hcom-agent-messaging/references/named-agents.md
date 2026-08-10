@@ -57,6 +57,29 @@ hcom agent reviewer --clean
 
 Use `hcom agent edit` for the global catalog or `hcom agent edit --project` for the project catalog.
 
+## Message-driven startup
+
+A targeted message treats the effective catalog as an address book as well as a launcher. If a
+resolved local recipient is missing or stopped but is defined in the catalog, hcom starts it before
+writing the message:
+
+```bash
+hcom send @reviewer --intent request -- "Review the current diff"
+hcom send @review- --intent inform -- "The API contract changed"
+hcom send @reviewer @one_shot -- "Coordinate this task"
+```
+
+The launch uses the same merged agent definition as `hcom agent <name>`, including its configured
+clean/resume start mode. The message event is addressed to the canonical catalog name, so delivery
+continues through the normal unread/wake mechanism as the new process registers. A send fails
+without writing its message if a requested name is neither deliverable nor defined in the catalog,
+or if its catalog launch fails.
+
+This behavior applies to direct names, catalog tag groups, and missing catalog members already
+recorded in a `--thread`. It does not apply to broadcasts: a message without targets reaches current
+deliverable instances only and never starts the whole catalog. Remote `name:DEVICE` targets are
+resolved by relay state and do not launch a same-named local catalog entry.
+
 ## Clean start and resume
 
 `resume` is a scalar boolean accepted in `defaults` and individual agent entries:

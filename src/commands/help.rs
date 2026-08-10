@@ -219,6 +219,10 @@ const SEND_HELP: &[HelpEntry] = &[
         "",
         "Partial local names are rejected to avoid accidental fan-out.",
     ),
+    (
+        "",
+        "Targeted missing/stopped catalog agents start automatically; broadcasts never start agents.",
+    ),
     ("", ""),
     ("Envelope:", ""),
     ("  --intent <type>", "request | inform | ack"),

@@ -21,6 +21,8 @@ Target matching:
     @api-                          all local agents with exact tag 'api'
     @luna:BOXE                     exact or uniquely prefixed remote agent
   Partial local names are rejected to avoid accidental fan-out.
+  A targeted stopped/missing local agent is started automatically when its
+  name is defined in the effective hcom agent catalog. Broadcasts never start agents.
 
 Inline bundle (attach structured context):
     --title <text>                 Create and attach bundle inline
@@ -241,6 +243,7 @@ struct ResolvedDelivery {
     effective_scope: MessageScope,
     effective_mentions: Vec<String>,
     delivered_to: Vec<String>,
+    catalog_starts: Vec<String>,
     is_thread_resolved: bool,
 }
 
@@ -272,6 +275,7 @@ fn resolve_delivery(
     message: &str,
     envelope: Option<&MessageEnvelope>,
     explicit_targets: Option<&[String]>,
+    catalog_instances: &[InstanceInfo],
 ) -> Result<ResolvedDelivery, String> {
     // Deliverable agents: exclude session-stopped (exit:*) and launch_failed placeholders.
     // Adhoc instances use inactive:tool:* between commands — still @mentionable.
@@ -279,7 +283,16 @@ fn resolve_delivery(
 
     // Compute scope and routing. Thread-only sends keep their original message
     // semantics; membership only affects the delivery target set.
-    let scope_result = compute_scope(message, &rows, explicit_targets)?;
+    let mut routing_rows = rows.clone();
+    for catalog in catalog_instances {
+        if !routing_rows
+            .iter()
+            .any(|inst| inst.name.eq_ignore_ascii_case(&catalog.name))
+        {
+            routing_rows.push(catalog.clone());
+        }
+    }
+    let scope_result = compute_scope(message, &routing_rows, explicit_targets)?;
     let thread_delivery_members =
         if let Some(thread) = envelope.and_then(|env| env.thread.as_deref()) {
             if scope_result.scope == MessageScope::Broadcast {
@@ -309,12 +322,27 @@ fn resolve_delivery(
     };
 
     let scope_data = build_scope_data(identity, effective_scope, &effective_mentions);
-    let delivered_to = rows
+    let recipient_rows = if effective_scope == MessageScope::Mentions {
+        &routing_rows
+    } else {
+        &rows
+    };
+    let delivered_to: Vec<String> = recipient_rows
         .iter()
         .filter(|inst| {
             should_deliver_message(&scope_data, &inst.name, &identity.name).unwrap_or(false)
         })
         .map(|inst| inst.name.clone())
+        .collect();
+    let catalog_starts = delivered_to
+        .iter()
+        .filter(|name| !rows.iter().any(|inst| inst.name.eq_ignore_ascii_case(name)))
+        .filter(|name| {
+            catalog_instances
+                .iter()
+                .any(|inst| inst.name.eq_ignore_ascii_case(name))
+        })
+        .cloned()
         .collect();
 
     Ok(ResolvedDelivery {
@@ -322,6 +350,7 @@ fn resolve_delivery(
         effective_scope,
         effective_mentions,
         delivered_to,
+        catalog_starts,
         is_thread_resolved,
     })
 }
@@ -382,9 +411,30 @@ pub fn send_message(
     envelope: Option<&MessageEnvelope>,
     explicit_targets: Option<&[String]>,
 ) -> Result<Vec<String>, String> {
+    send_message_with_catalog(db, identity, message, envelope, explicit_targets, &[])
+}
+
+fn send_message_with_catalog(
+    db: &HcomDb,
+    identity: &SenderIdentity,
+    message: &str,
+    envelope: Option<&MessageEnvelope>,
+    explicit_targets: Option<&[String]>,
+    catalog_instances: &[InstanceInfo],
+) -> Result<Vec<String>, String> {
     validate_message(message)?;
 
-    let delivery = resolve_delivery(db, identity, message, envelope, explicit_targets)?;
+    let delivery = resolve_delivery(
+        db,
+        identity,
+        message,
+        envelope,
+        explicit_targets,
+        catalog_instances,
+    )?;
+    for name in &delivery.catalog_starts {
+        super::agent::autostart_catalog_agent(name).map_err(|e| e.to_string())?;
+    }
     let scope_str = delivery.effective_scope.as_str();
 
     // Build event data
@@ -876,6 +926,23 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         } else {
             None
         };
+    let catalog_instances = if targets_to_pass.is_some_and(|targets| !targets.is_empty())
+        || message.contains('@')
+        || envelope.thread.is_some()
+    {
+        match super::agent::catalog_message_targets() {
+            Ok(targets) => targets
+                .into_iter()
+                .map(|(name, tag)| InstanceInfo { name, tag })
+                .collect(),
+            Err(e) => {
+                eprintln!("Error: cannot load agent catalog for message routing: {e:#}");
+                return 1;
+            }
+        }
+    } else {
+        Vec::new()
+    };
 
     let preview_has_envelope =
         envelope.intent.is_some() || envelope.reply_to.is_some() || envelope.thread.is_some();
@@ -889,6 +956,7 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
             None
         },
         targets_to_pass,
+        &catalog_instances,
     ) {
         Ok(delivery) => delivery,
         Err(e) => {
@@ -1012,12 +1080,13 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         || envelope.thread.is_some()
         || envelope.bundle_id.is_some();
 
-    let delivered_to = match send_message(
+    let delivered_to = match send_message_with_catalog(
         db,
         &sender_identity,
         &message,
         if has_envelope { Some(&envelope) } else { None },
         targets_to_pass,
+        &catalog_instances,
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -1456,6 +1525,86 @@ mod tests {
         let shm = PathBuf::from(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(wal);
         let _ = std::fs::remove_file(shm);
+    }
+
+    #[test]
+    #[serial]
+    fn catalog_agents_are_routable_and_marked_for_start_only_when_targeted() {
+        let (db, path, _env) = setup_test_db();
+        let sender = SenderIdentity {
+            kind: SenderKind::External,
+            name: "bigboss".into(),
+            instance_data: None,
+            session_id: None,
+        };
+        let catalog = vec![InstanceInfo {
+            name: "reviewer".into(),
+            tag: Some("review".into()),
+        }];
+
+        let targeted = resolve_delivery(
+            &db,
+            &sender,
+            "review this",
+            None,
+            Some(&["reviewer".to_string()]),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(targeted.delivered_to, vec!["reviewer"]);
+        assert_eq!(targeted.catalog_starts, vec!["reviewer"]);
+
+        let tagged = resolve_delivery(
+            &db,
+            &sender,
+            "review this",
+            None,
+            Some(&["review-".to_string()]),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(tagged.delivered_to, vec!["reviewer"]);
+        assert_eq!(tagged.catalog_starts, vec!["reviewer"]);
+
+        let broadcast = resolve_delivery(&db, &sender, "hello", None, None, &catalog).unwrap();
+        assert!(broadcast.delivered_to.is_empty());
+        assert!(broadcast.catalog_starts.is_empty());
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn stopped_catalog_thread_member_is_marked_for_start() {
+        let (db, path, _env) = setup_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, created_at) VALUES ('reviewer', 'stopped', 1000.0)",
+                [],
+            )
+            .unwrap();
+        db.add_thread_memberships("review", None, &["reviewer".to_string()]);
+        let sender = SenderIdentity {
+            kind: SenderKind::External,
+            name: "bigboss".into(),
+            instance_data: None,
+            session_id: None,
+        };
+        let envelope = MessageEnvelope {
+            thread: Some("review".into()),
+            ..Default::default()
+        };
+        let catalog = vec![InstanceInfo {
+            name: "reviewer".into(),
+            tag: None,
+        }];
+
+        let delivery =
+            resolve_delivery(&db, &sender, "next task", Some(&envelope), None, &catalog).unwrap();
+        assert_eq!(delivery.delivered_to, vec!["reviewer"]);
+        assert_eq!(delivery.catalog_starts, vec!["reviewer"]);
+
+        cleanup_test_db(path);
     }
 
     #[test]

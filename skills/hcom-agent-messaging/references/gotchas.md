@@ -30,9 +30,10 @@ hcom events --agent luna     # What has luna seen recently?
 
 | Cause | How to detect | Fix |
 |-------|---------------|-----|
-| Agent already stopped | `hcom list` shows inactive/missing | Check timing; agent may finish before message arrives |
+| Catalog agent is stopped | `hcom list` shows inactive/missing | Send to its exact name; targeted sends start catalog agents automatically |
+| Non-catalog agent already stopped | `hcom list` shows inactive/missing | Relaunch it explicitly or define it in the agent catalog |
 | Agent has not bound session yet | `hcom list` shows "launching" | Wait: `hcom events --wait 30 --idle "$name"` |
-| Mistyped @-mention | `send` fails: "non-existent or stopped agents" + Available list | Names resolve exactly — use the exact agent name or `@tag-` group, no partial/prefix matching |
+| Mistyped @-mention | `send` fails with the unknown target + Available list | Names resolve exactly — use an active name, catalog agent, or exact `@tag-` group; no partial matching |
 | No matching thread | Agent sees no messages | Both sides must use exact same `--thread` value |
 | Message scope mismatch | Event `scope` is "mentions" but agent not in `mentions` array | Verify @mention matches agent name or tag |
 | Identity binding failed | Agent not in `instances` table | Check `HCOM_PROCESS_ID` env var propagation |
@@ -121,6 +122,9 @@ hcom send @luna -- "only luna sees this"         # Direct mention
 hcom send @worker- -- "all workers see this"     # Tag prefix
 hcom send @luna @nova -- "luna and nova see this" # Multiple mentions
 ```
+
+If a targeted local name or tag member is defined in the effective `hcom agent` catalog but is not
+running, `send` starts it automatically. Broadcasts never start catalog agents.
 
 **Common mistake:** Forgetting `--` before the message text. Without `--`, the message text might be parsed as flags.
 

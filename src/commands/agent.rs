@@ -429,6 +429,29 @@ impl Catalogs {
     }
 }
 
+/// Catalog agent identities available for message routing, including stopped agents.
+pub(crate) fn catalog_message_targets() -> Result<Vec<(String, Option<String>)>> {
+    let catalogs = Catalogs::load(false, None)?;
+    Ok(catalogs
+        .names()
+        .keys()
+        .filter(|name| !name.contains(':'))
+        .filter_map(|name| {
+            let def = catalogs.resolve(name)?;
+            let eff = effective(name, def, &Cli::default());
+            Some((name.clone(), eff.tag))
+        })
+        .collect())
+}
+
+/// Start a configured agent using its effective catalog start mode.
+pub(crate) fn autostart_catalog_agent(name: &str) -> Result<()> {
+    match cmd_launch(name, &[])? {
+        0 => Ok(()),
+        code => bail!("could not start catalog agent '{name}' (exit {code})"),
+    }
+}
+
 fn unknown_agent_error(name: &str, catalogs: &Catalogs) -> anyhow::Error {
     let names = catalogs.names();
     let mut msg = format!("unknown agent '{name}'");

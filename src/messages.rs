@@ -196,7 +196,7 @@ fn build_unmatched_error(unmatched: &[String], full_names: &[String]) -> String 
     }
 
     let mut msg = format!(
-        "@mentions to non-existent or stopped agents (or you used '@' char for stuff that wasn't agent name): {}",
+        "@mentions to unknown or unavailable agents (or you used '@' char for stuff that wasn't agent name): {}",
         unmatched_display.join(", "),
     );
     if !suggestions.is_empty() {
@@ -1135,7 +1135,7 @@ mod tests {
         let targets = vec!["nonexistent".to_string()];
         let result = compute_scope("hello", &instances, Some(&targets));
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("non-existent or stopped"));
+        assert!(result.unwrap_err().contains("unknown or unavailable"));
     }
 
     #[test]

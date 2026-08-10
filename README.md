@@ -286,6 +286,18 @@ Anything else is forwarded to the tool: `--model sonnet`, `--yolo`, etc.
 
 `hcom agent` launches an agent from a JSON catalog, so a machine's recurring agents stop living in
 shell history. A named agent is unique: launching one that already runs prints its status and exits.
+Targeted messages also launch catalog agents on demand, so callers do not need a list/start/send
+preflight:
+
+```bash
+hcom send @wdt_main --intent request -- "Review the current change"
+```
+
+If `wdt_main` is not deliverable, hcom starts it with its effective catalog configuration and
+`resume`/clean mode, then queues the message to that canonical name. This applies to direct names,
+catalog tag groups, multiple recipients, and stopped catalog members of an existing `--thread`.
+Unknown names still fail without writing the message. Broadcasts only address currently
+deliverable instances and never start every catalog entry.
 
 ```bash
 hcom agent wdt_main                 # launch (or report that it already runs)

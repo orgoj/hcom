@@ -66,6 +66,11 @@ tmux attach -t hcom-audit_api
 
 Use `--terminal tmux-split` only when the child should split the launching agent's current window. Always pass `--dir` when the child must work in another repository. Use `hcom send @audit_api -- "..."` for follow-up work and `hcom kill audit_api` to stop the agent and close its managed tmux pane.
 
+For agents defined in the effective `hcom agent` JSON catalog, a targeted send is also the normal
+launch operation: `hcom send @audit_api --intent request -- "..."` starts `audit_api` when it is
+missing or stopped, then delivers the message. Do not add `hcom list`/`hcom agent` preflight logic.
+Broadcasts do not auto-start catalog agents. See `references/named-agents.md` for routing details.
+
 For multiple agents, omit `--as` and capture the generated names from launch output; one explicit name cannot be assigned to a multi-agent launch.
 
 ---
@@ -130,7 +135,7 @@ hcom claude          # fresh start
 
 | symptom | diagnosis | fix |
 |---------|-----------|-----|
-| agent not in `hcom list` | agent stopped or never bound | relaunch or wait for binding |
+| catalog agent not in `hcom list` | agent stopped or never launched | target it directly; `hcom send` starts it on demand |
 | message sent but not delivered | check `hcom events --last 5` | verify @mention matches agent name/tag |
 | message reaches more than one agent | duplicate base name across tags | target the full `@tag-name` to hit exactly one |
 | messages leaking between workflows | no thread isolation | always use `--thread` |

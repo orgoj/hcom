@@ -1267,6 +1267,71 @@ fn agent_start_mode_uses_catalog_and_cli_override() {
 }
 
 #[test]
+fn targeted_send_starts_catalog_agent_and_routes_message() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@reviewer",
+        "--intent",
+        "request",
+        "--",
+        "review this",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("Sent to:"), "stdout={stdout}");
+    assert!(stdout.contains("reviewer"), "stdout={stdout}");
+
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
+    assert_eq!(event["data"]["text"], "review this");
+
+    let (code, instances, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "instances={instances} stderr={stderr}");
+    let instances: serde_json::Value = serde_json::from_str(&instances).expect("instance list JSON");
+    let reviewer = instances
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["name"] == "reviewer"))
+        .expect("autostarted reviewer instance");
+    assert_eq!(reviewer["unread_count"], 1);
+}
+
+#[test]
+fn catalog_autostart_failure_does_not_write_message() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"broken":{"dir":"/tmp","cli":"not-a-real-tool",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, _stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@broken",
+        "--",
+        "must not be queued",
+    ]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(stderr.contains("could not start catalog agent 'broken'"), "stderr={stderr}");
+
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    assert!(events.trim().is_empty(), "failed send wrote message: {events}");
+}
+
+#[test]
 fn agent_dry_run_selects_the_effective_cli_tool_profile() {
     let h = Hcom::new();
     std::fs::write(
