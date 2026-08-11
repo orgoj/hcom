@@ -179,9 +179,10 @@ Choose replies from the received intent, not from conversational politeness:
 
 ### Hermes / shell delivery guardrails
 
-- Never interpolate message text into a shell command. Send every non-trivial
-  hcom body with `--base64` (or `--file`): Markdown backticks and `$()` inside
-  a double-quoted shell argument are executed by Bash before hcom receives it.
+- Pass ordinary message text directly as the argument after `--`, using normal
+  shell quoting. Keep messaging to one `hcom send` command; do not add encoding
+  commands or use `--base64`/`--file` unless the payload itself specifically
+  requires that transport.
 - `hcom` can append unread messages to the stdout of ordinary identity-bound
   commands; `listen` is therefore not the only receive path. Inspect every
   hcom command result for delivered messages before issuing another command.
