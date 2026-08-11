@@ -13,6 +13,8 @@ use std::process::{Command, Stdio};
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
+use crate::db::HcomDb;
+
 const GLOBAL_FILE: &str = "agents.json";
 const PROJECT_FILE: &str = ".hcom-agents.json";
 const EXTRA_CATALOGS_ENV: &str = "HCOM_AGENT_CATALOGS";
@@ -552,10 +554,31 @@ pub(crate) fn catalog_message_targets() -> Result<Vec<(String, Option<String>)>>
 }
 
 /// Start a configured agent using its effective catalog start mode.
-pub(crate) fn autostart_catalog_agent(name: &str) -> Result<()> {
+pub(crate) fn autostart_catalog_agent(db: &HcomDb, name: &str) -> Result<()> {
     match cmd_launch(name, &[])? {
-        0 => Ok(()),
+        0 => wait_for_catalog_agent_registration(db, name, std::time::Duration::from_secs(10)),
         code => bail!("could not start catalog agent '{name}' (exit {code})"),
+    }
+}
+
+fn wait_for_catalog_agent_registration(
+    db: &HcomDb,
+    name: &str,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if db.get_instance_full(name).ok().flatten().is_some_and(|row| {
+            row.status != "stopped"
+                && row.status_context != "launch_failed"
+                && !(row.status == "inactive" && row.status_context.starts_with("exit:"))
+        }) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("catalog agent '{name}' did not register before timeout");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
 
@@ -1476,6 +1499,64 @@ mod tests {
 
     fn def_from(json: &str) -> AgentDef {
         serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn catalog_autostart_waits_for_deliverable_registration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("hcom.db");
+        let db = HcomDb::open_at(&db_path).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, status_context, created_at)
+                 VALUES ('reviewer', 'stopped', '', 1.0)",
+                [],
+            )
+            .unwrap();
+
+        let writer_path = db_path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let writer_db = HcomDb::open_at(&writer_path).unwrap();
+            writer_db
+                .conn()
+                .execute(
+                    "UPDATE instances
+                     SET status = 'inactive', status_context = 'new'
+                     WHERE name = 'reviewer'",
+                    [],
+                )
+                .unwrap();
+        });
+
+        wait_for_catalog_agent_registration(
+            &db,
+            "reviewer",
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn catalog_autostart_registration_timeout_rejects_stopped_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = HcomDb::open_at(&tmp.path().join("hcom.db")).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, created_at)
+                 VALUES ('reviewer', 'stopped', 1.0)",
+                [],
+            )
+            .unwrap();
+
+        let error = wait_for_catalog_agent_registration(
+            &db,
+            "reviewer",
+            std::time::Duration::ZERO,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("did not register before timeout"));
     }
 
     #[test]

@@ -433,7 +433,7 @@ fn send_message_with_catalog(
         catalog_instances,
     )?;
     for name in &delivery.catalog_starts {
-        super::agent::autostart_catalog_agent(name).map_err(|e| e.to_string())?;
+        super::agent::autostart_catalog_agent(db, name).map_err(|e| e.to_string())?;
     }
     let scope_str = delivery.effective_scope.as_str();
 
