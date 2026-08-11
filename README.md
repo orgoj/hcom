@@ -286,18 +286,6 @@ Anything else is forwarded to the tool: `--model sonnet`, `--yolo`, etc.
 
 `hcom agent` launches an agent from a JSON catalog, so a machine's recurring agents stop living in
 shell history. A named agent is unique: launching one that already runs prints its status and exits.
-Targeted messages also launch catalog agents on demand, so callers do not need a list/start/send
-preflight:
-
-```bash
-hcom send @wdt_main --intent request -- "Review the current change"
-```
-
-If `wdt_main` is not deliverable, hcom starts it with its effective catalog configuration and
-`resume`/clean mode, then queues the message to that canonical name. This applies to direct names,
-catalog tag groups, multiple recipients, and stopped catalog members of an existing `--thread`.
-Unknown names still fail without writing the message. Broadcasts only address currently
-deliverable instances and never start every catalog entry.
 
 ```bash
 hcom agent wdt_main                 # launch (or report that it already runs)
@@ -307,85 +295,9 @@ hcom agent show wdt_main            # effective config and the exact command
 hcom agent edit                     # open the catalog in $EDITOR (creates a starter file)
 ```
 
-`~/.hcom/agents.json` (override with `HCOM_AGENTS_FILE`) holds the machine's agents; a
-`.hcom-agents.json` found upward from the current directory adds or overrides entries for one repo.
-A file's `defaults` apply only to the agents that same file defines. Relative `dir` resolves against
-`$HOME` for the global catalog and against the catalog's own directory for a project one.
-
-Set `HCOM_AGENT_CATALOGS` to a platform path-separated list of additive catalogs when one external
-client needs the normal global agents plus its own catalog view. These catalogs load after the
-global catalog and before the current project's catalog. Unlike `HCOM_AGENTS_FILE`, this variable
-does not replace the global catalog.
-
-Any catalog can import all or selected agents from another catalog without copying their
-definitions. Relative `from` paths resolve against the importing catalog; imports are recursive,
-load before the importing file's local entries, and reject missing agents and import cycles.
-
-```json
-{
-  "imports": [
-    {
-      "from": "~/work/wdt/ansible-wdt/.hcom-agents.json",
-      "agents": ["wdt_main"]
-    },
-    { "from": "../shared/.hcom-agents.json" }
-  ],
-  "agents": {
-    "local_override": { "dir": ".", "cli": "codex" }
-  }
-}
-```
-
-Omitting `agents` imports every agent; an empty list imports none. Imported agents keep the
-`defaults` and relative `dir` base of their source catalog. Later layers retain the normal merge
-semantics.
-
-```jsonc
-{
-  "defaults": { "cli": "claude", "resume": false },
-  "agents": {
-    "wdt_main": {
-      "dir": "~/work/wdt/ansible-wdt",
-      "cli": "codex",
-      "session": "wdt",                  // tmux session; window defaults to the agent name
-      "env": { "AWS_PROFILE": "wdt" },
-      "pre": "source .venv/bin/activate",
-      "tools": {
-        "claude": { "model": "sonnet", "args": ["--agent", "reviewer"] },
-        "codex": { "model": "gpt-5.4", "args": ["--sandbox", "workspace-write"] }
-      }
-    },
-    "gtm_cli": { "dir": "~/projects/gtm-cli", "cli": "codex", "terminal": "wezterm-tab" }
-  }
-}
-```
-
-An agent can be launched through different CLIs with `--cli`. Shared fields such as `dir`, `env`,
-`prompt`, and `system_prompt` stay at the agent level. Put CLI-specific `model`, `prompt`,
-`system_prompt`, and `args` under `tools.<cli>`. The selected tool profile overrides shared scalar
-fields and appends its arguments; command-line flags override both. Top-level `model` and `args`
-remain supported for simple single-CLI agents and backwards compatibility.
-
-```bash
-hcom agent wdt_main --cli claude
-hcom agent wdt_main --cli codex
-hcom agent show wdt_main --cli codex   # effective config and exact command
-```
-
-Where the window opens, in order: `terminal_command` (passed to hcom as `HCOM_TERMINAL`), then
-`session` when tmux is available (the window is prepared first, the agent runs with
-`--terminal here`, so `hcom kill` still closes the pane), otherwise `--terminal <preset>` and hcom
-opens the window itself. Without tmux — Windows, for instance — `session` is ignored with a warning
-and the preset takes over.
-
-Start mode follows the same scalar precedence as the other agent fields. Set `"resume": true` in
-`defaults` or an agent entry to continue its previous session by default; `false` means a clean
-start and remains the built-in default. On the command line, `--resume` and `--clean` override the
-catalog (if both are supplied, the last one wins). Resuming requires an existing stopped session.
-The selected mode also applies after `--restart` replaces a running agent. `hcom agent show <name>`
-prints `start: resume|clean` and renders the corresponding command.
-
-`--dry-run` prints the commands instead of running them. `hcom agent --help` lists the rest.
+Targeted messages start missing or stopped catalog agents before delivery. Catalog precedence,
+imports, tool profiles, terminal placement, resume behavior, and per-agent skill support are
+documented in [Named agents](docs/agent.md).
 
 ### Other commands
 
