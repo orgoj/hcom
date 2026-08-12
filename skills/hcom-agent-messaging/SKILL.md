@@ -50,6 +50,24 @@ run `hcom --help` for full command syntax and flags.
 
 ## spawning named agents with terminal access
 
+### Do not confuse catalog agents with running instances
+
+When the user says **"hcom agent `<name>`"**, **"agent `<name>`"**, or asks to message a
+named agent, treat `<name>` as an agent from the effective `hcom agent` JSON catalog. It is not a
+request to choose a similarly named entry from `hcom list`.
+
+- `hcom agent` / `hcom agent ls` describes configured catalog agents.
+- `hcom list` shows only currently running instances. It is not an agent catalog and must not be
+  used to replace an explicitly named catalog agent with whichever instance happens to be active.
+- Send the task directly with `hcom send @<name> --intent request -- "..."`. Targeted send resolves
+  the catalog and automatically starts a missing or stopped catalog agent.
+- Do not run `hcom list` as a preflight for a catalog agent.
+- Do not run `hcom r <name>` unless the user explicitly asks to resume that agent's previous tool
+  session or the catalog's configured launch mode is being invoked through `hcom agent`/targeted
+  send. `hcom r` resumes a stopped session; it is not how you address or launch a catalog agent.
+- If the user distinguishes an "hcom agent" from an "hcom instance", preserve that distinction
+  literally. Never silently substitute another active instance.
+
 Use `--as` for one intentional, stable agent name. It is valid only when launching one agent:
 
 ```bash

@@ -1123,6 +1123,17 @@ impl LiveAgent {
     fn pane_id(&self) -> Option<&str> {
         self.launch_context.get("pane_id")?.as_str()
     }
+
+    fn location(&self) -> Option<String> {
+        let terminal = self
+            .launch_context
+            .get("terminal_preset_effective")?
+            .as_str()?;
+        Some(match self.pane_id() {
+            Some(pane) => format!(", {terminal} {pane}"),
+            None => format!(", {terminal}"),
+        })
+    }
 }
 
 fn live_agents() -> Vec<LiveAgent> {
@@ -1136,8 +1147,29 @@ fn live_agents() -> Vec<LiveAgent> {
     serde_json::from_slice(&out.stdout).unwrap_or_default()
 }
 
-fn find_live(name: &str) -> Option<LiveAgent> {
-    live_agents().into_iter().find(|a| a.name == name)
+fn find_live(name: &str, include_inactive: bool) -> Option<LiveAgent> {
+    let db = HcomDb::open().ok();
+    find_live_in(live_agents(), name, include_inactive, |instance_name| {
+        db.as_ref()
+            .and_then(|db| db.get_instance_full(instance_name).ok().flatten())
+            .is_some_and(|instance| crate::launcher::inactive_instance_is_replaceable(&instance))
+    })
+}
+
+fn find_live_in(
+    agents: impl IntoIterator<Item = LiveAgent>,
+    name: &str,
+    include_inactive: bool,
+    inactive_is_replaceable: impl Fn(&str) -> bool,
+) -> Option<LiveAgent> {
+    agents
+        .into_iter()
+        .find(|a| {
+            a.name == name
+                && (include_inactive
+                    || a.status != "inactive"
+                    || !inactive_is_replaceable(&a.name))
+        })
 }
 
 // ── tmux backend ────────────────────────────────────────────────────────
@@ -1277,7 +1309,7 @@ fn cmd_launch(name: &str, rest: &[String]) -> Result<i32> {
         .ok_or_else(|| unknown_agent_error(name, &catalogs))?;
     let eff = effective(name, def, &cli);
 
-    let live = find_live(name);
+    let live = find_live(name, false);
     if let Some(live) = &live {
         if cli.restart {
             if cli.dry_run {
@@ -1286,10 +1318,7 @@ fn cmd_launch(name: &str, rest: &[String]) -> Result<i32> {
                 let _ = Command::new(hcom_bin()).args(["kill", name]).status();
             }
         } else {
-            let where_ = match &eff.session {
-                Some(s) => format!(", tmux {s}:{}", eff.window),
-                None => String::new(),
-            };
+            let where_ = live.location().unwrap_or_default();
             println!(
                 "agent '{name}' already running ({}, {}, {}{where_})",
                 live.tool,
@@ -1594,7 +1623,7 @@ fn cmd_attach(rest: &[String]) -> Result<i32> {
     let catalogs = Catalogs::load(cli.no_project, cli.catalog.as_deref())?;
     let def = catalogs.resolve(&name).unwrap_or_default();
     let eff = effective(&name, def, &cli);
-    match find_live(&name) {
+    match find_live(&name, false) {
         Some(live) => {
             focus_running(&eff, &live)?;
             Ok(0)
@@ -1672,6 +1701,47 @@ mod tests {
 
     fn def_from(json: &str) -> AgentDef {
         serde_json::from_str(json).unwrap()
+    }
+
+    fn live_agent(name: &str, status: &str) -> LiveAgent {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "status": status,
+            "tool": "codex",
+            "directory": "/tmp/project",
+            "launch_context": {}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn find_live_excludes_only_replaceable_inactive_instances() {
+        assert!(
+            find_live_in([live_agent("milo", "inactive")], "milo", false, |_| true).is_none()
+        );
+        assert!(
+            find_live_in([live_agent("milo", "inactive")], "milo", false, |_| false).is_some()
+        );
+        assert!(
+            find_live_in([live_agent("milo", "inactive")], "milo", true, |_| true).is_some()
+        );
+        assert!(
+            find_live_in([live_agent("milo", "listening")], "milo", false, |_| true).is_some()
+        );
+    }
+
+    #[test]
+    fn live_location_uses_recorded_terminal_context() {
+        let live: LiveAgent = serde_json::from_value(serde_json::json!({
+            "name": "milo",
+            "status": "listening",
+            "launch_context": {
+                "terminal_preset_effective": "herdr",
+                "pane_id": "wM:p1"
+            }
+        }))
+        .unwrap();
+        assert_eq!(live.location().as_deref(), Some(", herdr wM:p1"));
     }
 
     #[test]

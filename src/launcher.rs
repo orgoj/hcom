@@ -1493,9 +1493,9 @@ fn launch_pty_or_background(
 /// Resolve a naming conflict for an explicit instance name.
 ///
 /// - Name is free → Ok(()).
-/// - Name held by an inactive row → consume the row (delete) and return Ok(()).
-///   An inactive row is a resume handle from agy soft-finalize; launch will
-///   re-create a fresh row with the same name.
+/// - Name held by a provably dead inactive row → consume the row (delete) and
+///   return Ok(()). An inactive status alone is not proof of death: heartbeat
+///   timeouts can report a still-running process as inactive.
 /// - Name held by a `pending` placeholder reservation → Ok(()) without
 ///   deleting. This is *our own* reservation: the fork/resume path calls
 ///   `reserve_generated_name` (under flock, against an unused name) before the
@@ -1504,11 +1504,10 @@ fn launch_pty_or_background(
 ///   place, so it must survive — bailing here broke every tracked `hcom f`.
 /// - Name held by anything else (listening/active/blocked) → Err.
 fn resolve_explicit_name_conflict(db: &HcomDb, name: &str) -> Result<()> {
-    let Some(row) = db.get_instance(name).ok().flatten() else {
+    let Some(instance) = db.get_instance_full(name).ok().flatten() else {
         return Ok(());
     };
-    let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
-    if status == "inactive" {
+    if inactive_instance_is_replaceable(&instance) {
         db.delete_instance(name).map_err(|e| {
             anyhow::anyhow!("Failed to clear inactive resume row '{}': {}", name, e)
         })?;
@@ -1516,38 +1515,45 @@ fn resolve_explicit_name_conflict(db: &HcomDb, name: &str) -> Result<()> {
     }
     // A pending placeholder with no session yet is a reservation, not a live
     // agent — leave it for the launcher's pre-register promotion.
-    let status_context = row
-        .get("status_context")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let session_empty = row
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.is_empty())
-        .unwrap_or(true);
-    if status == instance_names::PLACEHOLDER_STATUS
-        && status_context == instance_names::PLACEHOLDER_CONTEXT
-        && session_empty
+    if instance.status == instance_names::PLACEHOLDER_STATUS
+        && instance.status_context == instance_names::PLACEHOLDER_CONTEXT
+        && instance.session_id.is_none()
     {
         return Ok(());
     }
     // A machine restart can leave an active/blocked row behind even though its
     // PTY and agent process are gone. Reconcile only the requested name; a
     // launch must not clean unrelated stale agents as a side effect.
-    if let Ok(Some(instance)) = db.get_instance_full(name) {
-        let computed = crate::instance_lifecycle::get_instance_status(&instance, db);
-        if computed.status == crate::shared::ST_INACTIVE
-            && computed.context == "stale"
-            && computed.age_seconds > 3600
-        {
-            crate::hooks::common::stop_instance(db, name, "system", "stale_cleanup");
-            return Ok(());
-        }
+    let computed = crate::instance_lifecycle::get_instance_status(&instance, db);
+    let process_is_dead = instance
+        .pid
+        .filter(|pid| *pid > 0)
+        .is_some_and(|pid| !crate::sys::process::is_alive(pid as u32));
+    if computed.status == crate::shared::ST_INACTIVE
+        && computed.context == "stale"
+        && computed.age_seconds > 3600
+        && process_is_dead
+    {
+        crate::hooks::common::stop_instance(db, name, "system", "stale_cleanup");
+        return Ok(());
     }
     bail!(
         "Instance '{}' already exists (stop it first or use a different name)",
         name
     );
+}
+
+pub(crate) fn inactive_instance_is_replaceable(instance: &crate::db::InstanceRow) -> bool {
+    if instance.status != crate::shared::ST_INACTIVE {
+        return false;
+    }
+    match instance.pid.filter(|pid| *pid > 0) {
+        Some(pid) => !crate::sys::process::is_alive(pid as u32),
+        None => {
+            instance.status_context.starts_with("exit:")
+                || instance.status_context == "launch_failed"
+        }
+    }
 }
 
 /// Inject ephemeral workspace trust flags into args for gemini and codex.
@@ -3666,6 +3672,17 @@ mod tests {
             .unwrap();
     }
 
+    fn exited_child_pid() -> u32 {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--help")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
     #[test]
     fn resolve_explicit_name_conflict_allows_free_name() {
         let db = launcher_test_db();
@@ -3676,8 +3693,49 @@ mod tests {
     fn resolve_explicit_name_conflict_consumes_inactive_resume_row() {
         let db = launcher_test_db();
         insert_test_instance(&db, "zeno", "inactive");
+        db.conn()
+            .execute(
+                "UPDATE instances SET status_context = 'exit:crashed' WHERE name = 'zeno'",
+                [],
+            )
+            .unwrap();
         assert!(resolve_explicit_name_conflict(&db, "zeno").is_ok());
         // Row must be gone so the launcher can create a fresh row with the same name.
+        assert!(db.get_instance("zeno").unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_explicit_name_conflict_rejects_inactive_with_live_pid() {
+        let db = launcher_test_db();
+        insert_test_instance(&db, "zeno", "inactive");
+        db.conn()
+            .execute(
+                "UPDATE instances SET pid = ?1 WHERE name = 'zeno'",
+                rusqlite::params![std::process::id() as i64],
+            )
+            .unwrap();
+
+        let err = resolve_explicit_name_conflict(&db, "zeno")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already exists"), "unexpected: {err}");
+        assert!(db.get_instance("zeno").unwrap().is_some());
+    }
+
+    #[test]
+    fn resolve_explicit_name_conflict_consumes_inactive_with_dead_pid() {
+        let dead_pid = exited_child_pid();
+
+        let db = launcher_test_db();
+        insert_test_instance(&db, "zeno", "inactive");
+        db.conn()
+            .execute(
+                "UPDATE instances SET pid = ?1 WHERE name = 'zeno'",
+                rusqlite::params![dead_pid as i64],
+            )
+            .unwrap();
+
+        assert!(resolve_explicit_name_conflict(&db, "zeno").is_ok());
         assert!(db.get_instance("zeno").unwrap().is_none());
     }
 
@@ -3730,6 +3788,12 @@ mod tests {
                 )
                 .unwrap();
         }
+        db.conn()
+            .execute(
+                "UPDATE instances SET pid = ?1 WHERE name = 'rune'",
+                rusqlite::params![exited_child_pid() as i64],
+            )
+            .unwrap();
 
         assert!(resolve_explicit_name_conflict(&db, "rune").is_ok());
         assert!(db.get_instance("rune").unwrap().is_none());
