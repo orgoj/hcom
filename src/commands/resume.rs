@@ -985,6 +985,15 @@ fn load_stopped_snapshot(
     )
 }
 
+/// Fail before a catalog launcher creates a terminal for an impossible resume.
+pub(crate) fn validate_tracked_resume(db: &HcomDb, name: &str) -> Result<()> {
+    let (_, session_id, _, _, _, _, _) = load_stopped_snapshot(db, name)?;
+    if session_id.is_empty() {
+        bail!("No session ID found for '{name}' — cannot resume");
+    }
+    Ok(())
+}
+
 /// Build tool-specific resume/fork args from the integration spec.
 fn build_resume_args(tool: &str, session_id: &str, fork: bool) -> Vec<String> {
     use crate::integration_spec::{ForkArgs, ResumeArgs};
@@ -2863,6 +2872,52 @@ mod tests {
             "expected inactive agy row to be resumable, got: {:?}",
             result.err()
         );
+    }
+
+    #[test]
+    fn test_catalog_resume_preflight_rejects_missing_session_id() {
+        let db = test_db();
+        let snapshot = serde_json::json!({
+            "action": "stopped",
+            "snapshot": {
+                "tool": "codex",
+                "session_id": "",
+                "directory": "/tmp"
+            }
+        });
+        db.conn()
+            .execute(
+                "INSERT INTO events (timestamp, type, instance, data) VALUES (?, 'life', 'bin', ?)",
+                rusqlite::params!["2026-01-01T00:00:00Z", snapshot.to_string()],
+            )
+            .unwrap();
+
+        let error = validate_tracked_resume(&db, "bin").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "No session ID found for 'bin' — cannot resume"
+        );
+    }
+
+    #[test]
+    fn test_catalog_resume_preflight_accepts_session_id() {
+        let db = test_db();
+        let snapshot = serde_json::json!({
+            "action": "stopped",
+            "snapshot": {
+                "tool": "codex",
+                "session_id": "019ff5ad-18b7-7431-b6ef-71b053888ff6",
+                "directory": "/tmp"
+            }
+        });
+        db.conn()
+            .execute(
+                "INSERT INTO events (timestamp, type, instance, data) VALUES (?, 'life', 'bin', ?)",
+                rusqlite::params!["2026-01-01T00:00:00Z", snapshot.to_string()],
+            )
+            .unwrap();
+
+        validate_tracked_resume(&db, "bin").unwrap();
     }
 
     #[test]

@@ -1320,6 +1320,10 @@ fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
             anyhow::anyhow!("cannot read Codex skills_dir {dir}: {error}")
         })?;
     }
+    if resume {
+        let db = HcomDb::open()?;
+        crate::commands::resume::validate_tracked_resume(&db, &eff.name)?;
+    }
     let (strategy, warnings) = choose_strategy(eff, tmux_bin().is_some());
     for w in &warnings {
         eprintln!("warning: {w}");
