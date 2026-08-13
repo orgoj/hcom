@@ -186,8 +186,8 @@ currently deliverable instances and never start the whole catalog.
 
 ## Terminal placement
 
-`terminal` selects the launch backend. `session` and `window` configure placement only when the
-selected terminal preset supports tmux sessions.
+`terminal` selects the launch backend. `session` and `window` configure placement for tmux and
+Herdr.
 
 hcom chooses the launch strategy in this order:
 
@@ -195,7 +195,9 @@ hcom chooses the launch strategy in this order:
 2. explicit `terminal`: launch through that terminal preset
 3. hcom's configured default terminal
 
-When the effective terminal is a tmux preset, `session` selects or creates its tmux session and
-`window` selects the window name. For non-tmux terminal presets, hcom ignores `session` with a
-warning. Agents launched in a managed tmux window still retain normal hcom lifecycle behavior,
-including closing the pane through `hcom kill`.
+For tmux, `session` selects or creates the tmux session and `window` selects the window. For Herdr,
+`session` selects or creates the space (called a workspace by the CLI), `window` selects or creates
+the tab, and each agent runs in a pane split inside that tab. When a project catalog supplies no
+Herdr session, hcom uses the name of the directory containing `.hcom-agents.json`; the default tab
+is `agents`. Other non-tmux terminal presets ignore `session` with a warning. Managed agents retain
+normal hcom lifecycle behavior, including closing their pane through `hcom kill`.

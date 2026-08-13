@@ -1312,6 +1312,33 @@ fn additive_catalog_env_keeps_global_agents_and_imports_selected_project_agents(
 }
 
 #[test]
+fn imported_agent_config_overrides_global_defaults() {
+    let h = Hcom::new();
+    let project = h.root_path().join("wdt");
+    std::fs::create_dir_all(&project).expect("create project dir");
+    std::fs::write(
+        project.join(".hcom-agents.json"),
+        r#"{"defaults":{"cli":"claude"},"agents":{"wdt_main":{"dir":".","cli":"claude"}}}"#,
+    )
+    .expect("write project catalog");
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"defaults":{{"cli":"codex"}},"imports":[{{"from":{},"agents":["wdt_main"]}}]}}"#,
+            serde_json::to_string(&project.join(".hcom-agents.json")).unwrap()
+        ),
+    )
+    .expect("write global catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "wdt_main"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.lines().any(|line| line == "cli:       claude"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
 fn agent_unknown_name_suggests_a_close_match() {
     let h = Hcom::new();
     std::fs::write(
@@ -1368,7 +1395,7 @@ fn agent_start_mode_uses_catalog_and_cli_override() {
     )
     .expect("write catalog");
 
-    let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+    let (code, stdout, stderr) = h.run(["agent", "show", "solo"]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     assert!(stdout.contains(" r solo "), "stdout={stdout}");
     assert!(stdout.contains("--go"), "stdout={stdout}");

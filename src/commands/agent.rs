@@ -61,8 +61,8 @@ Flags:
   --skills-dir <path>       Extra editable skills directory for this agent
   --terminal <preset>       hcom terminal preset, or \"here\"
   --terminal-command <cmd>  Raw terminal command with {{script}} (passed via HCOM_TERMINAL)
-  --session <name>          Session for a tmux terminal preset; empty string disables
-  --window <name>           Window name inside the session (default: agent name)
+  --session <name>          tmux session or Herdr space/workspace; empty string disables
+  --window <name>           tmux window or Herdr tab (defaults: agent name / agents)
   --tag / --model <val>     Forwarded to hcom / the tool
   --prompt / --system-prompt <text>
   --pre <cmd>               Shell command run in the window before the agent
@@ -91,8 +91,8 @@ Terminal strategy, in order:
   2. terminal preset selected      -> hcom launches through that preset
   3. otherwise                     -> hcom uses its configured default terminal
 
-For tmux presets, session and window control tmux placement.
-For other presets, session is ignored with a warning.
+For tmux, session and window select the tmux session/window. For Herdr, session selects
+the space (workspace), window selects the tab, and the agent runs in a split pane.
 
 A named agent is unique: launching one that already runs prints its status and exits 0."
     )
@@ -397,12 +397,8 @@ fn load_catalog_tree(
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."));
-            let mut imported = load_catalog_tree(
-                &imported_path,
-                &imported_base,
-                imported_label,
-                stack,
-            )?;
+            let mut imported =
+                load_catalog_tree(&imported_path, &imported_base, imported_label, stack)?;
             if let Some(selected) = import.agents {
                 let selected: BTreeSet<String> = selected.into_iter().collect();
                 let available: BTreeSet<String> = imported
@@ -418,10 +414,16 @@ fn load_catalog_tree(
                     );
                 }
                 for file in &mut imported {
-                    file.catalog.agents.retain(|name, _| selected.contains(name));
+                    file.catalog
+                        .agents
+                        .retain(|name, _| selected.contains(name));
                 }
             }
-            files.extend(imported.into_iter().filter(|f| !f.catalog.agents.is_empty()));
+            files.extend(
+                imported
+                    .into_iter()
+                    .filter(|f| !f.catalog.agents.is_empty()),
+            );
         }
         files.push(current);
         Ok(files)
@@ -457,6 +459,7 @@ fn find_project_catalog(start: &Path) -> Option<PathBuf> {
 
 struct Catalogs {
     files: Vec<CatalogFile>,
+    project_root: Option<PathBuf>,
 }
 
 impl Catalogs {
@@ -467,13 +470,21 @@ impl Catalogs {
         let global = global_catalog_path();
         if global.is_file() {
             let base = home_dir().unwrap_or_else(|| PathBuf::from("."));
-            files.extend(load_catalog_tree(&global, &base, "global".to_string(), &mut stack)?);
+            files.extend(load_catalog_tree(
+                &global,
+                &base,
+                "global".to_string(),
+                &mut stack,
+            )?);
         }
 
         if let Some(raw) = std::env::var_os(EXTRA_CATALOGS_ENV).filter(|v| !v.is_empty()) {
             for path in std::env::split_paths(&raw) {
                 if !path.is_file() {
-                    bail!("catalog from {EXTRA_CATALOGS_ENV} not found: {}", path.display());
+                    bail!(
+                        "catalog from {EXTRA_CATALOGS_ENV} not found: {}",
+                        path.display()
+                    );
                 }
                 let base = path
                     .parent()
@@ -500,15 +511,26 @@ impl Catalogs {
                 .ok()
                 .and_then(|cwd| find_project_catalog(&cwd)),
         };
+        let project_root = project
+            .as_ref()
+            .and_then(|path| path.parent().map(Path::to_path_buf));
         if let Some(path) = project {
             let base = path
                 .parent()
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."));
-            files.extend(load_catalog_tree(&path, &base, "project".to_string(), &mut stack)?);
+            files.extend(load_catalog_tree(
+                &path,
+                &base,
+                "project".to_string(),
+                &mut stack,
+            )?);
         }
 
-        Ok(Self { files })
+        Ok(Self {
+            files,
+            project_root,
+        })
     }
 
     /// Names in catalog order, mapped to the label of the last file defining them.
@@ -532,13 +554,17 @@ impl Catalogs {
         {
             return None;
         }
-        // Global defaults apply to every catalog agent. Defaults from other
-        // catalogs only apply when that catalog defines the agent, so a project
-        // catalog cannot silently retune unrelated global agents.
+        // Global defaults are the lowest-precedence base for every catalog
+        // agent, including agents brought in by imports. Apply them before the
+        // catalog-order merge so an imported or project definition can override
+        // them even though imports are stored before their importing file.
         let mut def = AgentDef::default();
+        for file in self.files.iter().filter(|file| file.label == "global") {
+            def.merge_from(&file.catalog.defaults);
+        }
         for file in &self.files {
             let entry = file.catalog.agents.get(name);
-            if file.label == "global" || entry.is_some() {
+            if file.label != "global" && entry.is_some() {
                 def.merge_from(&file.catalog.defaults);
             }
             if let Some(entry) = entry {
@@ -583,11 +609,16 @@ fn wait_for_catalog_agent_registration(
 ) -> Result<()> {
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        if db.get_instance_full(name).ok().flatten().is_some_and(|row| {
-            row.status != "stopped"
-                && row.status_context != "launch_failed"
-                && !(row.status == "inactive" && row.status_context.starts_with("exit:"))
-        }) {
+        if db
+            .get_instance_full(name)
+            .ok()
+            .flatten()
+            .is_some_and(|row| {
+                row.status != "stopped"
+                    && row.status_context != "launch_failed"
+                    && !(row.status == "inactive" && row.status_context.starts_with("exit:"))
+            })
+        {
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
@@ -631,9 +662,7 @@ fn closest<'a, I: Iterator<Item = &'a String>>(target: &str, candidates: I) -> O
     let mut best: Option<(usize, String)> = None;
     for c in candidates {
         let d = levenshtein(target, c);
-        if d <= target.len().div_ceil(2)
-            && best.as_ref().is_none_or(|(bd, _)| d < *bd)
-        {
+        if d <= target.len().div_ceil(2) && best.as_ref().is_none_or(|(bd, _)| d < *bd) {
             best = Some((d, c.clone()));
         }
     }
@@ -892,10 +921,7 @@ fn merge_inline_json_env(
     key: &str,
     addition: serde_json::Value,
 ) {
-    let existing = env
-        .get(key)
-        .cloned()
-        .or_else(|| std::env::var(key).ok());
+    let existing = env.get(key).cloned().or_else(|| std::env::var(key).ok());
     let mut base = match existing {
         Some(raw) if !raw.trim().is_empty() => match serde_json::from_str(&raw) {
             Ok(value) => value,
@@ -944,6 +970,9 @@ fn choose_strategy(eff: &Effective, tmux_available: bool) -> (Strategy, Vec<Stri
     }
 
     if let Some(session) = &eff.session {
+        if eff.terminal.as_deref() == Some("herdr") {
+            return (Strategy::Direct(eff.terminal.clone()), warnings);
+        }
         let mux_ok = eff
             .terminal
             .as_deref()
@@ -954,7 +983,9 @@ fn choose_strategy(eff: &Effective, tmux_available: bool) -> (Strategy, Vec<Stri
                 "session '{session}' ignored: terminal preset '{preset}' is not a multiplexer"
             ));
         } else if !tmux_available {
-            warnings.push(format!("session '{session}' ignored: tmux not found on PATH"));
+            warnings.push(format!(
+                "session '{session}' ignored: tmux not found on PATH"
+            ));
         } else {
             return (
                 Strategy::Tmux {
@@ -1168,14 +1199,10 @@ fn find_live_in(
     include_inactive: bool,
     inactive_is_replaceable: impl Fn(&str) -> bool,
 ) -> Option<LiveAgent> {
-    agents
-        .into_iter()
-        .find(|a| {
-            a.name == name
-                && (include_inactive
-                    || a.status != "inactive"
-                    || !inactive_is_replaceable(&a.name))
-        })
+    agents.into_iter().find(|a| {
+        a.name == name
+            && (include_inactive || a.status != "inactive" || !inactive_is_replaceable(&a.name))
+    })
 }
 
 // ── tmux backend ────────────────────────────────────────────────────────
@@ -1199,7 +1226,11 @@ fn tmux_ok(args: &[&str]) -> bool {
 
 fn tmux_capture(args: &[&str]) -> Option<String> {
     let bin = tmux_bin()?;
-    let out = Command::new(bin).args(args).stderr(Stdio::null()).output().ok()?;
+    let out = Command::new(bin)
+        .args(args)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
@@ -1221,19 +1252,19 @@ fn tmux_run(args: &[String], dry_run: bool) -> Result<()> {
 }
 
 fn tmux_window_exists(session: &str, window: &str) -> bool {
-    tmux_capture(&["list-windows", "-t", &format!("={session}"), "-F", "#{window_name}"])
-        .map(|out| out.lines().any(|l| l == window))
-        .unwrap_or(false)
+    tmux_capture(&[
+        "list-windows",
+        "-t",
+        &format!("={session}"),
+        "-F",
+        "#{window_name}",
+    ])
+    .map(|out| out.lines().any(|l| l == window))
+    .unwrap_or(false)
 }
 
 /// Create the session (with the agent as its first window) or add a window to it.
-fn tmux_launch(
-    session: &str,
-    window: &str,
-    dir: &str,
-    command: &str,
-    dry_run: bool,
-) -> Result<()> {
+fn tmux_launch(session: &str, window: &str, dir: &str, command: &str, dry_run: bool) -> Result<()> {
     let session_exists = !dry_run && tmux_ok(&["has-session", "-t", &format!("={session}")]);
 
     let args: Vec<String> = if !session_exists {
@@ -1281,11 +1312,19 @@ fn tmux_focus(target: &str) -> Result<()> {
         bail!("tmux not found on PATH");
     }
     tmux_run(
-        &["select-window".to_string(), "-t".to_string(), target.to_string()],
+        &[
+            "select-window".to_string(),
+            "-t".to_string(),
+            target.to_string(),
+        ],
         false,
     )?;
     let inside = std::env::var_os("TMUX").is_some();
-    let verb = if inside { "switch-client" } else { "attach-session" };
+    let verb = if inside {
+        "switch-client"
+    } else {
+        "attach-session"
+    };
     tmux_run(
         &[verb.to_string(), "-t".to_string(), target.to_string()],
         false,
@@ -1293,15 +1332,26 @@ fn tmux_focus(target: &str) -> Result<()> {
 }
 
 fn focus_running(eff: &Effective, live: &LiveAgent) -> Result<()> {
+    if live
+        .launch_context
+        .get("terminal_preset_effective")
+        .and_then(|value| value.as_str())
+        == Some("herdr")
+    {
+        let status = Command::new("herdr")
+            .args(["agent", "focus", &eff.name])
+            .status()?;
+        if !status.success() {
+            bail!("could not focus Herdr agent '{}'", eff.name);
+        }
+        return Ok(());
+    }
     if let Some(pane) = live.pane_id() {
         return tmux_focus(pane);
     }
     match &eff.session {
         Some(session) => tmux_focus(&format!("{session}:{}", eff.window)),
-        None => bail!(
-            "no pane recorded for '{}' — nothing to attach to",
-            eff.name
-        ),
+        None => bail!("no pane recorded for '{}' — nothing to attach to", eff.name),
     }
 }
 
@@ -1313,7 +1363,9 @@ fn cmd_launch(name: &str, rest: &[String]) -> Result<i32> {
     let def = catalogs
         .resolve(name)
         .ok_or_else(|| unknown_agent_error(name, &catalogs))?;
-    let eff = effective(name, def, &cli);
+    let window_explicit = def.window.is_some() || cli.def.window.is_some();
+    let mut eff = effective(name, def, &cli);
+    apply_herdr_placement(&mut eff, catalogs.project_root.as_deref(), window_explicit);
 
     let live = find_live(name, false);
     if let Some(live) = &live {
@@ -1341,6 +1393,28 @@ fn cmd_launch(name: &str, rest: &[String]) -> Result<i32> {
     launch(&eff, &cli, eff.resume)
 }
 
+fn apply_herdr_placement(eff: &mut Effective, project_root: Option<&Path>, window_explicit: bool) {
+    if eff.terminal.as_deref() != Some("herdr") {
+        return;
+    }
+    if eff.session.is_none() {
+        eff.session = project_root
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
+    }
+    if !window_explicit {
+        eff.window = "agents".to_string();
+    }
+    if let Some(workspace) = &eff.session {
+        eff.env
+            .insert("HCOM_HERDR_WORKSPACE".to_string(), workspace.clone());
+        eff.env
+            .insert("HCOM_HERDR_TAB".to_string(), eff.window.clone());
+    }
+}
+
 fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
     if eff.skills_dir.is_some() && !supports_skills_dir(&eff.cli) {
         bail!(
@@ -1351,9 +1425,8 @@ fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
     if eff.cli == "codex"
         && let Some(dir) = &eff.skills_dir
     {
-        discover_codex_skill_dirs(Path::new(dir)).map_err(|error| {
-            anyhow::anyhow!("cannot read Codex skills_dir {dir}: {error}")
-        })?;
+        discover_codex_skill_dirs(Path::new(dir))
+            .map_err(|error| anyhow::anyhow!("cannot read Codex skills_dir {dir}: {error}"))?;
     }
     if resume {
         let db = HcomDb::open()?;
@@ -1458,8 +1531,10 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
         return Ok(0);
     }
 
-    let live: BTreeMap<String, LiveAgent> =
-        live_agents().into_iter().map(|a| (a.name.clone(), a)).collect();
+    let live: BTreeMap<String, LiveAgent> = live_agents()
+        .into_iter()
+        .map(|a| (a.name.clone(), a))
+        .collect();
 
     if json {
         let mut out = Vec::new();
@@ -1553,7 +1628,9 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     let def = catalogs
         .resolve(&name)
         .ok_or_else(|| unknown_agent_error(&name, &catalogs))?;
-    let eff = effective(&name, def, &cli);
+    let window_explicit = def.window.is_some() || cli.def.window.is_some();
+    let mut eff = effective(&name, def, &cli);
+    apply_herdr_placement(&mut eff, catalogs.project_root.as_deref(), window_explicit);
     let (strategy, mut warnings) = choose_strategy(&eff, tmux_bin().is_some());
     if eff.skills_dir.is_some() && !supports_skills_dir(&eff.cli) {
         warnings.push(format!(
@@ -1570,7 +1647,9 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     }
     println!("start:     {}", if eff.resume { "resume" } else { "clean" });
     match &strategy {
-        Strategy::Tmux { session, window } => println!("terminal:  tmux {session}:{window} (--terminal here)"),
+        Strategy::Tmux { session, window } => {
+            println!("terminal:  tmux {session}:{window} (--terminal here)")
+        }
         Strategy::Custom(c) => println!("terminal:  HCOM_TERMINAL={c}"),
         Strategy::Direct(Some(t)) => println!("terminal:  preset {t}"),
         Strategy::Direct(None) => println!("terminal:  hcom default (hcom config terminal)"),
@@ -1585,22 +1664,30 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
         println!("pre:       {p}");
     }
     if !eff.env.is_empty() {
-        println!("env:       {}", eff
-            .env
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(" "));
+        println!(
+            "env:       {}",
+            eff.env
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
     if !eff.extra.is_empty() {
-        println!("args:      {}", shell_words::join(eff.extra.iter().map(String::as_str)));
+        println!(
+            "args:      {}",
+            shell_words::join(eff.extra.iter().map(String::as_str))
+        );
     }
-    println!("sources:   {}", catalogs
-        .paths()
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect::<Vec<_>>()
-        .join(", "));
+    println!(
+        "sources:   {}",
+        catalogs
+            .paths()
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     for w in warnings {
         println!("warning:   {w}");
     }
@@ -1722,18 +1809,10 @@ mod tests {
 
     #[test]
     fn find_live_excludes_only_replaceable_inactive_instances() {
-        assert!(
-            find_live_in([live_agent("milo", "inactive")], "milo", false, |_| true).is_none()
-        );
-        assert!(
-            find_live_in([live_agent("milo", "inactive")], "milo", false, |_| false).is_some()
-        );
-        assert!(
-            find_live_in([live_agent("milo", "inactive")], "milo", true, |_| true).is_some()
-        );
-        assert!(
-            find_live_in([live_agent("milo", "listening")], "milo", false, |_| true).is_some()
-        );
+        assert!(find_live_in([live_agent("milo", "inactive")], "milo", false, |_| true).is_none());
+        assert!(find_live_in([live_agent("milo", "inactive")], "milo", false, |_| false).is_some());
+        assert!(find_live_in([live_agent("milo", "inactive")], "milo", true, |_| true).is_some());
+        assert!(find_live_in([live_agent("milo", "listening")], "milo", false, |_| true).is_some());
     }
 
     #[test]
@@ -1778,12 +1857,8 @@ mod tests {
                 .unwrap();
         });
 
-        wait_for_catalog_agent_registration(
-            &db,
-            "reviewer",
-            std::time::Duration::from_secs(1),
-        )
-        .unwrap();
+        wait_for_catalog_agent_registration(&db, "reviewer", std::time::Duration::from_secs(1))
+            .unwrap();
         writer.join().unwrap();
     }
 
@@ -1799,13 +1874,13 @@ mod tests {
             )
             .unwrap();
 
-        let error = wait_for_catalog_agent_registration(
-            &db,
-            "reviewer",
-            std::time::Duration::ZERO,
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("did not register before timeout"));
+        let error = wait_for_catalog_agent_registration(&db, "reviewer", std::time::Duration::ZERO)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("did not register before timeout")
+        );
     }
 
     #[test]
@@ -1824,9 +1899,7 @@ mod tests {
         let mut base = def_from(
             r#"{"tools":{"claude":{"model":"sonnet","args":["--a"]},"codex":{"model":"gpt-5"}}}"#,
         );
-        let over = def_from(
-            r#"{"tools":{"claude":{"model":"opus","args":["--b"]}}}"#,
-        );
+        let over = def_from(r#"{"tools":{"claude":{"model":"opus","args":["--b"]}}}"#);
         base.merge_from(&over);
         let claude = &base.tools["claude"];
         assert_eq!(claude.model.as_deref(), Some("opus"));
@@ -1878,6 +1951,7 @@ mod tests {
                     }
                 })
                 .collect(),
+            project_root: None,
         }
     }
 
@@ -1899,10 +1973,21 @@ mod tests {
         assert_eq!(a.cli.as_deref(), Some("codex"), "project defaults win");
         // An agent the project catalog never mentions keeps the global defaults.
         let c2 = catalogs_from(&[
-            ("global", "/home/u", r#"{"defaults":{"cli":"claude"},"agents":{"only_global":{}}}"#),
-            ("project", "/repo", r#"{"defaults":{"cli":"codex"},"agents":{"other":{}}}"#),
+            (
+                "global",
+                "/home/u",
+                r#"{"defaults":{"cli":"claude"},"agents":{"only_global":{}}}"#,
+            ),
+            (
+                "project",
+                "/repo",
+                r#"{"defaults":{"cli":"codex"},"agents":{"other":{}}}"#,
+            ),
         ]);
-        assert_eq!(c2.resolve("only_global").unwrap().cli.as_deref(), Some("claude"));
+        assert_eq!(
+            c2.resolve("only_global").unwrap().cli.as_deref(),
+            Some("claude")
+        );
         assert_eq!(a.model.as_deref(), Some("gpt-5"));
         assert_eq!(a.dir.as_deref(), Some("/g"), "global dir survives");
 
@@ -1918,7 +2003,10 @@ mod tests {
             "global defaults apply to project-only agents"
         );
         assert!(c.resolve("missing").is_none());
-        assert_eq!(c.names().get("a").map(String::as_str), Some("global+project"));
+        assert_eq!(
+            c.names().get("a").map(String::as_str),
+            Some("global+project")
+        );
     }
 
     #[test]
@@ -1956,11 +2044,17 @@ mod tests {
             &mut Vec::new(),
         )
         .unwrap();
-        let catalogs = Catalogs { files };
+        let catalogs = Catalogs {
+            files,
+            project_root: None,
+        };
         let wdt = catalogs.resolve("wdt_main").unwrap();
         assert_eq!(wdt.cli.as_deref(), Some("codex"));
         assert_eq!(wdt.model.as_deref(), Some("overlay"));
-        assert_eq!(wdt.dir.as_deref(), Some(project.join("work").to_string_lossy().as_ref()));
+        assert_eq!(
+            wdt.dir.as_deref(),
+            Some(project.join("work").to_string_lossy().as_ref())
+        );
         assert_eq!(
             wdt.skills_dir.as_deref(),
             Some(
@@ -1988,8 +2082,14 @@ mod tests {
         std::fs::write(&c, r#"{"agents":{"c":{}}}"#).unwrap();
 
         let files = load_catalog_tree(&a, tmp.path(), "root".to_string(), &mut Vec::new()).unwrap();
-        let catalogs = Catalogs { files };
-        assert_eq!(catalogs.names().keys().cloned().collect::<Vec<_>>(), ["a", "b", "c"]);
+        let catalogs = Catalogs {
+            files,
+            project_root: None,
+        };
+        assert_eq!(
+            catalogs.names().keys().cloned().collect::<Vec<_>>(),
+            ["a", "b", "c"]
+        );
 
         std::fs::write(&c, r#"{"imports":[{"from":"a.json"}],"agents":{"c":{}}}"#).unwrap();
         let error = load_catalog_tree(&a, tmp.path(), "root".to_string(), &mut Vec::new())
@@ -2013,7 +2113,10 @@ mod tests {
         let error = load_catalog_tree(&root, tmp.path(), "root".to_string(), &mut Vec::new())
             .unwrap_err()
             .to_string();
-        assert!(error.contains("requests unknown agent(s): missing"), "{error}");
+        assert!(
+            error.contains("requests unknown agent(s): missing"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2034,11 +2137,20 @@ mod tests {
     fn cli_flags_win_over_catalog_and_unknown_flags_pass_through() {
         let eff = eff_of(
             r#"{"cli":"claude","dir":"/w","args":["--from-catalog"]}"#,
-            &["--cli", "codex", "--model", "gpt-5", "--dangerously-skip-permissions"],
+            &[
+                "--cli",
+                "codex",
+                "--model",
+                "gpt-5",
+                "--dangerously-skip-permissions",
+            ],
         );
         assert_eq!(eff.cli, "codex");
         assert_eq!(eff.model.as_deref(), Some("gpt-5"));
-        assert_eq!(eff.extra, vec!["--from-catalog", "--dangerously-skip-permissions"]);
+        assert_eq!(
+            eff.extra,
+            vec!["--from-catalog", "--dangerously-skip-permissions"]
+        );
     }
 
     #[test]
@@ -2065,14 +2177,25 @@ mod tests {
         assert_eq!(codex.model.as_deref(), Some("gpt-5"));
         assert_eq!(codex.prompt.as_deref(), Some("shared"));
         assert_eq!(codex.system_prompt.as_deref(), Some("codex system"));
-        assert_eq!(codex.extra, vec!["--common", "--sandbox", "workspace-write"]);
+        assert_eq!(
+            codex.extra,
+            vec!["--common", "--sandbox", "workspace-write"]
+        );
     }
 
     #[test]
     fn command_line_overrides_selected_tool_profile() {
         let eff = eff_of(
             r#"{"cli":"claude","tools":{"codex":{"model":"profile","prompt":"profile prompt","args":["--profile"]}}}"#,
-            &["--cli", "codex", "--model", "cli", "--prompt", "cli prompt", "--extra"],
+            &[
+                "--cli",
+                "codex",
+                "--model",
+                "cli",
+                "--prompt",
+                "cli prompt",
+                "--extra",
+            ],
         );
         assert_eq!(eff.model.as_deref(), Some("cli"));
         assert_eq!(eff.prompt.as_deref(), Some("cli prompt"));
@@ -2132,10 +2255,41 @@ mod tests {
 
     #[test]
     fn session_with_non_mux_preset_warns_and_falls_back() {
-        let eff = eff_of(r#"{"dir":"/w","session":"wdt","terminal":"kitty-tab"}"#, &[]);
+        let eff = eff_of(
+            r#"{"dir":"/w","session":"wdt","terminal":"kitty-tab"}"#,
+            &[],
+        );
         let (s, warnings) = choose_strategy(&eff, true);
         assert_eq!(s, Strategy::Direct(Some("kitty-tab".into())));
         assert!(warnings[0].contains("not a multiplexer"));
+    }
+
+    #[test]
+    fn herdr_uses_session_as_workspace_and_window_as_tab() {
+        let mut eff = eff_of(
+            r#"{"dir":"/work/repo","session":"repo","window":"review","terminal":"herdr"}"#,
+            &[],
+        );
+        apply_herdr_placement(&mut eff, Some(Path::new("/work/repo")), true);
+        assert_eq!(
+            eff.env.get("HCOM_HERDR_WORKSPACE").map(String::as_str),
+            Some("repo")
+        );
+        assert_eq!(
+            eff.env.get("HCOM_HERDR_TAB").map(String::as_str),
+            Some("review")
+        );
+        let (strategy, warnings) = choose_strategy(&eff, false);
+        assert_eq!(strategy, Strategy::Direct(Some("herdr".into())));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn herdr_defaults_to_project_space_and_agents_tab() {
+        let mut eff = eff_of(r#"{"dir":"/work/repo","terminal":"herdr"}"#, &[]);
+        apply_herdr_placement(&mut eff, Some(Path::new("/work/repo")), false);
+        assert_eq!(eff.session.as_deref(), Some("repo"));
+        assert_eq!(eff.window, "agents");
     }
 
     #[test]
@@ -2341,7 +2495,10 @@ mod tests {
     #[test]
     fn closest_suggests_near_miss_only() {
         let names = ["wdt_main".to_string(), "gtm_cli".to_string()];
-        assert_eq!(closest("wdt_mian", names.iter()).as_deref(), Some("wdt_main"));
+        assert_eq!(
+            closest("wdt_mian", names.iter()).as_deref(),
+            Some("wdt_main")
+        );
         assert_eq!(closest("zzzzzzzzzz", names.iter()), None);
     }
 

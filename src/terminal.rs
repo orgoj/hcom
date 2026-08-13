@@ -1881,7 +1881,11 @@ fn parse_herdr_pane_id(captured: &str) -> Option<String> {
     let val: serde_json::Value = serde_json::from_str(trimmed).ok()?;
     let result = val.get("result")?;
     let pane_id = match val.get("id").and_then(|v| v.as_str())? {
-        "cli:tab:create" | "cli:pane:split" => result.get("root_pane")?.get("pane_id")?,
+        "cli:workspace:create" | "cli:tab:create" => result.get("root_pane")?.get("pane_id")?,
+        "cli:pane:split" => result
+            .get("pane")
+            .or_else(|| result.get("root_pane"))?
+            .get("pane_id")?,
         "cli:agent:start" => result.get("agent")?.get("pane_id")?,
         _ => return None,
     };
@@ -1904,8 +1908,25 @@ fn launch_herdr_two_step(
     // Step 1: open the pane. `tab create` takes no script, so substitute
     // placeholders directly — the generic `substitute_open_argv` requires a
     // `{script}` slot this command intentionally lacks.
-    let create_argv = substitute_herdr_create_argv(create_template, &ctx);
+    let create_argv = herdr_placement_argv(&ctx)
+        .unwrap_or_else(|| substitute_herdr_create_argv(create_template, &ctx));
     let (created, captured) = spawn_terminal_process(&create_argv, inside_ai_tool)?;
+    if create_argv.get(1).map(String::as_str) == Some("workspace")
+        && create_argv.get(2).map(String::as_str) == Some("create")
+        && let (Some(tab_label), Some(tab_id)) = (
+            std::env::var("HCOM_HERDR_TAB").ok(),
+            parse_herdr_created_tab_id(captured.trim()),
+        )
+    {
+        let rename_argv = vec![
+            "herdr".to_string(),
+            "tab".to_string(),
+            "rename".to_string(),
+            tab_id,
+            tab_label,
+        ];
+        let _ = spawn_terminal_process(&rename_argv, inside_ai_tool);
+    }
     let Some(pane_id) = parse_herdr_pane_id(captured.trim()) else {
         // Couldn't open/parse a pane. Either `tab create` failed outright (no
         // pane exists) or returned something unparseable; without a pane id
@@ -1947,6 +1968,119 @@ fn launch_herdr_two_step(
 
     // Return the `tab create` stdout so `write_terminal_id` records the pane id.
     Ok((created && ran, captured))
+}
+
+/// Resolve hcom's catalog placement onto Herdr's space/workspace -> tab -> pane
+/// hierarchy. The launcher process inherits the socket for the selected Herdr
+/// persistent session, while these two values select structure inside it.
+fn herdr_placement_argv(ctx: &TerminalCommandContext<'_>) -> Option<Vec<String>> {
+    let workspace_label = std::env::var("HCOM_HERDR_WORKSPACE").ok()?;
+    let tab_label = std::env::var("HCOM_HERDR_TAB").ok()?;
+    if workspace_label.is_empty() || tab_label.is_empty() {
+        return None;
+    }
+
+    let workspaces = herdr_json(&["workspace", "list"])?;
+    let workspace_id = json_array(&workspaces, &["result", "workspaces"])
+        .and_then(|items| find_labeled_id(items, &workspace_label, "workspace_id"));
+
+    let Some(workspace_id) = workspace_id else {
+        return Some(vec![
+            "herdr".into(),
+            "workspace".into(),
+            "create".into(),
+            "--cwd".into(),
+            ctx.cwd.into(),
+            "--label".into(),
+            workspace_label,
+            "--no-focus".into(),
+        ]);
+    };
+
+    let tabs = herdr_json(&["tab", "list", "--workspace", &workspace_id])?;
+    let tab_id = json_array(&tabs, &["result", "tabs"])
+        .and_then(|items| find_labeled_id(items, &tab_label, "tab_id"));
+    let Some(tab_id) = tab_id else {
+        return Some(vec![
+            "herdr".into(),
+            "tab".into(),
+            "create".into(),
+            "--workspace".into(),
+            workspace_id,
+            "--cwd".into(),
+            ctx.cwd.into(),
+            "--label".into(),
+            tab_label,
+            "--no-focus".into(),
+        ]);
+    };
+
+    let panes = herdr_json(&["pane", "list", "--workspace", &workspace_id])?;
+    let pane_id = json_array(&panes, &["result", "panes"])?
+        .iter()
+        .find(|pane| pane.get("tab_id").and_then(|v| v.as_str()) == Some(&tab_id))?
+        .get("pane_id")?
+        .as_str()?
+        .to_string();
+    let direction = herdr_json(&["pane", "layout", "--pane", &pane_id])
+        .and_then(|layout| {
+            let area = layout.get("result")?.get("layout")?.get("area")?;
+            let width = area.get("width")?.as_u64()?;
+            let height = area.get("height")?.as_u64()?;
+            Some(if width >= height { "right" } else { "down" })
+        })
+        .unwrap_or("right");
+    Some(vec![
+        "herdr".into(),
+        "pane".into(),
+        "split".into(),
+        pane_id,
+        "--direction".into(),
+        direction.into(),
+        "--cwd".into(),
+        ctx.cwd.into(),
+        "--no-focus".into(),
+    ])
+}
+
+fn parse_herdr_created_tab_id(captured: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(captured).ok()?;
+    (value.get("id")?.as_str()? == "cli:workspace:create").then_some(())?;
+    value
+        .get("result")?
+        .get("tab")?
+        .get("tab_id")?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn herdr_json(args: &[&str]) -> Option<serde_json::Value> {
+    let output = std::process::Command::new("herdr")
+        .args(args)
+        .output()
+        .ok()?;
+    output.status.success().then_some(())?;
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+fn json_array<'a>(
+    value: &'a serde_json::Value,
+    path: &[&str],
+) -> Option<&'a Vec<serde_json::Value>> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.as_array()
+}
+
+fn find_labeled_id(items: &[serde_json::Value], label: &str, id: &str) -> Option<String> {
+    items
+        .iter()
+        .find(|item| item.get("label").and_then(|v| v.as_str()) == Some(label))?
+        .get(id)?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Substitute placeholders into herdr's `tab create` argv. Mirrors
@@ -3055,7 +3189,9 @@ mod tests {
         .unwrap();
 
         let content = std::fs::read_to_string(&script).unwrap();
-        let guard = content.find("if [ \"${HCOM_SHELL_INITIALIZED:-}\" != 1 ]").unwrap();
+        let guard = content
+            .find("if [ \"${HCOM_SHELL_INITIALIZED:-}\" != 1 ]")
+            .unwrap();
         let inherited_path = content.find("export PATH=/old/path;").unwrap();
         let cwd = content.find("cd /work/project").unwrap();
         let shell_init = content.find("\"${SHELL:-/bin/bash}\" -lic").unwrap();
