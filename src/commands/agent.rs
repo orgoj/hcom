@@ -529,13 +529,16 @@ impl Catalogs {
         {
             return None;
         }
-        // A catalog's `defaults` only apply to agents that same catalog defines,
-        // so a project catalog cannot silently retune unrelated global agents.
-        // Adding an empty entry (`"name": {}`) opts an inherited agent in.
+        // Global defaults apply to every catalog agent. Defaults from other
+        // catalogs only apply when that catalog defines the agent, so a project
+        // catalog cannot silently retune unrelated global agents.
         let mut def = AgentDef::default();
         for file in &self.files {
-            if let Some(entry) = file.catalog.agents.get(name) {
+            let entry = file.catalog.agents.get(name);
+            if file.label == "global" || entry.is_some() {
                 def.merge_from(&file.catalog.defaults);
+            }
+            if let Some(entry) = entry {
                 def.merge_from(entry);
             }
         }
@@ -1881,7 +1884,7 @@ mod tests {
             (
                 "global",
                 "/home/u",
-                r#"{"defaults":{"cli":"claude"},"agents":{"a":{"dir":"/g","model":"opus"}}}"#,
+                r#"{"defaults":{"cli":"claude","terminal":"herdr"},"agents":{"a":{"dir":"/g","model":"opus"}}}"#,
             ),
             (
                 "project",
@@ -1901,7 +1904,16 @@ mod tests {
         assert_eq!(a.dir.as_deref(), Some("/g"), "global dir survives");
 
         let b = c.resolve("b").unwrap();
-        assert_eq!(b.dir.as_deref(), Some("/repo"), "project dir is relative to the catalog");
+        assert_eq!(
+            b.dir.as_deref(),
+            Some("/repo"),
+            "project dir is relative to the catalog"
+        );
+        assert_eq!(
+            b.terminal.as_deref(),
+            Some("herdr"),
+            "global defaults apply to project-only agents"
+        );
         assert!(c.resolve("missing").is_none());
         assert_eq!(c.names().get("a").map(String::as_str), Some("global+project"));
     }
