@@ -34,6 +34,10 @@ Scalar fields replace earlier values. `env`, `args`, and tool profiles merge. Re
 `skills_dir` paths use `$HOME` as their base in the global catalog and the catalog's directory in
 project, imported, and additive catalogs. hcom expands `~` and environment variables.
 
+Global catalog `defaults` apply to every resolved catalog agent, even when the named agent is
+defined only in an additive or project catalog. Defaults from later catalogs apply only when that
+catalog defines the named agent.
+
 Unknown catalog fields are errors. This catches misspelled configuration instead of silently
 ignoring it.
 
@@ -82,7 +86,7 @@ Supported agent fields:
 | `cli` | CLI selected by default |
 | `terminal` | hcom terminal preset, or `here` |
 | `terminal_command` | Raw terminal command containing `{script}` |
-| `session` | tmux session; an empty string disables tmux placement |
+| `session` | Session name used by tmux terminal presets; ignored by other terminals |
 | `window` | Window name; defaults to the agent name |
 | `tag` | hcom group tag |
 | `model` | Default model passed to the selected CLI |
@@ -182,12 +186,16 @@ currently deliverable instances and never start the whole catalog.
 
 ## Terminal placement
 
+`terminal` selects the launch backend. `session` and `window` configure placement only when the
+selected terminal preset supports tmux sessions.
+
 hcom chooses the launch strategy in this order:
 
 1. `terminal_command`: pass the raw command through `HCOM_TERMINAL`
-2. `session` with tmux available: prepare the window, then run the agent with `--terminal here`
-3. `terminal`: let hcom open the configured terminal preset
+2. explicit `terminal`: launch through that terminal preset
+3. hcom's configured default terminal
 
-If tmux is unavailable, hcom warns and falls back to the terminal preset. Agents launched in a
-managed tmux window still retain normal hcom lifecycle behavior, including closing the pane through
-`hcom kill`.
+When the effective terminal is a tmux preset, `session` selects or creates its tmux session and
+`window` selects the window name. For non-tmux terminal presets, hcom ignores `session` with a
+warning. Agents launched in a managed tmux window still retain normal hcom lifecycle behavior,
+including closing the pane through `hcom kill`.

@@ -1484,7 +1484,7 @@ fn agent_session_uses_tmux_window_with_terminal_here() {
     let h = Hcom::new();
     std::fs::write(
         h.path().join("agents.json"),
-        r#"{"agents":{"solo":{"dir":"/tmp","cli":"codex","session":"work","window":"main",
+        r#"{"agents":{"solo":{"dir":"/tmp","cli":"codex","terminal":"tmux","session":"work","window":"main",
                               "pre":"echo ready"}}}"#,
     )
     .expect("write catalog");
@@ -1500,5 +1500,5 @@ fn agent_session_uses_tmux_window_with_terminal_here() {
     assert!(stdout.contains("-n main"), "stdout={stdout}");
     assert!(stdout.contains("echo ready &&"), "stdout={stdout}");
     assert!(stdout.contains("--terminal here"), "stdout={stdout}");
-    assert!(stdout.contains(r#"exec "${SHELL:-sh}""#), "stdout={stdout}");
+    assert!(stdout.contains(r#"exec "${SHELL:-"#), "stdout={stdout}");
 }

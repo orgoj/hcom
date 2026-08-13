@@ -16,9 +16,10 @@ hcom reads these catalogs:
    project-specific additions and overrides.
 4. Command-line flags, which have the highest precedence.
 
-Within each catalog, `defaults` apply only to agents defined by that same file. An empty project
-entry such as `"reviewer": {}` opts a global agent into the project defaults. Scalar fields replace
-earlier values; `env`, `args`, and matching `tools` profiles merge. Arguments append in layer order.
+Global catalog `defaults` apply to every resolved catalog agent, including agents defined only by
+additive or project catalogs. Defaults from additive, imported, and project catalogs apply only to
+agents defined by that catalog. Scalar fields replace earlier values; `env`, `args`, and matching
+`tools` profiles merge. Arguments append in layer order.
 
 Relative `dir` values resolve from `$HOME` in the global catalog and from the catalog directory in
 additive, imported, and project catalogs. `~` and environment variables are expanded.
@@ -205,15 +206,11 @@ CLI.
 
 ## Terminal selection
 
-Terminal behavior is selected in this order:
-
-1. `terminal_command`: raw command containing `{script}`, passed as `HCOM_TERMINAL`.
-2. `session`: create or reuse a tmux session and launch in its `window` (defaults to agent name).
-3. `terminal`: pass the named terminal preset to hcom.
-4. hcom's configured default terminal.
+`terminal` selects how the agent is launched. `session` and `window` are supplementary placement
+settings for tmux terminal presets; they do not select tmux by themselves. With a non-tmux terminal
+such as `herdr`, hcom uses that terminal and ignores `session` with a warning.
 
 `pre` runs inside the prepared window before hcom, and `env` variables are supplied to the launch.
-Without tmux, `session` is ignored with a warning and terminal selection falls back normally.
 
 ## Schema summary
 

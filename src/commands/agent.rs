@@ -61,7 +61,7 @@ Flags:
   --skills-dir <path>       Extra editable skills directory for this agent
   --terminal <preset>       hcom terminal preset, or \"here\"
   --terminal-command <cmd>  Raw terminal command with {{script}} (passed via HCOM_TERMINAL)
-  --session <name>          Multiplexer session (tmux); empty string disables
+  --session <name>          Session for a tmux terminal preset; empty string disables
   --window <name>           Window name inside the session (default: agent name)
   --tag / --model <val>     Forwarded to hcom / the tool
   --prompt / --system-prompt <text>
@@ -88,8 +88,11 @@ Start mode:
 
 Terminal strategy, in order:
   1. terminal_command set          -> hcom launches with HCOM_TERMINAL=<cmd>
-  2. session set + tmux available  -> window is prepared here, agent runs with --terminal here
-  3. otherwise                     -> hcom opens the window itself via --terminal <preset>
+  2. terminal preset selected      -> hcom launches through that preset
+  3. otherwise                     -> hcom uses its configured default terminal
+
+For tmux presets, session and window control tmux placement.
+For other presets, session is ignored with a warning.
 
 A named agent is unique: launching one that already runs prints its status and exits 0."
     )
@@ -944,11 +947,11 @@ fn choose_strategy(eff: &Effective, tmux_available: bool) -> (Strategy, Vec<Stri
         let mux_ok = eff
             .terminal
             .as_deref()
-            .is_none_or(|t| t.starts_with("tmux"));
+            .is_some_and(|t| t.starts_with("tmux"));
         if !mux_ok {
+            let preset = eff.terminal.as_deref().unwrap_or("default");
             warnings.push(format!(
-                "session '{session}' ignored: terminal preset '{}' is not a multiplexer",
-                eff.terminal.as_deref().unwrap_or("")
+                "session '{session}' ignored: terminal preset '{preset}' is not a multiplexer"
             ));
         } else if !tmux_available {
             warnings.push(format!("session '{session}' ignored: tmux not found on PATH"));
@@ -2085,7 +2088,7 @@ mod tests {
 
     #[test]
     fn window_defaults_to_agent_name_and_empty_session_disables_mux() {
-        let eff = eff_of(r#"{"dir":"/w","session":"wdt"}"#, &[]);
+        let eff = eff_of(r#"{"dir":"/w","session":"wdt","terminal":"tmux"}"#, &[]);
         assert_eq!(eff.window, "wdt_main");
         assert_eq!(eff.session.as_deref(), Some("wdt"));
 
@@ -2099,7 +2102,7 @@ mod tests {
         let (s, _) = choose_strategy(&eff, true);
         assert_eq!(s, Strategy::Custom("myterm {script}".into()));
 
-        let eff = eff_of(r#"{"dir":"/w","session":"wdt"}"#, &[]);
+        let eff = eff_of(r#"{"dir":"/w","session":"wdt","terminal":"tmux"}"#, &[]);
         let (s, w) = choose_strategy(&eff, true);
         assert_eq!(
             s,
@@ -2133,6 +2136,14 @@ mod tests {
         let (s, warnings) = choose_strategy(&eff, true);
         assert_eq!(s, Strategy::Direct(Some("kitty-tab".into())));
         assert!(warnings[0].contains("not a multiplexer"));
+    }
+
+    #[test]
+    fn session_without_terminal_does_not_select_tmux() {
+        let eff = eff_of(r#"{"dir":"/w","session":"wdt"}"#, &[]);
+        let (s, warnings) = choose_strategy(&eff, true);
+        assert_eq!(s, Strategy::Direct(None));
+        assert!(warnings[0].contains("terminal preset 'default'"));
     }
 
     #[test]
