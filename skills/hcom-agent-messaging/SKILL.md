@@ -174,6 +174,14 @@ Then check whether the process or terminal still exists. If the instance is dead
 `hcom kill <name>` only for a genuinely live managed instance. Do not use
 `hcom reset all` for a single-name collision.
 
+Do not treat `status = inactive` as proof that the agent process is dead.
+Heartbeat or status timeouts can make a still-running agent appear inactive.
+Check the recorded PID with the platform process-liveness check. A live PID
+must continue to hold the name. A dead PID may be replaced. If no PID is
+available, replace the row only when lifecycle context explicitly proves
+termination (`exit:*`) or launch failure (`launch_failed`); otherwise fail
+conservatively instead of risking a duplicate agent.
+
 ### intent system
 
 agents follow these rules from their bootstrap:

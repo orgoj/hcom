@@ -19,3 +19,11 @@ escalation so Cargo can use its cache and target-directory locks correctly.
 For the required `hcom` rebuild, run exactly `cargo build --release`: use the
 standard full release build, do not add `--bin` or otherwise narrow its targets,
 and verify the result with `target/release/hcom --version`.
+
+## Handoff cleanliness
+
+Before committing or handing off completed work, inspect `git status`.
+Remove artifacts created by the current work. Do not silently ignore,
+commit, or delete pre-existing untracked files: identify them explicitly
+and resolve their disposition with the user before declaring the worktree
+clean.
