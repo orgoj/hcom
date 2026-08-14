@@ -1493,9 +1493,10 @@ fn launch_pty_or_background(
 /// Resolve a naming conflict for an explicit instance name.
 ///
 /// - Name is free → Ok(()).
-/// - Name held by a provably dead inactive row → consume the row (delete) and
-///   return Ok(()). An inactive status alone is not proof of death: heartbeat
-///   timeouts can report a still-running process as inactive.
+/// - Name whose computed status is inactive and whose recorded process is
+///   provably dead, or an inactive exit row without a PID → consume the row and
+///   return Ok(()). Status alone is not proof of death: heartbeat timeouts can
+///   report a still-running process as inactive.
 /// - Name held by a `pending` placeholder reservation → Ok(()) without
 ///   deleting. This is *our own* reservation: the fork/resume path calls
 ///   `reserve_generated_name` (under flock, against an unused name) before the
@@ -1507,9 +1508,10 @@ fn resolve_explicit_name_conflict(db: &HcomDb, name: &str) -> Result<()> {
     let Some(instance) = db.get_instance_full(name).ok().flatten() else {
         return Ok(());
     };
-    if inactive_instance_is_replaceable(&instance) {
+    let computed = crate::instance_lifecycle::get_instance_status(&instance, db);
+    if instance_is_replaceable(&instance, &computed) {
         db.delete_instance(name).map_err(|e| {
-            anyhow::anyhow!("Failed to clear inactive resume row '{}': {}", name, e)
+            anyhow::anyhow!("Failed to clear replaceable instance row '{}': {}", name, e)
         })?;
         return Ok(());
     }
@@ -1521,38 +1523,22 @@ fn resolve_explicit_name_conflict(db: &HcomDb, name: &str) -> Result<()> {
     {
         return Ok(());
     }
-    // A machine restart can leave an active/blocked row behind even though its
-    // PTY and agent process are gone. Reconcile only the requested name; a
-    // launch must not clean unrelated stale agents as a side effect.
-    let computed = crate::instance_lifecycle::get_instance_status(&instance, db);
-    let process_is_dead = instance
-        .pid
-        .filter(|pid| *pid > 0)
-        .is_some_and(|pid| !crate::sys::process::is_alive(pid as u32));
-    if computed.status == crate::shared::ST_INACTIVE
-        && computed.context == "stale"
-        && computed.age_seconds > 3600
-        && process_is_dead
-    {
-        crate::hooks::common::stop_instance(db, name, "system", "stale_cleanup");
-        return Ok(());
-    }
     bail!(
         "Instance '{}' already exists (stop it first or use a different name)",
         name
     );
 }
 
-pub(crate) fn inactive_instance_is_replaceable(instance: &crate::db::InstanceRow) -> bool {
-    if instance.status != crate::shared::ST_INACTIVE {
+pub(crate) fn instance_is_replaceable(
+    instance: &crate::db::InstanceRow,
+    computed: &crate::instance_lifecycle::ComputedStatus,
+) -> bool {
+    if computed.status != crate::shared::ST_INACTIVE {
         return false;
     }
     match instance.pid.filter(|pid| *pid > 0) {
         Some(pid) => !crate::sys::process::is_alive(pid as u32),
-        None => {
-            instance.status_context.starts_with("exit:")
-                || instance.status_context == "launch_failed"
-        }
+        None => instance.status_context.starts_with("exit:") || computed.context == "launch_failed",
     }
 }
 
@@ -3731,6 +3717,23 @@ mod tests {
         db.conn()
             .execute(
                 "UPDATE instances SET pid = ?1 WHERE name = 'zeno'",
+                rusqlite::params![dead_pid as i64],
+            )
+            .unwrap();
+
+        assert!(resolve_explicit_name_conflict(&db, "zeno").is_ok());
+        assert!(db.get_instance("zeno").unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_explicit_name_conflict_consumes_stale_live_status_with_dead_pid() {
+        let dead_pid = exited_child_pid();
+
+        let db = launcher_test_db();
+        insert_test_instance(&db, "zeno", "listening");
+        db.conn()
+            .execute(
+                "UPDATE instances SET pid = ?1, status_time = status_time - 400 WHERE name = 'zeno'",
                 rusqlite::params![dead_pid as i64],
             )
             .unwrap();

@@ -148,10 +148,11 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
 
         match db.get_instance_full(&lookup_name) {
             Ok(Some(data)) => {
+                let computed = get_instance_status(&data, db);
                 let mut payload = serde_json::json!({
                     "name": lookup_name,
                     "session_id": data.session_id,
-                    "status": data.status,
+                    "status": computed.status,
                     "directory": data.directory,
                     "transcript_path": data.transcript_path,
                     "parent_name": data.parent_name,
