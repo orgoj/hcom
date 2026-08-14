@@ -62,7 +62,7 @@ Flags:
   --terminal <preset>       hcom terminal preset, or \"here\"
   --terminal-command <cmd>  Raw terminal command with {{script}} (passed via HCOM_TERMINAL)
   --session <name>          tmux session or Herdr space/workspace; empty string disables
-  --window <name>           tmux window or Herdr tab (defaults: agent name / agents)
+  --window <name>           tmux window or Herdr tab (default: agent name)
   --tag / --model <val>     Forwarded to hcom / the tool
   --prompt / --system-prompt <text>
   --pre <cmd>               Shell command run in the window before the agent
@@ -1405,7 +1405,7 @@ fn apply_herdr_placement(eff: &mut Effective, project_root: Option<&Path>, windo
             .map(str::to_string);
     }
     if !window_explicit {
-        eff.window = "agents".to_string();
+        eff.window = eff.name.clone();
     }
     if let Some(workspace) = &eff.session {
         eff.env
@@ -2285,11 +2285,11 @@ mod tests {
     }
 
     #[test]
-    fn herdr_defaults_to_project_space_and_agents_tab() {
+    fn herdr_defaults_to_project_space_and_agent_tab() {
         let mut eff = eff_of(r#"{"dir":"/work/repo","terminal":"herdr"}"#, &[]);
         apply_herdr_placement(&mut eff, Some(Path::new("/work/repo")), false);
         assert_eq!(eff.session.as_deref(), Some("repo"));
-        assert_eq!(eff.window, "agents");
+        assert_eq!(eff.window, eff.name);
     }
 
     #[test]

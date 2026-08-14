@@ -198,6 +198,7 @@ hcom chooses the launch strategy in this order:
 For tmux, `session` selects or creates the tmux session and `window` selects the window. For Herdr,
 `session` selects or creates the space (called a workspace by the CLI), `window` selects or creates
 the tab, and each agent runs in a pane split inside that tab. When a project catalog supplies no
-Herdr session, hcom uses the name of the directory containing `.hcom-agents.json`; the default tab
-is `agents`. Other non-tmux terminal presets ignore `session` with a warning. Managed agents retain
-normal hcom lifecycle behavior, including closing their pane through `hcom kill`.
+Herdr session, hcom uses the name of the directory containing `.hcom-agents.json`; unless `window`
+is configured explicitly, each agent gets a tab named after the agent. Other non-tmux terminal
+presets ignore `session` with a warning. Managed agents retain normal hcom lifecycle behavior,
+including closing their pane through `hcom kill`.
