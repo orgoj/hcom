@@ -68,6 +68,17 @@ request to choose a similarly named entry from `hcom list`.
 - If the user distinguishes an "hcom agent" from an "hcom instance", preserve that distinction
   literally. Never silently substitute another active instance.
 
+To run the same catalog definition concurrently, give each runtime instance a distinct name:
+
+```bash
+hcom agent reviewer --as review_api
+hcom agent reviewer --as review_backend
+```
+
+The positional name selects catalog configuration; `--as` selects the runtime identity used for
+messaging and lifecycle operations. Aliases are not catalog entries and targeted sends do not
+auto-start them. See `references/named-agents.md` for full semantics.
+
 Use `--as` for one intentional, stable agent name. It is valid only when launching one agent:
 
 ```bash

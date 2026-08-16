@@ -27,3 +27,12 @@ Remove artifacts created by the current work. Do not silently ignore,
 commit, or delete pre-existing untracked files: identify them explicitly
 and resolve their disposition with the user before declaring the worktree
 clean.
+
+## CLI documentation
+
+When changing a user-facing command, flag, configuration field, or behavior,
+audit every relevant documentation surface before committing. This includes
+the command's built-in help, `README.md`, files under `docs/`, and corresponding
+references under `skills/hcom-agent-messaging/`. Update all affected surfaces
+in the same change set and add or update tests for built-in help where
+practical.
