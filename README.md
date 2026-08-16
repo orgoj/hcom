@@ -285,10 +285,12 @@ Anything else is forwarded to the tool: `--model sonnet`, `--yolo`, etc.
 ### Named agents
 
 `hcom agent` launches an agent from a JSON catalog, so a machine's recurring agents stop living in
-shell history. A named agent is unique: launching one that already runs prints its status and exits.
+shell history. An instance name is unique: launching one that already runs prints its status and
+exits. Use `--as` to run the same catalog definition concurrently under distinct instance names.
 
 ```bash
 hcom agent wdt_main                 # launch (or report that it already runs)
+hcom agent wdt_main --as wdt_review # same config, independent instance named wdt_review
 hcom agent wdt_main --cli codex     # unknown flags are forwarded to `hcom <cli>`
 hcom agent ls                       # catalog + live status + which file defined it
 hcom agent show wdt_main            # effective config and the exact command

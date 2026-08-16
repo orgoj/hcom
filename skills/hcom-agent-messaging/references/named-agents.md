@@ -1,9 +1,10 @@
 # Named agents (`hcom agent`)
 
 Use `hcom agent` for recurring agents whose working directory, CLI, prompts, environment, and
-terminal setup should live in versionable configuration instead of shell history. A named agent is
-unique: launching a name that is already running reports its status and exits without creating a
-duplicate.
+terminal setup should live in versionable configuration instead of shell history. An instance name
+is unique: launching a name that is already running reports its status and exits without creating
+a duplicate. Use `--as` to launch one catalog definition concurrently under distinct instance
+names.
 
 ## Catalogs and precedence
 
@@ -21,8 +22,9 @@ additive or project catalogs. Defaults from additive, imported, and project cata
 agents defined by that catalog. Scalar fields replace earlier values; `env`, `args`, and matching
 `tools` profiles merge. Arguments append in layer order.
 
-Relative `dir` values resolve from `$HOME` in the global catalog and from the catalog directory in
-additive, imported, and project catalogs. `~` and environment variables are expanded.
+Relative `dir` and `skills_dir` values resolve from `$HOME` in the global catalog and from the
+catalog directory in additive, imported, and project catalogs. `~` and environment variables are
+expanded.
 
 ## Imports and additive client catalogs
 
@@ -82,6 +84,7 @@ Missing files, requested names, and import cycles are errors.
 
 ```bash
 hcom agent reviewer
+hcom agent reviewer --as review_api
 hcom agent show reviewer       # effective configuration and exact launch command
 hcom agent reviewer --dry-run  # render without launching
 hcom agent ls
@@ -92,6 +95,12 @@ hcom agent reviewer --clean
 ```
 
 Use `hcom agent edit` for the global catalog or `hcom agent edit --project` for the project catalog.
+
+The positional name selects the catalog definition; `--as <name>` selects the runtime identity.
+The alias is used for duplicate detection, routing, restart/attach behavior, resume history, and the
+default tmux window or Herdr tab. An explicit `window` remains unchanged. Address the instance by
+its alias, such as `hcom send @review_api -- "Review this"`. Targeted sends to catalog names only
+auto-start the canonical catalog instance; aliases must be launched explicitly.
 
 ## Message-driven startup
 
@@ -207,8 +216,9 @@ CLI.
 ## Terminal selection
 
 `terminal` selects how the agent is launched. `session` and `window` are supplementary placement
-settings for tmux terminal presets; they do not select tmux by themselves. With a non-tmux terminal
-such as `herdr`, hcom uses that terminal and ignores `session` with a warning.
+settings; they do not select a multiplexer by themselves. For tmux, they select the session and
+window. For Herdr, they select the workspace and tab. Other non-multiplexer terminals ignore
+`session` with a warning.
 
 `pre` runs inside the prepared window before hcom, and `env` variables are supplied to the launch.
 
@@ -216,7 +226,7 @@ such as `herdr`, hcom uses that terminal and ignores `session` with a warning.
 
 Agent and `defaults` fields:
 
-- `cli`, `dir`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `model`
+- `cli`, `dir`, `skills_dir`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `model`
 - `prompt`, `system_prompt`, `pre`, and boolean `resume`
 - `env` object and `args` array
 - `tools` object keyed by CLI name

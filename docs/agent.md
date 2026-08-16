@@ -6,6 +6,7 @@ stable name.
 
 ```bash
 hcom agent wdt_main                 # launch, or report that it is already running
+hcom agent wdt_main --as wdt_review # same config, independent instance named wdt_review
 hcom agent wdt_main --cli codex     # override the configured CLI
 hcom agent ls                       # catalog entries, live status, and source file
 hcom agent show wdt_main            # effective configuration and exact command
@@ -86,8 +87,8 @@ Supported agent fields:
 | `cli` | CLI selected by default |
 | `terminal` | hcom terminal preset, or `here` |
 | `terminal_command` | Raw terminal command containing `{script}` |
-| `session` | Session name used by tmux terminal presets; ignored by other terminals |
-| `window` | Window name; defaults to the agent name |
+| `session` | tmux session or Herdr workspace; ignored by other terminals |
+| `window` | tmux window or Herdr tab; defaults to the instance name |
 | `tag` | hcom group tag |
 | `model` | Default model passed to the selected CLI |
 | `prompt` | Initial user prompt |
@@ -171,8 +172,22 @@ The built-in start mode is clean. Set `"resume": true` in defaults or an agent e
 its stopped session. `--resume` and `--clean` override the catalog; if both occur, the last one
 wins. `--restart` first replaces a running instance, then applies the selected start mode.
 
-A named agent is unique. Launching an already-running name reports its status and exits without
-opening another instance.
+An instance name is unique. Launching an already-running name reports its status and exits without
+opening another instance. To run one catalog definition concurrently, assign each instance a
+different name:
+
+```bash
+hcom agent wdt_main --as wdt_review
+hcom agent wdt_main --as wdt_backend
+hcom agent show wdt_main --as wdt_review # inspect the aliased command
+```
+
+`wdt_main` remains the catalog key used to resolve configuration. The `--as` value becomes the
+runtime identity used by `hcom list`, messages, duplicate detection, `--restart`, `--attach`, and
+resume history. It is also the default tmux window or Herdr tab name; an explicit catalog or CLI
+`window` still wins. Address an aliased instance directly, for example
+`hcom send @wdt_review -- "Review this"`. Catalog-driven message startup continues to use the
+canonical catalog name and does not invent or restart aliases.
 
 A targeted message starts a missing or stopped catalog agent before delivery:
 

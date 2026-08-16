@@ -1255,6 +1255,7 @@ fn agent_help_lists_catalog_layers() {
     assert!(stdout.starts_with("Usage:"), "stdout={stdout}");
     assert!(stdout.contains("agents.json"), "stdout={stdout}");
     assert!(stdout.contains(".hcom-agents.json"), "stdout={stdout}");
+    assert!(stdout.contains("--as <name>"), "stdout={stdout}");
 }
 
 #[test]
@@ -1383,6 +1384,26 @@ fn agent_dry_run_renders_the_hcom_command_without_launching() {
     let (code, list, _stderr) = h.run(["list", "--json"]);
     assert_eq!(code, 0);
     assert_eq!(list.trim(), "[]", "dry-run must not create an instance");
+}
+
+#[test]
+fn agent_as_uses_catalog_config_with_a_distinct_instance_name() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"solo":{"dir":"/tmp","cli":"codex","terminal":"wezterm-tab"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--as", "solo_two", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("codex --as solo_two"), "stdout={stdout}");
+    assert!(stdout.contains("--dir /tmp"), "stdout={stdout}");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "solo", "--as", "solo_two"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("name:      solo_two"), "stdout={stdout}");
+    assert!(stdout.contains("codex --as solo_two"), "stdout={stdout}");
 }
 
 #[test]

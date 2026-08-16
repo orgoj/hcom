@@ -59,6 +59,7 @@ Flags:
   --terminal-command <cmd>  Raw terminal command with {{script}} (passed via HCOM_TERMINAL)
   --session <name>          tmux session or Herdr space/workspace; empty string disables
   --window <name>           tmux window or Herdr tab (default: agent name)
+  --as <name>               Run under a different instance name
   --tag / --model <val>     Forwarded to hcom / the tool
   --prompt / --system-prompt <text>
   --pre <cmd>               Shell command run in the window before the agent
@@ -90,7 +91,8 @@ Terminal strategy, in order:
 For tmux, session and window select the tmux session/window. For Herdr, session selects
 the space (workspace), window selects the tab, and the agent runs in a split pane.
 
-A named agent is unique: launching one that already runs prints its status and exits 0."
+An instance name is unique: launching one that already runs prints its status and exits 0.
+Use --as <name> to launch the same catalog definition as another independent instance."
     )
 }
 
@@ -686,6 +688,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
 #[derive(Default)]
 struct Cli {
     def: AgentDef,
+    as_name: Option<String>,
     attach: bool,
     dry_run: bool,
     restart: bool,
@@ -742,6 +745,10 @@ fn parse_cli(argv: &[String]) -> Result<Cli> {
             }
             "--window" => {
                 cli.def.window = Some(value()?);
+                i += 2;
+            }
+            "--as" => {
+                cli.as_name = Some(value()?);
                 i += 2;
             }
             "--tag" => {
@@ -1363,22 +1370,25 @@ fn cmd_launch(name: &str, rest: &[String]) -> Result<i32> {
     let def = catalogs
         .resolve(name)
         .ok_or_else(|| unknown_agent_error(name, &catalogs))?;
+    let instance_name = cli.as_name.as_deref().unwrap_or(name);
     let window_explicit = def.window.is_some() || cli.def.window.is_some();
-    let mut eff = effective(name, def, &cli);
+    let mut eff = effective(instance_name, def, &cli);
     apply_herdr_placement(&mut eff, catalogs.project_root.as_deref(), window_explicit);
 
-    let live = find_live(name);
+    let live = find_live(instance_name);
     if let Some(live) = &live {
         if cli.restart {
             if cli.dry_run {
-                println!("{} kill {}", hcom_bin(), name);
+                println!("{} kill {}", hcom_bin(), instance_name);
             } else {
-                let _ = Command::new(hcom_bin()).args(["kill", name]).status();
+                let _ = Command::new(hcom_bin())
+                    .args(["kill", instance_name])
+                    .status();
             }
         } else {
             let where_ = live.location().unwrap_or_default();
             println!(
-                "agent '{name}' already running ({}, {}, {}{where_})",
+                "agent '{instance_name}' already running ({}, {}, {}{where_})",
                 live.tool,
                 live.status,
                 shorten_home(&live.directory)
@@ -1628,8 +1638,9 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     let def = catalogs
         .resolve(&name)
         .ok_or_else(|| unknown_agent_error(&name, &catalogs))?;
+    let instance_name = cli.as_name.as_deref().unwrap_or(&name);
     let window_explicit = def.window.is_some() || cli.def.window.is_some();
-    let mut eff = effective(&name, def, &cli);
+    let mut eff = effective(instance_name, def, &cli);
     apply_herdr_placement(&mut eff, catalogs.project_root.as_deref(), window_explicit);
     let (strategy, mut warnings) = choose_strategy(&eff, tmux_bin().is_some());
     if eff.skills_dir.is_some() && !supports_skills_dir(&eff.cli) {
