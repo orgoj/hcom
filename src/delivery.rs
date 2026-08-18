@@ -232,6 +232,10 @@ mod host_label {
         /// only when the rename returns a real success envelope, so it retries
         /// across the classification race instead of latching on a bare ack.
         name_set: bool,
+        /// Whether we've set Herdr's presentation-only agent label. This keeps
+        /// the visible kind (`codex`, `claude`, ...) independent from the
+        /// canonical target name managed by `agent.rename`.
+        display_agent_set: bool,
         /// Consecutive transient socket failures since the last success; any
         /// success resets it. See [`MAX_CONSECUTIVE_FAILURES`].
         consecutive_failures: u32,
@@ -260,6 +264,7 @@ mod host_label {
                 last_reported_state: None,
                 seq: 0,
                 name_set: false,
+                display_agent_set: false,
                 consecutive_failures: 0,
             }
         }
@@ -299,7 +304,20 @@ mod host_label {
                 }
             }
 
-            // 3. Set herdr's canonical agent `name` once so `herdr agent
+            // 3. Preserve the native agent kind as Herdr's presentation label.
+            //    `agent.rename` below deliberately changes the canonical,
+            //    targetable name; without this display-only override Herdr's
+            //    sidebar would show that name in both rows. Guard by agent kind
+            //    so stale metadata cannot apply after the pane changes tools.
+            if !self.display_agent_set {
+                if let Some(agent) = crate::terminal::herdr_agent_label(tool) {
+                    if self.send(|backend| backend.report_metadata(agent)) {
+                        self.display_agent_set = true;
+                    }
+                }
+            }
+
+            // 4. Set herdr's canonical agent `name` once so `herdr agent
             //    send/prompt/focus <name>` resolves — parity with the retired
             //    `agent start {name}` flow. herdr's `agent.rename` requires the
             //    pane to already be a classified agent terminal. Classification
@@ -482,6 +500,29 @@ mod host_label {
             }
         }
 
+        /// Set a presentation-only agent label without taking over Herdr's
+        /// lifecycle or session authority for a natively recognized tool.
+        fn report_metadata(&self, agent: &str) -> Result<(), SocketError> {
+            match self {
+                Backend::Herdr {
+                    socket_path,
+                    pane_id,
+                } => {
+                    let request = serde_json::json!({
+                        "id": "hcom:pane:report_metadata",
+                        "method": "pane.report_metadata",
+                        "params": {
+                            "pane_id": pane_id,
+                            "source": "hcom:display",
+                            "agent": agent,
+                            "display_agent": agent,
+                        },
+                    });
+                    send_unix_request(socket_path, &request)
+                }
+            }
+        }
+
         /// Set herdr's canonical agent `name` (the targetable field) via
         /// `agent.rename`, so `herdr agent send/prompt/focus <name>` resolves.
         /// Only valid once the pane is a classified agent terminal — our
@@ -621,6 +662,7 @@ mod host_label {
                 last_reported_state: None,
                 seq: 0,
                 name_set: false,
+                display_agent_set: false,
                 consecutive_failures: 0,
             }
         }
@@ -629,23 +671,31 @@ mod host_label {
         fn serve_responses(
             path: std::path::PathBuf,
             responses: Vec<&'static str>,
-        ) -> std::thread::JoinHandle<Vec<String>> {
+        ) -> std::thread::JoinHandle<Vec<serde_json::Value>> {
             use std::io::{BufRead, BufReader, Write};
             use std::os::unix::net::UnixListener;
 
             std::thread::spawn(move || {
                 let listener = UnixListener::bind(path).unwrap();
-                let mut methods = Vec::new();
+                let mut requests = Vec::new();
                 for response in responses {
                     let (mut stream, _) = listener.accept().unwrap();
                     let mut request = String::new();
                     BufReader::new(&stream).read_line(&mut request).unwrap();
                     let request: serde_json::Value = serde_json::from_str(&request).unwrap();
-                    methods.push(request["method"].as_str().unwrap().to_string());
+                    requests.push(request);
                     writeln!(stream, "{response}").unwrap();
                 }
-                methods
+                requests
             })
+        }
+
+        #[cfg(unix)]
+        fn request_methods(requests: &[serde_json::Value]) -> Vec<&str> {
+            requests
+                .iter()
+                .map(|request| request["method"].as_str().unwrap())
+                .collect()
         }
 
         #[test]
@@ -731,6 +781,7 @@ mod host_label {
                 socket.clone(),
                 vec![
                     r#"{"result":{"type":"pane_renamed"}}"#,
+                    r#"{"result":{"type":"metadata_reported"}}"#,
                     r#"{"error":{"code":"not_agent","message":"not classified yet"}}"#,
                     r#"{"result":{"type":"agent_renamed"}}"#,
                 ],
@@ -743,14 +794,70 @@ mod host_label {
             let mut label = socket_backend(&socket);
             label.sync(&db, "luna", ST_LISTENING, "claude");
             assert!(!label.name_set);
+            assert!(label.display_agent_set);
             assert!(label.last_reported_state.is_none());
             label.sync(&db, "luna", ST_LISTENING, "claude");
             assert!(label.name_set);
 
+            let requests = server.join().unwrap();
             assert_eq!(
-                server.join().unwrap(),
-                vec!["pane.rename", "agent.rename", "agent.rename"]
+                request_methods(&requests),
+                vec![
+                    "pane.rename",
+                    "pane.report_metadata",
+                    "agent.rename",
+                    "agent.rename"
+                ]
             );
+            assert_eq!(
+                requests[1]["params"],
+                serde_json::json!({
+                    "pane_id": "w1:p1",
+                    "source": "hcom:display",
+                    "agent": "claude",
+                    "display_agent": "claude",
+                })
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        #[serial]
+        fn rejected_display_metadata_retries_without_repeating_other_updates() {
+            let (dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
+            let socket = dir.path().join("herdr.sock");
+            let server = serve_responses(
+                socket.clone(),
+                vec![
+                    r#"{"result":{"type":"pane_renamed"}}"#,
+                    r#"{"error":{"code":"not_agent","message":"not classified yet"}}"#,
+                    r#"{"result":{"type":"agent_renamed"}}"#,
+                    r#"{"result":{"type":"metadata_reported"}}"#,
+                ],
+            );
+            while !socket.exists() {
+                std::thread::yield_now();
+            }
+
+            let db = crate::db::HcomDb::open().unwrap();
+            let mut label = socket_backend(&socket);
+            label.sync(&db, "luna", ST_LISTENING, "codex");
+            assert!(!label.display_agent_set);
+            assert!(label.name_set);
+            label.sync(&db, "luna", ST_LISTENING, "codex");
+            assert!(label.display_agent_set);
+
+            let requests = server.join().unwrap();
+            assert_eq!(
+                request_methods(&requests),
+                vec![
+                    "pane.rename",
+                    "pane.report_metadata",
+                    "agent.rename",
+                    "pane.report_metadata"
+                ]
+            );
+            assert_eq!(requests[1]["params"], requests[3]["params"]);
         }
 
         #[cfg(unix)]
@@ -777,9 +884,15 @@ mod host_label {
             assert_eq!(label.last_reported_state, Some("working"));
             assert!(label.name_set);
 
+            let requests = server.join().unwrap();
             assert_eq!(
-                server.join().unwrap(),
+                request_methods(&requests),
                 vec!["pane.rename", "pane.report_agent", "agent.rename"]
+            );
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request["method"] != "pane.report_metadata")
             );
         }
     }
