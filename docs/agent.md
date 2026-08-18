@@ -217,3 +217,8 @@ Herdr session, hcom uses the name of the directory containing `.hcom-agents.json
 is configured explicitly, each agent gets a tab named after the agent. Other non-tmux terminal
 presets ignore `session` with a warning. Managed agents retain normal hcom lifecycle behavior,
 including closing their pane through `hcom kill`.
+
+For Herdr-known tools, hcom identifies the outer PTY process to Herdr on Unix/macOS; on Windows,
+Herdr detects the tool in the descendant process tree. Herdr's screen manifests or native
+integrations own working/idle/blocked state and session-resume metadata. The hcom
+`pane.report_agent` fallback is reserved for tools Herdr does not recognize.

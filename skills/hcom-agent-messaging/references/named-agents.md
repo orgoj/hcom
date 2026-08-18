@@ -226,6 +226,10 @@ settings; they do not select a multiplexer by themselves. For tmux, they select 
 window. For Herdr, they select the workspace and tab. Other non-multiplexer terminals ignore
 `session` with a warning.
 
+For tools Herdr recognizes, hcom lets Herdr's native process detection, screen manifests, and
+installed integrations own classification, lifecycle state, and resume metadata. hcom uses
+`pane.report_agent` only as a fallback for tools outside Herdr's agent catalog.
+
 `pre` runs inside the prepared window before hcom, and `env` variables are supplied to the launch.
 
 ## Schema summary

@@ -1936,15 +1936,16 @@ fn launch_herdr_two_step(
     };
 
     // Step 2: run hcom's generated runner script in the new pane. `pane run`
-    // sends the text and presses Enter, so `bash <script>` is the whole line.
-    // The script path is shell-quoted: herdr types it into the pane's shell,
-    // and hcom's launch dir lives under $HOME, which can contain spaces.
+    // sends the text and presses Enter, so the platform-specific invocation is
+    // the whole line. On Unix, put HERDR_AGENT on this command only: the runner
+    // execs `hcom pty`, making the hint visible on Herdr's foreground process
+    // without leaking it into any other terminal preset.
     let run_argv = vec![
         "herdr".to_string(),
         "pane".to_string(),
         "run".to_string(),
         pane_id.clone(),
-        format!("bash {}", shell_quote(ctx.script)),
+        herdr_pane_run_command(ctx.script, ctx.tool, cfg!(windows)),
     ];
     // Don't `?`-propagate a step-2 failure directly: step 1 already opened the
     // pane, so bailing here would orphan an empty pane that looks like a live
@@ -1968,6 +1969,46 @@ fn launch_herdr_two_step(
 
     // Return the `tab create` stdout so `write_terminal_id` records the pane id.
     Ok((created && ran, captured))
+}
+
+/// Return Herdr's canonical label for an hcom tool name.
+///
+/// Keep this adapter-local map aligned with Herdr's `parse_agent_label`; a
+/// missing entry deliberately falls back to `pane.report_agent` in delivery.
+pub(crate) fn herdr_agent_label(tool: &str) -> Option<&'static str> {
+    match tool {
+        "claude" => Some("claude"),
+        "gemini" => Some("gemini"),
+        "codex" => Some("codex"),
+        "opencode" => Some("opencode"),
+        "kilo" => Some("kilo"),
+        "antigravity" => Some("agy"),
+        "cursor" => Some("cursor"),
+        "kimi" => Some("kimi"),
+        "copilot" => Some("copilot"),
+        "pi" => Some("pi"),
+        "omp" => Some("omp"),
+        "hermes" => Some("hermes"),
+        _ => None,
+    }
+}
+
+fn herdr_pane_run_command(script: &str, tool: &str, windows: bool) -> String {
+    if windows {
+        return format!(
+            "powershell.exe -NoProfile -ExecutionPolicy Bypass -File {}",
+            ps_quote(script)
+        );
+    }
+
+    match herdr_agent_label(tool) {
+        Some(agent) => format!(
+            "HERDR_AGENT={} bash {}",
+            shell_quote(agent),
+            shell_quote(script)
+        ),
+        None => format!("bash {}", shell_quote(script)),
+    }
 }
 
 /// Resolve hcom's catalog placement onto Herdr's space/workspace -> tab -> pane
@@ -3737,6 +3778,63 @@ mod tests {
                 "luna",
             ]
         );
+    }
+
+    #[test]
+    fn herdr_agent_labels_are_canonical_and_unknown_tools_fall_back() {
+        for (tool, label) in [
+            ("claude", "claude"),
+            ("gemini", "gemini"),
+            ("codex", "codex"),
+            ("opencode", "opencode"),
+            ("kilo", "kilo"),
+            ("antigravity", "agy"),
+            ("cursor", "cursor"),
+            ("kimi", "kimi"),
+            ("copilot", "copilot"),
+            ("pi", "pi"),
+            ("omp", "omp"),
+            ("hermes", "hermes"),
+        ] {
+            assert_eq!(herdr_agent_label(tool), Some(label));
+        }
+        assert_eq!(herdr_agent_label("adhoc"), None);
+        assert_eq!(herdr_agent_label("future-tool"), None);
+    }
+
+    #[test]
+    fn herdr_unix_pane_run_scopes_and_quotes_agent_hint() {
+        assert_eq!(
+            herdr_pane_run_command("/tmp/launch dir/agent.sh", "antigravity", false),
+            "HERDR_AGENT=agy bash '/tmp/launch dir/agent.sh'"
+        );
+        assert_eq!(
+            herdr_pane_run_command("/tmp/launch dir/custom.sh", "future-tool", false),
+            "bash '/tmp/launch dir/custom.sh'"
+        );
+    }
+
+    #[test]
+    fn herdr_windows_pane_run_uses_powershell_without_agent_hint() {
+        assert_eq!(
+            herdr_pane_run_command("C:\\Users\\O'Brien\\launch.ps1", "claude", true),
+            "powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\\Users\\O''Brien\\launch.ps1'"
+        );
+    }
+
+    #[test]
+    fn non_herdr_terminal_substitution_does_not_add_agent_hint() {
+        let out = substitute_open_argv(
+            &argv(&["kitty", "--", "bash", "{script}"]),
+            TerminalCommandContext {
+                script: "/tmp/agent.sh",
+                tool: "claude",
+                ..TerminalCommandContext::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out, vec!["kitty", "--", "bash", "/tmp/agent.sh"]);
+        assert!(out.iter().all(|arg| !arg.contains("HERDR_AGENT")));
     }
 
     #[test]

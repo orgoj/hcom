@@ -108,6 +108,11 @@ Any other AI tool without hooks can join by running `hcom start`. Any process ca
 
 Every agent runs in a real terminal you can see, scroll, and interrupt. Any emulator works for spawning. **kitty**, **wezterm**, **tmux**, **zellij**, **waveterm**, **cmux**, **herdr** also support closing panes from `hcom kill`.
 
+With the Herdr preset, hcom supplies Herdr's native agent identity hint on Unix/macOS and uses
+native descendant-process detection on Windows. Herdr remains responsible for agent state through
+its screen manifests or installed integrations; hcom only supplies lifecycle reports for tools
+Herdr does not recognize.
+
 To configure a custom terminal open/close setup, tell an agent to run:
 
 ```bash
