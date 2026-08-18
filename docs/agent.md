@@ -40,6 +40,10 @@ Scalar fields replace earlier values. `env`, `args`, and tool profiles merge. Re
 catalogs (including when imported), and the catalog directory in other imported/additive
 catalogs. hcom expands `~` and environment variables.
 
+Keep paths in project catalogs relative to the project root. Do not store machine-specific
+absolute paths in a versioned `.hcom/agents.json`; use absolute or `~`-based paths only in
+machine-local catalogs such as `~/.hcom/agents.json`.
+
 Global catalog `defaults` apply throughout the non-project catalog group. Project defaults apply
 only to project agents.
 

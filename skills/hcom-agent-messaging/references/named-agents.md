@@ -27,6 +27,10 @@ Relative `dir` and `skills_dir` values resolve from `$HOME` globally, from the d
 `.hcom` for project catalogs (including when imported), and from the catalog directory for other
 additive/imported catalogs.
 
+Keep paths in project catalogs relative to the project root. Do not store machine-specific
+absolute paths in a versioned `.hcom/agents.json`; use absolute or `~`-based paths only in
+machine-local catalogs such as `~/.hcom/agents.json`.
+
 The fixed JSON `system_prompt` is followed by the current `AGENTS.md`. hcom rereads it on every
 launch/resume, and files referenced by it resolve relative to the bundle. For an external bundle,
 hcom grants only that directory when the CLI supports startup-time additional workspaces;
