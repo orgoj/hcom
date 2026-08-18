@@ -1,7 +1,9 @@
 # Named agents (`hcom agent`)
 
 Use `hcom agent` for recurring agents whose working directory, CLI, prompts, environment, and
-terminal setup should live in versionable configuration instead of shell history. An instance name
+terminal setup should live in versionable configuration instead of shell history. An editable
+`agents/<name>/AGENTS.md` bundle supplies evolving instructions and defines the agent even without
+a JSON entry. An instance name
 is unique: launching a name that is already running reports its status and exits without creating
 a duplicate. Use `--as` to launch one catalog definition concurrently under distinct instance
 names.
@@ -13,18 +15,21 @@ hcom reads these catalogs:
 1. `~/.hcom/agents.json` for machine-wide agents. Override its path with `HCOM_AGENTS_FILE`.
 2. Catalogs listed in `HCOM_AGENT_CATALOGS`, separated with the platform path separator, for
    additive client-specific views.
-3. The nearest `.hcom-agents.json` found from the working directory upward to the Git root, for
-   project-specific additions and overrides.
+3. The nearest parent `.hcom/agents.json` and `.hcom/agents/<name>/` bundles, found independently
+   of Git roots, for project agents that fully shadow same-named global agents.
 4. Command-line flags, which have the highest precedence.
 
-Global catalog `defaults` apply to every resolved catalog agent, including agents defined only by
-additive or project catalogs. Defaults from additive, imported, and project catalogs apply only to
-agents defined by that catalog. Scalar fields replace earlier values; `env`, `args`, and matching
-`tools` profiles merge. Arguments append in layer order.
+Global defaults apply to the non-project catalog group. Project agents resolve independently and
+do not inherit global fields. Within each group, scalar fields replace earlier values while `env`,
+`args`, and matching `tools` profiles merge.
 
-Relative `dir` and `skills_dir` values resolve from `$HOME` in the global catalog and from the
-catalog directory in additive, imported, and project catalogs. `~` and environment variables are
-expanded.
+Relative `dir` and `skills_dir` values resolve from `$HOME` globally, from the directory containing
+`.hcom` for project agents, and from the catalog directory for additive/imported catalogs.
+
+The fixed JSON `system_prompt` is followed by the current `AGENTS.md`. hcom rereads it on every
+launch/resume, and files referenced by it resolve relative to the bundle. For an external bundle,
+hcom grants only that directory when the CLI supports startup-time additional workspaces;
+otherwise launch fails clearly.
 
 ## Imports and additive client catalogs
 
@@ -35,7 +40,7 @@ owning project while an external client can compose a private address book:
 {
   "imports": [
     {
-      "from": "~/work/wdt/ansible-wdt/.hcom-agents.json",
+      "from": "~/work/wdt/ansible-wdt/.hcom/agents.json",
       "agents": ["wdt_main"]
     }
   ]
@@ -57,6 +62,7 @@ the global catalog.
 Imports are recursive and load before the importing file's local definitions. Relative `from`
 paths resolve against the importing file. Omitting `agents` imports all agents; an empty list
 imports none. Imported agents retain their source catalog's defaults and relative directory base.
+Each catalog discovers bundles in a sibling `agents/` directory, including bundle-only agents.
 Missing files, requested names, and import cycles are errors.
 
 ## Basic catalog
@@ -139,8 +145,8 @@ agent's configuration.
 - `true` runs `hcom r <name> --go` to continue the agent's previous stopped session.
 - Omitting the field inherits the value from the preceding catalog layer.
 
-Normal catalog precedence applies, so an agent entry can override its catalog's default and a
-project entry can override the global value. Command-line `--resume` and `--clean` have the highest
+Normal catalog precedence applies within a scope, so an agent entry can override its catalog's
+default; a project agent shadows the global agent as a whole. Command-line `--resume` and `--clean` have the highest
 precedence. If both occur, the last flag wins, which makes wrapper scripts able to append an
 authoritative choice.
 

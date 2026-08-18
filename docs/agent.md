@@ -1,8 +1,8 @@
 # Named agents
 
-`hcom agent` launches recurring agents from JSON catalogs. A catalog keeps the CLI, working
-directory, terminal placement, environment, tool-specific arguments, and private skills under one
-stable name.
+`hcom agent` launches recurring agents from JSON catalogs and editable bundles. A catalog keeps
+launch settings; `agents/<name>/AGENTS.md` keeps the agent's evolving instructions and can refer to
+other files in the same bundle.
 
 ```bash
 hcom agent wdt_main                 # launch, or report that it is already running
@@ -25,22 +25,52 @@ hcom merges catalog layers in this order. Later values win:
 2. `defaults` in `~/.hcom/agents.json`
 3. the named entry in `~/.hcom/agents.json`
 4. catalogs listed by `HCOM_AGENT_CATALOGS`
-5. `defaults` and the named entry in the nearest `.hcom-agents.json`
+5. `defaults`, named entries, and bundles in the nearest parent `.hcom`
 6. command-line flags
 
 Set `HCOM_AGENTS_FILE` to replace the global catalog path. `HCOM_AGENT_CATALOGS` is a
 platform-specific path-separated list of additive catalogs; it does not replace the global one.
 
-Scalar fields replace earlier values. `env`, `args`, and tool profiles merge. Relative `dir` and
-`skills_dir` paths use `$HOME` as their base in the global catalog and the catalog's directory in
-project, imported, and additive catalogs. hcom expands `~` and environment variables.
+The project search walks parent directories until it finds the nearest `.hcom`, independently of
+Git boundaries. The global `~/.hcom` is never a project scope. A project agent fully shadows a
+same-named global/additive agent instead of inheriting its fields.
 
-Global catalog `defaults` apply to every resolved catalog agent, even when the named agent is
-defined only in an additive or project catalog. Defaults from later catalogs apply only when that
-catalog defines the named agent.
+Scalar fields replace earlier values. `env`, `args`, and tool profiles merge. Relative `dir` and
+`skills_dir` paths use `$HOME` in the global catalog, the directory containing `.hcom` in the
+project catalog, and the catalog directory in imported/additive catalogs. hcom expands `~` and
+environment variables.
+
+Global catalog `defaults` apply throughout the non-project catalog group. Project defaults apply
+only to project agents.
 
 Unknown catalog fields are errors. This catches misspelled configuration instead of silently
 ignoring it.
+
+## Agent bundles
+
+Global and project layouts are identical:
+
+```text
+~/.hcom/                         <project>/.hcom/
+├── agents.json                 ├── agents.json
+└── agents/                     └── agents/
+    └── reviewer/                   └── reviewer/
+        ├── AGENTS.md                   ├── AGENTS.md
+        └── checklist.md                └── checklist.md
+```
+
+`agents/<name>/AGENTS.md` defines an agent even without a matching JSON entry. A JSON-only agent
+also remains valid. Discovered directory names must contain only lowercase letters, numbers, and
+underscores.
+
+The effective system prompt is the fixed JSON `system_prompt`, followed by the bundle path and the
+current `AGENTS.md`. `prompt` remains the initial user message. hcom rereads `AGENTS.md` on every
+clean start and resume, so an agent can improve instructions for its next launch. Other files are
+loaded only when `AGENTS.md` refers to them, relative to the bundle directory.
+
+If a bundle is outside the working directory, hcom grants only that directory through the CLI's
+additional-workspace mechanism. Launch fails clearly when the CLI cannot make it writable at
+startup.
 
 ## Catalog format
 
@@ -111,10 +141,10 @@ A catalog may import every agent or a selected set from another catalog:
 {
   "imports": [
     {
-      "from": "~/work/wdt/ansible-wdt/.hcom-agents.json",
+      "from": "~/work/wdt/ansible-wdt/.hcom/agents.json",
       "agents": ["wdt_main"]
     },
-    { "from": "../shared/.hcom-agents.json" }
+    { "from": "../shared/.hcom/agents.json" }
   ],
   "agents": {
     "local_override": { "dir": ".", "cli": "codex" }
@@ -125,6 +155,8 @@ A catalog may import every agent or a selected set from another catalog:
 Omitting `agents` imports all entries; an empty list imports none. Relative `from` paths use the
 importing catalog's directory. Imports are recursive, load before local entries, preserve the
 source catalog's defaults and path base, and reject cycles or unknown selected agents.
+Every imported or additive catalog discovers bundles in an `agents/` directory beside that
+catalog file; bundle-only agents participate in selective imports normally.
 
 ## Private agent skills
 
@@ -213,7 +245,7 @@ hcom chooses the launch strategy in this order:
 For tmux, `session` selects or creates the tmux session and `window` selects the window. For Herdr,
 `session` selects or creates the space (called a workspace by the CLI), `window` selects or creates
 the tab, and each agent runs in a pane split inside that tab. When a project catalog supplies no
-Herdr session, hcom uses the name of the directory containing `.hcom-agents.json`; unless `window`
+Herdr session, hcom uses the name of the directory containing `.hcom`; unless `window`
 is configured explicitly, each agent gets a tab named after the agent. Other non-tmux terminal
 presets ignore `session` with a warning. Managed agents retain normal hcom lifecycle behavior,
 including closing their pane through `hcom kill`.

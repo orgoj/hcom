@@ -12,10 +12,10 @@ use serde::Deserialize;
 use crate::db::HcomDb;
 
 const GLOBAL_FILE: &str = "agents.json";
-const PROJECT_FILE: &str = ".hcom-agents.json";
+const PROJECT_DIR: &str = ".hcom";
+const PROJECT_FILE: &str = "agents.json";
 const EXTRA_CATALOGS_ENV: &str = "HCOM_AGENT_CATALOGS";
 const DEFAULT_CLI: &str = "claude";
-const MAX_WALK_UP: usize = 40;
 
 // ── CLI entry ───────────────────────────────────────────────────────────
 
@@ -37,18 +37,21 @@ pub fn help_text() -> String {
   hcom agent edit [--project]                Open a catalog in $EDITOR (creates a starter file)
   hcom agent completions bash|zsh|fish       Shell completion for agent names
 
-Catalog (later layers win; env and args merge, scalars replace):
+Catalog and bundles (later layers win; env and args merge, scalars replace):
   1. built-in defaults (cli={DEFAULT_CLI})
   2. \"defaults\" in ~/.hcom/{GLOBAL_FILE}          (override path: HCOM_AGENTS_FILE)
   3. agent entry in ~/.hcom/{GLOBAL_FILE}
   4. catalogs in {EXTRA_CATALOGS_ENV}                 (platform path-separated)
-  5. \"defaults\" and agent in ./{PROJECT_FILE}      (nearest one up to the git root)
+  5. \"defaults\" and agent in .hcom/{PROJECT_FILE}   (nearest parent .hcom; Git-independent)
   6. command-line flags
 
   Every catalog may use \"imports\" to reference all or selected agents from other
   catalogs. Imported layers are applied before the importing file's local entries.
+  A sibling agents/<name>/AGENTS.md also defines an agent and is appended to its
+  system prompt after the fixed JSON system_prompt. Project agents fully shadow
+  same-named non-project agents.
   Relative import paths resolve against the importing file. Relative \"dir\" resolves
-  against $HOME for the global catalog and against its own file for all other catalogs.
+  against $HOME globally, the parent of project .hcom, or its file for other catalogs.
   ~ and $VAR are expanded.
 
 Flags:
@@ -65,7 +68,7 @@ Flags:
   --pre <cmd>               Shell command run in the window before the agent
   --env K=V                 Extra environment variable (repeatable)
   --catalog <path>          Use this file instead of the project catalog
-  --no-project              Ignore any {PROJECT_FILE}
+  --no-project              Ignore the nearest project .hcom/{PROJECT_FILE}
   --attach                  Focus the window after launching (or when already running)
   --restart                 Kill a running agent first instead of reporting it
   --resume                  Continue the agent's previous session
@@ -150,6 +153,12 @@ struct AgentDef {
     args: Vec<String>,
     #[serde(default)]
     tools: BTreeMap<String, ToolDef>,
+    #[serde(skip)]
+    agent_dir: Option<String>,
+    #[serde(skip)]
+    instructions: Option<String>,
+    #[serde(skip)]
+    instructions_content: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -199,7 +208,10 @@ impl AgentDef {
             prompt,
             system_prompt,
             pre,
-            resume
+            resume,
+            agent_dir,
+            instructions,
+            instructions_content
         );
         for (k, v) in &over.env {
             self.env.insert(k.clone(), v.clone());
@@ -328,10 +340,14 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogFile> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
-    let mut catalog: Catalog = serde_json::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("invalid JSON in {}: {e}", path.display()))?;
+    let mut catalog: Catalog = if path.is_file() {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
+        serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("invalid JSON in {}: {e}", path.display()))?
+    } else {
+        Catalog::default()
+    };
 
     // Resolve `dir` while we still know which file it came from.
     if let Some(dir) = catalog.defaults.dir.take() {
@@ -346,6 +362,40 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
         }
         if let Some(dir) = def.skills_dir.take() {
             def.skills_dir = Some(expand_path(&dir, base));
+        }
+    }
+
+    let agents_dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("agents");
+    if agents_dir.is_dir() {
+        for entry in std::fs::read_dir(&agents_dir)
+            .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", agents_dir.display()))?
+        {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let dir = entry.path();
+            let instructions = dir.join("AGENTS.md");
+            if instructions.is_file() {
+                if !crate::identity::is_valid_base_name(&name) {
+                    bail!("invalid agent bundle name '{}': {}", name, dir.display());
+                }
+                catalog.agents.entry(name.clone()).or_default();
+            }
+            if let Some(def) = catalog.agents.get_mut(&name) {
+                def.agent_dir = Some(dir.to_string_lossy().into_owned());
+                if instructions.is_file() {
+                    def.instructions = Some(instructions.to_string_lossy().into_owned());
+                    def.instructions_content =
+                        Some(std::fs::read_to_string(&instructions).map_err(|e| {
+                            anyhow::anyhow!("cannot read {}: {e}", instructions.display())
+                        })?);
+                }
+            }
         }
     }
     Ok(CatalogFile {
@@ -437,18 +487,18 @@ fn global_catalog_path() -> PathBuf {
     }
 }
 
-/// Nearest `.hcom-agents.json` walking up from `start`; stops after the
-/// directory that holds `.git`.
-fn find_project_catalog(start: &Path) -> Option<PathBuf> {
+/// Nearest project `.hcom` walking up from `start`, independent of Git roots.
+/// The user's global hcom directory is not a project scope.
+fn find_project_hcom_dir(start: &Path) -> Option<PathBuf> {
+    let global = global_catalog_path()
+        .parent()
+        .map(normalize)
+        .unwrap_or_else(|| normalize(&crate::paths::hcom_dir()));
     let mut dir = Some(start);
-    for _ in 0..MAX_WALK_UP {
-        let d = dir?;
-        let candidate = d.join(PROJECT_FILE);
-        if candidate.is_file() {
+    while let Some(d) = dir {
+        let candidate = normalize(&d.join(PROJECT_DIR));
+        if candidate.is_dir() && candidate != global {
             return Some(candidate);
-        }
-        if d.join(".git").exists() {
-            return None;
         }
         dir = d.parent();
     }
@@ -456,24 +506,30 @@ fn find_project_catalog(start: &Path) -> Option<PathBuf> {
 }
 
 struct Catalogs {
-    files: Vec<CatalogFile>,
+    base_files: Vec<CatalogFile>,
+    project_files: Vec<CatalogFile>,
     project_root: Option<PathBuf>,
 }
 
 impl Catalogs {
     fn load(no_project: bool, explicit: Option<&Path>) -> Result<Self> {
-        let mut files = Vec::new();
+        let mut base_files = Vec::new();
         let mut stack = Vec::new();
 
         let global = global_catalog_path();
-        if global.is_file() {
+        let global_bundles = global.parent().is_some_and(|p| p.join("agents").is_dir());
+        if global.is_file() || global_bundles {
             let base = home_dir().unwrap_or_else(|| PathBuf::from("."));
-            files.extend(load_catalog_tree(
-                &global,
-                &base,
-                "global".to_string(),
-                &mut stack,
-            )?);
+            if global.is_file() {
+                base_files.extend(load_catalog_tree(
+                    &global,
+                    &base,
+                    "global".to_string(),
+                    &mut stack,
+                )?);
+            } else {
+                base_files.push(load_catalog_file(&global, &base, "global".to_string())?);
+            }
         }
 
         if let Some(raw) = std::env::var_os(EXTRA_CATALOGS_ENV).filter(|v| !v.is_empty()) {
@@ -488,7 +544,7 @@ impl Catalogs {
                     .parent()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| PathBuf::from("."));
-                files.extend(load_catalog_tree(
+                base_files.extend(load_catalog_tree(
                     &path,
                     &base,
                     format!("extra:{}", path.display()),
@@ -497,36 +553,46 @@ impl Catalogs {
             }
         }
 
-        let project = match explicit {
+        let project_hcom = match explicit {
             Some(p) => {
                 if !p.is_file() {
                     bail!("catalog not found: {}", p.display());
                 }
-                Some(p.to_path_buf())
+                p.parent().map(Path::to_path_buf)
             }
             None if no_project => None,
             None => std::env::current_dir()
                 .ok()
-                .and_then(|cwd| find_project_catalog(&cwd)),
+                .and_then(|cwd| find_project_hcom_dir(&cwd)),
         };
-        let project_root = project
-            .as_ref()
-            .and_then(|path| path.parent().map(Path::to_path_buf));
-        if let Some(path) = project {
-            let base = path
-                .parent()
+        let project_root = project_hcom.as_ref().map(|dir| {
+            if dir.file_name().is_some_and(|name| name == PROJECT_DIR) {
+                dir.parent().unwrap_or(dir).to_path_buf()
+            } else {
+                dir.clone()
+            }
+        });
+        let mut project_files = Vec::new();
+        if let Some(hcom_dir) = project_hcom {
+            let path = explicit
                 .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."));
-            files.extend(load_catalog_tree(
-                &path,
-                &base,
-                "project".to_string(),
-                &mut stack,
-            )?);
+                .unwrap_or_else(|| hcom_dir.join(PROJECT_FILE));
+            let base = project_root.clone().unwrap_or_else(|| hcom_dir.clone());
+            if path.is_file() {
+                project_files.extend(load_catalog_tree(
+                    &path,
+                    &base,
+                    "project".to_string(),
+                    &mut stack,
+                )?);
+            } else {
+                project_files.push(load_catalog_file(&path, &base, "project".to_string())?);
+            }
         }
 
         Ok(Self {
-            files,
+            base_files,
+            project_files,
             project_root,
         })
     }
@@ -534,22 +600,34 @@ impl Catalogs {
     /// Names in catalog order, mapped to the label of the last file defining them.
     fn names(&self) -> BTreeMap<String, String> {
         let mut out = BTreeMap::new();
-        for file in &self.files {
+        for file in &self.base_files {
             for name in file.catalog.agents.keys() {
                 out.entry(name.clone())
                     .and_modify(|l: &mut String| *l = format!("{l}+{}", file.label))
                     .or_insert_with(|| file.label.clone());
             }
         }
+        for file in &self.project_files {
+            for name in file.catalog.agents.keys() {
+                out.insert(name.clone(), file.label.clone());
+            }
+        }
         out
     }
 
     fn resolve(&self, name: &str) -> Option<AgentDef> {
-        if !self
-            .files
+        if self
+            .project_files
             .iter()
             .any(|f| f.catalog.agents.contains_key(name))
         {
+            return Self::resolve_from(&self.project_files, name, false);
+        }
+        Self::resolve_from(&self.base_files, name, true)
+    }
+
+    fn resolve_from(files: &[CatalogFile], name: &str, global_defaults: bool) -> Option<AgentDef> {
+        if !files.iter().any(|f| f.catalog.agents.contains_key(name)) {
             return None;
         }
         // Global defaults are the lowest-precedence base for every catalog
@@ -557,12 +635,14 @@ impl Catalogs {
         // catalog-order merge so an imported or project definition can override
         // them even though imports are stored before their importing file.
         let mut def = AgentDef::default();
-        for file in self.files.iter().filter(|file| file.label == "global") {
-            def.merge_from(&file.catalog.defaults);
+        if global_defaults {
+            for file in files.iter().filter(|file| file.label == "global") {
+                def.merge_from(&file.catalog.defaults);
+            }
         }
-        for file in &self.files {
+        for file in files {
             let entry = file.catalog.agents.get(name);
-            if file.label != "global" && entry.is_some() {
+            if (!global_defaults || file.label != "global") && entry.is_some() {
                 def.merge_from(&file.catalog.defaults);
             }
             if let Some(entry) = entry {
@@ -573,7 +653,12 @@ impl Catalogs {
     }
 
     fn paths(&self) -> Vec<&Path> {
-        self.files.iter().map(|f| f.path.as_path()).collect()
+        self.base_files
+            .iter()
+            .chain(&self.project_files)
+            .map(|f| f.path.as_path())
+            .filter(|path| path.is_file())
+            .collect()
     }
 }
 
@@ -832,6 +917,10 @@ struct Effective {
     model: Option<String>,
     prompt: Option<String>,
     system_prompt: Option<String>,
+    agent_dir: Option<String>,
+    instructions: Option<String>,
+    bundle_args: Vec<String>,
+    bundle_access_error: Option<String>,
     resume: bool,
     env: BTreeMap<String, String>,
     extra: Vec<String>,
@@ -866,6 +955,21 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
     let mut extra = std::mem::take(&mut def.args);
     extra.extend(cli.passthrough.iter().cloned());
 
+    let fixed_system_prompt = nonempty(def.system_prompt);
+    let system_prompt = nonempty(def.instructions_content).map_or(fixed_system_prompt.clone(), |body| {
+        let path = def
+            .agent_dir
+            .as_deref()
+            .unwrap_or(".");
+        let bundle = format!(
+            "# AGENTS.md instructions for {path}\n\nResolve relative paths mentioned below from this agent bundle directory.\n\n{body}"
+        );
+        match fixed_system_prompt {
+            Some(fixed) => Some(format!("{fixed}\n\n{bundle}")),
+            None => Some(bundle),
+        }
+    });
+
     let mut effective = Effective {
         name: name.to_string(),
         cli: selected_cli,
@@ -883,13 +987,62 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         tag: nonempty(def.tag),
         model: nonempty(def.model),
         prompt: nonempty(def.prompt),
-        system_prompt: nonempty(def.system_prompt),
+        system_prompt,
+        agent_dir: nonempty(def.agent_dir),
+        instructions: nonempty(def.instructions),
+        bundle_args: Vec::new(),
+        bundle_access_error: None,
         resume: cli.resume.or(def.resume).unwrap_or(false),
         env: def.env,
         extra,
     };
     apply_skills_config(&mut effective);
+    apply_bundle_access(&mut effective);
     effective
+}
+
+fn apply_bundle_access(eff: &mut Effective) {
+    let Some(dir) = eff.agent_dir.clone() else {
+        return;
+    };
+    let workspace =
+        std::fs::canonicalize(&eff.dir).unwrap_or_else(|_| normalize(Path::new(&eff.dir)));
+    let bundle = std::fs::canonicalize(&dir).unwrap_or_else(|_| normalize(Path::new(&dir)));
+    if bundle.starts_with(&workspace) {
+        return;
+    }
+
+    match eff.cli.as_str() {
+        "claude" | "codex" => {
+            eff.bundle_args.extend(["--add-dir".into(), dir]);
+        }
+        "gemini" => {
+            eff.bundle_args
+                .extend(["--include-directories".into(), dir]);
+        }
+        "omp" | "copilot" => eff.bundle_args.push(format!("--add-dir={dir}")),
+        "opencode" | "kilo" => {
+            let key = if eff.cli == "opencode" {
+                "OPENCODE_CONFIG_CONTENT"
+            } else {
+                "KILO_CONFIG_CONTENT"
+            };
+            let pattern = format!("{}/**", dir.trim_end_matches(['/', '\\']));
+            merge_inline_json_env(
+                &mut eff.env,
+                key,
+                serde_json::json!({
+                    "permission": { "external_directory": { (pattern): "allow" } }
+                }),
+            );
+        }
+        _ => {
+            eff.bundle_access_error = Some(format!(
+                "{} cannot make external agent bundle {} writable; place the bundle inside the working directory or use a CLI with additional-directory support",
+                eff.cli, dir
+            ));
+        }
+    }
 }
 
 fn apply_skills_config(eff: &mut Effective) {
@@ -1041,6 +1194,7 @@ fn hcom_argv(eff: &Effective, terminal: Option<&str>, resume: bool) -> Vec<Strin
         v.push("--hcom-system-prompt".into());
         v.push(s.clone());
     }
+    v.extend(eff.bundle_args.iter().cloned());
     add_skills_args(eff, &mut v);
     if resume {
         v.push("--go".into());
@@ -1426,6 +1580,9 @@ fn apply_herdr_placement(eff: &mut Effective, project_root: Option<&Path>, windo
 }
 
 fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
+    if let Some(error) = &eff.bundle_access_error {
+        bail!("{error}");
+    }
     if eff.skills_dir.is_some() && !supports_skills_dir(&eff.cli) {
         bail!(
             "{} does not support an invocation-local extra skills directory; skills_dir cannot be applied without changing that CLI's persistent profile or workspace",
@@ -1556,6 +1713,8 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
                 "source": source,
                 "cli": eff.cli,
                 "dir": eff.dir,
+                "agent_dir": eff.agent_dir,
+                "instructions": eff.instructions,
                 "skills_dir": eff.skills_dir,
                 "session": eff.session,
                 "window": eff.window,
@@ -1649,12 +1808,21 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
             eff.cli
         ));
     }
+    if let Some(error) = &eff.bundle_access_error {
+        warnings.push(error.clone());
+    }
 
     println!("name:      {}", eff.name);
     println!("cli:       {}", eff.cli);
     println!("dir:       {}", eff.dir);
     if let Some(dir) = &eff.skills_dir {
         println!("skills:    {dir}");
+    }
+    if let Some(dir) = &eff.agent_dir {
+        println!("bundle:    {dir}");
+    }
+    if let Some(path) = &eff.instructions {
+        println!("instructions: {path}");
     }
     println!("start:     {}", if eff.resume { "resume" } else { "clean" });
     match &strategy {
@@ -1757,7 +1925,10 @@ const STARTER: &str = r#"{
 fn cmd_edit(rest: &[String]) -> Result<i32> {
     let project = rest.iter().any(|a| a == "--project");
     let path = if project {
-        std::env::current_dir()?.join(PROJECT_FILE)
+        let cwd = std::env::current_dir()?;
+        find_project_hcom_dir(&cwd)
+            .unwrap_or_else(|| cwd.join(PROJECT_DIR))
+            .join(PROJECT_FILE)
     } else {
         global_catalog_path()
     };
@@ -1928,27 +2099,31 @@ mod tests {
 
     fn catalogs_from(pairs: &[(&str, &str, &str)]) -> Catalogs {
         // (label, base_dir, json)
+        let files = pairs
+            .iter()
+            .map(|(label, base, json)| {
+                let mut catalog: Catalog = serde_json::from_str(json).unwrap();
+                let base = PathBuf::from(base);
+                if let Some(dir) = catalog.defaults.dir.take() {
+                    catalog.defaults.dir = Some(expand_path(&dir, &base));
+                }
+                for d in catalog.agents.values_mut() {
+                    if let Some(dir) = d.dir.take() {
+                        d.dir = Some(expand_path(&dir, &base));
+                    }
+                }
+                CatalogFile {
+                    path: base.join("catalog.json"),
+                    label: label.to_string(),
+                    catalog,
+                }
+            })
+            .collect::<Vec<_>>();
+        let (project_files, base_files) =
+            files.into_iter().partition(|file| file.label == "project");
         Catalogs {
-            files: pairs
-                .iter()
-                .map(|(label, base, json)| {
-                    let mut catalog: Catalog = serde_json::from_str(json).unwrap();
-                    let base = PathBuf::from(base);
-                    if let Some(dir) = catalog.defaults.dir.take() {
-                        catalog.defaults.dir = Some(expand_path(&dir, &base));
-                    }
-                    for d in catalog.agents.values_mut() {
-                        if let Some(dir) = d.dir.take() {
-                            d.dir = Some(expand_path(&dir, &base));
-                        }
-                    }
-                    CatalogFile {
-                        path: base.join("catalog.json"),
-                        label: label.to_string(),
-                        catalog,
-                    }
-                })
-                .collect(),
+            base_files,
+            project_files,
             project_root: None,
         }
     }
@@ -1987,7 +2162,7 @@ mod tests {
             Some("claude")
         );
         assert_eq!(a.model.as_deref(), Some("gpt-5"));
-        assert_eq!(a.dir.as_deref(), Some("/g"), "global dir survives");
+        assert_eq!(a.dir, None, "project agent fully shadows global config");
 
         let b = c.resolve("b").unwrap();
         assert_eq!(
@@ -1995,16 +2170,9 @@ mod tests {
             Some("/repo"),
             "project dir is relative to the catalog"
         );
-        assert_eq!(
-            b.terminal.as_deref(),
-            Some("herdr"),
-            "global defaults apply to project-only agents"
-        );
+        assert_eq!(b.terminal, None, "global defaults do not leak into project");
         assert!(c.resolve("missing").is_none());
-        assert_eq!(
-            c.names().get("a").map(String::as_str),
-            Some("global+project")
-        );
+        assert_eq!(c.names().get("a").map(String::as_str), Some("project"));
     }
 
     #[test]
@@ -2012,6 +2180,74 @@ mod tests {
         assert_eq!(expand_path("sub/x", Path::new("/base")), "/base/sub/x");
         assert_eq!(expand_path("/abs", Path::new("/base")), "/abs");
         assert_eq!(expand_path("./a/../b", Path::new("/base")), "/base/b");
+    }
+
+    #[test]
+    fn bundle_instructions_follow_fixed_system_prompt() {
+        let mut def = def_from(r#"{"dir":"/work","system_prompt":"fixed"}"#);
+        def.agent_dir = Some("/work/.hcom/agents/reviewer".into());
+        def.instructions = Some("/work/.hcom/agents/reviewer/AGENTS.md".into());
+        def.instructions_content = Some("learned".into());
+        let eff = effective("reviewer", def, &Cli::default());
+        let prompt = eff.system_prompt.unwrap();
+        assert!(prompt.starts_with("fixed\n\n# AGENTS.md instructions for "));
+        assert!(prompt.ends_with("learned"));
+        assert!(eff.bundle_args.is_empty(), "bundle is inside workspace");
+    }
+
+    #[test]
+    fn external_bundle_uses_cli_access_or_reports_unsupported_tool() {
+        for (cli, expected) in [
+            ("claude", vec!["--add-dir", "/agent/reviewer"]),
+            ("codex", vec!["--add-dir", "/agent/reviewer"]),
+            ("gemini", vec!["--include-directories", "/agent/reviewer"]),
+            ("omp", vec!["--add-dir=/agent/reviewer"]),
+            ("copilot", vec!["--add-dir=/agent/reviewer"]),
+        ] {
+            let mut def = def_from(&format!(r#"{{"dir":"/work","cli":"{cli}"}}"#));
+            def.agent_dir = Some("/agent/reviewer".into());
+            let eff = effective("reviewer", def, &Cli::default());
+            assert_eq!(eff.bundle_args, expected, "cli={cli}");
+            assert!(eff.bundle_access_error.is_none(), "cli={cli}");
+        }
+
+        for (cli, key) in [
+            ("opencode", "OPENCODE_CONFIG_CONTENT"),
+            ("kilo", "KILO_CONFIG_CONTENT"),
+        ] {
+            let mut def = def_from(&format!(r#"{{"dir":"/work","cli":"{cli}"}}"#));
+            def.agent_dir = Some("/agent/reviewer".into());
+            let eff = effective("reviewer", def, &Cli::default());
+            let config: serde_json::Value = serde_json::from_str(&eff.env[key]).unwrap();
+            assert_eq!(
+                config["permission"]["external_directory"]["/agent/reviewer/**"],
+                "allow"
+            );
+        }
+
+        let mut pi_def = def_from(r#"{"dir":"/work","cli":"pi"}"#);
+        pi_def.agent_dir = Some("/agent/reviewer".into());
+        let pi = effective("reviewer", pi_def, &Cli::default());
+        assert!(
+            pi.bundle_access_error
+                .as_deref()
+                .is_some_and(|e| e.contains("pi"))
+        );
+    }
+
+    #[test]
+    fn bundle_discovery_rejects_invalid_agent_directory_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("agents/Bad-Name");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("AGENTS.md"), "instructions").unwrap();
+        let error = load_catalog_file(&tmp.path().join("agents.json"), tmp.path(), "test".into())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("invalid agent bundle name 'Bad-Name'"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -2030,7 +2266,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             overlay.join("hermes.json"),
-            r#"{"imports":[{"from":"../project/.hcom-agents.json","agents":["wdt_main"]}],
+            r#"{"imports":[{"from":"../project/agents.json","agents":["wdt_main"]}],
                 "agents":{"wdt_main":{"model":"overlay"},"hermes_local":{"dir":"."}}}"#,
         )
         .unwrap();
@@ -2043,7 +2279,8 @@ mod tests {
         )
         .unwrap();
         let catalogs = Catalogs {
-            files,
+            base_files: files,
+            project_files: Vec::new(),
             project_root: None,
         };
         let wdt = catalogs.resolve("wdt_main").unwrap();
@@ -2081,7 +2318,8 @@ mod tests {
 
         let files = load_catalog_tree(&a, tmp.path(), "root".to_string(), &mut Vec::new()).unwrap();
         let catalogs = Catalogs {
-            files,
+            base_files: files,
+            project_files: Vec::new(),
             project_root: None,
         };
         assert_eq!(

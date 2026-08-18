@@ -1254,31 +1254,155 @@ fn agent_help_lists_catalog_layers() {
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     assert!(stdout.starts_with("Usage:"), "stdout={stdout}");
     assert!(stdout.contains("agents.json"), "stdout={stdout}");
-    assert!(stdout.contains(".hcom-agents.json"), "stdout={stdout}");
+    assert!(stdout.contains(".hcom/agents.json"), "stdout={stdout}");
+    assert!(
+        stdout.contains("agents/<name>/AGENTS.md"),
+        "stdout={stdout}"
+    );
     assert!(stdout.contains("--as <name>"), "stdout={stdout}");
 }
 
 #[test]
 fn agent_ls_without_catalog_points_at_the_global_file() {
     let h = Hcom::new();
-    let (code, stdout, stderr) = h.run(["agent", "ls"]);
+    let (code, stdout, stderr) = h.run(["agent", "ls", "--no-project"]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     assert!(stdout.contains("No agents defined"), "stdout={stdout}");
     assert!(stdout.contains("agents.json"), "stdout={stdout}");
 }
 
 #[test]
+fn agent_bundle_is_discovered_across_nested_git_roots_and_composes_prompt() {
+    let h = Hcom::new();
+    let project = h.root_path().join("multi-repo");
+    let nested = project.join("services/api");
+    let bundle = project.join(".hcom/agents/reviewer");
+    std::fs::create_dir_all(nested.join(".git")).expect("create nested git marker");
+    std::fs::create_dir_all(&bundle).expect("create agent bundle");
+    std::fs::write(
+        bundle.join("AGENTS.md"),
+        "Improve this file when you learn.",
+    )
+    .expect("write agent instructions");
+    std::fs::write(
+        project.join(".hcom/agents.json"),
+        r#"{"agents":{"reviewer":{"cli":"claude","dir":".","system_prompt":"Fixed identity."}}}"#,
+    )
+    .expect("write project catalog");
+
+    let output = h
+        .cmd()
+        .current_dir(&nested)
+        .args(["agent", "show", "reviewer"])
+        .output()
+        .expect("show bundle agent");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains(&format!("dir:       {}", project.display())),
+        "project-relative dir must use the parent of .hcom: {stdout}"
+    );
+    assert!(stdout.contains(&format!("bundle:    {}", bundle.display())));
+    assert!(stdout.contains("Fixed identity."), "stdout={stdout}");
+    assert!(
+        stdout.contains("Improve this file when you learn."),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.find("Fixed identity.") < stdout.find("Improve this file when you learn."),
+        "fixed prompt must precede AGENTS.md: {stdout}"
+    );
+
+    let json_output = h
+        .cmd()
+        .current_dir(&nested)
+        .args(["agent", "ls", "--json"])
+        .output()
+        .expect("list bundle agent");
+    let rows: serde_json::Value = serde_json::from_slice(&json_output.stdout).expect("agent JSON");
+    assert_eq!(rows[0]["agent_dir"], bundle.to_string_lossy().as_ref());
+    assert_eq!(
+        rows[0]["instructions"],
+        bundle.join("AGENTS.md").to_string_lossy().as_ref()
+    );
+}
+
+#[test]
+fn project_bundle_fully_shadows_same_named_global_agent() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"cli":"codex","dir":"/global","model":"global-model"}}}"#,
+    )
+    .expect("write global catalog");
+    let project = h.root_path().join("project");
+    let bundle = project.join(".hcom/agents/reviewer");
+    std::fs::create_dir_all(&bundle).expect("create project bundle");
+    std::fs::write(bundle.join("AGENTS.md"), "Project reviewer.").expect("write instructions");
+
+    let output = h
+        .cmd()
+        .current_dir(&project)
+        .args(["agent", "show", "reviewer"])
+        .output()
+        .expect("show project agent");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("cli:       claude"), "stdout={stdout}");
+    assert!(!stdout.contains("/global"), "stdout={stdout}");
+    assert!(!stdout.contains("global-model"), "stdout={stdout}");
+    assert!(stdout.contains("Project reviewer."), "stdout={stdout}");
+}
+
+#[test]
+fn legacy_project_catalog_is_ignored_and_edit_creates_dot_hcom_catalog() {
+    let h = Hcom::new();
+    let project = h.root_path().join("legacy");
+    std::fs::create_dir_all(&project).expect("create project");
+    std::fs::write(
+        project.join(".hcom-agents.json"),
+        r#"{"agents":{"legacy_agent":{}}}"#,
+    )
+    .expect("write legacy catalog");
+
+    let output = h
+        .cmd()
+        .current_dir(&project)
+        .args(["agent", "ls", "--names"])
+        .output()
+        .expect("list without project scope");
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("legacy_agent"));
+
+    let edit = h
+        .cmd()
+        .current_dir(&project)
+        .env("EDITOR", "true")
+        .args(["agent", "edit", "--project"])
+        .output()
+        .expect("create project catalog");
+    assert!(
+        edit.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&edit.stderr)
+    );
+    assert!(project.join(".hcom/agents.json").is_file());
+}
+
+#[test]
 fn additive_catalog_env_keeps_global_agents_and_imports_selected_project_agents() {
     let h = Hcom::new();
     let project = h.root_path().join("wdt");
-    std::fs::create_dir_all(&project).expect("create project dir");
+    std::fs::create_dir_all(project.join(".hcom")).expect("create project dir");
     std::fs::write(
         h.path().join("agents.json"),
         r#"{"agents":{"global_main":{"dir":"/tmp"}}}"#,
     )
     .expect("write global catalog");
     std::fs::write(
-        project.join(".hcom-agents.json"),
+        project.join(".hcom/agents.json"),
         r#"{"agents":{"wdt_main":{"dir":"."},"wdt_private":{"dir":"."}}}"#,
     )
     .expect("write project catalog");
@@ -1287,7 +1411,7 @@ fn additive_catalog_env_keeps_global_agents_and_imports_selected_project_agents(
         &overlay,
         format!(
             r#"{{"imports":[{{"from":{},"agents":["wdt_main"]}}]}}"#,
-            serde_json::to_string(&project.join(".hcom-agents.json")).unwrap()
+            serde_json::to_string(&project.join(".hcom/agents.json")).unwrap()
         ),
     )
     .expect("write overlay catalog");
@@ -1316,9 +1440,9 @@ fn additive_catalog_env_keeps_global_agents_and_imports_selected_project_agents(
 fn imported_agent_config_overrides_global_defaults() {
     let h = Hcom::new();
     let project = h.root_path().join("wdt");
-    std::fs::create_dir_all(&project).expect("create project dir");
+    std::fs::create_dir_all(project.join(".hcom")).expect("create project dir");
     std::fs::write(
-        project.join(".hcom-agents.json"),
+        project.join(".hcom/agents.json"),
         r#"{"defaults":{"cli":"claude"},"agents":{"wdt_main":{"dir":".","cli":"claude"}}}"#,
     )
     .expect("write project catalog");
@@ -1326,7 +1450,7 @@ fn imported_agent_config_overrides_global_defaults() {
         h.path().join("agents.json"),
         format!(
             r#"{{"defaults":{{"cli":"codex"}},"imports":[{{"from":{},"agents":["wdt_main"]}}]}}"#,
-            serde_json::to_string(&project.join(".hcom-agents.json")).unwrap()
+            serde_json::to_string(&project.join(".hcom/agents.json")).unwrap()
         ),
     )
     .expect("write global catalog");
