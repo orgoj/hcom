@@ -51,7 +51,8 @@ Catalog and bundles (later layers win; env and args merge, scalars replace):
   system prompt after the fixed JSON system_prompt. Project agents fully shadow
   same-named non-project agents.
   Relative import paths resolve against the importing file. Relative \"dir\" resolves
-  against $HOME globally, the parent of project .hcom, or its file for other catalogs.
+  against $HOME globally, the parent of project .hcom (also when imported), or its
+  file for other catalogs.
   ~ and $VAR are expanded.
 
 Flags:
@@ -441,10 +442,7 @@ fn load_catalog_tree(
         for import in imports {
             let imported_path = PathBuf::from(expand_path(&import.from, &file_base));
             let imported_label = format!("import:{}", imported_path.display());
-            let imported_base = imported_path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."));
+            let imported_base = catalog_relative_base(&imported_path);
             let mut imported =
                 load_catalog_tree(&imported_path, &imported_base, imported_label, stack)?;
             if let Some(selected) = import.agents {
@@ -478,6 +476,17 @@ fn load_catalog_tree(
     })();
     stack.pop();
     result
+}
+
+fn catalog_relative_base(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if path.file_name().is_some_and(|name| name == PROJECT_FILE)
+        && parent.file_name().is_some_and(|name| name == PROJECT_DIR)
+    {
+        parent.parent().unwrap_or(parent).to_path_buf()
+    } else {
+        parent.to_path_buf()
+    }
 }
 
 fn global_catalog_path() -> PathBuf {
@@ -2303,6 +2312,46 @@ mod tests {
         assert_eq!(
             catalogs.resolve("hermes_local").unwrap().dir.as_deref(),
             Some(overlay.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn imported_project_catalog_resolves_dirs_from_parent_of_hcom() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let project_hcom = project.join(PROJECT_DIR);
+        let overlay = tmp.path().join("overlay");
+        std::fs::create_dir_all(&project_hcom).unwrap();
+        std::fs::create_dir_all(&overlay).unwrap();
+        std::fs::write(
+            project_hcom.join(PROJECT_FILE),
+            r#"{"agents":{"wdt_main":{"dir":"."}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            overlay.join("agents.json"),
+            format!(
+                r#"{{"imports":[{{"from":{}}}]}}"#,
+                serde_json::to_string(&project_hcom.join(PROJECT_FILE)).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let files = load_catalog_tree(
+            &overlay.join("agents.json"),
+            &overlay,
+            "global".to_string(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let catalogs = Catalogs {
+            base_files: files,
+            project_files: Vec::new(),
+            project_root: None,
+        };
+        assert_eq!(
+            catalogs.resolve("wdt_main").unwrap().dir.as_deref(),
+            Some(project.to_string_lossy().as_ref())
         );
     }
 

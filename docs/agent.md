@@ -36,9 +36,9 @@ Git boundaries. The global `~/.hcom` is never a project scope. A project agent f
 same-named global/additive agent instead of inheriting its fields.
 
 Scalar fields replace earlier values. `env`, `args`, and tool profiles merge. Relative `dir` and
-`skills_dir` paths use `$HOME` in the global catalog, the directory containing `.hcom` in the
-project catalog, and the catalog directory in imported/additive catalogs. hcom expands `~` and
-environment variables.
+`skills_dir` paths use `$HOME` in the global catalog, the directory containing `.hcom` in project
+catalogs (including when imported), and the catalog directory in other imported/additive
+catalogs. hcom expands `~` and environment variables.
 
 Global catalog `defaults` apply throughout the non-project catalog group. Project defaults apply
 only to project agents.

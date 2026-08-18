@@ -24,7 +24,8 @@ do not inherit global fields. Within each group, scalar fields replace earlier v
 `args`, and matching `tools` profiles merge.
 
 Relative `dir` and `skills_dir` values resolve from `$HOME` globally, from the directory containing
-`.hcom` for project agents, and from the catalog directory for additive/imported catalogs.
+`.hcom` for project catalogs (including when imported), and from the catalog directory for other
+additive/imported catalogs.
 
 The fixed JSON `system_prompt` is followed by the current `AGENTS.md`. hcom rereads it on every
 launch/resume, and files referenced by it resolve relative to the bundle. For an external bundle,
