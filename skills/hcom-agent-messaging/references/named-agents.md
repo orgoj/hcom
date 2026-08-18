@@ -127,6 +127,12 @@ resolved by relay state and do not launch a same-named local catalog entry.
 
 ## Clean start and resume
 
+Operational rule: create and update catalog agents as clean-starting. “Persistent,” “recurring,”
+or “catalog agent” refers to the persistent catalog definition, not session continuation. Add
+`resume: true`, pass `--resume`, or run `hcom r` only when the user explicitly requests resuming a
+previous tool session. Never infer resume from persistence, an existing stopped session, or another
+agent's configuration.
+
 `resume` is a scalar boolean accepted in `defaults` and individual agent entries:
 
 - `false` starts a new tool session and is the built-in default.
