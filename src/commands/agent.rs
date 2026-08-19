@@ -1205,9 +1205,7 @@ fn hcom_argv(eff: &Effective, terminal: Option<&str>, resume: bool) -> Vec<Strin
     }
     v.extend(eff.bundle_args.iter().cloned());
     add_skills_args(eff, &mut v);
-    if resume {
-        v.push("--go".into());
-    }
+    v.push("--go".into());
     // Tool-level args last.
     if let Some(m) = &eff.model {
         v.push("--model".into());
@@ -2606,6 +2604,7 @@ mod tests {
                 "wdt",
                 "--hcom-prompt",
                 "hi",
+                "--go",
                 "--model",
                 "gpt-5",
                 "--foo",
@@ -2762,6 +2761,13 @@ mod tests {
         assert_eq!(argv[1], "wdt_main");
         assert!(argv.contains(&"--go".to_string()));
         assert!(!argv.contains(&"--as".to_string()));
+    }
+
+    #[test]
+    fn fresh_argv_uses_go() {
+        let eff = eff_of(r#"{"dir":"/w","cli":"codex"}"#, &[]);
+        let argv = hcom_argv(&eff, Some("here"), false);
+        assert!(argv.contains(&"--go".to_string()));
     }
 
     #[test]
