@@ -304,7 +304,7 @@ hcom agent wdt_main --cli codex     # unknown flags are forwarded to `hcom <cli>
 hcom agent ls                       # catalog + effective CLI/model + live status + source
 hcom agent ls @wdt                  # show only members of one catalog group
 hcom agent ls --all                 # include agents hidden by recursive selective imports
-hcom agent show wdt_main            # effective config and the exact command
+hcom agent show wdt_main            # effective model/reasoning and the exact command
 hcom agent edit                     # open the catalog in $EDITOR (creates a starter file)
 ```
 

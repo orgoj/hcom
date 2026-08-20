@@ -66,7 +66,7 @@ Catalog groups:
 Listing:
   @<group>                  Show only members of one catalog group
   --all                     Include all agents from recursively reachable imports
-  Table and JSON output show the effective model for the selected CLI.
+  Table output shows the effective model; JSON also includes reasoning.
 
 Flags:
   --cli <tool>              claude | codex | gemini | ... (default: {DEFAULT_CLI})
@@ -77,6 +77,7 @@ Flags:
   --window <name>           tmux window or Herdr tab (default: agent name)
   --as <name>               Run under a different instance name
   --tag / --model <val>     Forwarded to hcom / the tool
+  --reasoning <val>         Reasoning effort (Claude, Antigravity, and Codex)
   --prompt / --system-prompt <text>
   --pre <cmd>               Shell command run in the window before the agent
   --env K=V                 Extra environment variable (repeatable)
@@ -91,8 +92,10 @@ Flags:
   Any other flag is forwarded verbatim to `hcom <cli>`.
 
 Catalog tool profiles:
-  \"tools\": {{ \"claude\": {{ \"model\": \"sonnet\", \"args\": [\"--agent\", \"reviewer\"] }} }}
-  The profile for the effective --cli may set model, prompt, system_prompt, and args.
+  \"tools\": {{ \"claude\": {{ \"model\": \"sonnet\", \"reasoning\": \"high\" }} }}
+  The profile for the effective --cli may set model, reasoning, prompt,
+  system_prompt, and args. Reasoning maps to --effort for Claude/Antigravity
+  and model_reasoning_effort for Codex.
   Common fields are applied first, then the tool profile, then command-line flags.
 
 Start mode:
@@ -160,6 +163,7 @@ struct AgentDef {
     #[serde(default)]
     groups: Vec<String>,
     model: Option<String>,
+    reasoning: Option<String>,
     prompt: Option<String>,
     system_prompt: Option<String>,
     pre: Option<String>,
@@ -182,6 +186,7 @@ struct AgentDef {
 #[serde(deny_unknown_fields)]
 struct ToolDef {
     model: Option<String>,
+    reasoning: Option<String>,
     prompt: Option<String>,
     system_prompt: Option<String>,
     #[serde(default)]
@@ -192,6 +197,9 @@ impl ToolDef {
     fn merge_from(&mut self, over: &ToolDef) {
         if over.model.is_some() {
             self.model = over.model.clone();
+        }
+        if over.reasoning.is_some() {
+            self.reasoning = over.reasoning.clone();
         }
         if over.prompt.is_some() {
             self.prompt = over.prompt.clone();
@@ -221,6 +229,7 @@ impl AgentDef {
             window,
             tag,
             model,
+            reasoning,
             prompt,
             system_prompt,
             pre,
@@ -931,6 +940,10 @@ fn parse_cli(argv: &[String]) -> Result<Cli> {
                 cli.def.model = Some(value()?);
                 i += 2;
             }
+            "--reasoning" => {
+                cli.def.reasoning = Some(value()?);
+                i += 2;
+            }
             "--prompt" | "--hcom-prompt" => {
                 cli.def.prompt = Some(value()?);
                 i += 2;
@@ -1004,6 +1017,8 @@ struct Effective {
     tag: Option<String>,
     groups: Vec<String>,
     model: Option<String>,
+    reasoning: Option<String>,
+    reasoning_error: Option<String>,
     prompt: Option<String>,
     system_prompt: Option<String>,
     agent_dir: Option<String>,
@@ -1188,6 +1203,9 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         if profile.model.is_some() {
             def.model = profile.model;
         }
+        if profile.reasoning.is_some() {
+            def.reasoning = profile.reasoning;
+        }
         if profile.prompt.is_some() {
             def.prompt = profile.prompt;
         }
@@ -1213,6 +1231,13 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         &skills,
     );
 
+    let reasoning = nonempty(def.reasoning);
+    let reasoning_error = reasoning.as_ref().and_then(|_| match selected_cli.as_str() {
+        "claude" | "agy" | "antigravity" | "codex" => None,
+        cli => Some(format!(
+            "reasoning is not supported for cli '{cli}'; use tools.{cli}.args for a tool-specific setting"
+        )),
+    });
     let mut effective = Effective {
         name: name.to_string(),
         cli: selected_cli,
@@ -1231,6 +1256,8 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         tag: nonempty(def.tag),
         groups: def.groups,
         model: nonempty(def.model),
+        reasoning,
+        reasoning_error,
         prompt: nonempty(def.prompt),
         system_prompt,
         agent_dir: nonempty(def.agent_dir),
@@ -1430,6 +1457,22 @@ fn hcom_argv(eff: &Effective, terminal: Option<&str>, resume: bool) -> Vec<Strin
     if let Some(m) = &eff.model {
         v.push("--model".into());
         v.push(m.clone());
+    }
+    if let Some(reasoning) = &eff.reasoning {
+        match eff.cli.as_str() {
+            "claude" | "agy" | "antigravity" => {
+                v.push("--effort".into());
+                v.push(reasoning.clone());
+            }
+            "codex" => {
+                v.push("-c".into());
+                v.push(format!(
+                    "model_reasoning_effort={}",
+                    serde_json::to_string(reasoning).expect("string serialization cannot fail")
+                ));
+            }
+            _ => {}
+        }
     }
     v.extend(eff.extra.iter().cloned());
     v
@@ -1818,6 +1861,9 @@ fn apply_herdr_placement(eff: &mut Effective, project_root: Option<&Path>, windo
 }
 
 fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
+    if let Some(error) = &eff.reasoning_error {
+        bail!("{error}");
+    }
     if let Some(error) = &eff.bundle_access_error {
         bail!("{error}");
     }
@@ -1994,6 +2040,7 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
                 "source": source,
                 "cli": eff.cli,
                 "model": eff.model,
+                "reasoning": eff.reasoning,
                 "dir": eff.dir,
                 "agent_dir": eff.agent_dir,
                 "instructions": eff.instructions,
@@ -2092,6 +2139,9 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     if let Some(error) = &eff.bundle_access_error {
         warnings.push(error.clone());
     }
+    if let Some(error) = &eff.reasoning_error {
+        warnings.push(error.clone());
+    }
 
     println!("name:      {}", eff.name);
     println!("cli:       {}", eff.cli);
@@ -2125,6 +2175,9 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     }
     if let Some(m) = &eff.model {
         println!("model:     {m}");
+    }
+    if let Some(reasoning) = &eff.reasoning {
+        println!("reasoning: {reasoning}");
     }
     if let Some(p) = &eff.pre {
         println!("pre:       {p}");
@@ -2353,12 +2406,14 @@ mod tests {
     #[test]
     fn merge_accumulates_tool_args_and_replaces_tool_scalars() {
         let mut base = def_from(
-            r#"{"tools":{"claude":{"model":"sonnet","args":["--a"]},"codex":{"model":"gpt-5"}}}"#,
+            r#"{"tools":{"claude":{"model":"sonnet","reasoning":"low","args":["--a"]},"codex":{"model":"gpt-5"}}}"#,
         );
-        let over = def_from(r#"{"tools":{"claude":{"model":"opus","args":["--b"]}}}"#);
+        let over =
+            def_from(r#"{"tools":{"claude":{"model":"opus","reasoning":"high","args":["--b"]}}}"#);
         base.merge_from(&over);
         let claude = &base.tools["claude"];
         assert_eq!(claude.model.as_deref(), Some("opus"));
+        assert_eq!(claude.reasoning.as_deref(), Some("high"));
         assert_eq!(claude.args, vec!["--a", "--b"]);
         assert_eq!(base.tools["codex"].model.as_deref(), Some("gpt-5"));
     }
@@ -2844,23 +2899,26 @@ mod tests {
         let json = r#"{
             "cli":"claude",
             "model":"legacy",
+            "reasoning":"low",
             "prompt":"shared",
             "args":["--common"],
             "tools":{
-                "claude":{"model":"sonnet","prompt":"claude prompt","args":["--agent","reviewer"]},
-                "codex":{"model":"gpt-5","system_prompt":"codex system","args":["--sandbox","workspace-write"]}
+                "claude":{"model":"sonnet","reasoning":"high","prompt":"claude prompt","args":["--agent","reviewer"]},
+                "codex":{"model":"gpt-5","reasoning":"xhigh","system_prompt":"codex system","args":["--sandbox","workspace-write"]}
             }
         }"#;
 
         let claude = eff_of(json, &[]);
         assert_eq!(claude.cli, "claude");
         assert_eq!(claude.model.as_deref(), Some("sonnet"));
+        assert_eq!(claude.reasoning.as_deref(), Some("high"));
         assert_eq!(claude.prompt.as_deref(), Some("claude prompt"));
         assert_eq!(claude.extra, vec!["--common", "--agent", "reviewer"]);
 
         let codex = eff_of(json, &["--cli", "codex"]);
         assert_eq!(codex.cli, "codex");
         assert_eq!(codex.model.as_deref(), Some("gpt-5"));
+        assert_eq!(codex.reasoning.as_deref(), Some("xhigh"));
         assert_eq!(codex.prompt.as_deref(), Some("shared"));
         assert_eq!(codex.system_prompt.as_deref(), Some("codex system"));
         assert_eq!(
@@ -2872,18 +2930,21 @@ mod tests {
     #[test]
     fn command_line_overrides_selected_tool_profile() {
         let eff = eff_of(
-            r#"{"cli":"claude","tools":{"codex":{"model":"profile","prompt":"profile prompt","args":["--profile"]}}}"#,
+            r#"{"cli":"claude","tools":{"codex":{"model":"profile","reasoning":"high","prompt":"profile prompt","args":["--profile"]}}}"#,
             &[
                 "--cli",
                 "codex",
                 "--model",
                 "cli",
+                "--reasoning",
+                "xhigh",
                 "--prompt",
                 "cli prompt",
                 "--extra",
             ],
         );
         assert_eq!(eff.model.as_deref(), Some("cli"));
+        assert_eq!(eff.reasoning.as_deref(), Some("xhigh"));
         assert_eq!(eff.prompt.as_deref(), Some("cli prompt"));
         assert_eq!(eff.extra, vec!["--profile", "--extra"]);
     }
@@ -3024,6 +3085,38 @@ mod tests {
     }
 
     #[test]
+    fn hcom_argv_translates_reasoning_for_supported_clis() {
+        let claude = eff_of(r#"{"cli":"claude","reasoning":"high"}"#, &[]);
+        assert!(
+            hcom_argv(&claude, None, false)
+                .ends_with(&["--effort".to_string(), "high".to_string(),])
+        );
+
+        let agy = eff_of(r#"{"cli":"agy","reasoning":"medium"}"#, &[]);
+        assert!(
+            hcom_argv(&agy, None, false)
+                .ends_with(&["--effort".to_string(), "medium".to_string(),])
+        );
+
+        let codex = eff_of(r#"{"cli":"codex","reasoning":"xhigh"}"#, &[]);
+        assert!(hcom_argv(&codex, None, false).ends_with(&[
+            "-c".to_string(),
+            "model_reasoning_effort=\"xhigh\"".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn unsupported_cli_reports_reasoning_error() {
+        let eff = eff_of(r#"{"cli":"gemini","reasoning":"high"}"#, &[]);
+        assert_eq!(
+            eff.reasoning_error.as_deref(),
+            Some(
+                "reasoning is not supported for cli 'gemini'; use tools.gemini.args for a tool-specific setting"
+            )
+        );
+    }
+
+    #[test]
     fn skills_dir_has_targeted_migration_error() {
         let error = parse_cli(&["--skills-dir".into(), "/old".into()])
             .err()
@@ -3060,12 +3153,16 @@ mod tests {
 
     #[test]
     fn resume_argv_uses_r_and_go() {
-        let eff = eff_of(r#"{"dir":"/w","cli":"codex"}"#, &[]);
+        let eff = eff_of(r#"{"dir":"/w","cli":"codex","reasoning":"xhigh"}"#, &[]);
         let argv = hcom_argv(&eff, Some("here"), true);
         assert_eq!(argv[0], "r");
         assert_eq!(argv[1], "wdt_main");
         assert!(argv.contains(&"--go".to_string()));
         assert!(!argv.contains(&"--as".to_string()));
+        assert!(argv.ends_with(&[
+            "-c".to_string(),
+            "model_reasoning_effort=\"xhigh\"".to_string(),
+        ]));
     }
 
     #[test]
@@ -3100,6 +3197,9 @@ mod tests {
 
     #[test]
     fn help_starts_with_usage() {
-        assert!(help_text().starts_with("Usage:"));
+        let help = help_text();
+        assert!(help.starts_with("Usage:"));
+        assert!(help.contains("--reasoning <val>"));
+        assert!(help.contains("model_reasoning_effort for Codex"));
     }
 }

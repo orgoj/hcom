@@ -219,6 +219,7 @@ Keep shared fields at the agent level and put CLI-specific `model`, `prompt`, `s
         },
         "codex": {
           "model": "gpt-5.4",
+          "reasoning": "high",
           "system_prompt": "Prioritize correctness and cite file locations.",
           "args": ["--sandbox", "workspace-write"]
         }
@@ -236,19 +237,21 @@ The effective CLI is the command-line `--cli` value, otherwise the agent's `cli`
 3. Command-line flags and passthrough arguments.
 
 Tool-profile scalar values override their shared equivalents. Tool-profile arguments append after
-top-level arguments. Command-line `--model`, `--prompt`, and `--system-prompt` override both; unknown
-command-line arguments append last and are forwarded to the selected tool.
+top-level arguments. Command-line `--model`, `--reasoning`, `--prompt`, and `--system-prompt`
+override both; unknown command-line arguments append last and are forwarded to the selected tool.
 
 ```bash
 hcom agent reviewer --cli claude
 hcom agent reviewer --cli codex
 hcom agent show reviewer --cli codex
-hcom agent reviewer --cli codex --model gpt-5.4 --dry-run
+hcom agent reviewer --cli codex --model gpt-5.4 --reasoning high --dry-run
 ```
 
-Top-level `model` and `args` remain valid for simple single-CLI agents and existing catalogs. Avoid
-putting a Claude-only flag in top-level `args` when the agent can be switched to Codex or another
-CLI.
+Top-level `model`, `reasoning`, and `args` remain valid for simple single-CLI agents and existing
+catalogs. `reasoning` maps to `--effort` for Claude and Antigravity (`agy`), and to
+`model_reasoning_effort` for Codex. Other CLIs reject it at launch; use a tool-specific `args`
+entry instead. Avoid putting a Claude-only flag in top-level `args` when the agent can be switched
+to Codex or another CLI.
 
 ## Terminal selection
 
@@ -267,13 +270,13 @@ installed integrations own classification, lifecycle state, and resume metadata.
 
 Agent and `defaults` fields:
 
-- `cli`, `dir`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`
+- `cli`, `dir`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`, `reasoning`
 - `prompt`, `system_prompt`, `pre`, and boolean `resume`
 - `env` object and `args` array
 - `tools` object keyed by CLI name
 
-Each `tools.<cli>` profile accepts only `model`, `prompt`, `system_prompt`, and `args`. Unknown fields
-are rejected so catalog typos fail visibly.
+Each `tools.<cli>` profile accepts only `model`, `reasoning`, `prompt`, `system_prompt`, and `args`.
+Unknown fields are rejected so catalog typos fail visibly.
 
 Any unrecognized flag after `hcom agent <name>` is forwarded to `hcom <effective-cli>`. Use `--` to
 forward everything that follows verbatim, including tokens that resemble `hcom agent` flags.

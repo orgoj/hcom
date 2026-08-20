@@ -132,17 +132,22 @@ Supported agent fields:
 | `tag` | hcom group tag |
 | `groups` | Catalog-only groups used by `hcom agent @<group>` |
 | `model` | Default model passed to the selected CLI |
+| `reasoning` | Reasoning effort for Claude, Antigravity, or Codex |
 | `prompt` | Initial user prompt |
 | `system_prompt` | Additional system prompt |
 | `pre` | Shell command run before the CLI |
 | `resume` | Resume the previous session by default |
 | `env` | Environment variables merged by key |
 | `args` | Additional CLI arguments |
-| `tools.<cli>` | Per-CLI `model`, `prompt`, `system_prompt`, and `args` overrides |
+| `tools.<cli>` | Per-CLI `model`, `reasoning`, `prompt`, `system_prompt`, and `args` overrides |
 
 The selected `tools.<cli>` profile replaces shared scalar values and appends its `args`.
-Command-line flags override both. Top-level `model` and `args` remain useful for agents that always
-use one CLI.
+Command-line flags override both. Top-level `model`, `reasoning`, and `args` remain useful for
+agents that always use one CLI.
+
+`reasoning` maps to `--effort` for Claude and Antigravity (`agy`), and to Codex's
+`model_reasoning_effort`. Other CLIs reject the field at launch; use `tools.<cli>.args` when that
+CLI has its own reasoning control. `--reasoning` overrides the catalog value.
 
 `groups` is independent of `tag`: it does not change runtime display names, message routing, or
 `hcom kill tag:...`. An agent may belong to multiple catalog groups. Group membership merges
