@@ -1332,7 +1332,11 @@ enum Strategy {
     Direct(Option<String>),
 }
 
-fn choose_strategy(eff: &Effective, tmux_available: bool) -> (Strategy, Vec<String>) {
+fn choose_strategy(
+    eff: &Effective,
+    tmux_available: bool,
+    configured_terminal: Option<&str>,
+) -> (Strategy, Vec<String>) {
     let mut warnings = Vec::new();
 
     if let Some(cmd) = &eff.terminal_command {
@@ -1343,7 +1347,7 @@ fn choose_strategy(eff: &Effective, tmux_available: bool) -> (Strategy, Vec<Stri
     }
 
     if let Some(session) = &eff.session {
-        if eff.terminal.as_deref() == Some("herdr") {
+        if eff.terminal.as_deref().or(configured_terminal) == Some("herdr") {
             return (Strategy::Direct(eff.terminal.clone()), warnings);
         }
         let mux_ok = eff
@@ -1371,6 +1375,15 @@ fn choose_strategy(eff: &Effective, tmux_available: bool) -> (Strategy, Vec<Stri
     }
 
     (Strategy::Direct(eff.terminal.clone()), warnings)
+}
+
+/// The configured terminal matters when an agent inherits hcom's default.
+/// In particular, a Herdr default owns session/workspace placement even if the
+/// catalog does not repeat `terminal = "herdr"`.
+fn configured_terminal() -> Option<String> {
+    crate::config::HcomConfig::load(None)
+        .ok()
+        .map(|config| config.terminal)
 }
 
 // ── Command construction ────────────────────────────────────────────────
@@ -1750,7 +1763,9 @@ fn cmd_launch_group(group: &str, rest: &[String]) -> Result<i32> {
         let def = catalogs.resolve(name).unwrap_or_default();
         let mut eff = effective(name, def, &cli);
         apply_herdr_placement(&mut eff, catalogs.project_root.as_deref(), false);
-        let (strategy, _) = choose_strategy(&eff, tmux_bin().is_some());
+        let configured_terminal = configured_terminal();
+        let (strategy, _) =
+            choose_strategy(&eff, tmux_bin().is_some(), configured_terminal.as_deref());
         if strategy == Strategy::Direct(Some("here".to_string())) {
             bail!(
                 "agent '{name}' in group '@{group}' would launch in the current terminal; groups require separate terminal panes"
@@ -1810,7 +1825,9 @@ fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
         let db = HcomDb::open()?;
         crate::commands::resume::validate_tracked_resume(&db, &eff.name)?;
     }
-    let (strategy, warnings) = choose_strategy(eff, tmux_bin().is_some());
+    let configured_terminal = configured_terminal();
+    let (strategy, warnings) =
+        choose_strategy(eff, tmux_bin().is_some(), configured_terminal.as_deref());
     for w in &warnings {
         eprintln!("warning: {w}");
     }
@@ -2068,7 +2085,9 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     let window_explicit = def.window.is_some() || cli.def.window.is_some();
     let mut eff = effective(instance_name, def, &cli);
     apply_herdr_placement(&mut eff, catalogs.project_root.as_deref(), window_explicit);
-    let (strategy, mut warnings) = choose_strategy(&eff, tmux_bin().is_some());
+    let configured_terminal = configured_terminal();
+    let (strategy, mut warnings) =
+        choose_strategy(&eff, tmux_bin().is_some(), configured_terminal.as_deref());
     warnings.extend(eff.skill_warnings.iter().cloned());
     if let Some(error) = &eff.bundle_access_error {
         warnings.push(error.clone());
@@ -2889,11 +2908,11 @@ mod tests {
     #[test]
     fn strategy_prefers_terminal_command_then_mux_then_preset() {
         let eff = eff_of(r#"{"dir":"/w","terminal_command":"myterm {script}"}"#, &[]);
-        let (s, _) = choose_strategy(&eff, true);
+        let (s, _) = choose_strategy(&eff, true, None);
         assert_eq!(s, Strategy::Custom("myterm {script}".into()));
 
         let eff = eff_of(r#"{"dir":"/w","session":"wdt","terminal":"tmux"}"#, &[]);
-        let (s, w) = choose_strategy(&eff, true);
+        let (s, w) = choose_strategy(&eff, true, None);
         assert_eq!(
             s,
             Strategy::Tmux {
@@ -2904,18 +2923,18 @@ mod tests {
         assert!(w.is_empty());
 
         let eff = eff_of(r#"{"dir":"/w","terminal":"wezterm-tab"}"#, &[]);
-        let (s, _) = choose_strategy(&eff, true);
+        let (s, _) = choose_strategy(&eff, true, None);
         assert_eq!(s, Strategy::Direct(Some("wezterm-tab".into())));
 
         let eff = eff_of(r#"{"dir":"/w"}"#, &[]);
-        let (s, _) = choose_strategy(&eff, true);
+        let (s, _) = choose_strategy(&eff, true, None);
         assert_eq!(s, Strategy::Direct(None));
     }
 
     #[test]
     fn session_falls_back_to_preset_without_tmux() {
         let eff = eff_of(r#"{"dir":"/w","session":"wdt","terminal":"tmux"}"#, &[]);
-        let (s, warnings) = choose_strategy(&eff, false);
+        let (s, warnings) = choose_strategy(&eff, false, None);
         assert_eq!(s, Strategy::Direct(Some("tmux".into())));
         assert!(warnings[0].contains("tmux not found"));
     }
@@ -2926,7 +2945,7 @@ mod tests {
             r#"{"dir":"/w","session":"wdt","terminal":"kitty-tab"}"#,
             &[],
         );
-        let (s, warnings) = choose_strategy(&eff, true);
+        let (s, warnings) = choose_strategy(&eff, true, None);
         assert_eq!(s, Strategy::Direct(Some("kitty-tab".into())));
         assert!(warnings[0].contains("not a multiplexer"));
     }
@@ -2946,7 +2965,7 @@ mod tests {
             eff.env.get("HCOM_HERDR_TAB").map(String::as_str),
             Some("review")
         );
-        let (strategy, warnings) = choose_strategy(&eff, false);
+        let (strategy, warnings) = choose_strategy(&eff, false, None);
         assert_eq!(strategy, Strategy::Direct(Some("herdr".into())));
         assert!(warnings.is_empty());
     }
@@ -2962,9 +2981,17 @@ mod tests {
     #[test]
     fn session_without_terminal_does_not_select_tmux() {
         let eff = eff_of(r#"{"dir":"/w","session":"wdt"}"#, &[]);
-        let (s, warnings) = choose_strategy(&eff, true);
+        let (s, warnings) = choose_strategy(&eff, true, None);
         assert_eq!(s, Strategy::Direct(None));
         assert!(warnings[0].contains("terminal preset 'default'"));
+    }
+
+    #[test]
+    fn session_uses_configured_herdr_without_catalog_terminal() {
+        let eff = eff_of(r#"{"dir":"/w","session":"wdt"}"#, &[]);
+        let (strategy, warnings) = choose_strategy(&eff, true, Some("herdr"));
+        assert_eq!(strategy, Strategy::Direct(None));
+        assert!(warnings.is_empty());
     }
 
     #[test]
