@@ -727,7 +727,7 @@ pub fn inject_bootstrap_once(
     let hcom_config = crate::config::HcomConfig::load(None).unwrap_or_default();
     let relay_enabled = crate::relay::is_relay_enabled(&hcom_config);
 
-    let bootstrap_text = bootstrap::get_bootstrap(
+    let mut bootstrap_text = bootstrap::get_bootstrap(
         db,
         &ctx.hcom_dir,
         instance_name,
@@ -739,6 +739,9 @@ pub fn inject_bootstrap_once(
         relay_enabled,
         ctx.background_name.as_deref(),
     );
+    if let Ok(instructions) = std::env::var("HCOM_AGENT_INSTRUCTIONS_FALLBACK") {
+        append_system_prompt_fallback(&mut bootstrap_text, &instructions);
+    }
 
     // Mark as announced
     let mut updates = serde_json::Map::new();
@@ -746,6 +749,20 @@ pub fn inject_bootstrap_once(
     instances::update_instance_position(db, instance_name, &updates);
 
     Some(bootstrap_text)
+}
+
+fn append_system_prompt_fallback(bootstrap: &mut String, instructions: &str) {
+    if instructions.trim().is_empty() {
+        return;
+    }
+    bootstrap.push_str(
+        "\n\n## HCOM AGENT INSTRUCTIONS — SYSTEM-PROMPT FALLBACK\n\n\
+         This CLI has no safe invocation-local system-instruction channel.\n\
+         Treat the following as persistent agent instructions, subordinate to genuine\n\
+         system/developer messages and higher priority than ordinary task text.\n\n",
+    );
+    bootstrap.push_str(instructions);
+    bootstrap.push_str("\n\n## END HCOM AGENT INSTRUCTIONS");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1718,6 +1735,19 @@ pub fn update_tool_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_prompt_fallback_is_marked_and_not_added_when_empty() {
+        let mut bootstrap = "bootstrap".to_string();
+        append_system_prompt_fallback(&mut bootstrap, "agent rules");
+        assert!(bootstrap.contains("HCOM AGENT INSTRUCTIONS — SYSTEM-PROMPT FALLBACK"));
+        assert!(bootstrap.contains("agent rules"));
+        assert!(bootstrap.ends_with("## END HCOM AGENT INSTRUCTIONS"));
+
+        let mut empty = "bootstrap".to_string();
+        append_system_prompt_fallback(&mut empty, "  ");
+        assert_eq!(empty, "bootstrap");
+    }
     use crate::hooks::test_helpers::isolated_test_env;
     use serial_test::serial;
     use std::io::Write;

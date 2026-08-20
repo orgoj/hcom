@@ -972,7 +972,10 @@ const SHARED_LAUNCH_FLAGS: &[(&str, &str)] = &[
     ("--dir <path>", "Working directory"),
     ("--headless", "Run in background"),
     ("--hcom-prompt <text>", "Initial prompt"),
-    ("--hcom-system-prompt <text>", "System prompt"),
+    (
+        "--hcom-system-prompt <text>",
+        "Invocation-local agent instructions",
+    ),
 ];
 
 /// Shared help body for `hcom r` / `hcom f` (both accept the same target

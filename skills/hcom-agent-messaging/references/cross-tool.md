@@ -34,7 +34,7 @@ Verified behavior when mixing different AI coding tools via hcom.
 - **Payload**: JSON via stdin
 - **Session binding**: On beforeagent hook
 - **Message delivery**: Hook output
-- **System prompt**: Written to `~/.hcom/system-prompts/gemini.md`, set via `GEMINI_SYSTEM_MD` env var
+- **System prompt**: Written per instance under `$HCOM_DIR/system-prompts/gemini/<instance>/`, set via `GEMINI_SYSTEM_MD`
 - **Policy auto-approval**: `~/.gemini/policies/hcom.toml`
 - **Transcript path**: Derived from session_id, searched in `~/.gemini/chats/`
 

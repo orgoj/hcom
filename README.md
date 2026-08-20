@@ -283,7 +283,7 @@ hcom launch flags:
 | `--headless` | Run in background pty with no terminal window |
 | `--device <name>` | Spawn on a remote device (via relay) |
 | `--hcom-prompt <text>` | Initial user prompt |
-| `--hcom-system-prompt <text>` | Append to system prompt |
+| `--hcom-system-prompt <text>` | Invocation-local agent instructions (native channel or marked fallback) |
 
 Anything else is forwarded to the tool: `--model sonnet`, `--yolo`, etc.
 
@@ -291,8 +291,9 @@ Anything else is forwarded to the tool: `--model sonnet`, `--yolo`, etc.
 
 `hcom agent` launches recurring agents from JSON settings and editable bundles. A bundle at
 `~/.hcom/agents/<name>/AGENTS.md` or the nearest project `.hcom/agents/<name>/AGENTS.md` defines an
-agent even without a JSON entry. Its contents follow the fixed `system_prompt`, and it can refer to
-other files in the same bundle. An instance name is unique: launching one that already runs prints
+agent even without a JSON entry. Its contents follow the fixed `system_prompt`; immediate
+`skills/*/SKILL.md` children are advertised through one shared lazy-loading manifest. Both are
+reread on clean start and named resume. An instance name is unique: launching one that already runs prints
 its status and exits. Use `--as` to run the same definition concurrently.
 
 ```bash
@@ -307,7 +308,7 @@ hcom agent edit                     # open the catalog in $EDITOR (creates a sta
 ```
 
 Targeted messages start missing or stopped catalog agents before delivery. Catalog precedence,
-imports, tool profiles, terminal placement, resume behavior, and per-agent skill support are
+imports, tool profiles, terminal placement, resume behavior, instruction transport, and bundle skills are
 documented in [Named agents](docs/agent.md).
 
 ### Other commands

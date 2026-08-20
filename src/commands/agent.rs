@@ -50,7 +50,8 @@ Catalog and bundles (later layers win; env and args merge, scalars replace):
   Every catalog may use \"imports\" to reference all or selected agents from other
   catalogs. Imported layers are applied before the importing file's local entries.
   A sibling agents/<name>/AGENTS.md also defines an agent and is appended to its
-  system prompt after the fixed JSON system_prompt. Project agents fully shadow
+  system instructions after the fixed JSON system_prompt. Bundle-local skills are
+  discovered from agents/<name>/skills/*/SKILL.md. Project agents fully shadow
   same-named non-project agents.
   Relative import paths resolve against the importing file. Relative \"dir\" resolves
   against $HOME globally, the parent of project .hcom (also when imported), or its
@@ -69,7 +70,6 @@ Listing:
 Flags:
   --cli <tool>              claude | codex | gemini | ... (default: {DEFAULT_CLI})
   --dir <path>              Working directory
-  --skills-dir <path>       Extra editable skills directory for this agent
   --terminal <preset>       hcom terminal preset, or \"here\"
   --terminal-command <cmd>  Raw terminal command with {{script}} (passed via HCOM_TERMINAL)
   --session <name>          tmux session or Herdr space/workspace; empty string disables
@@ -148,7 +148,8 @@ fn run(argv: &[String]) -> Result<i32> {
 #[serde(deny_unknown_fields)]
 struct AgentDef {
     dir: Option<String>,
-    skills_dir: Option<String>,
+    #[serde(default)]
+    skills_dir: Option<serde_json::Value>,
     cli: Option<String>,
     terminal: Option<String>,
     terminal_command: Option<String>,
@@ -212,7 +213,6 @@ impl AgentDef {
         }
         take!(
             dir,
-            skills_dir,
             cli,
             terminal,
             terminal_command,
@@ -388,16 +388,12 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
     if let Some(dir) = catalog.defaults.dir.take() {
         catalog.defaults.dir = Some(expand_path(&dir, base));
     }
-    if let Some(dir) = catalog.defaults.skills_dir.take() {
-        catalog.defaults.skills_dir = Some(expand_path(&dir, base));
-    }
+    reject_legacy_skills_dir(&catalog.defaults, "defaults", path)?;
     for def in catalog.agents.values_mut() {
         if let Some(dir) = def.dir.take() {
             def.dir = Some(expand_path(&dir, base));
         }
-        if let Some(dir) = def.skills_dir.take() {
-            def.skills_dir = Some(expand_path(&dir, base));
-        }
+        reject_legacy_skills_dir(def, "agent", path)?;
     }
 
     let agents_dir = path
@@ -413,7 +409,7 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
-            let dir = entry.path();
+            let dir = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path());
             let instructions = dir.join("AGENTS.md");
             if instructions.is_file() {
                 if !crate::identity::is_valid_base_name(&name) {
@@ -903,13 +899,9 @@ fn parse_cli(argv: &[String]) -> Result<Cli> {
                 ));
                 i += 2;
             }
-            "--skills-dir" => {
-                cli.def.skills_dir = Some(expand_path(
-                    &value()?,
-                    &std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-                ));
-                i += 2;
-            }
+            "--skills-dir" => bail!(
+                "--skills-dir was removed; move each skill to agents/<name>/skills/<skill>/SKILL.md"
+            ),
             "--terminal" => {
                 cli.def.terminal = Some(value()?);
                 i += 2;
@@ -1001,7 +993,8 @@ struct Effective {
     name: String,
     cli: String,
     dir: String,
-    skills_dir: Option<String>,
+    skills: Vec<AgentSkill>,
+    skill_warnings: Vec<String>,
     window: String,
     session: Option<String>,
     terminal: Option<String>,
@@ -1019,6 +1012,162 @@ struct Effective {
     resume: bool,
     env: BTreeMap<String, String>,
     extra: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct AgentSkill {
+    name: String,
+    description: String,
+    path: String,
+}
+
+fn reject_legacy_skills_dir(def: &AgentDef, owner: &str, path: &Path) -> Result<()> {
+    if def.skills_dir.is_some() {
+        bail!(
+            "skills_dir in {owner} of {} was removed; move each skill to agents/<name>/skills/<skill>/SKILL.md",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn discover_agent_skills(bundle: &str) -> (Vec<AgentSkill>, Vec<String>) {
+    let bundle = Path::new(bundle);
+    let canonical_bundle = match std::fs::canonicalize(bundle) {
+        Ok(path) => path,
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+    let root = bundle.join("skills");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    paths.sort();
+    let mut skills = Vec::new();
+    let mut warnings = Vec::new();
+    let mut names = BTreeSet::new();
+    for dir in paths {
+        let skill_file = dir.join("SKILL.md");
+        if !skill_file.is_file() {
+            continue;
+        }
+        let Ok(canonical) = std::fs::canonicalize(&skill_file) else {
+            warnings.push(format!(
+                "cannot canonicalize skill {}",
+                skill_file.display()
+            ));
+            continue;
+        };
+        if !canonical.starts_with(&canonical_bundle) {
+            warnings.push(format!(
+                "skipped skill outside bundle: {}",
+                canonical.display()
+            ));
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&canonical) else {
+            warnings.push(format!("cannot read skill {}", canonical.display()));
+            continue;
+        };
+        let basename = dir.file_name().and_then(|s| s.to_str()).unwrap_or("skill");
+        let (name, description, metadata_ok) = parse_skill_metadata(&body, basename);
+        if !metadata_ok {
+            warnings.push(format!(
+                "invalid or incomplete metadata in {}",
+                canonical.display()
+            ));
+        }
+        if !names.insert(name.clone()) {
+            warnings.push(format!(
+                "duplicate skill name '{name}' at {}",
+                canonical.display()
+            ));
+        }
+        skills.push(AgentSkill {
+            name,
+            description,
+            path: canonical.to_string_lossy().into_owned(),
+        });
+    }
+    (skills, warnings)
+}
+
+fn parse_skill_metadata(body: &str, basename: &str) -> (String, String, bool) {
+    let normalized = body.replace("\r\n", "\n");
+    let body = normalized.as_str();
+    let mut name = None;
+    let mut description = None;
+    let mut metadata_ok = false;
+    let mut content = body;
+    if let Some(rest) = body.strip_prefix("---\n")
+        && let Some(end) = rest.find("\n---")
+    {
+        metadata_ok = true;
+        for line in rest[..end].lines() {
+            if let Some(value) = line.strip_prefix("name:") {
+                name = Some(value.trim().trim_matches(['\'', '"']).to_string());
+            } else if let Some(value) = line.strip_prefix("description:") {
+                description = Some(value.trim().trim_matches(['\'', '"']).to_string());
+            }
+        }
+        content = &rest[end + 4..];
+    }
+    let fallback_description = content
+        .lines()
+        .find_map(|line| {
+            let heading = line
+                .trim()
+                .strip_prefix('#')?
+                .trim_start_matches('#')
+                .trim();
+            (!heading.is_empty()).then(|| heading.to_string())
+        })
+        .unwrap_or_else(|| "Agent-local skill; read SKILL.md for details.".into());
+    let valid = metadata_ok
+        && name.as_ref().is_some_and(|v| !v.is_empty())
+        && description.as_ref().is_some_and(|v| !v.is_empty());
+    (
+        name.filter(|v| !v.is_empty())
+            .unwrap_or_else(|| basename.to_string()),
+        description
+            .filter(|v| !v.is_empty())
+            .unwrap_or(fallback_description),
+        valid,
+    )
+}
+
+fn build_agent_instructions(
+    fixed: Option<String>,
+    bundle_dir: Option<&str>,
+    instruction_path: Option<String>,
+    instruction_body: Option<String>,
+    skills: &[AgentSkill],
+) -> Option<String> {
+    let mut sections = Vec::new();
+    if let Some(fixed) = fixed {
+        sections.push(fixed);
+    }
+    if let (Some(dir), Some(path), Some(body)) = (bundle_dir, instruction_path, instruction_body) {
+        sections.push(format!(
+            "# Agent bundle instructions\n\nBundle directory: `{dir}`\nInstruction file: `{path}`\n\nResolve relative paths mentioned by these instructions from the bundle directory.\nThe bundle is editable when the selected CLI supports the granted workspace access.\n\n{body}"
+        ));
+    }
+    if !skills.is_empty() {
+        let mut manifest = String::from(
+            "# Available agent skills\n\nThe following skills belong to this agent. When a task matches a description,\nread the referenced SKILL.md completely before using it. Resolve its relative\nreferences from that skill directory.",
+        );
+        for skill in skills {
+            manifest.push_str(&format!(
+                "\n\n## {}\n\nDescription: {}\nInstructions: `{}`",
+                skill.name, skill.description, skill.path
+            ));
+        }
+        sections.push(manifest);
+    }
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
 fn nonempty(v: Option<String>) -> Option<String> {
@@ -1050,20 +1199,18 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
     let mut extra = std::mem::take(&mut def.args);
     extra.extend(cli.passthrough.iter().cloned());
 
-    let fixed_system_prompt = nonempty(def.system_prompt);
-    let system_prompt = nonempty(def.instructions_content).map_or(fixed_system_prompt.clone(), |body| {
-        let path = def
-            .agent_dir
-            .as_deref()
-            .unwrap_or(".");
-        let bundle = format!(
-            "# AGENTS.md instructions for {path}\n\nResolve relative paths mentioned below from this agent bundle directory.\n\n{body}"
-        );
-        match fixed_system_prompt {
-            Some(fixed) => Some(format!("{fixed}\n\n{bundle}")),
-            None => Some(bundle),
-        }
-    });
+    let (skills, skill_warnings) = def
+        .agent_dir
+        .as_deref()
+        .map(discover_agent_skills)
+        .unwrap_or_default();
+    let system_prompt = build_agent_instructions(
+        nonempty(def.system_prompt),
+        def.agent_dir.as_deref(),
+        nonempty(def.instructions.clone()),
+        nonempty(def.instructions_content),
+        &skills,
+    );
 
     let mut effective = Effective {
         name: name.to_string(),
@@ -1073,7 +1220,8 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| ".".to_string())
         }),
-        skills_dir: nonempty(def.skills_dir),
+        skills,
+        skill_warnings,
         window: nonempty(def.window).unwrap_or_else(|| name.to_string()),
         session: nonempty(def.session),
         terminal: nonempty(def.terminal),
@@ -1092,7 +1240,6 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         env: def.env,
         extra,
     };
-    apply_skills_config(&mut effective);
     apply_bundle_access(&mut effective);
     effective
 }
@@ -1138,33 +1285,6 @@ fn apply_bundle_access(eff: &mut Effective) {
                 eff.cli, dir
             ));
         }
-    }
-}
-
-fn apply_skills_config(eff: &mut Effective) {
-    let Some(dir) = eff.skills_dir.clone() else {
-        return;
-    };
-
-    match eff.cli.as_str() {
-        "opencode" => merge_inline_json_env(
-            &mut eff.env,
-            "OPENCODE_CONFIG_CONTENT",
-            serde_json::json!({ "skills": [dir] }),
-        ),
-        "kilo" => merge_inline_json_env(
-            &mut eff.env,
-            "KILO_CONFIG_CONTENT",
-            serde_json::json!({ "skills": { "paths": [dir] } }),
-        ),
-        "copilot" => {
-            let value = match eff.env.get("COPILOT_SKILLS_DIRS") {
-                Some(existing) if !existing.trim().is_empty() => format!("{existing},{dir}"),
-                _ => dir,
-            };
-            eff.env.insert("COPILOT_SKILLS_DIRS".into(), value);
-        }
-        _ => {}
     }
 }
 
@@ -1291,7 +1411,6 @@ fn hcom_argv(eff: &Effective, terminal: Option<&str>, resume: bool) -> Vec<Strin
         v.push(s.clone());
     }
     v.extend(eff.bundle_args.iter().cloned());
-    add_skills_args(eff, &mut v);
     v.push("--go".into());
     // Tool-level args last.
     if let Some(m) = &eff.model {
@@ -1300,70 +1419,6 @@ fn hcom_argv(eff: &Effective, terminal: Option<&str>, resume: bool) -> Vec<Strin
     }
     v.extend(eff.extra.iter().cloned());
     v
-}
-
-fn add_skills_args(eff: &Effective, argv: &mut Vec<String>) {
-    let Some(dir) = &eff.skills_dir else {
-        return;
-    };
-    match eff.cli.as_str() {
-        "codex" => {
-            let Ok(skill_dirs) = discover_codex_skill_dirs(Path::new(dir)) else {
-                return;
-            };
-            if skill_dirs.is_empty() {
-                return;
-            }
-            let config = toml::Value::Array(
-                skill_dirs
-                    .into_iter()
-                    .map(|path| {
-                        toml::Value::Table(toml::Table::from_iter([
-                            ("enabled".into(), toml::Value::Boolean(true)),
-                            (
-                                "path".into(),
-                                toml::Value::String(path.to_string_lossy().into_owned()),
-                            ),
-                        ]))
-                    })
-                    .collect(),
-            );
-            argv.push("-c".into());
-            argv.push(format!("skills.config={config}"));
-        }
-        // Claude plugins discover skills from <plugin-root>/skills. Treat the
-        // configured directory as that skills directory and pass its parent.
-        "claude" => {
-            let root = Path::new(dir).parent().unwrap_or_else(|| Path::new(dir));
-            argv.push("--plugin-dir".into());
-            argv.push(root.to_string_lossy().into_owned());
-        }
-        "kimi" => {
-            argv.push("--skills-dir".into());
-            argv.push(dir.clone());
-        }
-        "pi" => {
-            argv.push("--skill".into());
-            argv.push(dir.clone());
-        }
-        _ => {}
-    }
-}
-
-fn discover_codex_skill_dirs(root: &Path) -> std::io::Result<Vec<PathBuf>> {
-    let mut dirs = std::fs::read_dir(root)?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_dir() && path.join("SKILL.md").is_file())
-        .collect::<Vec<_>>();
-    dirs.sort();
-    Ok(dirs)
-}
-
-fn supports_skills_dir(cli: &str) -> bool {
-    matches!(
-        cli,
-        "claude" | "codex" | "kimi" | "pi" | "opencode" | "kilo" | "copilot"
-    )
 }
 
 /// Shell line executed inside a multiplexer window.
@@ -1750,18 +1805,6 @@ fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
     if let Some(error) = &eff.bundle_access_error {
         bail!("{error}");
     }
-    if eff.skills_dir.is_some() && !supports_skills_dir(&eff.cli) {
-        bail!(
-            "{} does not support an invocation-local extra skills directory; skills_dir cannot be applied without changing that CLI's persistent profile or workspace",
-            eff.cli
-        );
-    }
-    if eff.cli == "codex"
-        && let Some(dir) = &eff.skills_dir
-    {
-        discover_codex_skill_dirs(Path::new(dir))
-            .map_err(|error| anyhow::anyhow!("cannot read Codex skills_dir {dir}: {error}"))?;
-    }
     if resume {
         let db = HcomDb::open()?;
         crate::commands::resume::validate_tracked_resume(&db, &eff.name)?;
@@ -1898,7 +1941,7 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
                 "dir": eff.dir,
                 "agent_dir": eff.agent_dir,
                 "instructions": eff.instructions,
-                "skills_dir": eff.skills_dir,
+                "skills": eff.skills,
                 "session": eff.session,
                 "window": eff.window,
                 "terminal": eff.terminal,
@@ -1987,12 +2030,7 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     let mut eff = effective(instance_name, def, &cli);
     apply_herdr_placement(&mut eff, catalogs.project_root.as_deref(), window_explicit);
     let (strategy, mut warnings) = choose_strategy(&eff, tmux_bin().is_some());
-    if eff.skills_dir.is_some() && !supports_skills_dir(&eff.cli) {
-        warnings.push(format!(
-            "{} cannot apply skills_dir without changing its persistent profile or workspace",
-            eff.cli
-        ));
-    }
+    warnings.extend(eff.skill_warnings.iter().cloned());
     if let Some(error) = &eff.bundle_access_error {
         warnings.push(error.clone());
     }
@@ -2000,8 +2038,11 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     println!("name:      {}", eff.name);
     println!("cli:       {}", eff.cli);
     println!("dir:       {}", eff.dir);
-    if let Some(dir) = &eff.skills_dir {
-        println!("skills:    {dir}");
+    for skill in &eff.skills {
+        println!(
+            "skill:     {} — {} ({})",
+            skill.name, skill.description, skill.path
+        );
     }
     if let Some(dir) = &eff.agent_dir {
         println!("bundle:    {dir}");
@@ -2385,9 +2426,88 @@ mod tests {
         def.instructions_content = Some("learned".into());
         let eff = effective("reviewer", def, &Cli::default());
         let prompt = eff.system_prompt.unwrap();
-        assert!(prompt.starts_with("fixed\n\n# AGENTS.md instructions for "));
+        assert!(prompt.starts_with("fixed\n\n# Agent bundle instructions\n\nBundle directory: `/work/.hcom/agents/reviewer`\nInstruction file: `/work/.hcom/agents/reviewer/AGENTS.md`"));
         assert!(prompt.ends_with("learned"));
         assert!(eff.bundle_args.is_empty(), "bundle is inside workspace");
+    }
+
+    #[test]
+    fn skill_metadata_fallbacks_and_manifest_are_deterministic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("reviewer");
+        std::fs::create_dir_all(bundle.join("skills/zeta")).unwrap();
+        std::fs::create_dir_all(bundle.join("skills/alpha")).unwrap();
+        std::fs::write(
+            bundle.join("skills/zeta/SKILL.md"),
+            "---\nname: inspect\ndescription: Inspect releases\n---\n# Ignored",
+        )
+        .unwrap();
+        std::fs::write(bundle.join("skills/alpha/SKILL.md"), "# Alpha fallback").unwrap();
+
+        let (skills, warnings) = discover_agent_skills(bundle.to_str().unwrap());
+        assert_eq!(
+            skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["alpha", "inspect"]
+        );
+        assert_eq!(skills[0].description, "Alpha fallback");
+        assert_eq!(warnings.len(), 1);
+
+        let prompt = build_agent_instructions(None, None, None, None, &skills).unwrap();
+        assert!(prompt.starts_with("# Available agent skills"));
+        assert!(prompt.find("## alpha").unwrap() < prompt.find("## inspect").unwrap());
+        assert!(prompt.contains(&skills[0].path));
+    }
+
+    #[test]
+    fn skill_metadata_accepts_windows_crlf() {
+        let (name, description, valid) = parse_skill_metadata(
+            "---\r\nname: windows\r\ndescription: Works everywhere\r\n---\r\n# Heading\r\n",
+            "fallback",
+        );
+        assert!(valid);
+        assert_eq!(name, "windows");
+        assert_eq!(description, "Works everywhere");
+    }
+
+    #[test]
+    fn duplicate_skill_names_warn_without_dropping_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("reviewer");
+        for dir in ["one", "two"] {
+            std::fs::create_dir_all(bundle.join("skills").join(dir)).unwrap();
+            std::fs::write(
+                bundle.join("skills").join(dir).join("SKILL.md"),
+                "---\nname: same\ndescription: Shared\n---\n",
+            )
+            .unwrap();
+        }
+        let (skills, warnings) = discover_agent_skills(bundle.to_str().unwrap());
+        assert_eq!(skills.len(), 2);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("duplicate skill name"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_symlink_escape_is_skipped() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("reviewer");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(bundle.join("skills")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("SKILL.md"), "# Escape").unwrap();
+        symlink(&outside, bundle.join("skills/escape")).unwrap();
+        let (skills, warnings) = discover_agent_skills(bundle.to_str().unwrap());
+        assert!(skills.is_empty());
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("outside bundle"))
+        );
     }
 
     #[test]
@@ -2455,7 +2575,7 @@ mod tests {
         std::fs::write(
             project.join(PROJECT_FILE),
             r#"{"defaults":{"cli":"codex"},"agents":{
-                "wdt_main":{"dir":"work","skills_dir":".hcom/agents/wdt_main/skills","model":"base"},
+                "wdt_main":{"dir":"work","model":"base"},
                 "private":{"dir":"private"}}}"#,
         )
         .unwrap();
@@ -2484,15 +2604,6 @@ mod tests {
         assert_eq!(
             wdt.dir.as_deref(),
             Some(project.join("work").to_string_lossy().as_ref())
-        );
-        assert_eq!(
-            wdt.skills_dir.as_deref(),
-            Some(
-                project
-                    .join(".hcom/agents/wdt_main/skills")
-                    .to_string_lossy()
-                    .as_ref()
-            )
         );
         assert!(catalogs.resolve("private").is_none());
         assert_eq!(
@@ -2847,120 +2958,14 @@ mod tests {
     }
 
     #[test]
-    fn skills_dir_is_additive_and_editable_for_native_cli_adapters() {
-        let claude = eff_of(
-            r#"{"dir":"/w","cli":"claude","skills_dir":"/profiles/backend/skills"}"#,
-            &[],
-        );
-        let argv = hcom_argv(&claude, None, false);
+    fn skills_dir_has_targeted_migration_error() {
+        let error = parse_cli(&["--skills-dir".into(), "/old".into()])
+            .err()
+            .expect("legacy flag rejected");
         assert!(
-            argv.windows(2)
-                .any(|v| v == ["--plugin-dir", "/profiles/backend"])
-        );
-
-        let kimi = eff_of(
-            r#"{"dir":"/w","cli":"kimi","skills_dir":"/profiles/backend/skills"}"#,
-            &[],
-        );
-        assert!(
-            hcom_argv(&kimi, None, false)
-                .windows(2)
-                .any(|v| v == ["--skills-dir", "/profiles/backend/skills"])
-        );
-
-        let pi = eff_of(
-            r#"{"dir":"/w","cli":"pi","skills_dir":"/profiles/backend/skills"}"#,
-            &[],
-        );
-        assert!(
-            hcom_argv(&pi, None, false)
-                .windows(2)
-                .any(|v| v == ["--skill", "/profiles/backend/skills"])
-        );
-    }
-
-    #[test]
-    fn unsupported_clis_reject_skills_dir_instead_of_faking_discovery() {
-        for tool in ["antigravity", "gemini", "omp", "cursor", "hermes"] {
-            let eff = eff_of(
-                &format!(
-                    r#"{{"dir":"/w","cli":"{tool}","skills_dir":"/profiles/backend/skills"}}"#
-                ),
-                &[],
-            );
-            let cli = Cli {
-                dry_run: true,
-                ..Cli::default()
-            };
-            let error = launch(&eff, &cli, false).unwrap_err().to_string();
-            assert!(error.contains("does not support"), "{tool}: {error}");
-        }
-    }
-
-    #[test]
-    fn codex_receives_each_skill_folder_in_an_invocation_local_override() {
-        let temp = tempfile::tempdir().unwrap();
-        let skills = temp.path().join("skills");
-        std::fs::create_dir_all(skills.join("release")).unwrap();
-        std::fs::create_dir_all(skills.join("review")).unwrap();
-        std::fs::create_dir_all(skills.join("not-a-skill")).unwrap();
-        std::fs::write(skills.join("release/SKILL.md"), "release").unwrap();
-        std::fs::write(skills.join("review/SKILL.md"), "review").unwrap();
-
-        let eff = eff_of(
-            &format!(
-                r#"{{"dir":"/w","cli":"codex","skills_dir":"{}"}}"#,
-                skills.display()
-            ),
-            &[],
-        );
-        let argv = hcom_argv(&eff, None, false);
-        let config = argv
-            .windows(2)
-            .find(|pair| pair[0] == "-c")
-            .map(|pair| &pair[1])
-            .unwrap();
-
-        assert!(config.starts_with("skills.config="));
-        assert!(config.contains(&skills.join("release").to_string_lossy().into_owned()));
-        assert!(config.contains(&skills.join("review").to_string_lossy().into_owned()));
-        assert!(!config.contains("not-a-skill"));
-        assert!(config.find("release").unwrap() < config.find("review").unwrap());
-        assert!(config.contains("enabled = true"));
-    }
-
-    #[test]
-    fn opencode_and_kilo_receive_additive_inline_skill_config() {
-        let opencode = eff_of(
-            r#"{"dir":"/w","cli":"opencode","skills_dir":"/profiles/backend/skills","env":{"OPENCODE_CONFIG_CONTENT":"{\"skills\":[\"/shared\"],\"theme\":\"dark\"}"}}"#,
-            &[],
-        );
-        let config: serde_json::Value =
-            serde_json::from_str(opencode.env.get("OPENCODE_CONFIG_CONTENT").unwrap()).unwrap();
-        assert_eq!(
-            config["skills"],
-            serde_json::json!(["/shared", "/profiles/backend/skills"])
-        );
-        assert_eq!(config["theme"], "dark");
-
-        let kilo = eff_of(
-            r#"{"dir":"/w","cli":"kilo","skills_dir":"/profiles/backend/skills"}"#,
-            &[],
-        );
-        let config: serde_json::Value =
-            serde_json::from_str(kilo.env.get("KILO_CONFIG_CONTENT").unwrap()).unwrap();
-        assert_eq!(
-            config["skills"]["paths"],
-            serde_json::json!(["/profiles/backend/skills"])
-        );
-
-        let copilot = eff_of(
-            r#"{"dir":"/w","cli":"copilot","skills_dir":"/profiles/backend/skills","env":{"COPILOT_SKILLS_DIRS":"/shared"}}"#,
-            &[],
-        );
-        assert_eq!(
-            copilot.env.get("COPILOT_SKILLS_DIRS").map(String::as_str),
-            Some("/shared,/profiles/backend/skills")
+            error
+                .to_string()
+                .contains("agents/<name>/skills/<skill>/SKILL.md")
         );
     }
 

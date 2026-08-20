@@ -37,8 +37,8 @@ The project search walks parent directories until it finds the nearest `.hcom`, 
 Git boundaries. The global `~/.hcom` is never a project scope. A project agent fully shadows a
 same-named global/additive agent instead of inheriting its fields.
 
-Scalar fields replace earlier values. `env`, `args`, and tool profiles merge. Relative `dir` and
-`skills_dir` paths use `$HOME` in the global catalog, the directory containing `.hcom` in project
+Scalar fields replace earlier values. `env`, `args`, and tool profiles merge. Relative `dir`
+paths use `$HOME` in the global catalog, the directory containing `.hcom` in project
 catalogs (including when imported), and the catalog directory in other imported/additive
 catalogs. hcom expands `~` and environment variables.
 
@@ -62,17 +62,21 @@ Global and project layouts are identical:
 └── agents/                     └── agents/
     └── reviewer/                   └── reviewer/
         ├── AGENTS.md                   ├── AGENTS.md
-        └── checklist.md                └── checklist.md
+        └── skills/                     └── skills/
+            └── review/                     └── review/
+                └── SKILL.md                    └── SKILL.md
 ```
 
 `agents/<name>/AGENTS.md` defines an agent even without a matching JSON entry. A JSON-only agent
 also remains valid. Discovered directory names must contain only lowercase letters, numbers, and
 underscores.
 
-The effective system prompt is the fixed JSON `system_prompt`, followed by the bundle path and the
-current `AGENTS.md`. `prompt` remains the initial user message. hcom rereads `AGENTS.md` on every
-clean start and resume, so an agent can improve instructions for its next launch. Other files are
-loaded only when `AGENTS.md` refers to them, relative to the bundle directory.
+The effective `agent_instructions` contains the fixed JSON `system_prompt`, then an `# Agent bundle
+instructions` section with absolute bundle and `AGENTS.md` paths and its current contents, then an
+`# Available agent skills` manifest. Empty sections are omitted. `prompt` remains the initial user
+message. hcom rereads `AGENTS.md` and skills on every clean start and named-agent resume, so an
+agent may improve its bundle for its next launch. Relative references resolve from the bundle or
+skill directory named in the manifest.
 
 If a bundle is outside the working directory, hcom grants only that directory through the CLI's
 additional-workspace mechanism. Launch fails clearly when the CLI cannot make it writable at
@@ -90,7 +94,6 @@ startup.
   "agents": {
     "wdt_main": {
       "dir": "~/work/wdt/ansible-wdt",
-      "skills_dir": ".hcom/agents/wdt_main/skills",
       "cli": "codex",
       "session": "wdt",
       "window": "review",
@@ -120,7 +123,6 @@ Supported agent fields:
 | Field | Purpose |
 |---|---|
 | `dir` | CLI working directory |
-| `skills_dir` | Additional editable skills belonging only to this named agent |
 | `cli` | CLI selected by default |
 | `terminal` | hcom terminal preset, or `here` |
 | `terminal_command` | Raw terminal command containing `{script}` |
@@ -185,9 +187,9 @@ the value is displayed.
 
 ## Private agent skills
 
-`skills_dir` adds an editable skill collection for one named agent. hcom passes it only to the
-selected CLI invocation. It does not change `HOME`, the CLI's own home directory, or the working
-directory. Normal user, project, and plugin skills remain available.
+Private skills live only under `<bundle>/skills/`. Each immediate child containing `SKILL.md` is
+listed in the common lazy-loading manifest; hcom does not register it through a CLI-specific skill
+system. Normal user, project, and plugin skills remain available.
 
 Use one child directory per skill:
 
@@ -201,25 +203,31 @@ Use one child directory per skill:
     └── scripts/
 ```
 
-Support depends on the selected CLI:
+YAML frontmatter supplies `name` and `description`. Missing or malformed values fall back to the
+directory basename and first Markdown heading, then to `Agent-local skill; read SKILL.md for
+details.` `hcom agent show` warns about malformed metadata, duplicate names, and skipped symlinks
+that escape the bundle. `hcom agent ls --json` exposes `{name, description, path}` entries.
 
-| CLI | Support | Invocation-local mechanism | Notes |
-|---|---:|---|---|
-| Claude | yes | `--plugin-dir <parent-of-skills_dir>` | `skills_dir` must be named `skills`. Claude loads it as the plugin's standard `skills/` directory; a manifest is optional. Skills are namespaced by the plugin directory name. |
-| Codex | yes | `-c skills.config=[...]` | hcom passes each immediate child containing `SKILL.md`. Other children are ignored. |
-| Kimi | yes | `--skills-dir <skills_dir>` | The collection stays in place. |
-| Pi | yes | `--skill <skills_dir>` | The collection stays in place. |
-| OpenCode | yes | `OPENCODE_CONFIG_CONTENT.skills` | hcom merges the path with existing inline configuration. |
-| Kilo | yes | `KILO_CONFIG_CONTENT.skills.paths` | hcom merges the path with existing inline configuration. |
-| Copilot | yes | `COPILOT_SKILLS_DIRS` | hcom appends the path to an existing value. |
-| Antigravity | no | none | hcom rejects `skills_dir`. |
-| Gemini | no | none | hcom rejects `skills_dir`. |
-| OMP | no | none | hcom rejects `skills_dir`. |
-| Cursor | no | none | hcom rejects `skills_dir`. |
-| Hermes | no | none | hcom rejects `skills_dir`. |
+`skills_dir` and `--skills-dir` have been removed. Move each old skill to
+`agents/<name>/skills/<skill>/SKILL.md`; old configuration produces a targeted migration error.
 
-The unsupported adapters fail explicitly. Filesystem permission flags such as `--add-dir` do not
-count as skill discovery.
+## Instruction transport
+
+| CLI | Invocation-local transport |
+|---|---|
+| Claude / Claude PTY | `--append-system-prompt` |
+| Codex | `-c developer_instructions=...` |
+| Gemini | per-instance `GEMINI_SYSTEM_MD` file |
+| Pi | `--append-system-prompt` |
+| OMP | `--append-system-prompt=...` |
+| OpenCode / Kilo | per-instance Markdown path merged into inline `instructions` |
+| Copilot | per-instance `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` |
+| Hermes | `HERMES_EPHEMERAL_SYSTEM_PROMPT` |
+| Antigravity / Cursor / Kimi | marked fallback in the existing one-time hcom bootstrap |
+
+Per-instance files are stored under `$HCOM_DIR/system-prompts/<tool>/<instance>/`. The fallback is
+an approximation: it is subordinate to genuine system/developer messages, though agents are told
+to treat it above ordinary task text. It is not emitted as a separate user task or meta-turn.
 
 Use `hcom agent show <name> --cli <tool>` to inspect the exact effective command before launch.
 

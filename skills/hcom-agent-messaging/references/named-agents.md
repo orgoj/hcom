@@ -23,7 +23,7 @@ Global defaults apply to the non-project catalog group. Project agents resolve i
 do not inherit global fields. Within each group, scalar fields replace earlier values while `env`,
 `args`, `groups`, and matching `tools` profiles merge.
 
-Relative `dir` and `skills_dir` values resolve from `$HOME` globally, from the directory containing
+Relative `dir` values resolve from `$HOME` globally, from the directory containing
 `.hcom` for project catalogs (including when imported), and from the catalog directory for other
 additive/imported catalogs.
 
@@ -31,8 +31,9 @@ Keep paths in project catalogs relative to the project root. Do not store machin
 absolute paths in a versioned `.hcom/agents.json`; use absolute or `~`-based paths only in
 machine-local catalogs such as `~/.hcom/agents.json`.
 
-The fixed JSON `system_prompt` is followed by the current `AGENTS.md`. hcom rereads it on every
-launch/resume, and files referenced by it resolve relative to the bundle. For an external bundle,
+The fixed JSON `system_prompt` is followed by the current `AGENTS.md` and a manifest of immediate
+`skills/*/SKILL.md` children. hcom rereads both on every clean launch/named resume, and referenced
+files resolve relative to their bundle or skill directory. For an external bundle,
 hcom grants only that directory when the CLI supports startup-time additional workspaces;
 otherwise launch fails clearly.
 
@@ -265,7 +266,7 @@ installed integrations own classification, lifecycle state, and resume metadata.
 
 Agent and `defaults` fields:
 
-- `cli`, `dir`, `skills_dir`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`
+- `cli`, `dir`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`
 - `prompt`, `system_prompt`, `pre`, and boolean `resume`
 - `env` object and `args` array
 - `tools` object keyed by CLI name
