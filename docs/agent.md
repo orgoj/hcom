@@ -10,6 +10,7 @@ hcom agent @wdt                     # launch every member of the wdt catalog gro
 hcom agent wdt_main --as wdt_review # same config, independent instance named wdt_review
 hcom agent wdt_main --cli codex     # override the configured CLI
 hcom agent ls                       # catalog entries, effective CLI/model, status, and source
+hcom agent ls @wdt                  # show only members of the wdt catalog group
 hcom agent ls --all                 # include agents hidden by recursive selective imports
 hcom agent show wdt_main            # effective configuration and exact command
 hcom agent attach wdt_main          # focus its managed terminal window

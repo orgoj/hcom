@@ -1627,6 +1627,15 @@ fn agent_group_dry_run_includes_agents_hidden_by_selective_import() {
     assert_eq!(code, 0, "stdout={groups} stderr={stderr}");
     assert_eq!(groups.trim(), "@crew");
 
+    let (code, members, stderr) = h.run(["agent", "ls", "@crew", "--names", "--no-project"]);
+    assert_eq!(code, 0, "stdout={members} stderr={stderr}");
+    assert_eq!(members.trim(), "private\npublic");
+
+    let (code, json, stderr) = h.run(["agent", "ls", "@crew", "--json", "--no-project"]);
+    assert_eq!(code, 0, "stdout={json} stderr={stderr}");
+    let listed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON listing");
+    assert_eq!(listed.as_array().map(Vec::len), Some(2));
+
     let (code, stdout, stderr) = h.run([
         "agent",
         "@crew",

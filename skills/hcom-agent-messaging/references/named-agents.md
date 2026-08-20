@@ -109,6 +109,7 @@ hcom agent reviewer --as review_api
 hcom agent show reviewer       # effective configuration and exact launch command
 hcom agent reviewer --dry-run  # render without launching
 hcom agent ls
+hcom agent ls @app             # show only members of one catalog group
 hcom agent ls --all            # include agents hidden by recursive selective imports
 hcom agent attach reviewer
 hcom agent reviewer --restart

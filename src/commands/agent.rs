@@ -32,8 +32,8 @@ pub fn help_text() -> String {
         "Usage:
   hcom agent <name> [flags] [tool-args...]   Launch a catalog agent (no-op if already running)
   hcom agent @<group> [flags]                Launch every agent in a catalog group
-  hcom agent ls [--all] [--json] [--names|--groups]
-                                             Catalog entries, names, or reachable groups
+  hcom agent ls [@<group>] [--all] [--json] [--names|--groups]
+                                             Catalog entries, filtered names, or reachable groups
   hcom agent show <name>                     Effective config and the exact command
   hcom agent attach <name>                   Focus a running agent's window
   hcom agent edit [--project]                Open a catalog in $EDITOR (creates a starter file)
@@ -64,6 +64,7 @@ Catalog groups:
   imports, including agents omitted by a selective import's \"agents\" list.
 
 Listing:
+  @<group>                  Show only members of one catalog group
   --all                     Include all agents from recursively reachable imports
   Table and JSON output show the effective model for the selected CLI.
 
@@ -1892,10 +1893,21 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
     let names_only = cli.passthrough.iter().any(|a| a == "--names");
     let groups_only = cli.passthrough.iter().any(|a| a == "--groups");
     let all = cli.passthrough.iter().any(|a| a == "--all");
+    let group_filters: Vec<&str> = cli
+        .passthrough
+        .iter()
+        .filter_map(|arg| arg.strip_prefix('@'))
+        .collect();
     if names_only && groups_only {
         bail!("--names and --groups cannot be used together");
     }
-    let catalogs = if groups_only || all {
+    if group_filters.len() > 1 {
+        bail!("agent ls accepts at most one @<group> filter");
+    }
+    if groups_only && !group_filters.is_empty() {
+        bail!("@<group> and --groups cannot be used together");
+    }
+    let catalogs = if groups_only || all || !group_filters.is_empty() {
         Catalogs::load_for_groups(cli.no_project, cli.catalog.as_deref())?
     } else {
         Catalogs::load(cli.no_project, cli.catalog.as_deref())?
@@ -1906,7 +1918,34 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
         }
         return Ok(0);
     }
-    let names = catalogs.names();
+    let mut names = catalogs.names();
+    if let Some(group) = group_filters.first() {
+        if group.is_empty() || !crate::identity::is_valid_base_name(group) {
+            bail!(
+                "invalid agent group '{group}': use @ followed by lowercase letters, numbers, and underscore"
+            );
+        }
+        let members = catalogs.group_members(group);
+        if members.is_empty() {
+            let groups = catalogs.group_names();
+            let mut message = format!("unknown or empty agent group '@{group}'");
+            if let Some(close) = closest(group, groups.iter()) {
+                message.push_str(&format!(" (did you mean '@{close}'?)"));
+            }
+            if !groups.is_empty() {
+                message.push_str(&format!(
+                    "\nAvailable groups: {}",
+                    groups
+                        .into_iter()
+                        .map(|name| format!("@{name}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            bail!(message);
+        }
+        names.retain(|name, _| members.contains(name));
+    }
 
     if names_only {
         for name in names.keys() {
