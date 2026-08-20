@@ -71,8 +71,9 @@ Each catalog discovers bundles in a sibling `agents/` directory, including bundl
 Missing files, requested names, and import cycles are errors.
 
 Selective imports remain the visibility boundary for normal listing, direct launch, and message
-routing. `hcom agent @<group>` is the explicit exception: it considers all agents in every
-recursively reachable import, including agents omitted by an import's `agents` list. This supports
+routing. `hcom agent ls --all` and `hcom agent @<group>` are explicit exceptions: they consider all
+agents in every recursively reachable import, including agents omitted by an import's `agents`
+list. The listing flag also works with `--names` and `--json`. This supports inspecting agents or
 starting a project group from another directory while keeping its other agents out of the normal
 external address book. hcom does not discover unrelated catalogs by scanning the filesystem.
 
@@ -107,6 +108,7 @@ hcom agent reviewer --as review_api
 hcom agent show reviewer       # effective configuration and exact launch command
 hcom agent reviewer --dry-run  # render without launching
 hcom agent ls
+hcom agent ls --all            # include agents hidden by recursive selective imports
 hcom agent attach reviewer
 hcom agent reviewer --restart
 hcom agent reviewer --resume
@@ -114,6 +116,9 @@ hcom agent reviewer --clean
 ```
 
 Use `hcom agent edit` for the global catalog or `hcom agent edit --project` for the project catalog.
+
+The listing shows the effective CLI and its resolved model. An unset table value is `-`; JSON uses
+`model: null`. Models from the selected CLI's tool profile are resolved before display.
 
 `groups` is a list of catalog-only launch sets; it does not affect runtime display names, message
 routing, or `hcom kill tag:...`. `hcom agent @<group>` processes members in name order, applies its

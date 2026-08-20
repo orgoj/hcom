@@ -9,7 +9,8 @@ hcom agent wdt_main                 # launch, or report that it is already runni
 hcom agent @wdt                     # launch every member of the wdt catalog group
 hcom agent wdt_main --as wdt_review # same config, independent instance named wdt_review
 hcom agent wdt_main --cli codex     # override the configured CLI
-hcom agent ls                       # catalog entries, live status, and source file
+hcom agent ls                       # catalog entries, effective CLI/model, status, and source
+hcom agent ls --all                 # include agents hidden by recursive selective imports
 hcom agent show wdt_main            # effective configuration and exact command
 hcom agent attach wdt_main          # focus its managed terminal window
 hcom agent edit                     # edit the global catalog
@@ -171,11 +172,16 @@ Every imported or additive catalog discovers bundles in an `agents/` directory b
 catalog file; bundle-only agents participate in selective imports normally.
 
 For normal listing, direct launch, and message routing, an import's `agents` list remains a
-visibility boundary. `hcom agent @<group>` deliberately traverses every recursively reachable
-import and considers all of its agents, including entries omitted by a selective import. This lets
-a global catalog act as a registry from which a project group can be started without changing to
-that project's directory. hcom does not scan the filesystem for unrelated project catalogs; they
-must be reachable through an import.
+visibility boundary. `hcom agent ls --all` and `hcom agent @<group>` deliberately traverse every
+recursively reachable import and consider all of its agents, including entries omitted by a
+selective import. `--all` also works with the `--names` and `--json` listing formats. This lets a
+global catalog act as a registry from which agents can be inspected or a project group can be
+started without changing to that project's directory. hcom does not scan the filesystem for
+unrelated project catalogs; they must be reachable through an import.
+
+The table produced by `hcom agent ls` shows each agent's effective CLI and model. An unset model is
+shown as `-`; JSON output includes it as `model: null`. Per-CLI tool profiles are resolved before
+the value is displayed.
 
 ## Private agent skills
 

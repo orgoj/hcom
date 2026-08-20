@@ -1262,6 +1262,7 @@ fn agent_help_lists_catalog_layers() {
     assert!(stdout.contains("--as <name>"), "stdout={stdout}");
     assert!(stdout.contains("@<group>"), "stdout={stdout}");
     assert!(stdout.contains("\"groups\""), "stdout={stdout}");
+    assert!(stdout.contains("--all"), "stdout={stdout}");
 }
 
 #[test]
@@ -1436,6 +1437,80 @@ fn additive_catalog_env_keeps_global_agents_and_imports_selected_project_agents(
         "stdout={stdout}"
     );
     assert!(!stdout.contains("wdt_private"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_ls_all_includes_agents_hidden_by_recursive_selective_imports() {
+    let h = Hcom::new();
+    let leaf = h.path().join("leaf-agents.json");
+    std::fs::write(
+        &leaf,
+        r#"{"agents":{
+            "leaf_public":{"dir":"/tmp","cli":"claude"},
+            "leaf_private":{"dir":"/tmp","cli":"gemini",
+                "tools":{"gemini":{"model":"gemini-2.5-pro"}}}
+        }}"#,
+    )
+    .expect("write leaf catalog");
+    let middle = h.path().join("middle-agents.json");
+    std::fs::write(
+        &middle,
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["leaf_public"]}}],
+                "agents":{{
+                    "middle_public":{{"dir":"/tmp","cli":"codex"}},
+                    "middle_private":{{"dir":"/tmp","cli":"claude"}}
+                }}}}"#,
+            serde_json::to_string(&leaf).unwrap()
+        ),
+    )
+    .expect("write middle catalog");
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["middle_public"]}}]}}"#,
+            serde_json::to_string(&middle).unwrap()
+        ),
+    )
+    .expect("write root catalog");
+
+    let (code, visible, stderr) = h.run(["agent", "ls", "--names", "--no-project"]);
+    assert_eq!(code, 0, "stdout={visible} stderr={stderr}");
+    assert_eq!(visible.trim(), "middle_public");
+
+    let (code, all_names, stderr) = h.run(["agent", "ls", "--all", "--names", "--no-project"]);
+    assert_eq!(code, 0, "stdout={all_names} stderr={stderr}");
+    assert_eq!(
+        all_names.lines().collect::<Vec<_>>(),
+        [
+            "leaf_private",
+            "leaf_public",
+            "middle_private",
+            "middle_public"
+        ]
+    );
+
+    let (code, table, stderr) = h.run(["agent", "ls", "--all", "--no-project"]);
+    assert_eq!(code, 0, "stdout={table} stderr={stderr}");
+    assert!(table.starts_with("NAME"));
+    assert!(table.contains("MODEL"));
+    assert!(table.lines().any(|line| line.starts_with("leaf_private ")));
+    assert!(table.contains("gemini-2.5-pro"));
+
+    let (code, json, stderr) = h.run(["agent", "ls", "--all", "--json", "--no-project"]);
+    assert_eq!(code, 0, "stdout={json} stderr={stderr}");
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&json).expect("list JSON");
+    let leaf_private = entries
+        .iter()
+        .find(|entry| entry["name"] == "leaf_private")
+        .expect("hidden leaf agent in JSON");
+    assert_eq!(leaf_private["cli"], "gemini");
+    assert_eq!(leaf_private["model"], "gemini-2.5-pro");
+    assert!(
+        leaf_private["source"]
+            .as_str()
+            .is_some_and(|source| source.starts_with("import:"))
+    );
 }
 
 #[test]

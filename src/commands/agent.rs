@@ -32,7 +32,8 @@ pub fn help_text() -> String {
         "Usage:
   hcom agent <name> [flags] [tool-args...]   Launch a catalog agent (no-op if already running)
   hcom agent @<group> [flags]                Launch every agent in a catalog group
-  hcom agent ls [--json] [--names|--groups]  Catalog entries, names, or reachable groups
+  hcom agent ls [--all] [--json] [--names|--groups]
+                                             Catalog entries, names, or reachable groups
   hcom agent show <name>                     Effective config and the exact command
   hcom agent attach <name>                   Focus a running agent's window
   hcom agent edit [--project]                Open a catalog in $EDITOR (creates a starter file)
@@ -60,6 +61,10 @@ Catalog groups:
   \"groups\": [\"review\", \"all\"] assigns launch-only groups independently of the
   runtime messaging \"tag\". Group launch traverses all recursively reachable
   imports, including agents omitted by a selective import's \"agents\" list.
+
+Listing:
+  --all                     Include all agents from recursively reachable imports
+  Table and JSON output show the effective model for the selected CLI.
 
 Flags:
   --cli <tool>              claude | codex | gemini | ... (default: {DEFAULT_CLI})
@@ -1843,10 +1848,11 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
     let json = cli.passthrough.iter().any(|a| a == "--json");
     let names_only = cli.passthrough.iter().any(|a| a == "--names");
     let groups_only = cli.passthrough.iter().any(|a| a == "--groups");
+    let all = cli.passthrough.iter().any(|a| a == "--all");
     if names_only && groups_only {
         bail!("--names and --groups cannot be used together");
     }
-    let catalogs = if groups_only {
+    let catalogs = if groups_only || all {
         Catalogs::load_for_groups(cli.no_project, cli.catalog.as_deref())?
     } else {
         Catalogs::load(cli.no_project, cli.catalog.as_deref())?
@@ -1888,6 +1894,7 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
                 "name": name,
                 "source": source,
                 "cli": eff.cli,
+                "model": eff.model,
                 "dir": eff.dir,
                 "agent_dir": eff.agent_dir,
                 "instructions": eff.instructions,
@@ -1903,7 +1910,7 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
         return Ok(0);
     }
 
-    let rows: Vec<[String; 5]> = names
+    let rows: Vec<[String; 6]> = names
         .iter()
         .map(|(name, source)| {
             let def = catalogs.resolve(name).unwrap_or_default();
@@ -1920,6 +1927,7 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
             [
                 name.clone(),
                 eff.cli,
+                eff.model.unwrap_or_else(|| "-".to_string()),
                 where_,
                 shorten_home(&eff.dir),
                 format!("{status}  [{source}]"),
@@ -1927,14 +1935,14 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
         })
         .collect();
 
-    let headers = ["NAME", "CLI", "WHERE", "DIR", "STATUS"];
+    let headers = ["NAME", "CLI", "MODEL", "WHERE", "DIR", "STATUS"];
     let mut widths = headers.map(str::len);
     for row in &rows {
         for (i, cell) in row.iter().enumerate() {
             widths[i] = widths[i].max(cell.chars().count());
         }
     }
-    let render = |cells: &[String; 5]| {
+    let render = |cells: &[String; 6]| {
         let mut line = String::new();
         for (i, cell) in cells.iter().enumerate() {
             if i + 1 == cells.len() {
