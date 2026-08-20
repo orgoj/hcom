@@ -6,6 +6,7 @@ other files in the same bundle.
 
 ```bash
 hcom agent wdt_main                 # launch, or report that it is already running
+hcom agent @wdt                     # launch every member of the wdt catalog group
 hcom agent wdt_main --as wdt_review # same config, independent instance named wdt_review
 hcom agent wdt_main --cli codex     # override the configured CLI
 hcom agent ls                       # catalog entries, live status, and source file
@@ -93,6 +94,7 @@ startup.
       "session": "wdt",
       "window": "review",
       "terminal": "wezterm-tab",
+      "groups": ["wdt", "review"],
       "env": { "AWS_PROFILE": "wdt" },
       "pre": "source .venv/bin/activate",
       "prompt": "Review the current change",
@@ -124,6 +126,7 @@ Supported agent fields:
 | `session` | tmux session or Herdr workspace; ignored by other terminals |
 | `window` | tmux window or Herdr tab; defaults to the instance name |
 | `tag` | hcom group tag |
+| `groups` | Catalog-only groups used by `hcom agent @<group>` |
 | `model` | Default model passed to the selected CLI |
 | `prompt` | Initial user prompt |
 | `system_prompt` | Additional system prompt |
@@ -136,6 +139,11 @@ Supported agent fields:
 The selected `tools.<cli>` profile replaces shared scalar values and appends its `args`.
 Command-line flags override both. Top-level `model` and `args` remain useful for agents that always
 use one CLI.
+
+`groups` is independent of `tag`: it does not change runtime display names, message routing, or
+`hcom kill tag:...`. An agent may belong to multiple catalog groups. Group membership merges
+additively across catalog layers and duplicate names are ignored. Group names use lowercase
+letters, numbers, and underscores.
 
 ## Imports
 
@@ -161,6 +169,13 @@ importing catalog's directory. Imports are recursive, load before local entries,
 source catalog's defaults and path base, and reject cycles or unknown selected agents.
 Every imported or additive catalog discovers bundles in an `agents/` directory beside that
 catalog file; bundle-only agents participate in selective imports normally.
+
+For normal listing, direct launch, and message routing, an import's `agents` list remains a
+visibility boundary. `hcom agent @<group>` deliberately traverses every recursively reachable
+import and considers all of its agents, including entries omitted by a selective import. This lets
+a global catalog act as a registry from which a project group can be started without changing to
+that project's directory. hcom does not scan the filesystem for unrelated project catalogs; they
+must be reachable through an import.
 
 ## Private agent skills
 
@@ -224,6 +239,20 @@ resume history. It is also the default tmux window or Herdr tab name; an explici
 `window` still wins. Address an aliased instance directly, for example
 `hcom send @wdt_review -- "Review this"`. Catalog-driven message startup continues to use the
 canonical catalog name and does not invent or restart aliases.
+
+To launch several named agents together, add `groups` to their catalog definitions and target the
+group with `@`:
+
+```bash
+hcom agent @wdt
+hcom agent @wdt --dry-run
+hcom agent @wdt --restart --clean
+```
+
+Flags are shared by every member, except `--as` and `--attach`, which are invalid for group
+launches. Members are processed in name order; already-running agents count as successful. A
+failure does not prevent later members from being attempted, but the command returns exit 1 after
+printing its summary. Group launches require separate terminal panes and reject `terminal: here`.
 
 A targeted message starts a missing or stopped catalog agent before delivery:
 

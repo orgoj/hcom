@@ -31,7 +31,8 @@ pub fn help_text() -> String {
     format!(
         "Usage:
   hcom agent <name> [flags] [tool-args...]   Launch a catalog agent (no-op if already running)
-  hcom agent ls [--json] [--names]           Catalog entries with live status and source
+  hcom agent @<group> [flags]                Launch every agent in a catalog group
+  hcom agent ls [--json] [--names|--groups]  Catalog entries, names, or reachable groups
   hcom agent show <name>                     Effective config and the exact command
   hcom agent attach <name>                   Focus a running agent's window
   hcom agent edit [--project]                Open a catalog in $EDITOR (creates a starter file)
@@ -54,6 +55,11 @@ Catalog and bundles (later layers win; env and args merge, scalars replace):
   against $HOME globally, the parent of project .hcom (also when imported), or its
   file for other catalogs.
   ~ and $VAR are expanded.
+
+Catalog groups:
+  \"groups\": [\"review\", \"all\"] assigns launch-only groups independently of the
+  runtime messaging \"tag\". Group launch traverses all recursively reachable
+  imports, including agents omitted by a selective import's \"agents\" list.
 
 Flags:
   --cli <tool>              claude | codex | gemini | ... (default: {DEFAULT_CLI})
@@ -126,6 +132,7 @@ fn run(argv: &[String]) -> Result<i32> {
             println!("{}", help_text());
             Ok(0)
         }
+        group if group.starts_with('@') => cmd_launch_group(&group[1..], &argv[1..]),
         name => cmd_launch(name, &argv[1..]),
     }
 }
@@ -143,6 +150,8 @@ struct AgentDef {
     session: Option<String>,
     window: Option<String>,
     tag: Option<String>,
+    #[serde(default)]
+    groups: Vec<String>,
     model: Option<String>,
     prompt: Option<String>,
     system_prompt: Option<String>,
@@ -216,6 +225,11 @@ impl AgentDef {
         );
         for (k, v) in &over.env {
             self.env.insert(k.clone(), v.clone());
+        }
+        for group in &over.groups {
+            if !self.groups.contains(group) {
+                self.groups.push(group.clone());
+            }
         }
         self.args.extend(over.args.iter().cloned());
         for (tool, profile) in &over.tools {
@@ -350,6 +364,21 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
         Catalog::default()
     };
 
+    for (owner, def) in std::iter::once(("defaults", &catalog.defaults)).chain(
+        catalog
+            .agents
+            .iter()
+            .map(|(name, def)| (name.as_str(), def)),
+    ) {
+        for group in &def.groups {
+            if !crate::identity::is_valid_base_name(group) {
+                bail!(
+                    "invalid agent group '{group}' in {owner}: use lowercase letters, numbers, and underscore"
+                );
+            }
+        }
+    }
+
     // Resolve `dir` while we still know which file it came from.
     if let Some(dir) = catalog.defaults.dir.take() {
         catalog.defaults.dir = Some(expand_path(&dir, base));
@@ -408,11 +437,22 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
 
 /// Load a catalog and its imports in precedence order. Imports are expanded
 /// before the importing file, and may themselves import other catalogs.
+#[cfg(test)]
 fn load_catalog_tree(
     path: &Path,
     base: &Path,
     label: String,
     stack: &mut Vec<PathBuf>,
+) -> Result<Vec<CatalogFile>> {
+    load_catalog_tree_with_mode(path, base, label, stack, false)
+}
+
+fn load_catalog_tree_with_mode(
+    path: &Path,
+    base: &Path,
+    label: String,
+    stack: &mut Vec<PathBuf>,
+    include_all_import_agents: bool,
 ) -> Result<Vec<CatalogFile>> {
     let absolute = if path.is_absolute() {
         normalize(path)
@@ -443,8 +483,13 @@ fn load_catalog_tree(
             let imported_path = PathBuf::from(expand_path(&import.from, &file_base));
             let imported_label = format!("import:{}", imported_path.display());
             let imported_base = catalog_relative_base(&imported_path);
-            let mut imported =
-                load_catalog_tree(&imported_path, &imported_base, imported_label, stack)?;
+            let mut imported = load_catalog_tree_with_mode(
+                &imported_path,
+                &imported_base,
+                imported_label,
+                stack,
+                include_all_import_agents,
+            )?;
             if let Some(selected) = import.agents {
                 let selected: BTreeSet<String> = selected.into_iter().collect();
                 let available: BTreeSet<String> = imported
@@ -459,10 +504,12 @@ fn load_catalog_tree(
                         missing.join(", ")
                     );
                 }
-                for file in &mut imported {
-                    file.catalog
-                        .agents
-                        .retain(|name, _| selected.contains(name));
+                if !include_all_import_agents {
+                    for file in &mut imported {
+                        file.catalog
+                            .agents
+                            .retain(|name, _| selected.contains(name));
+                    }
                 }
             }
             files.extend(
@@ -522,6 +569,18 @@ struct Catalogs {
 
 impl Catalogs {
     fn load(no_project: bool, explicit: Option<&Path>) -> Result<Self> {
+        Self::load_with_mode(no_project, explicit, false)
+    }
+
+    fn load_for_groups(no_project: bool, explicit: Option<&Path>) -> Result<Self> {
+        Self::load_with_mode(no_project, explicit, true)
+    }
+
+    fn load_with_mode(
+        no_project: bool,
+        explicit: Option<&Path>,
+        include_all_import_agents: bool,
+    ) -> Result<Self> {
         let mut base_files = Vec::new();
         let mut stack = Vec::new();
 
@@ -530,11 +589,12 @@ impl Catalogs {
         if global.is_file() || global_bundles {
             let base = home_dir().unwrap_or_else(|| PathBuf::from("."));
             if global.is_file() {
-                base_files.extend(load_catalog_tree(
+                base_files.extend(load_catalog_tree_with_mode(
                     &global,
                     &base,
                     "global".to_string(),
                     &mut stack,
+                    include_all_import_agents,
                 )?);
             } else {
                 base_files.push(load_catalog_file(&global, &base, "global".to_string())?);
@@ -553,11 +613,12 @@ impl Catalogs {
                     .parent()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| PathBuf::from("."));
-                base_files.extend(load_catalog_tree(
+                base_files.extend(load_catalog_tree_with_mode(
                     &path,
                     &base,
                     format!("extra:{}", path.display()),
                     &mut stack,
+                    include_all_import_agents,
                 )?);
             }
         }
@@ -588,11 +649,12 @@ impl Catalogs {
                 .unwrap_or_else(|| hcom_dir.join(PROJECT_FILE));
             let base = project_root.clone().unwrap_or_else(|| hcom_dir.clone());
             if path.is_file() {
-                project_files.extend(load_catalog_tree(
+                project_files.extend(load_catalog_tree_with_mode(
                     &path,
                     &base,
                     "project".to_string(),
                     &mut stack,
+                    include_all_import_agents,
                 )?);
             } else {
                 project_files.push(load_catalog_file(&path, &base, "project".to_string())?);
@@ -633,6 +695,24 @@ impl Catalogs {
             return Self::resolve_from(&self.project_files, name, false);
         }
         Self::resolve_from(&self.base_files, name, true)
+    }
+
+    fn group_members(&self, group: &str) -> Vec<String> {
+        self.names()
+            .into_keys()
+            .filter(|name| {
+                self.resolve(name)
+                    .is_some_and(|def| def.groups.iter().any(|item| item == group))
+            })
+            .collect()
+    }
+
+    fn group_names(&self) -> BTreeSet<String> {
+        self.names()
+            .into_keys()
+            .filter_map(|name| self.resolve(&name))
+            .flat_map(|def| def.groups)
+            .collect()
     }
 
     fn resolve_from(files: &[CatalogFile], name: &str, global_defaults: bool) -> Option<AgentDef> {
@@ -923,6 +1003,7 @@ struct Effective {
     terminal_command: Option<String>,
     pre: Option<String>,
     tag: Option<String>,
+    groups: Vec<String>,
     model: Option<String>,
     prompt: Option<String>,
     system_prompt: Option<String>,
@@ -994,6 +1075,7 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         terminal_command: nonempty(def.terminal_command),
         pre: nonempty(def.pre),
         tag: nonempty(def.tag),
+        groups: def.groups,
         model: nonempty(def.model),
         prompt: nonempty(def.prompt),
         system_prompt,
@@ -1528,6 +1610,10 @@ fn focus_running(eff: &Effective, live: &LiveAgent) -> Result<()> {
 fn cmd_launch(name: &str, rest: &[String]) -> Result<i32> {
     let cli = parse_cli(rest)?;
     let catalogs = Catalogs::load(cli.no_project, cli.catalog.as_deref())?;
+    launch_named(name, &cli, &catalogs)
+}
+
+fn launch_named(name: &str, cli: &Cli, catalogs: &Catalogs) -> Result<i32> {
     let def = catalogs
         .resolve(name)
         .ok_or_else(|| unknown_agent_error(name, &catalogs))?;
@@ -1562,6 +1648,75 @@ fn cmd_launch(name: &str, rest: &[String]) -> Result<i32> {
     }
 
     launch(&eff, &cli, eff.resume)
+}
+
+fn cmd_launch_group(group: &str, rest: &[String]) -> Result<i32> {
+    if group.is_empty() || !crate::identity::is_valid_base_name(group) {
+        bail!(
+            "invalid agent group '{group}': use @ followed by lowercase letters, numbers, and underscore"
+        );
+    }
+    let cli = parse_cli(rest)?;
+    if cli.as_name.is_some() {
+        bail!("--as cannot be used when launching an agent group");
+    }
+    if cli.attach {
+        bail!("--attach cannot be used when launching an agent group");
+    }
+
+    let catalogs = Catalogs::load_for_groups(cli.no_project, cli.catalog.as_deref())?;
+    let members = catalogs.group_members(group);
+    if members.is_empty() {
+        let groups = catalogs.group_names();
+        let mut message = format!("unknown or empty agent group '@{group}'");
+        if let Some(close) = closest(group, groups.iter()) {
+            message.push_str(&format!(" (did you mean '@{close}'?)"));
+        }
+        if !groups.is_empty() {
+            message.push_str(&format!(
+                "\nAvailable groups: {}",
+                groups
+                    .into_iter()
+                    .map(|name| format!("@{name}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        bail!(message);
+    }
+
+    for name in &members {
+        let def = catalogs.resolve(name).unwrap_or_default();
+        let mut eff = effective(name, def, &cli);
+        apply_herdr_placement(&mut eff, catalogs.project_root.as_deref(), false);
+        let (strategy, _) = choose_strategy(&eff, tmux_bin().is_some());
+        if strategy == Strategy::Direct(Some("here".to_string())) {
+            bail!(
+                "agent '{name}' in group '@{group}' would launch in the current terminal; groups require separate terminal panes"
+            );
+        }
+    }
+
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    for name in &members {
+        match launch_named(name, &cli, &catalogs) {
+            Ok(0) => succeeded += 1,
+            Ok(code) => {
+                failed += 1;
+                eprintln!("agent '{name}' failed with exit {code}");
+            }
+            Err(error) => {
+                failed += 1;
+                eprintln!("agent '{name}' failed: {error:#}");
+            }
+        }
+    }
+    println!(
+        "group '@{group}': {succeeded} succeeded, {failed} failed ({} total)",
+        members.len()
+    );
+    Ok(if failed == 0 { 0 } else { 1 })
 }
 
 fn apply_herdr_placement(eff: &mut Effective, project_root: Option<&Path>, window_explicit: bool) {
@@ -1687,7 +1842,21 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
     let cli = parse_cli(rest)?;
     let json = cli.passthrough.iter().any(|a| a == "--json");
     let names_only = cli.passthrough.iter().any(|a| a == "--names");
-    let catalogs = Catalogs::load(cli.no_project, cli.catalog.as_deref())?;
+    let groups_only = cli.passthrough.iter().any(|a| a == "--groups");
+    if names_only && groups_only {
+        bail!("--names and --groups cannot be used together");
+    }
+    let catalogs = if groups_only {
+        Catalogs::load_for_groups(cli.no_project, cli.catalog.as_deref())?
+    } else {
+        Catalogs::load(cli.no_project, cli.catalog.as_deref())?
+    };
+    if groups_only {
+        for group in catalogs.group_names() {
+            println!("@{group}");
+        }
+        return Ok(0);
+    }
     let names = catalogs.names();
 
     if names_only {
@@ -1726,6 +1895,7 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
                 "session": eff.session,
                 "window": eff.window,
                 "terminal": eff.terminal,
+                "groups": eff.groups,
                 "status": live.get(name).map(|a| a.status.clone()),
             }));
         }
@@ -1842,6 +2012,9 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     }
     if let Some(tag) = &eff.tag {
         println!("tag:       {tag}");
+    }
+    if !eff.groups.is_empty() {
+        println!("groups:    {}", eff.groups.join(", "));
     }
     if let Some(m) = &eff.model {
         println!("model:     {m}");
@@ -1961,13 +2134,13 @@ fn cmd_completions(rest: &[String]) -> Result<i32> {
     let shell = rest.first().map(String::as_str).unwrap_or("bash");
     let script = match shell {
         "bash" => {
-            "_hcom_agent() {\n  local cur=${COMP_WORDS[COMP_CWORD]}\n  if [ \"$COMP_CWORD\" -eq 2 ]; then\n    COMPREPLY=( $(compgen -W \"$(hcom agent ls --names 2>/dev/null) ls show attach edit completions\" -- \"$cur\") )\n  fi\n}\ncomplete -F _hcom_agent hcom\n"
+            "_hcom_agent() {\n  local cur=${COMP_WORDS[COMP_CWORD]}\n  if [ \"$COMP_CWORD\" -eq 2 ]; then\n    COMPREPLY=( $(compgen -W \"$(hcom agent ls --names 2>/dev/null) $(hcom agent ls --groups 2>/dev/null) ls show attach edit completions\" -- \"$cur\") )\n  fi\n}\ncomplete -F _hcom_agent hcom\n"
         }
         "zsh" => {
-            "#compdef hcom\n_hcom_agent_names() {\n  local -a names\n  names=(${(f)\"$(hcom agent ls --names 2>/dev/null)\"})\n  compadd -a names\n}\ncompdef _hcom_agent_names hcom-agent\n"
+            "#compdef hcom\n_hcom_agent_names() {\n  local -a names groups\n  names=(${(f)\"$(hcom agent ls --names 2>/dev/null)\"})\n  groups=(${(f)\"$(hcom agent ls --groups 2>/dev/null)\"})\n  compadd -a names\n  compadd -a groups\n}\ncompdef _hcom_agent_names hcom-agent\n"
         }
         "fish" => {
-            "complete -c hcom -n '__fish_seen_subcommand_from agent' -f -a \"(hcom agent ls --names 2>/dev/null)\"\n"
+            "complete -c hcom -n '__fish_seen_subcommand_from agent' -f -a \"(hcom agent ls --names 2>/dev/null) (hcom agent ls --groups 2>/dev/null)\"\n"
         }
         other => bail!("unsupported shell '{other}' (bash | zsh | fish)"),
     };
@@ -2081,6 +2254,13 @@ mod tests {
         assert_eq!(claude.model.as_deref(), Some("opus"));
         assert_eq!(claude.args, vec!["--a", "--b"]);
         assert_eq!(base.tools["codex"].model.as_deref(), Some("gpt-5"));
+    }
+
+    #[test]
+    fn merge_accumulates_unique_groups() {
+        let mut base = def_from(r#"{"groups":["all","review"]}"#);
+        base.merge_from(&def_from(r#"{"groups":["review","backend"]}"#));
+        assert_eq!(base.groups, vec!["all", "review", "backend"]);
     }
 
     #[test]
@@ -2311,6 +2491,52 @@ mod tests {
             catalogs.resolve("hermes_local").unwrap().dir.as_deref(),
             Some(overlay.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn group_loading_sees_agents_hidden_by_selective_imports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source.json");
+        let root = tmp.path().join("root.json");
+        std::fs::write(
+            &source,
+            r#"{"agents":{"public":{"groups":["crew"]},"private":{"groups":["crew"]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &root,
+            r#"{"imports":[{"from":"source.json","agents":["public"]}]}"#,
+        )
+        .unwrap();
+
+        let visible = load_catalog_tree(&root, tmp.path(), "root".into(), &mut Vec::new()).unwrap();
+        let all =
+            load_catalog_tree_with_mode(&root, tmp.path(), "root".into(), &mut Vec::new(), true)
+                .unwrap();
+        let visible = Catalogs {
+            base_files: visible,
+            project_files: Vec::new(),
+            project_root: None,
+        };
+        let all = Catalogs {
+            base_files: all,
+            project_files: Vec::new(),
+            project_root: None,
+        };
+
+        assert_eq!(visible.group_members("crew"), vec!["public"]);
+        assert_eq!(all.group_members("crew"), vec!["private", "public"]);
+    }
+
+    #[test]
+    fn invalid_group_name_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("agents.json");
+        std::fs::write(&path, r#"{"agents":{"a":{"groups":["Bad-Group"]}}}"#).unwrap();
+        let error = load_catalog_file(&path, tmp.path(), "test".into())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid agent group 'Bad-Group'"), "{error}");
     }
 
     #[test]

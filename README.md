@@ -297,6 +297,7 @@ its status and exits. Use `--as` to run the same definition concurrently.
 
 ```bash
 hcom agent wdt_main                 # launch (or report that it already runs)
+hcom agent @wdt                     # launch every member of a catalog group
 hcom agent wdt_main --as wdt_review # same config, independent instance named wdt_review
 hcom agent wdt_main --cli codex     # unknown flags are forwarded to `hcom <cli>`
 hcom agent ls                       # catalog + live status + which file defined it

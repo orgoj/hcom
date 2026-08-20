@@ -1260,6 +1260,8 @@ fn agent_help_lists_catalog_layers() {
         "stdout={stdout}"
     );
     assert!(stdout.contains("--as <name>"), "stdout={stdout}");
+    assert!(stdout.contains("@<group>"), "stdout={stdout}");
+    assert!(stdout.contains("\"groups\""), "stdout={stdout}");
 }
 
 #[test]
@@ -1508,6 +1510,121 @@ fn agent_dry_run_renders_the_hcom_command_without_launching() {
     let (code, list, _stderr) = h.run(["list", "--json"]);
     assert_eq!(code, 0);
     assert_eq!(list.trim(), "[]", "dry-run must not create an instance");
+}
+
+#[test]
+fn agent_group_dry_run_includes_agents_hidden_by_selective_import() {
+    let h = Hcom::new();
+    let imported = h.path().join("project-agents.json");
+    std::fs::write(
+        &imported,
+        r#"{"agents":{
+            "public":{"dir":"/tmp","cli":"claude","groups":["crew"]},
+            "private":{"dir":"/tmp","cli":"gemini","groups":["crew"]}
+        }}"#,
+    )
+    .expect("write imported catalog");
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["public"]}}]}}"#,
+            serde_json::to_string(&imported).unwrap()
+        ),
+    )
+    .expect("write catalog");
+
+    let (code, visible, stderr) = h.run(["agent", "ls", "--names", "--no-project"]);
+    assert_eq!(code, 0, "stdout={visible} stderr={stderr}");
+    assert_eq!(visible.trim(), "public");
+
+    let (code, groups, stderr) = h.run(["agent", "ls", "--groups", "--no-project"]);
+    assert_eq!(code, 0, "stdout={groups} stderr={stderr}");
+    assert_eq!(groups.trim(), "@crew");
+
+    let (code, stdout, stderr) = h.run([
+        "agent",
+        "@crew",
+        "--cli",
+        "codex",
+        "--dry-run",
+        "--no-project",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("codex --as private"), "stdout={stdout}");
+    assert!(stdout.contains("codex --as public"), "stdout={stdout}");
+    assert!(
+        stdout.find("--as private") < stdout.find("--as public"),
+        "members must launch in name order: {stdout}"
+    );
+    assert!(
+        stdout.contains("group '@crew': 2 succeeded, 0 failed (2 total)"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn agent_zsh_completions_add_names_and_groups_separately() {
+    let h = Hcom::new();
+    let (code, stdout, stderr) = h.run(["agent", "completions", "zsh"]);
+
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("  compadd -a names\n"), "stdout={stdout}");
+    assert!(stdout.contains("  compadd -a groups\n"), "stdout={stdout}");
+    assert!(
+        !stdout.contains("compadd -a names -a groups"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn agent_group_rejects_single_instance_flags_and_terminal_here() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"solo":{"dir":"/tmp","groups":["crew"]}}}"#,
+    )
+    .expect("write catalog");
+
+    for flag in ["--as", "--attach"] {
+        let args = if flag == "--as" {
+            vec!["agent", "@crew", flag, "alias", "--dry-run"]
+        } else {
+            vec!["agent", "@crew", flag, "--dry-run"]
+        };
+        let (code, _stdout, stderr) = h.run(args);
+        assert_ne!(code, 0, "flag={flag}");
+        assert!(stderr.contains(flag), "stderr={stderr}");
+    }
+
+    let (code, _stdout, stderr) = h.run(["agent", "@crew", "--terminal", "here", "--dry-run"]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("current terminal"), "stderr={stderr}");
+}
+
+#[test]
+fn agent_group_continues_after_a_member_fails() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{
+            "a_broken":{"dir":"/tmp","cli":"not-a-real-tool","groups":["crew"],
+                "terminal_command":"sh -c true {script}"},
+            "z_working":{"dir":"/tmp","cli":"codex","groups":["crew"],
+                "terminal_command":"sh -c true {script}"}
+        }}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "@crew", "--no-project"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("agent 'a_broken' failed"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("group '@crew': 1 succeeded, 1 failed (2 total)"),
+        "stdout={stdout}"
+    );
 }
 
 #[test]

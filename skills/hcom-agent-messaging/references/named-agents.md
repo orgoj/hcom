@@ -21,7 +21,7 @@ hcom reads these catalogs:
 
 Global defaults apply to the non-project catalog group. Project agents resolve independently and
 do not inherit global fields. Within each group, scalar fields replace earlier values while `env`,
-`args`, and matching `tools` profiles merge.
+`args`, `groups`, and matching `tools` profiles merge.
 
 Relative `dir` and `skills_dir` values resolve from `$HOME` globally, from the directory containing
 `.hcom` for project catalogs (including when imported), and from the catalog directory for other
@@ -70,6 +70,12 @@ imports none. Imported agents retain their source catalog's defaults and relativ
 Each catalog discovers bundles in a sibling `agents/` directory, including bundle-only agents.
 Missing files, requested names, and import cycles are errors.
 
+Selective imports remain the visibility boundary for normal listing, direct launch, and message
+routing. `hcom agent @<group>` is the explicit exception: it considers all agents in every
+recursively reachable import, including agents omitted by an import's `agents` list. This supports
+starting a project group from another directory while keeping its other agents out of the normal
+external address book. hcom does not discover unrelated catalogs by scanning the filesystem.
+
 ## Basic catalog
 
 ```json
@@ -83,6 +89,7 @@ Missing files, requested names, and import cycles are errors.
     "reviewer": {
       "dir": "~/projects/app",
       "tag": "review",
+      "groups": ["reviewers", "app"],
       "prompt": "Review the current changes and report actionable findings.",
       "system_prompt": "You are a concise, rigorous code reviewer.",
       "env": {
@@ -95,6 +102,7 @@ Missing files, requested names, and import cycles are errors.
 
 ```bash
 hcom agent reviewer
+hcom agent @app
 hcom agent reviewer --as review_api
 hcom agent show reviewer       # effective configuration and exact launch command
 hcom agent reviewer --dry-run  # render without launching
@@ -106,6 +114,11 @@ hcom agent reviewer --clean
 ```
 
 Use `hcom agent edit` for the global catalog or `hcom agent edit --project` for the project catalog.
+
+`groups` is a list of catalog-only launch sets; it does not affect runtime display names, message
+routing, or `hcom kill tag:...`. `hcom agent @<group>` processes members in name order, applies its
+flags to every member, continues after individual failures, and returns exit 1 if any member
+failed. `--as`, `--attach`, and `terminal: here` are invalid for group launches.
 
 The positional name selects the catalog definition; `--as <name>` selects the runtime identity.
 The alias is used for duplicate detection, routing, restart/attach behavior, resume history, and the
@@ -247,7 +260,7 @@ installed integrations own classification, lifecycle state, and resume metadata.
 
 Agent and `defaults` fields:
 
-- `cli`, `dir`, `skills_dir`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `model`
+- `cli`, `dir`, `skills_dir`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`
 - `prompt`, `system_prompt`, `pre`, and boolean `resume`
 - `env` object and `args` array
 - `tools` object keyed by CLI name

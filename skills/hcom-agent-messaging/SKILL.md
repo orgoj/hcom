@@ -69,6 +69,8 @@ request to choose a similarly named entry from `hcom list`.
   another agent. `hcom r` resumes a stopped session; it is not how you address or launch an agent.
 - If the user distinguishes an "hcom agent" from an "hcom instance", preserve that distinction
   literally. Never silently substitute another active instance.
+- When the user asks to launch a catalog group, use `hcom agent @<group>`. Catalog `groups` are
+  launch-only and are independent of the runtime `tag` used for message routing.
 
 To run the same catalog definition concurrently, give each runtime instance a distinct name:
 
