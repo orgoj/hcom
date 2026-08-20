@@ -72,6 +72,7 @@ struct DiagContext {
     root_path: PathBuf,
     home: PathBuf,
     hcom_dir: PathBuf,
+    workspace: PathBuf,
     codex_home: PathBuf,
     path_env: OsString,
 }
@@ -150,6 +151,7 @@ fn apply_isolated_env_ctx(
     command: &mut Command,
 ) {
     command.env_clear();
+    command.current_dir(&ctx.workspace);
     command.env("PATH", &ctx.path_env);
     if let Ok(lang) = std::env::var("LANG") {
         command.env("LANG", lang);
@@ -162,6 +164,8 @@ fn apply_isolated_env_ctx(
     command.env("CI", "1");
 
     command.env("HOME", &ctx.home);
+    command.env("HCOM_AGENTS_FILE", ctx.hcom_dir.join("agents.json"));
+    command.env_remove("HCOM_AGENT_CATALOGS");
     command.env("HCOM_DEV_ROOT", env!("CARGO_MANIFEST_DIR"));
     #[cfg(windows)]
     {
@@ -379,6 +383,7 @@ impl Hcom {
             root_path: self.root.path().to_path_buf(),
             home: self.home.clone(),
             hcom_dir: self.hcom_dir.clone(),
+            workspace: self.workspace.clone(),
             codex_home: self.codex_home.clone(),
             path_env: self.path_env.clone(),
         }

@@ -20,6 +20,23 @@ For the required `hcom` rebuild, run exactly `cargo build --release`: use the
 standard full release build, do not add `--bin` or otherwise narrow its targets,
 and verify the result with `target/release/hcom --version`.
 
+## Cargo tests
+
+This package has no library target. Run binary unit tests with
+`cargo test --bin hcom`; do not use `cargo test --lib`. Cargo accepts only one
+positional test-name filter per invocation, so use a shared substring or
+separate commands for unrelated focused tests. Like builds, run Cargo tests
+outside the sandbox so Cargo can use its caches and target-directory locks.
+
+## Launch transport changes
+
+When changing per-CLI arguments, environment variables, bootstrap context, or
+instruction transport, verify every applicable lifecycle path: clean start,
+tracked resume, fork, session switch, and a nested child launch. Replay logic
+may remove stale arguments or inherit parent environment, so tests must prove
+that current invocation-local values survive where intended and do not leak
+into children.
+
 ## Handoff cleanliness
 
 Before committing or handing off completed work, inspect `git status`.

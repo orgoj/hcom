@@ -1538,6 +1538,17 @@ fn imported_agent_config_overrides_global_defaults() {
         stdout.lines().any(|line| line == "cli:       claude"),
         "stdout={stdout}"
     );
+    let sources = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("sources:   "))
+        .expect("catalog sources in show output");
+    for source in sources.split(", ") {
+        assert!(
+            std::path::Path::new(source).starts_with(h.root_path()),
+            "fixture leaked catalog source outside {}: {source}\nstdout={stdout}",
+            h.root_path().display()
+        );
+    }
 }
 
 #[test]
