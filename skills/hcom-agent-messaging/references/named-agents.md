@@ -72,11 +72,14 @@ Each catalog discovers bundles in a sibling `agents/` directory, including bundl
 Missing files, requested names, and import cycles are errors.
 
 Selective imports remain the visibility boundary for normal listing, direct launch, and message
-routing. `hcom agent ls --all` and `hcom agent @<group>` are explicit exceptions: they consider all
+routing. `hcom agent list --all` and `hcom agent @<group>` are explicit exceptions: they consider all
 agents in every recursively reachable import, including agents omitted by an import's `agents`
 list. The listing flag also works with `--names` and `--json`. This supports inspecting agents or
 starting a project group from another directory while keeping its other agents out of the normal
 external address book. hcom does not discover unrelated catalogs by scanning the filesystem.
+`hcom agent list --local` limits listings to the nearest project's direct and recursively imported
+agents; global and additive catalogs are excluded. Combine it with `--all` to include agents hidden
+by the project's selective imports.
 
 ## Basic catalog
 
@@ -108,9 +111,10 @@ hcom agent @app
 hcom agent reviewer --as review_api
 hcom agent show reviewer       # effective configuration and exact launch command
 hcom agent reviewer --dry-run  # render without launching
-hcom agent ls
-hcom agent ls @app             # show only members of one catalog group
-hcom agent ls --all            # include agents hidden by recursive selective imports
+hcom agent list
+hcom agent list @app           # show only members of one catalog group
+hcom agent list --all          # include agents hidden by recursive selective imports
+hcom agent list --local        # only direct and imported agents from this project
 hcom agent attach reviewer
 hcom agent reviewer --restart
 hcom agent reviewer --resume

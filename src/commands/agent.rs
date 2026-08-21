@@ -32,7 +32,7 @@ pub fn help_text() -> String {
         "Usage:
   hcom agent <name> [flags] [tool-args...]   Launch a catalog agent (no-op if already running)
   hcom agent @<group> [flags]                Launch every agent in a catalog group
-  hcom agent ls [@<group>] [--all] [--json] [--names|--groups]
+  hcom agent list [@<group>] [--all] [--local] [--json] [--names|--groups]
                                              Catalog entries, filtered names, or reachable groups
   hcom agent show <name>                     Effective config and the exact command
   hcom agent attach <name>                   Focus a running agent's window
@@ -66,6 +66,7 @@ Catalog groups:
 Listing:
   @<group>                  Show only members of one catalog group
   --all                     Include all agents from recursively reachable imports
+  --local                   Show only project agents, direct and imported
   Table output shows the effective model; JSON also includes reasoning.
 
 Flags:
@@ -132,7 +133,7 @@ fn run(argv: &[String]) -> Result<i32> {
     };
 
     match first {
-        "ls" | "list" => cmd_ls(&argv[1..]),
+        "list" => cmd_list(&argv[1..]),
         "show" => cmd_show(&argv[1..]),
         "attach" => cmd_attach(&argv[1..]),
         "edit" => cmd_edit(&argv[1..]),
@@ -689,6 +690,17 @@ impl Catalogs {
                     .or_insert_with(|| file.label.clone());
             }
         }
+        for file in &self.project_files {
+            for name in file.catalog.agents.keys() {
+                out.insert(name.clone(), file.label.clone());
+            }
+        }
+        out
+    }
+
+    /// Project-scoped names, including agents from the project's imports.
+    fn local_names(&self) -> BTreeMap<String, String> {
+        let mut out = BTreeMap::new();
         for file in &self.project_files {
             for name in file.catalog.agents.keys() {
                 out.insert(name.clone(), file.label.clone());
@@ -1948,14 +1960,15 @@ fn run_hcom(
     Ok(status.code().unwrap_or(1))
 }
 
-// ── Subcommand: ls / show / attach / edit / completions ──────────────────
+// ── Subcommand: list / show / attach / edit / completions ────────────────
 
-fn cmd_ls(rest: &[String]) -> Result<i32> {
+fn cmd_list(rest: &[String]) -> Result<i32> {
     let cli = parse_cli(rest)?;
     let json = cli.passthrough.iter().any(|a| a == "--json");
     let names_only = cli.passthrough.iter().any(|a| a == "--names");
     let groups_only = cli.passthrough.iter().any(|a| a == "--groups");
     let all = cli.passthrough.iter().any(|a| a == "--all");
+    let local = cli.passthrough.iter().any(|a| a == "--local");
     let group_filters: Vec<&str> = cli
         .passthrough
         .iter()
@@ -1965,7 +1978,7 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
         bail!("--names and --groups cannot be used together");
     }
     if group_filters.len() > 1 {
-        bail!("agent ls accepts at most one @<group> filter");
+        bail!("agent list accepts at most one @<group> filter");
     }
     if groups_only && !group_filters.is_empty() {
         bail!("@<group> and --groups cannot be used together");
@@ -1975,22 +1988,43 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
     } else {
         Catalogs::load(cli.no_project, cli.catalog.as_deref())?
     };
+    let mut names = if local {
+        catalogs.local_names()
+    } else {
+        catalogs.names()
+    };
     if groups_only {
-        for group in catalogs.group_names() {
+        let groups = names
+            .keys()
+            .filter_map(|name| catalogs.resolve(name))
+            .flat_map(|def| def.groups)
+            .collect::<BTreeSet<_>>();
+        for group in groups {
             println!("@{group}");
         }
         return Ok(0);
     }
-    let mut names = catalogs.names();
     if let Some(group) = group_filters.first() {
         if group.is_empty() || !crate::identity::is_valid_base_name(group) {
             bail!(
                 "invalid agent group '{group}': use @ followed by lowercase letters, numbers, and underscore"
             );
         }
-        let members = catalogs.group_members(group);
+        let members = names
+            .keys()
+            .filter(|name| {
+                catalogs
+                    .resolve(name)
+                    .is_some_and(|def| def.groups.iter().any(|item| item == group))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         if members.is_empty() {
-            let groups = catalogs.group_names();
+            let groups = names
+                .keys()
+                .filter_map(|name| catalogs.resolve(name))
+                .flat_map(|def| def.groups)
+                .collect::<BTreeSet<_>>();
             let mut message = format!("unknown or empty agent group '@{group}'");
             if let Some(close) = closest(group, groups.iter()) {
                 message.push_str(&format!(" (did you mean '@{close}'?)"));
@@ -2019,8 +2053,16 @@ fn cmd_ls(rest: &[String]) -> Result<i32> {
 
     if names.is_empty() {
         println!(
-            "No agents defined. Create {} or run `hcom agent edit`.",
-            global_catalog_path().display()
+            "No {}agents defined. {}",
+            if local { "project " } else { "" },
+            if local {
+                "Create .hcom/agents.json or run `hcom agent edit --project`.".to_string()
+            } else {
+                format!(
+                    "Create {} or run `hcom agent edit`.",
+                    global_catalog_path().display()
+                )
+            }
         );
         return Ok(0);
     }
@@ -2294,13 +2336,13 @@ fn cmd_completions(rest: &[String]) -> Result<i32> {
     let shell = rest.first().map(String::as_str).unwrap_or("bash");
     let script = match shell {
         "bash" => {
-            "_hcom_agent() {\n  local cur=${COMP_WORDS[COMP_CWORD]}\n  if [ \"$COMP_CWORD\" -eq 2 ]; then\n    COMPREPLY=( $(compgen -W \"$(hcom agent ls --names 2>/dev/null) $(hcom agent ls --groups 2>/dev/null) ls show attach edit completions\" -- \"$cur\") )\n  fi\n}\ncomplete -F _hcom_agent hcom\n"
+            "_hcom_agent() {\n  local cur=${COMP_WORDS[COMP_CWORD]}\n  if [ \"$COMP_CWORD\" -eq 2 ]; then\n    COMPREPLY=( $(compgen -W \"$(hcom agent list --names 2>/dev/null) $(hcom agent list --groups 2>/dev/null) list show attach edit completions\" -- \"$cur\") )\n  fi\n}\ncomplete -F _hcom_agent hcom\n"
         }
         "zsh" => {
-            "#compdef hcom\n_hcom_agent_names() {\n  local -a names groups\n  names=(${(f)\"$(hcom agent ls --names 2>/dev/null)\"})\n  groups=(${(f)\"$(hcom agent ls --groups 2>/dev/null)\"})\n  compadd -a names\n  compadd -a groups\n}\ncompdef _hcom_agent_names hcom-agent\n"
+            "#compdef hcom\n_hcom_agent_names() {\n  local -a names groups\n  names=(${(f)\"$(hcom agent list --names 2>/dev/null)\"})\n  groups=(${(f)\"$(hcom agent list --groups 2>/dev/null)\"})\n  compadd -a names\n  compadd -a groups\n}\ncompdef _hcom_agent_names hcom-agent\n"
         }
         "fish" => {
-            "complete -c hcom -n '__fish_seen_subcommand_from agent' -f -a \"(hcom agent ls --names 2>/dev/null) (hcom agent ls --groups 2>/dev/null)\"\n"
+            "complete -c hcom -n '__fish_seen_subcommand_from agent' -f -a \"(hcom agent list --names 2>/dev/null) (hcom agent list --groups 2>/dev/null)\"\n"
         }
         other => bail!("unsupported shell '{other}' (bash | zsh | fish)"),
     };

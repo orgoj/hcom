@@ -9,9 +9,10 @@ hcom agent wdt_main                 # launch, or report that it is already runni
 hcom agent @wdt                     # launch every member of the wdt catalog group
 hcom agent wdt_main --as wdt_review # same config, independent instance named wdt_review
 hcom agent wdt_main --cli codex     # override the configured CLI
-hcom agent ls                       # catalog entries, effective CLI/model, status, and source
-hcom agent ls @wdt                  # show only members of the wdt catalog group
-hcom agent ls --all                 # include agents hidden by recursive selective imports
+hcom agent list                     # catalog entries, effective CLI/model, status, and source
+hcom agent list @wdt                # show only members of the wdt catalog group
+hcom agent list --all               # include agents hidden by recursive selective imports
+hcom agent list --local             # only direct and imported agents from this project
 hcom agent show wdt_main            # effective configuration and exact command
 hcom agent attach wdt_main          # focus its managed terminal window
 hcom agent edit                     # edit the global catalog
@@ -180,14 +181,18 @@ Every imported or additive catalog discovers bundles in an `agents/` directory b
 catalog file; bundle-only agents participate in selective imports normally.
 
 For normal listing, direct launch, and message routing, an import's `agents` list remains a
-visibility boundary. `hcom agent ls --all` and `hcom agent @<group>` deliberately traverse every
+visibility boundary. `hcom agent list --all` and `hcom agent @<group>` deliberately traverse every
 recursively reachable import and consider all of its agents, including entries omitted by a
 selective import. `--all` also works with the `--names` and `--json` listing formats. This lets a
 global catalog act as a registry from which agents can be inspected or a project group can be
 started without changing to that project's directory. hcom does not scan the filesystem for
 unrelated project catalogs; they must be reachable through an import.
 
-The table produced by `hcom agent ls` shows each agent's effective CLI and model. An unset model is
+`hcom agent list --local` limits any listing format to the nearest project's direct and imported
+agents, excluding global and additive catalogs. Combine it with `--all` to include project-imported
+agents hidden by selective imports.
+
+The table produced by `hcom agent list` shows each agent's effective CLI and model. An unset model is
 shown as `-`; JSON output includes it as `model: null`. Per-CLI tool profiles are resolved before
 the value is displayed.
 
@@ -212,7 +217,7 @@ Use one child directory per skill:
 YAML frontmatter supplies `name` and `description`. Missing or malformed values fall back to the
 directory basename and first Markdown heading, then to `Agent-local skill; read SKILL.md for
 details.` `hcom agent show` warns about malformed metadata, duplicate names, and skipped symlinks
-that escape the bundle. `hcom agent ls --json` exposes `{name, description, path}` entries.
+that escape the bundle. `hcom agent list --json` exposes `{name, description, path}` entries.
 
 `skills_dir` and `--skills-dir` have been removed. Move each old skill to
 `agents/<name>/skills/<skill>/SKILL.md`; old configuration produces a targeted migration error.

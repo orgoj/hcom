@@ -1263,12 +1263,15 @@ fn agent_help_lists_catalog_layers() {
     assert!(stdout.contains("@<group>"), "stdout={stdout}");
     assert!(stdout.contains("\"groups\""), "stdout={stdout}");
     assert!(stdout.contains("--all"), "stdout={stdout}");
+    assert!(stdout.contains("--local"), "stdout={stdout}");
+    assert!(stdout.contains("hcom agent list"), "stdout={stdout}");
+    assert!(!stdout.contains("hcom agent ls"), "stdout={stdout}");
 }
 
 #[test]
-fn agent_ls_without_catalog_points_at_the_global_file() {
+fn agent_list_without_catalog_points_at_the_global_file() {
     let h = Hcom::new();
-    let (code, stdout, stderr) = h.run(["agent", "ls", "--no-project"]);
+    let (code, stdout, stderr) = h.run(["agent", "list", "--no-project"]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     assert!(stdout.contains("No agents defined"), "stdout={stdout}");
     assert!(stdout.contains("agents.json"), "stdout={stdout}");
@@ -1320,7 +1323,7 @@ fn agent_bundle_is_discovered_across_nested_git_roots_and_composes_prompt() {
     let json_output = h
         .cmd()
         .current_dir(&nested)
-        .args(["agent", "ls", "--json"])
+        .args(["agent", "list", "--json"])
         .output()
         .expect("list bundle agent");
     let rows: serde_json::Value = serde_json::from_slice(&json_output.stdout).expect("agent JSON");
@@ -1373,7 +1376,7 @@ fn legacy_project_catalog_is_ignored_and_edit_creates_dot_hcom_catalog() {
     let output = h
         .cmd()
         .current_dir(&project)
-        .args(["agent", "ls", "--names"])
+        .args(["agent", "list", "--names"])
         .output()
         .expect("list without project scope");
     assert!(output.status.success());
@@ -1422,9 +1425,9 @@ fn additive_catalog_env_keeps_global_agents_and_imports_selected_project_agents(
     let output = h
         .cmd()
         .env("HCOM_AGENT_CATALOGS", &overlay)
-        .args(["agent", "ls", "--names"])
+        .args(["agent", "list", "--names"])
         .output()
-        .expect("run hcom agent ls");
+        .expect("run hcom agent list");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
@@ -1440,7 +1443,7 @@ fn additive_catalog_env_keeps_global_agents_and_imports_selected_project_agents(
 }
 
 #[test]
-fn agent_ls_all_includes_agents_hidden_by_recursive_selective_imports() {
+fn agent_list_all_includes_agents_hidden_by_recursive_selective_imports() {
     let h = Hcom::new();
     let leaf = h.path().join("leaf-agents.json");
     std::fs::write(
@@ -1474,11 +1477,11 @@ fn agent_ls_all_includes_agents_hidden_by_recursive_selective_imports() {
     )
     .expect("write root catalog");
 
-    let (code, visible, stderr) = h.run(["agent", "ls", "--names", "--no-project"]);
+    let (code, visible, stderr) = h.run(["agent", "list", "--names", "--no-project"]);
     assert_eq!(code, 0, "stdout={visible} stderr={stderr}");
     assert_eq!(visible.trim(), "middle_public");
 
-    let (code, all_names, stderr) = h.run(["agent", "ls", "--all", "--names", "--no-project"]);
+    let (code, all_names, stderr) = h.run(["agent", "list", "--all", "--names", "--no-project"]);
     assert_eq!(code, 0, "stdout={all_names} stderr={stderr}");
     assert_eq!(
         all_names.lines().collect::<Vec<_>>(),
@@ -1490,14 +1493,14 @@ fn agent_ls_all_includes_agents_hidden_by_recursive_selective_imports() {
         ]
     );
 
-    let (code, table, stderr) = h.run(["agent", "ls", "--all", "--no-project"]);
+    let (code, table, stderr) = h.run(["agent", "list", "--all", "--no-project"]);
     assert_eq!(code, 0, "stdout={table} stderr={stderr}");
     assert!(table.starts_with("NAME"));
     assert!(table.contains("MODEL"));
     assert!(table.lines().any(|line| line.starts_with("leaf_private ")));
     assert!(table.contains("gemini-2.5-pro"));
 
-    let (code, json, stderr) = h.run(["agent", "ls", "--all", "--json", "--no-project"]);
+    let (code, json, stderr) = h.run(["agent", "list", "--all", "--json", "--no-project"]);
     assert_eq!(code, 0, "stdout={json} stderr={stderr}");
     let entries: Vec<serde_json::Value> = serde_json::from_str(&json).expect("list JSON");
     let leaf_private = entries
@@ -1510,6 +1513,66 @@ fn agent_ls_all_includes_agents_hidden_by_recursive_selective_imports() {
         leaf_private["source"]
             .as_str()
             .is_some_and(|source| source.starts_with("import:"))
+    );
+}
+
+#[test]
+fn agent_list_local_includes_only_project_agents_and_their_imports() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"global_agent":{"dir":"/tmp"}}}"#,
+    )
+    .expect("write global catalog");
+
+    let project = h.root_path().join("project");
+    std::fs::create_dir_all(project.join(".hcom")).expect("create project catalog dir");
+    let imported = project.join("included.json");
+    std::fs::write(
+        &imported,
+        r#"{"agents":{
+            "included":{"dir":"/tmp","groups":["local_group"]},
+            "hidden":{"dir":"/tmp","groups":["hidden_group"]}
+        }}"#,
+    )
+    .expect("write imported catalog");
+    std::fs::write(
+        project.join(".hcom/agents.json"),
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["included"]}}],
+                "agents":{{"direct":{{"dir":".","groups":["local_group"]}}}}}}"#,
+            serde_json::to_string(&imported).unwrap()
+        ),
+    )
+    .expect("write project catalog");
+
+    let run = |args: &[&str]| {
+        let output = h
+            .cmd()
+            .current_dir(&project)
+            .args(args)
+            .output()
+            .expect("list local agents");
+        (
+            output.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    let (code, names, stderr) = run(&["agent", "list", "--local", "--names"]);
+    assert_eq!(code, 0, "stdout={names} stderr={stderr}");
+    assert_eq!(names.lines().collect::<Vec<_>>(), ["direct", "included"]);
+
+    let (code, groups, stderr) = run(&["agent", "list", "--local", "--groups"]);
+    assert_eq!(code, 0, "stdout={groups} stderr={stderr}");
+    assert_eq!(groups.trim(), "@hidden_group\n@local_group");
+
+    let (code, all, stderr) = run(&["agent", "list", "--local", "--all", "--names"]);
+    assert_eq!(code, 0, "stdout={all} stderr={stderr}");
+    assert_eq!(
+        all.lines().collect::<Vec<_>>(),
+        ["direct", "hidden", "included"]
     );
 }
 
@@ -1619,19 +1682,19 @@ fn agent_group_dry_run_includes_agents_hidden_by_selective_import() {
     )
     .expect("write catalog");
 
-    let (code, visible, stderr) = h.run(["agent", "ls", "--names", "--no-project"]);
+    let (code, visible, stderr) = h.run(["agent", "list", "--names", "--no-project"]);
     assert_eq!(code, 0, "stdout={visible} stderr={stderr}");
     assert_eq!(visible.trim(), "public");
 
-    let (code, groups, stderr) = h.run(["agent", "ls", "--groups", "--no-project"]);
+    let (code, groups, stderr) = h.run(["agent", "list", "--groups", "--no-project"]);
     assert_eq!(code, 0, "stdout={groups} stderr={stderr}");
     assert_eq!(groups.trim(), "@crew");
 
-    let (code, members, stderr) = h.run(["agent", "ls", "@crew", "--names", "--no-project"]);
+    let (code, members, stderr) = h.run(["agent", "list", "@crew", "--names", "--no-project"]);
     assert_eq!(code, 0, "stdout={members} stderr={stderr}");
     assert_eq!(members.trim(), "private\npublic");
 
-    let (code, json, stderr) = h.run(["agent", "ls", "@crew", "--json", "--no-project"]);
+    let (code, json, stderr) = h.run(["agent", "list", "@crew", "--json", "--no-project"]);
     assert_eq!(code, 0, "stdout={json} stderr={stderr}");
     let listed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON listing");
     assert_eq!(listed.as_array().map(Vec::len), Some(2));
