@@ -1,55 +1,10 @@
 # Repository instructions
 
-## `orgoj` branch versioning
-
-On the `orgoj` branch, increment the `orgoj.N` prerelease component in both
-`Cargo.toml` and `Cargo.lock` when starting the first change after a commit that
-affects the `hcom` binary. That version covers the entire working change set
-until it is committed: do not increment again for follow-up edits, fixes,
-documentation, instructions, tests, or rebuilds made before that commit. Pure
-documentation, instruction, metadata, and ignore-file changes do not require a
-version increment or rebuild. After the binary-affecting change set is
-committed, the first new binary-affecting change starts the next version.
-Rebuild `hcom` after source or version changes that affect the binary.
-
-## Cargo builds
-
-Never run a Cargo build inside the sandbox. Run every Cargo build with sandbox
-escalation so Cargo can use its cache and target-directory locks correctly.
-For the required `hcom` rebuild, run exactly `cargo build --release`: use the
-standard full release build, do not add `--bin` or otherwise narrow its targets,
-and verify the result with `target/release/hcom --version`.
-
-## Cargo tests
-
-This package has no library target. Run binary unit tests with
-`cargo test --bin hcom`; do not use `cargo test --lib`. Cargo accepts only one
-positional test-name filter per invocation, so use a shared substring or
-separate commands for unrelated focused tests. Like builds, run Cargo tests
-outside the sandbox so Cargo can use its caches and target-directory locks.
-
-## Launch transport changes
-
-When changing per-CLI arguments, environment variables, bootstrap context, or
-instruction transport, verify every applicable lifecycle path: clean start,
-tracked resume, fork, session switch, and a nested child launch. Replay logic
-may remove stale arguments or inherit parent environment, so tests must prove
-that current invocation-local values survive where intended and do not leak
-into children.
-
-## Handoff cleanliness
-
-Before committing or handing off completed work, inspect `git status`.
-Remove artifacts created by the current work. Do not silently ignore,
-commit, or delete pre-existing untracked files: identify them explicitly
-and resolve their disposition with the user before declaring the worktree
-clean.
-
-## CLI documentation
-
-When changing a user-facing command, flag, configuration field, or behavior,
-audit every relevant documentation surface before committing. This includes
-the command's built-in help, `README.md`, files under `docs/`, and corresponding
-references under `skills/hcom-agent-messaging/`. Update all affected surfaces
-in the same change set and add or update tests for built-in help where
-practical.
+- Never use the `hcom-agent-messaging` skill here; use the current source and documentation.
+- On `orgoj`, increment `orgoj.N` in `Cargo.toml` and `Cargo.lock` at the first binary-affecting change after each commit, once per uncommitted change set. Pure non-binary changes require no bump or rebuild.
+- Run every Cargo build and test outside the sandbox.
+- After binary-affecting source or version changes, run exactly `cargo build --release` and verify `target/release/hcom --version`.
+- Run binary unit tests with `cargo test --bin hcom`; never use `cargo test --lib`. Cargo accepts one positional filter, so use a shared filter or separate commands.
+- For per-CLI arguments, environment, bootstrap context, or instruction transport changes, test clean start, tracked resume, fork, session switch, and nested child launch. Invocation-local values must survive where intended and never leak to children.
+- Before committing or handing off, inspect `git status` and remove your artifacts. Never ignore, commit, or delete pre-existing untracked files without asking.
+- For user-facing commands, flags, configuration, or behavior, update built-in help, `README.md`, relevant `docs/`, `skills/hcom-agent-messaging/` references, and practical help tests in the same change set.
