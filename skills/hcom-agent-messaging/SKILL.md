@@ -208,9 +208,14 @@ Choose replies from the received intent, not from conversational politeness:
 
 - Do not send receipt acknowledgements, work-started notices, progress updates,
   status messages, or conversational filler. For a request, work silently and
-  send one completed result as `--intent inform --reply-to <request-id>`.
+  wait until the work and verification are complete before sending exactly one
+  completed result as `--intent inform --reply-to <request-id>`.
+- After that final `hcom send` succeeds, end the turn with a brief terminal-visible
+  summary of 1-3 sentences. Say that the result was sent via hcom without repeating
+  the full report. Never leave the terminal blank or print a long duplicate conclusion.
 - If blocked on missing information, send one concrete question as
-  `--intent request --reply-to <request-id>`, then continue after the answer.
+  `--intent request --reply-to <request-id>`, then end with the same brief terminal
+  summary and continue after the answer.
 - Do not reply to `inform` unless it requires a concrete substantive response.
 - Reserve `ack` for an explicit protocol that specifically requires a receipt;
   ordinary agent tasks never require it.

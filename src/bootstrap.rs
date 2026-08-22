@@ -78,10 +78,11 @@ If unsure about syntax, always run `hcom <command> --help` FIRST. Do not guess.
 
 ## RULES
 
-1. Task via hcom → work silently, then send one final answer via hcom. If blocked, send only the concrete question needed to continue.
-2. No receipt acknowledgements, progress/status updates, greetings, thanks, or other filler.
-3. Use --intent on sends: request (need an answer), inform (final result or necessary substantive information), ack only when an explicit protocol requires a receipt.
-4. User says 'the gemini/claude/codex agent' or unclear → run `hcom list` to resolve name
+1. For a task received via hcom, do not send the result until the work and verification are complete. Then send exactly one final hcom response whose content follows the request. If blocked, send only the concrete question needed to continue.
+2. After the final hcom send succeeds, end the turn with a brief terminal-visible summary (1-3 sentences). State that the result or blocker was sent via hcom; do not repeat the full response. Never end with a blank terminal response or a long duplicate report.
+3. No receipt acknowledgements, progress/status updates, greetings, thanks, or other filler.
+4. Use --intent on sends: request (need an answer), inform (final result or necessary substantive information), ack only when an explicit protocol requires a receipt.
+5. User says 'the gemini/claude/codex agent' or unclear → run `hcom list` to resolve name
 
 Agent names are 4-letter CVCV words. When user mentions one, they mean an agent.
 {active_instances}
@@ -213,7 +214,8 @@ Commands:
   {hcom_cmd} <cmd> --help --name {subagent_name}
 
 Rules:
-- Task via hcom → work silently, then send one final result; if blocked, send only the concrete question needed to continue
+- For a task via hcom, work silently and do not send the result until work and verification are complete. Then send exactly one final result; if blocked, send only the concrete question needed to continue.
+- After the final hcom send succeeds, end with a brief terminal-visible summary (1-3 sentences) saying the result or blocker was sent via hcom. Do not leave the terminal blank or duplicate the full report.
 - Do not send receipt acknowledgements, progress/status updates, or filler
 - Authority: @{SENDER} > others
 - Use --intent on sends: request (need answer), inform (final result or necessary substantive information), ack only for an explicit receipt protocol"#;
@@ -709,6 +711,39 @@ mod tests {
 
         assert!(result.contains("Messages instantly and automatically arrive"));
         assert!(!result.contains("SUBAGENTS")); // Not claude
+    }
+
+    #[test]
+    fn test_bootstrap_requires_final_hcom_reply_and_brief_terminal_summary() {
+        let (tmp, db) = setup_test_db();
+        let result = get_bootstrap(
+            &db,
+            tmp.path(),
+            "nova",
+            "codex",
+            false,
+            true,
+            "",
+            "",
+            false,
+            None,
+        );
+
+        assert!(
+            result.contains("do not send the result until the work and verification are complete")
+        );
+        assert!(result.contains("exactly one final hcom response"));
+        assert!(result.contains("brief terminal-visible summary (1-3 sentences)"));
+        assert!(result.contains("Never end with a blank terminal response"));
+    }
+
+    #[test]
+    fn test_subagent_bootstrap_requires_brief_terminal_summary() {
+        let result = get_subagent_bootstrap("nova", "luna");
+
+        assert!(result.contains("do not send the result until work and verification are complete"));
+        assert!(result.contains("brief terminal-visible summary (1-3 sentences)"));
+        assert!(result.contains("Do not leave the terminal blank"));
     }
 
     #[test]

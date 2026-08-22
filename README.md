@@ -86,6 +86,8 @@ agent → hooks → db → hooks → other agent
 ```
 
 Messages arrive mid-turn (injected between tool calls) or wake idle agents immediately.
+For hcom-requested work, agents send one reply only after the work is complete, then leave a
+short terminal summary instead of a blank terminal or a duplicate full report.
 
 Each agent gets a queryable identity:
 
