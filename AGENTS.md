@@ -8,3 +8,4 @@
 - For per-CLI arguments, environment, bootstrap context, or instruction transport changes, test clean start, tracked resume, fork, session switch, and nested child launch. Invocation-local values must survive where intended and never leak to children.
 - Before committing or handing off, inspect `git status` and remove your artifacts. Never ignore, commit, or delete pre-existing untracked files without asking.
 - For user-facing commands, flags, configuration, or behavior, update built-in help, `README.md`, relevant `docs/`, `skills/hcom-agent-messaging/` references, and practical help tests in the same change set.
+- Before the final `cargo build --release`, complete the user-facing change matrix (built-in help, `README.md`, relevant docs, skill references, and practical help tests) and inspect the full diff. Any subsequent source edit requires rebuilding and reverifying the release binary.
