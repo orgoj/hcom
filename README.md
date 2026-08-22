@@ -313,6 +313,9 @@ Targeted messages start missing or stopped catalog agents before delivery. Catal
 imports, tool profiles, terminal placement, resume behavior, instruction transport, and bundle skills are
 documented in [Named agents](docs/agent.md).
 
+Catalog `session`/`window` placement is honored when Herdr is the configured default, including
+nested launches and targeted-message autostart; a parent agent's Herdr location is not inherited.
+
 ### Other commands
 
 ```bash

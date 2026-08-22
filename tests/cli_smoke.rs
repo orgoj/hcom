@@ -1265,6 +1265,10 @@ fn agent_help_lists_catalog_layers() {
     assert!(stdout.contains("--all"), "stdout={stdout}");
     assert!(stdout.contains("--local"), "stdout={stdout}");
     assert!(stdout.contains("hcom agent list"), "stdout={stdout}");
+    assert!(
+        stdout.contains("not a parent agent's location"),
+        "stdout={stdout}"
+    );
     assert!(!stdout.contains("hcom agent ls"), "stdout={stdout}");
 }
 
@@ -1924,6 +1928,38 @@ fn agent_dry_run_selects_the_effective_cli_tool_profile() {
         "stdout={stdout}"
     );
     assert!(!stdout.contains("--agent reviewer"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_show_uses_configured_herdr_placement_instead_of_parent_placement() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"defaults":{"cli":"codex","session":"child-space"},"agents":{"solo":{"dir":"/tmp"}}}"#,
+    )
+    .expect("write catalog");
+
+    let mut cmd = h.cmd();
+    cmd.env("HCOM_TERMINAL", "herdr")
+        .env("HCOM_HERDR_WORKSPACE", "parent-space")
+        .env("HCOM_HERDR_TAB", "parent-tab")
+        .args(["agent", "show", "solo"]);
+    let output = cmd.output().expect("run agent show");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("terminal:  preset herdr (hcom config default)"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("HCOM_HERDR_WORKSPACE=child-space"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("HCOM_HERDR_TAB=solo"), "stdout={stdout}");
+    assert!(!stdout.contains("parent-space"), "stdout={stdout}");
+    assert!(!stdout.contains("parent-tab"), "stdout={stdout}");
 }
 
 #[test]

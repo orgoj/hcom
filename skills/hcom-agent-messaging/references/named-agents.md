@@ -261,7 +261,9 @@ to Codex or another CLI.
 
 `terminal` selects how the agent is launched. `session` and `window` are supplementary placement
 settings; they do not select a multiplexer by themselves. For tmux, they select the session and
-window. For Herdr, they select the workspace and tab. Other non-multiplexer terminals ignore
+window. For Herdr, they select the workspace and tab, including when Herdr is hcom's configured
+default. Nested launches and targeted-message autostart use the catalog agent's placement rather
+than the launching agent's inherited workspace and tab. Other non-multiplexer terminals ignore
 `session` with a warning.
 
 For tools Herdr recognizes, hcom lets Herdr's native process detection, screen manifests, and

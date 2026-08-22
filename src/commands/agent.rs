@@ -110,6 +110,7 @@ Terminal strategy, in order:
 
 For tmux, session and window select the tmux session/window. For Herdr, session selects
 the space (workspace), window selects the tab, and the agent runs in a split pane.
+Configured-default Herdr launches use the catalog placement, not a parent agent's location.
 
 An instance name is unique: launching one that already runs prints its status and exits 0.
 Use --as <name> to launch the same catalog definition as another independent instance."
@@ -1749,7 +1750,13 @@ fn launch_named(name: &str, cli: &Cli, catalogs: &Catalogs) -> Result<i32> {
     let instance_name = cli.as_name.as_deref().unwrap_or(name);
     let window_explicit = def.window.is_some() || cli.def.window.is_some();
     let mut eff = effective(instance_name, def, &cli);
-    apply_herdr_placement(&mut eff, catalogs.project_root.as_deref(), window_explicit);
+    let configured_terminal = configured_terminal();
+    apply_herdr_placement(
+        &mut eff,
+        catalogs.project_root.as_deref(),
+        window_explicit,
+        configured_terminal.as_deref(),
+    );
 
     let live = find_live(instance_name);
     if let Some(live) = &live {
@@ -1817,8 +1824,13 @@ fn cmd_launch_group(group: &str, rest: &[String]) -> Result<i32> {
     for name in &members {
         let def = catalogs.resolve(name).unwrap_or_default();
         let mut eff = effective(name, def, &cli);
-        apply_herdr_placement(&mut eff, catalogs.project_root.as_deref(), false);
         let configured_terminal = configured_terminal();
+        apply_herdr_placement(
+            &mut eff,
+            catalogs.project_root.as_deref(),
+            false,
+            configured_terminal.as_deref(),
+        );
         let (strategy, _) =
             choose_strategy(&eff, tmux_bin().is_some(), configured_terminal.as_deref());
         if strategy == Strategy::Direct(Some("here".to_string())) {
@@ -1850,8 +1862,15 @@ fn cmd_launch_group(group: &str, rest: &[String]) -> Result<i32> {
     Ok(if failed == 0 { 0 } else { 1 })
 }
 
-fn apply_herdr_placement(eff: &mut Effective, project_root: Option<&Path>, window_explicit: bool) {
-    if eff.terminal.as_deref() != Some("herdr") {
+fn apply_herdr_placement(
+    eff: &mut Effective,
+    project_root: Option<&Path>,
+    window_explicit: bool,
+    configured_terminal: Option<&str>,
+) {
+    if eff.terminal_command.is_some()
+        || eff.terminal.as_deref().or(configured_terminal) != Some("herdr")
+    {
         return;
     }
     if eff.session.is_none() {
@@ -2173,8 +2192,13 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     let instance_name = cli.as_name.as_deref().unwrap_or(&name);
     let window_explicit = def.window.is_some() || cli.def.window.is_some();
     let mut eff = effective(instance_name, def, &cli);
-    apply_herdr_placement(&mut eff, catalogs.project_root.as_deref(), window_explicit);
     let configured_terminal = configured_terminal();
+    apply_herdr_placement(
+        &mut eff,
+        catalogs.project_root.as_deref(),
+        window_explicit,
+        configured_terminal.as_deref(),
+    );
     let (strategy, mut warnings) =
         choose_strategy(&eff, tmux_bin().is_some(), configured_terminal.as_deref());
     warnings.extend(eff.skill_warnings.iter().cloned());
@@ -2207,7 +2231,12 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
         }
         Strategy::Custom(c) => println!("terminal:  HCOM_TERMINAL={c}"),
         Strategy::Direct(Some(t)) => println!("terminal:  preset {t}"),
-        Strategy::Direct(None) => println!("terminal:  hcom default (hcom config terminal)"),
+        Strategy::Direct(None) => match configured_terminal.as_deref() {
+            Some(terminal) if terminal != "default" => {
+                println!("terminal:  preset {terminal} (hcom config default)")
+            }
+            _ => println!("terminal:  hcom default (hcom config terminal)"),
+        },
     }
     if let Some(tag) = &eff.tag {
         println!("tag:       {tag}");
@@ -3059,7 +3088,7 @@ mod tests {
             r#"{"dir":"/work/repo","session":"repo","window":"review","terminal":"herdr"}"#,
             &[],
         );
-        apply_herdr_placement(&mut eff, Some(Path::new("/work/repo")), true);
+        apply_herdr_placement(&mut eff, Some(Path::new("/work/repo")), true, None);
         assert_eq!(
             eff.env.get("HCOM_HERDR_WORKSPACE").map(String::as_str),
             Some("repo")
@@ -3076,9 +3105,31 @@ mod tests {
     #[test]
     fn herdr_defaults_to_project_space_and_agent_tab() {
         let mut eff = eff_of(r#"{"dir":"/work/repo","terminal":"herdr"}"#, &[]);
-        apply_herdr_placement(&mut eff, Some(Path::new("/work/repo")), false);
+        apply_herdr_placement(&mut eff, Some(Path::new("/work/repo")), false, None);
         assert_eq!(eff.session.as_deref(), Some("repo"));
         assert_eq!(eff.window, eff.name);
+    }
+
+    #[test]
+    fn configured_herdr_overrides_parent_placement() {
+        let mut eff = eff_of(
+            r#"{"dir":"/work/repo","session":"child-space","env":{"HCOM_HERDR_WORKSPACE":"parent-space","HCOM_HERDR_TAB":"parent-tab"}}"#,
+            &[],
+        );
+        apply_herdr_placement(
+            &mut eff,
+            Some(Path::new("/work/repo")),
+            false,
+            Some("herdr"),
+        );
+        assert_eq!(
+            eff.env.get("HCOM_HERDR_WORKSPACE").map(String::as_str),
+            Some("child-space")
+        );
+        assert_eq!(
+            eff.env.get("HCOM_HERDR_TAB").map(String::as_str),
+            Some("wdt_main")
+        );
     }
 
     #[test]
@@ -3243,5 +3294,6 @@ mod tests {
         assert!(help.starts_with("Usage:"));
         assert!(help.contains("--reasoning <val>"));
         assert!(help.contains("model_reasoning_effort for Codex"));
+        assert!(help.contains("not a parent agent's location"));
     }
 }
