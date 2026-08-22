@@ -8,6 +8,10 @@ is unique: launching a name that is already running reports its status and exits
 a duplicate. Use `--as` to launch one catalog definition concurrently under distinct instance
 names.
 
+`hcom agent list` answers "who can be addressed at all"; `hcom list` answers "who is running right
+now". A catalog agent absent from `hcom list` is stopped, not unknown, and an exact name is never
+resolved to a similar one.
+
 ## Catalogs and precedence
 
 hcom reads these catalogs:

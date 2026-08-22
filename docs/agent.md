@@ -22,6 +22,20 @@ hcom agent edit --project           # edit the current project's catalog
 
 Run `hcom agent --help` for all flags. `--dry-run` prints commands without launching them.
 
+## Configured agents and running instances
+
+Two separate registries answer two different questions:
+
+| question | command |
+|---|---|
+| who is running right now | `hcom list` |
+| who can be addressed at all | `hcom agent list` |
+
+`hcom list` shows live instances only, so a configured agent missing from it is stopped, not
+unknown. Address it by its exact name: `hcom send @<name>` starts a missing or stopped configured
+agent before delivering. A name is never resolved to a similar one — `bin` is the agent `bin`, not
+a running `project1_bin`.
+
 ## Catalogs and precedence
 
 hcom merges catalog layers in this order. Later values win:

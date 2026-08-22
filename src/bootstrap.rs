@@ -59,7 +59,8 @@ You MUST use `hcom <cmd+flags> --name {instance_name}` for all hcom commands:
 - Message: send {target_name_s} [--intent request|inform|ack] [--reply-to <id>] [--thread <thread_name>] -- 'plain text'
   Or (for code/md/backticks) instead of --: --file <path> | --base64 <string> | pipe/heredoc
   Example: send {target_luna} {target_nova} --intent inform --reply-to 82 --name {instance_name} -- 'Completed: ...'
-- See who's active: list [-v] [--json] [--names] [--format '{{name}} {{status}}'] [name]
+- Who is running now: list [-v] [--json] [--names] [--format '{{name}} {{status}}'] [name]
+- Who can be addressed: agent list — configured agents (name + description). `hcom send @name` starts one that is not running
 - Read another's conversation: transcript [name] [N-M] [--last N] [--full] | transcript search 'text' [--all]
 - View events: events [--last N] [--all] [--sql EXPR] [filters]
   Filters (same flag=OR, different=AND): --agent NAME | --type message|status|life | --status listening|active|blocked | --cmd PATTERN (contains, ^prefix, =exact) | --file PATH (*.py for glob, file.py for contains)
@@ -82,9 +83,11 @@ If unsure about syntax, always run `hcom <command> --help` FIRST. Do not guess.
 2. After the final hcom send succeeds, end the turn with a brief terminal-visible summary (1-3 sentences). State that the result or blocker was sent via hcom; do not repeat the full response. Never end with a blank terminal response or a long duplicate report.
 3. No receipt acknowledgements, progress/status updates, greetings, thanks, or other filler.
 4. Use --intent on sends: request (need an answer), inform (final result or necessary substantive information), ack only when an explicit protocol requires a receipt.
-5. User says 'the gemini/claude/codex agent' or unclear → run `hcom list` to resolve name
+5. A name the user gives is exact. Resolve it: exact match in `hcom list`, else exact match in `hcom agent list`, else ask. Never substitute a similar or longer name — 'bin' is not 'project1_bin'.
+6. `hcom list` is not a directory of agents. A configured agent missing from it is only stopped: `hcom send @name` starts it.
+7. User says 'the gemini/claude/codex agent' or no name at all → run `hcom list` to resolve who is meant.
 
-Agent names are 4-letter CVCV words. When user mentions one, they mean an agent.
+Auto-generated instance names are 4-letter CVCV words; configured agents have arbitrary names. When the user mentions either, they mean an agent.
 {active_instances}
 
 This is session context, not a task for immediate action."#;

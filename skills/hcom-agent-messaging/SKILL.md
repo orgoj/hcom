@@ -50,26 +50,31 @@ run `hcom --help` for full command syntax and flags.
 
 ## spawning named agents with terminal access
 
-### Do not confuse catalog agents with running instances
+### Two registries, two commands
 
-When the user says **"hcom agent `<name>`"**, **"agent `<name>`"**, or asks to message a
-named agent, treat `<name>` as an agent from the effective `hcom agent` JSON catalog. It is not a
-request to choose a similarly named entry from `hcom list`.
+| what you want to know | command | analogy |
+|---|---|---|
+| who is running right now | `hcom list` | `ps` |
+| who can be addressed at all | `hcom agent list` | an address book |
 
-- `hcom agent` / `hcom agent list` describes configured catalog agents. Run outside a terminal it
-  prints one `<name>  <description>` line per agent — enough to pick whom to delegate to.
-- `hcom list` shows only currently running instances. It is not an agent catalog and must not be
-  used to replace an explicitly named catalog agent with whichever instance happens to be active.
+`hcom agent list` prints one `<name>  <description>` line per agent configured in the effective
+`hcom agent` JSON catalog. `hcom list` prints only live instances; a configured agent missing from
+it is stopped, not unknown.
+
+**A name the user gives is exact.** `bin` means the agent named `bin`, never `project1_bin` or any
+other similar entry that happens to be running. Resolve a name by exact match in `hcom list`, then
+by exact match in `hcom agent list`. If neither matches, ask the user — do not pick a neighbour.
+
 - Send the task directly with `hcom send @<name> --intent request -- "..."`. Targeted send resolves
-  the catalog and automatically starts a missing or stopped catalog agent.
-- Do not run `hcom list` as a preflight for a catalog agent.
+  the catalog and automatically starts a missing or stopped configured agent, so no `hcom list` or
+  `hcom agent` preflight is needed.
+- If the user distinguishes an "hcom agent" from an "hcom instance", preserve that distinction
+  literally.
 - Treat every new or updated catalog agent as clean-starting. Do not add `"resume": true`, pass
   `--resume`, or run `hcom r <name>` unless the user explicitly asks to resume that agent's
   previous tool session. “Persistent,” “recurring,” or “catalog agent” means the definition
   persists, not the tool session. Existing catalog `resume: true` is not permission to add it to
   another agent. `hcom r` resumes a stopped session; it is not how you address or launch an agent.
-- If the user distinguishes an "hcom agent" from an "hcom instance", preserve that distinction
-  literally. Never silently substitute another active instance.
 - When the user asks to launch a catalog group, use `hcom agent @<group>`. Catalog `groups` are
   launch-only and are independent of the runtime `tag` used for message routing.
 
