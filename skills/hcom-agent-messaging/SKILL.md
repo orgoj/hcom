@@ -56,7 +56,8 @@ When the user says **"hcom agent `<name>`"**, **"agent `<name>`"**, or asks to m
 named agent, treat `<name>` as an agent from the effective `hcom agent` JSON catalog. It is not a
 request to choose a similarly named entry from `hcom list`.
 
-- `hcom agent` / `hcom agent list` describes configured catalog agents.
+- `hcom agent` / `hcom agent list` describes configured catalog agents. Run outside a terminal it
+  prints one `<name>  <description>` line per agent — enough to pick whom to delegate to.
 - `hcom list` shows only currently running instances. It is not an agent catalog and must not be
   used to replace an explicitly named catalog agent with whichever instance happens to be active.
 - Send the task directly with `hcom send @<name> --intent request -- "..."`. Targeted send resolves

@@ -10,6 +10,7 @@ hcom agent @wdt                     # launch every member of the wdt catalog gro
 hcom agent wdt_main --as wdt_review # same config, independent instance named wdt_review
 hcom agent wdt_main --cli codex     # override the configured CLI
 hcom agent list                     # catalog entries, effective CLI/model, status, and source
+hcom agent list --for-agents        # only names and descriptions, for another agent to read
 hcom agent list @wdt                # show only members of the wdt catalog group
 hcom agent list --all               # include agents hidden by recursive selective imports
 hcom agent list --local             # only direct and imported agents from this project
@@ -95,6 +96,7 @@ startup.
   },
   "agents": {
     "wdt_main": {
+      "description": "WDT infrastructure: Ansible roles, deployments, runbooks",
       "dir": "~/work/wdt/ansible-wdt",
       "cli": "codex",
       "session": "wdt",
@@ -124,6 +126,7 @@ Supported agent fields:
 
 | Field | Purpose |
 |---|---|
+| `description` | One line on what the agent is for, shown to other agents |
 | `dir` | CLI working directory |
 | `cli` | CLI selected by default |
 | `terminal` | hcom terminal preset, or `here` |
@@ -195,6 +198,13 @@ agents hidden by selective imports.
 The table produced by `hcom agent list` shows each agent's effective CLI and model. An unset model is
 shown as `-`; JSON output includes it as `model: null`. Per-CLI tool profiles are resolved before
 the value is displayed.
+
+`hcom agent list --for-agents` prints one `<name>  <description>` line per agent and nothing else —
+no CLI, model, directory, terminal, or status. It is the listing meant for another agent deciding
+whom to delegate to; an agent without a `description` shows `-`. Without either flag, an interactive
+terminal gets the table and any other output (a pipe, an agent's shell) gets `--for-agents`;
+`--for-humans` forces the table. `--json`, `--names`, and `--groups` are unaffected. A description
+spanning several lines in the catalog is collapsed to one line on output.
 
 ## Private agent skills
 

@@ -1264,6 +1264,8 @@ fn agent_help_lists_catalog_layers() {
     assert!(stdout.contains("\"groups\""), "stdout={stdout}");
     assert!(stdout.contains("--all"), "stdout={stdout}");
     assert!(stdout.contains("--local"), "stdout={stdout}");
+    assert!(stdout.contains("--for-agents"), "stdout={stdout}");
+    assert!(stdout.contains("--for-humans"), "stdout={stdout}");
     assert!(stdout.contains("hcom agent list"), "stdout={stdout}");
     assert!(
         stdout.contains("not a parent agent's location"),
@@ -1497,7 +1499,7 @@ fn agent_list_all_includes_agents_hidden_by_recursive_selective_imports() {
         ]
     );
 
-    let (code, table, stderr) = h.run(["agent", "list", "--all", "--no-project"]);
+    let (code, table, stderr) = h.run(["agent", "list", "--all", "--for-humans", "--no-project"]);
     assert_eq!(code, 0, "stdout={table} stderr={stderr}");
     assert!(table.starts_with("NAME"));
     assert!(table.contains("MODEL"));
@@ -1616,6 +1618,48 @@ fn imported_agent_config_overrides_global_defaults() {
             h.root_path().display()
         );
     }
+}
+
+#[test]
+fn agent_list_for_agents_shows_only_names_and_descriptions() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{
+            "described":{"dir":"/tmp","cli":"codex","description":"backend API service, Go"},
+            "plain":{"dir":"/tmp"}
+        }}"#,
+    )
+    .expect("write catalog");
+
+    let (code, brief, stderr) = h.run(["agent", "list", "--for-agents", "--no-project"]);
+    assert_eq!(code, 0, "stdout={brief} stderr={stderr}");
+    assert_eq!(
+        brief.lines().collect::<Vec<_>>(),
+        ["described  backend API service, Go", "plain      -"]
+    );
+    assert!(!brief.contains("NAME"), "stdout={brief}");
+    assert!(!brief.contains("codex"), "stdout={brief}");
+    assert!(!brief.contains("/tmp"), "stdout={brief}");
+
+    // Test output is not a terminal, so the default matches --for-agents.
+    let (code, default, stderr) = h.run(["agent", "list", "--no-project"]);
+    assert_eq!(code, 0, "stdout={default} stderr={stderr}");
+    assert_eq!(default, brief);
+
+    let (code, json, stderr) = h.run(["agent", "list", "--json", "--no-project"]);
+    assert_eq!(code, 0, "stdout={json} stderr={stderr}");
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&json).expect("list JSON");
+    assert_eq!(entries[0]["description"], "backend API service, Go");
+    assert!(entries[1]["description"].is_null(), "stdout={json}");
+
+    let (code, show, stderr) = h.run(["agent", "show", "described", "--no-project"]);
+    assert_eq!(code, 0, "stdout={show} stderr={stderr}");
+    assert!(
+        show.lines()
+            .any(|line| line == "description: backend API service, Go"),
+        "stdout={show}"
+    );
 }
 
 #[test]

@@ -310,6 +310,7 @@ hcom agent @wdt                     # launch every member of a catalog group
 hcom agent wdt_main --as wdt_review # same config, independent instance named wdt_review
 hcom agent wdt_main --cli codex     # unknown flags are forwarded to `hcom <cli>`
 hcom agent list                     # catalog + effective CLI/model + live status + source
+hcom agent list --for-agents        # only names and catalog "description" entries
 hcom agent list @wdt                # show only members of one catalog group
 hcom agent list --all               # include agents hidden by recursive selective imports
 hcom agent list --local             # only direct and imported agents from this project

@@ -3,6 +3,7 @@
 //! Catalog loading and named-agent lifecycle commands.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -33,6 +34,7 @@ pub fn help_text() -> String {
   hcom agent <name> [flags] [tool-args...]   Launch a catalog agent (no-op if already running)
   hcom agent @<group> [flags]                Launch every agent in a catalog group
   hcom agent list [@<group>] [--all] [--local] [--json] [--names|--groups]
+                 [--for-agents|--for-humans]
                                              Catalog entries, filtered names, or reachable groups
   hcom agent show <name>                     Effective config and the exact command
   hcom agent attach <name>                   Focus a running agent's window
@@ -67,6 +69,9 @@ Listing:
   @<group>                  Show only members of one catalog group
   --all                     Include all agents from recursively reachable imports
   --local                   Show only project agents, direct and imported
+  --for-agents              Name and \"description\" only, for another agent to read
+  --for-humans              Full table, even when output is not a terminal
+  Without either flag, a terminal gets the table and anything else --for-agents.
   Table output shows the effective model; JSON also includes reasoning.
 
 Flags:
@@ -153,6 +158,7 @@ fn run(argv: &[String]) -> Result<i32> {
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentDef {
+    description: Option<String>,
     dir: Option<String>,
     #[serde(default)]
     skills_dir: Option<serde_json::Value>,
@@ -223,6 +229,7 @@ impl AgentDef {
             )+};
         }
         take!(
+            description,
             dir,
             cli,
             terminal,
@@ -1018,6 +1025,7 @@ fn parse_cli(argv: &[String]) -> Result<Cli> {
 
 struct Effective {
     name: String,
+    description: Option<String>,
     cli: String,
     dir: String,
     skills: Vec<AgentSkill>,
@@ -1203,6 +1211,11 @@ fn nonempty(v: Option<String>) -> Option<String> {
     v.filter(|s| !s.trim().is_empty())
 }
 
+/// Collapse whitespace so a multi-line description stays on one output line.
+fn single_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
     let selected_cli = cli
         .def
@@ -1253,6 +1266,7 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
     });
     let mut effective = Effective {
         name: name.to_string(),
+        description: nonempty(def.description).map(|text| single_line(&text)),
         cli: selected_cli,
         dir: nonempty(def.dir).unwrap_or_else(|| {
             std::env::current_dir()
@@ -1988,6 +2002,8 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
     let groups_only = cli.passthrough.iter().any(|a| a == "--groups");
     let all = cli.passthrough.iter().any(|a| a == "--all");
     let local = cli.passthrough.iter().any(|a| a == "--local");
+    let for_agents = cli.passthrough.iter().any(|a| a == "--for-agents");
+    let for_humans = cli.passthrough.iter().any(|a| a == "--for-humans");
     let group_filters: Vec<&str> = cli
         .passthrough
         .iter()
@@ -2002,6 +2018,12 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
     if groups_only && !group_filters.is_empty() {
         bail!("@<group> and --groups cannot be used together");
     }
+    if for_agents && for_humans {
+        bail!("--for-agents and --for-humans cannot be used together");
+    }
+    // Without an explicit choice, an interactive terminal gets the full table and
+    // everything else (an agent's shell, a pipe) gets the name/description view.
+    let brief = for_agents || (!for_humans && !std::io::stdout().is_terminal());
     let catalogs = if groups_only || all || !group_filters.is_empty() {
         Catalogs::load_for_groups(cli.no_project, cli.catalog.as_deref())?
     } else {
@@ -2086,6 +2108,22 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
         return Ok(0);
     }
 
+    if brief && !json {
+        let width = names
+            .keys()
+            .map(|name| name.chars().count())
+            .max()
+            .unwrap_or(0);
+        for name in names.keys() {
+            let def = catalogs.resolve(name).unwrap_or_default();
+            let description = effective(name, def, &Cli::default())
+                .description
+                .unwrap_or_else(|| "-".to_string());
+            println!("{name:<width$}  {description}");
+        }
+        return Ok(0);
+    }
+
     let live: BTreeMap<String, LiveAgent> = live_agents()
         .into_iter()
         .map(|a| (a.name.clone(), a))
@@ -2098,6 +2136,7 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
             let eff = effective(name, def, &Cli::default());
             out.push(serde_json::json!({
                 "name": name,
+                "description": eff.description,
                 "source": source,
                 "cli": eff.cli,
                 "model": eff.model,
@@ -2210,6 +2249,9 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     }
 
     println!("name:      {}", eff.name);
+    if let Some(description) = &eff.description {
+        println!("description: {description}");
+    }
     println!("cli:       {}", eff.cli);
     println!("dir:       {}", eff.dir);
     for skill in &eff.skills {
@@ -2325,6 +2367,7 @@ const STARTER: &str = r#"{
   },
   "agents": {
     "example": {
+      "description": "what this agent is for, shown to other agents",
       "dir": "~/projects/example",
       "cli": "codex",
       "session": "example"
@@ -2509,6 +2552,20 @@ mod tests {
         let mut base = def_from(r#"{"resume":true}"#);
         base.merge_from(&def_from(r#"{"resume":false}"#));
         assert_eq!(base.resume, Some(false));
+    }
+
+    #[test]
+    fn merge_replaces_description_and_effective_collapses_it_to_one_line() {
+        let mut base = def_from(r#"{"description":"old"}"#);
+        base.merge_from(&def_from("{\"description\":\"new  desc\\n  second line\"}"));
+        let eff = effective("a", base, &Cli::default());
+        assert_eq!(eff.description.as_deref(), Some("new desc second line"));
+    }
+
+    #[test]
+    fn blank_description_is_treated_as_unset() {
+        let eff = effective("a", def_from(r#"{"description":"  "}"#), &Cli::default());
+        assert_eq!(eff.description, None);
     }
 
     #[test]

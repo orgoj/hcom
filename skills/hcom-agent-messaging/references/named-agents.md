@@ -92,6 +92,7 @@ by the project's selective imports.
   },
   "agents": {
     "reviewer": {
+      "description": "code review for ~/projects/app: correctness, tests, security",
       "dir": "~/projects/app",
       "tag": "review",
       "groups": ["reviewers", "app"],
@@ -111,7 +112,9 @@ hcom agent @app
 hcom agent reviewer --as review_api
 hcom agent show reviewer       # effective configuration and exact launch command
 hcom agent reviewer --dry-run  # render without launching
-hcom agent list
+hcom agent list                # name and description only, unless output is a terminal
+hcom agent list --for-agents   # same listing, forced
+hcom agent list --for-humans   # full table: CLI, model, placement, directory, status
 hcom agent list @app           # show only members of one catalog group
 hcom agent list --all          # include agents hidden by recursive selective imports
 hcom agent list --local        # only direct and imported agents from this project
@@ -276,6 +279,8 @@ installed integrations own classification, lifecycle state, and resume metadata.
 
 Agent and `defaults` fields:
 
+- `description` — one line on what the agent is for; the only field other agents see in
+  `hcom agent list --for-agents`
 - `cli`, `dir`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`, `reasoning`
 - `prompt`, `system_prompt`, `pre`, and boolean `resume`
 - `env` object and `args` array
