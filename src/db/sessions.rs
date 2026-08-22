@@ -512,6 +512,92 @@ impl HcomDb {
         )
     }
 
+    /// Atomically restore a Claude instance whose inherited process identity was
+    /// rebound by a foreign CLI hook. The caller must first establish the
+    /// cross-tool transcript evidence; these comparisons keep the repair
+    /// fail-closed if the live rows changed in the meantime.
+    pub fn repair_claude_cross_tool_identity(
+        &self,
+        process_id: &str,
+        instance_name: &str,
+        session_id: &str,
+        transcript_path: &str,
+    ) -> Result<bool> {
+        if process_id.is_empty()
+            || instance_name.is_empty()
+            || session_id.is_empty()
+            || transcript_path.is_empty()
+        {
+            return Ok(false);
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+        let process_binding = tx
+            .query_row(
+                "SELECT session_id, instance_name FROM process_bindings WHERE process_id = ?",
+                params![process_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        let Some((Some(poisoned_session_id), process_owner)) = process_binding else {
+            return Ok(false);
+        };
+        let instance = tx
+            .query_row(
+                "SELECT tool, session_id FROM instances WHERE name = ?",
+                params![instance_name],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        let Some((tool, primary_session_id)) = instance else {
+            return Ok(false);
+        };
+        let incoming_owner = tx
+            .query_row(
+                "SELECT instance_name FROM session_bindings WHERE session_id = ?",
+                params![session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if process_owner != instance_name
+            || tool != "claude"
+            || poisoned_session_id.is_empty()
+            || poisoned_session_id == session_id
+            || primary_session_id.as_deref() != Some(poisoned_session_id.as_str())
+            || incoming_owner.is_some()
+        {
+            return Ok(false);
+        }
+
+        tx.execute(
+            "DELETE FROM session_bindings WHERE session_id = ? AND instance_name = ?",
+            params![&poisoned_session_id, instance_name],
+        )?;
+        tx.execute(
+            "INSERT INTO session_bindings (session_id, instance_name, created_at)
+             VALUES (?, ?, ?)",
+            params![session_id, instance_name, now_epoch_f64()],
+        )?;
+        tx.execute(
+            "UPDATE instances SET session_id = ?, transcript_path = ? WHERE name = ?",
+            params![session_id, transcript_path, instance_name],
+        )?;
+        tx.execute(
+            "UPDATE process_bindings SET session_id = ?, updated_at = ? WHERE process_id = ?",
+            params![session_id, now_epoch_f64(), process_id],
+        )?;
+        tx.execute(
+            "DELETE FROM kv WHERE key = ?",
+            params![claude_lineage_validation_key(&poisoned_session_id)],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
+            params![claude_lineage_validation_key(session_id), instance_name],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Remove cached Claude lineage validation for a session generation.
     pub fn clear_claude_session_validation(&self, session_id: &str) -> Result<()> {
         if session_id.is_empty() {

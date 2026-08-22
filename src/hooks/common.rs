@@ -20,6 +20,7 @@ use crate::messages;
 use crate::shared::constants::{BIND_MARKER_RE, MAX_MESSAGES_PER_DELIVERY};
 use crate::shared::context::HcomContext;
 use crate::shared::{ST_ACTIVE, ST_INACTIVE, ST_LISTENING};
+use crate::tool::Tool;
 
 /// Run a hook handler with panic safety.
 ///
@@ -99,6 +100,68 @@ pub fn hook_gate_check(ctx: &HcomContext, db: &HcomDb) -> bool {
             true // On DB error, proceed rather than silently disabling hooks
         }
     }
+}
+
+/// Reject a hook that inherited another CLI's hcom process identity.
+///
+/// Raw child CLIs inherit `HCOM_PROCESS_ID`, but their hooks belong to the
+/// child's tool. Letting those hooks use the parent process binding would
+/// overwrite the parent's session and transcript identity.
+pub fn hook_process_tool_matches(ctx: &HcomContext, db: &HcomDb, allowed: &[Tool]) -> bool {
+    let Some(process_id) = ctx.process_id.as_deref().filter(|value| !value.is_empty()) else {
+        return true;
+    };
+    let owner = match db.get_process_binding(process_id) {
+        Ok(Some(owner)) => owner,
+        Ok(None) => return true,
+        Err(error) => {
+            log::log_warn(
+                "hooks",
+                "gate.process_binding_error",
+                &format!("process_id={process_id} err={error}, proceeding anyway"),
+            );
+            return true;
+        }
+    };
+    let instance = match db.get_instance_full(&owner) {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return true,
+        Err(error) => {
+            log::log_warn(
+                "hooks",
+                "gate.instance_lookup_error",
+                &format!("process_id={process_id} owner={owner} err={error}, proceeding anyway"),
+            );
+            return true;
+        }
+    };
+    let Ok(bound_tool) = instance.tool.parse::<Tool>() else {
+        return true;
+    };
+    if allowed.contains(&bound_tool) {
+        return true;
+    }
+
+    log::log_warn(
+        "hooks",
+        "gate.foreign_inherited_identity_rejected",
+        &format!(
+            "process_id={} owner={} bound_tool={} hook_tools={}",
+            process_id,
+            owner,
+            bound_tool.as_str(),
+            allowed
+                .iter()
+                .map(Tool::as_str)
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+    );
+    false
+}
+
+pub fn hook_gate_check_for_tools(ctx: &HcomContext, db: &HcomDb, allowed: &[Tool]) -> bool {
+    hook_process_tool_matches(ctx, db, allowed) && hook_gate_check(ctx, db)
 }
 
 /// Convert a db::Message to a serde_json::Value object.
@@ -940,6 +1003,65 @@ pub(crate) fn load_claude_identity_evidence(
     Ok(evidence)
 }
 
+fn recover_claude_identity_from_foreign_transcript(
+    db: &HcomDb,
+    ctx: &HcomContext,
+    session_id: &str,
+    transcript_path: &str,
+    evidence: &ClaudeIdentityEvidence,
+) -> Option<String> {
+    let process_id = ctx.process_id.as_deref()?.trim();
+    let owner = evidence.process_owner.as_deref()?;
+    if process_id.is_empty()
+        || session_id.is_empty()
+        || transcript_path.is_empty()
+        || evidence.session_owner.is_some()
+        || !matches!(&evidence.lineage, TranscriptOwnerResolution::Unknown)
+        || evidence.process_session_id.as_deref() == Some(session_id)
+    {
+        return None;
+    }
+
+    let instance = db.get_instance_full(owner).ok().flatten()?;
+    let incoming_tool = crate::transcript::detect_tool_from_path(transcript_path)?;
+    let stored_tool = crate::transcript::detect_tool_from_path(&instance.transcript_path)?;
+    if instance.tool != Tool::Claude.as_str()
+        || incoming_tool != Tool::Claude
+        || stored_tool == Tool::Claude
+    {
+        return None;
+    }
+
+    match db.repair_claude_cross_tool_identity(process_id, owner, session_id, transcript_path) {
+        Ok(true) => {
+            log::log_warn(
+                "hooks",
+                "init_hook_context.cross_tool_identity_recovered",
+                &format!(
+                    "instance={} process_id={} rejected_tool={} restored_session_id={}",
+                    owner,
+                    process_id,
+                    stored_tool.as_str(),
+                    session_id,
+                ),
+            );
+            Some(owner.to_string())
+        }
+        Ok(false) => None,
+        Err(error) => {
+            log::log_warn(
+                "hooks",
+                "init_hook_context.cross_tool_identity_recovery_failed",
+                &format!(
+                    "instance={} process_id={} session_id={} err={}",
+                    owner, process_id, session_id, error,
+                ),
+            );
+            None
+        }
+    }
+}
+
 /// Initialize instance context from hook data via binding lookup.
 ///
 /// Structured session/transcript identity wins over a conflicting process
@@ -985,8 +1107,21 @@ pub fn init_hook_context(
         .filter(|bound_session_id| !bound_session_id.is_empty())
         .is_some_and(|bound_session_id| bound_session_id != session_id);
 
-    let mut instance_name = if let Some(validated_owner) = evidence.validated_session_owner.clone()
-    {
+    let recovered_owner = historical_process_binding
+        .then(|| {
+            recover_claude_identity_from_foreign_transcript(
+                db,
+                ctx,
+                session_id,
+                transcript_path,
+                &evidence,
+            )
+        })
+        .flatten();
+
+    let mut instance_name = if recovered_owner.is_some() {
+        recovered_owner
+    } else if let Some(validated_owner) = evidence.validated_session_owner.clone() {
         Some(validated_owner)
     } else if evidence.lineage_scanned {
         match &evidence.lineage {
@@ -1885,6 +2020,16 @@ mod tests {
             .unwrap();
     }
 
+    fn insert_test_instance_for_tool(db: &crate::db::HcomDb, name: &str, tool: &str) {
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, tool, status, status_context, status_time, created_at, last_event_id)
+                 VALUES (?1, ?2, 'listening', 'start', 0, 0, 0)",
+                rusqlite::params![name, tool],
+            )
+            .unwrap();
+    }
+
     fn insert_bound_claude_instance(
         db: &crate::db::HcomDb,
         name: &str,
@@ -1912,6 +2057,33 @@ mod tests {
             env.insert("HCOM_PROCESS_ID".to_string(), process_id.to_string());
         }
         crate::shared::context::HcomContext::from_env(&env, cwd.to_path_buf())
+    }
+
+    #[test]
+    fn hook_gate_rejects_foreign_tool_inherited_process_identity() {
+        let (dir, db) = make_test_db();
+        insert_test_instance_for_tool(&db, "coach", "claude");
+        db.set_process_binding("process-coach", "session-coach", "coach")
+            .unwrap();
+        let ctx = context_with_process_id(dir.path(), Some("process-coach"));
+
+        assert!(!hook_gate_check_for_tools(&ctx, &db, &[Tool::Codex]));
+        assert!(hook_gate_check_for_tools(&ctx, &db, &[Tool::Claude]));
+    }
+
+    #[test]
+    fn hook_gate_accepts_shared_opencode_family_identity() {
+        let (dir, db) = make_test_db();
+        insert_test_instance_for_tool(&db, "kilo", "kilo");
+        db.set_process_binding("process-kilo", "session-kilo", "kilo")
+            .unwrap();
+        let ctx = context_with_process_id(dir.path(), Some("process-kilo"));
+
+        assert!(hook_gate_check_for_tools(
+            &ctx,
+            &db,
+            &[Tool::OpenCode, Tool::Kilo]
+        ));
     }
 
     #[test]
@@ -2199,6 +2371,65 @@ mod tests {
 
         let (owner, _, _) = init_hook_context(&db, &ctx, "session-new", "");
         assert!(owner.is_none());
+    }
+
+    #[test]
+    fn hook_context_repairs_cross_tool_transcript_identity_poisoning() {
+        let (dir, db) = make_test_db();
+        let poisoned_transcript = dir
+            .path()
+            .join(".codex/sessions/2026/08/rollout-poisoned.jsonl");
+        let restored_transcript = dir
+            .path()
+            .join(".claude/projects/repo/session-original.jsonl");
+        insert_bound_claude_instance(
+            &db,
+            "coach",
+            "session-poisoned",
+            poisoned_transcript.to_str().unwrap(),
+        );
+        db.set_process_binding("process-coach", "session-poisoned", "coach")
+            .unwrap();
+        let ctx = context_with_process_id(dir.path(), Some("process-coach"));
+
+        let (owner, updates, is_primary) = init_hook_context(
+            &db,
+            &ctx,
+            "session-original",
+            restored_transcript.to_str().unwrap(),
+        );
+
+        assert_eq!(owner.as_deref(), Some("coach"));
+        assert!(is_primary);
+        assert_eq!(
+            updates.get("transcript_path").and_then(Value::as_str),
+            restored_transcript.to_str()
+        );
+        let instance = db.get_instance_full("coach").unwrap().unwrap();
+        assert_eq!(instance.session_id.as_deref(), Some("session-original"));
+        assert_eq!(
+            instance.transcript_path,
+            restored_transcript.to_string_lossy()
+        );
+        assert_eq!(db.get_session_binding("session-poisoned").unwrap(), None);
+        assert_eq!(
+            db.get_session_binding("session-original")
+                .unwrap()
+                .as_deref(),
+            Some("coach")
+        );
+        assert_eq!(
+            db.get_process_binding_full("process-coach")
+                .unwrap()
+                .unwrap(),
+            (Some("session-original".to_string()), "coach".to_string())
+        );
+        assert_eq!(
+            db.get_validated_claude_session_owner("session-original")
+                .unwrap()
+                .as_deref(),
+            Some("coach")
+        );
     }
 
     #[test]

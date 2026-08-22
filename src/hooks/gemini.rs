@@ -873,7 +873,12 @@ pub fn dispatch_gemini_hook(hook_name: &str) -> i32 {
     };
 
     // Pre-gate: non-participants with empty DB → exit 0, no output
-    if !common::hook_gate_check(&ctx, &db) {
+    let hook_tool = if is_agy {
+        crate::tool::Tool::Antigravity
+    } else {
+        crate::tool::Tool::Gemini
+    };
+    if !common::hook_gate_check_for_tools(&ctx, &db, &[hook_tool]) {
         return 0;
     }
 

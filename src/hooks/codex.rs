@@ -553,7 +553,7 @@ pub fn dispatch_codex_hook_native(hook_name: &str) -> i32 {
     };
 
     let ctx = HcomContext::from_os();
-    if !common::hook_gate_check(&ctx, &db) {
+    if !common::hook_gate_check_for_tools(&ctx, &db, &[crate::tool::Tool::Codex]) {
         return 0;
     }
 

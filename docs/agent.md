@@ -248,6 +248,11 @@ The built-in start mode is clean. Set `"resume": true` in defaults or an agent e
 its stopped session. `--resume` and `--clean` override the catalog; if both occur, the last one
 wins. `--restart` first replaces a running instance, then applies the selected start mode.
 
+An hcom-managed agent may invoke another AI CLI directly. The child inherits the
+parent environment, but hcom rejects hooks whose actual CLI does not match the
+tool bound to the inherited process identity. This keeps raw nested CLI sessions
+from replacing the parent's session, transcript, or delivery binding.
+
 An instance name is unique. Launching an already-running name reports its status and exits without
 opening another instance. To run one catalog definition concurrently, assign each instance a
 different name:

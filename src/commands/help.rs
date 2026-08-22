@@ -646,6 +646,10 @@ const HOOKS_HELP: &[HelpEntry] = &[
         "",
         "Without hooks, use ad-hoc mode (run hcom start inside any AI tool).",
     ),
+    (
+        "",
+        "Hooks from a different nested AI CLI cannot replace the parent identity.",
+    ),
     ("", "Restart the tool after adding hooks to activate."),
     (
         "",
@@ -1286,6 +1290,16 @@ mod tests {
 
         let resume_help = get_command_help("r");
         assert!(resume_help.contains("Claude/Kimi resume or fork only"));
+    }
+
+    #[test]
+    fn hooks_help_documents_nested_cli_identity_isolation() {
+        let help = get_command_help("hooks");
+        assert!(
+            help.contains(
+                "Hooks from a different nested AI CLI cannot replace the parent identity."
+            )
+        );
     }
 
     #[test]

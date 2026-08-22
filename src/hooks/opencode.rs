@@ -497,7 +497,11 @@ pub fn dispatch_opencode_hook(hook_name: &str, argv: &[String]) -> (i32, String)
     };
 
     // Pre-gate: non-participants with empty DB → exit 0, no output
-    if !common::hook_gate_check(&ctx, &db) {
+    if !common::hook_gate_check_for_tools(
+        &ctx,
+        &db,
+        &[crate::tool::Tool::OpenCode, crate::tool::Tool::Kilo],
+    ) {
         return (0, String::new());
     }
 

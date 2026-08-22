@@ -534,7 +534,7 @@ pub fn dispatch_copilot_hook_native(hook_name: &str) -> i32 {
         }
     };
     let ctx = HcomContext::from_os();
-    if !common::hook_gate_check(&ctx, &db) {
+    if !common::hook_gate_check_for_tools(&ctx, &db, &[crate::tool::Tool::Copilot]) {
         return 0;
     }
     let payload = HookPayload::from_copilot_native(hook_type_for_command(hook_name), raw);

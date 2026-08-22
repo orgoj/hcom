@@ -294,7 +294,7 @@ pub fn dispatch_pi_hook(hook_name: &str, argv: &[String]) -> (i32, String) {
             );
         }
     };
-    if !common::hook_gate_check(&ctx, &db) {
+    if !common::hook_gate_check_for_tools(&ctx, &db, &[crate::tool::Tool::Pi]) {
         return (0, String::new());
     }
     let handler_argv: Vec<String> = if !argv.is_empty() && argv[0] == hook_name {

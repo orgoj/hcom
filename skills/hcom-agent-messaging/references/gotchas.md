@@ -37,6 +37,7 @@ hcom events --agent luna     # What has luna seen recently?
 | No matching thread | Agent sees no messages | Both sides must use exact same `--thread` value |
 | Message scope mismatch | Event `scope` is "mentions" but agent not in `mentions` array | Verify @mention matches agent name or tag |
 | Identity binding failed | Agent not in `instances` table | Check `HCOM_PROCESS_ID` env var propagation |
+| Parent identity changes after running another AI CLI | Outdated hcom allowed foreign child hooks to reuse inherited `HCOM_PROCESS_ID` | Upgrade hcom; current hooks reject the child and repair unambiguous Claude metadata automatically |
 
 ## Messages Leaking Between Workflows
 

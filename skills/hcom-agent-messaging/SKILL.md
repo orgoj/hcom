@@ -157,6 +157,10 @@ hcom relay status    # check cross-device relay
 
 hooks missing? `hcom hooks add` then restart tool.
 
+Raw nested AI CLIs may inherit `HCOM_PROCESS_ID`; hcom ignores their hooks when
+the child CLI differs from the tool bound to that process. Current releases also
+repair older cross-tool corruption on the next unambiguous Claude hook.
+
 still broken?
 ```bash
 hcom reset all && hcom hooks add

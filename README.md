@@ -204,6 +204,12 @@ For `Instance '<name>' already exists` after a reboot, run `hcom list` and retry
 Current releases also reconcile stale launch records automatically when reusing an
 explicit name.
 
+Running another AI CLI directly from an hcom-managed agent is safe: foreign child
+hooks cannot reuse the parent's inherited process identity. If an older release
+already let a child overwrite a Claude instance's session metadata, the next
+Claude hook restores the original identity when both transcript paths identify
+the cross-tool mismatch.
+
 ---
 
 ## Uninstall

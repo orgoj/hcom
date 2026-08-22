@@ -157,6 +157,9 @@ pub fn dispatch_claude_hook(hook_type: &str) -> i32 {
     // a visible hcom attempt from a child: let it reach routing so it receives
     // the actionable "start hcom in the parent first" denial even with an
     // otherwise empty database.
+    if !common::hook_process_tool_matches(&ctx, &db, &[crate::tool::Tool::Claude]) {
+        return 0;
+    }
     if !(common::hook_gate_check(&ctx, &db)
         || (hook_type == HOOK_PRE && child_visibly_invokes_hcom(&payload)))
     {
