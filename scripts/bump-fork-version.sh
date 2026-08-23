@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Bump the fork's `-orgoj.N` suffix in Cargo.toml and keep Cargo.lock in sync.
+# Bump a fork version suffix (X.Y.Z-<fork>.N) in Cargo.toml and keep Cargo.lock
+# in sync.
 #
-# Every change in this fork ships a new orgoj.N, and doing that by hand across
-# two files is how the lock file drifts from the manifest.
+# A fork ships a new N per change, and doing that by hand across two files is
+# how the lock file drifts from the manifest. The fork label is read from the
+# current version, so nothing here is tied to one fork.
 #
 # Usage: scripts/bump-fork-version.sh [new-version]
 #   without an argument, N is incremented by one.
@@ -19,8 +21,8 @@ fi
 if [[ $# -gt 0 ]]; then
     next=$1
 else
-    if [[ ! ${current} =~ ^(.*-orgoj\.)([0-9]+)$ ]]; then
-        echo "version '${current}' has no -orgoj.N suffix; pass the new version explicitly" >&2
+    if [[ ! ${current} =~ ^(.*-[A-Za-z0-9_]+\.)([0-9]+)$ ]]; then
+        echo "version '${current}' has no fork suffix to increment; pass the new version explicitly" >&2
         exit 1
     fi
     next="${BASH_REMATCH[1]}$((BASH_REMATCH[2] + 1))"

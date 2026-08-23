@@ -1,9 +1,6 @@
 # Repository instructions
 
 - Never use the `hcom-agent-messaging` skill here; use the current source and documentation.
-- On `orgoj`, increment `orgoj.N` in `Cargo.toml` and `Cargo.lock` at the first binary-affecting change after each commit, once per uncommitted change set. Pure non-binary changes require no bump or rebuild.
-- Run every Cargo build and test outside the sandbox.
-- After binary-affecting source or version changes, run exactly `cargo build --release` and verify `target/release/hcom --version`.
 - Run binary unit tests with `cargo test --bin hcom`; never use `cargo test --lib`. Cargo accepts one positional filter, so use a shared filter or separate commands.
 - To find out how the binary behaves under a given catalog, environment, or flag, write the case in `tests/cli_smoke.rs` first and run `cargo test --test cli_smoke <filter>`. `Hcom::new()` in `tests/support/mod.rs` is an isolated HOME and data directory, `h.path()` is where a catalog goes, and `h.run([...])` returns `(code, stdout, stderr)` with the environment wired; `agent_dry_run_renders_the_hcom_command_without_launching` and `agent_group_dry_run_includes_agents_hidden_by_selective_import` are the templates. Do not rebuild that fixture in shell: the test explores and then stays as the regression, a scratch fixture verifies once and disappears. Reserve composed shell for the genuinely one-off that no harness covers, and keep any such fixture in the gitignored `tmp/`.
 - Never point a test at the live `~/.hcom`. The data directory variable is `HCOM_DIR` (there is no `HCOM_DATA_DIR`), and a stray `hcom start --as <name>` against the real database renames the running session's own instance row.
@@ -12,4 +9,4 @@
 - For per-CLI arguments, environment, bootstrap context, or instruction transport changes, test clean start, tracked resume, fork, session switch, and nested child launch. Invocation-local values must survive where intended and never leak to children.
 - Before committing or handing off, inspect `git status` and remove your artifacts. Never ignore, commit, or delete pre-existing untracked files without asking.
 - For user-facing commands, flags, configuration, or behavior, update built-in help, `README.md`, relevant `docs/`, `skills/hcom-agent-messaging/` references, and practical help tests in the same change set.
-- Before the final `cargo build --release`, complete the user-facing change matrix (built-in help, `README.md`, relevant docs, skill references, and practical help tests) and inspect the full diff. Any subsequent source edit requires rebuilding and reverifying the release binary.
+- Complete that change matrix and inspect the full diff before you build or hand the change set off. How a build is installed, and whether one is expected at all, is local setup rather than a repository rule.
