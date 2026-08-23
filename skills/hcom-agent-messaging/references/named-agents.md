@@ -84,13 +84,14 @@ Imports are recursive and load before the importing file's local definitions. Re
 paths resolve against the importing file. Omitting `agents` imports all agents; an empty list
 imports none. Imported agents retain their source catalog's defaults and relative directory base.
 
-An import's `agents` list is a scope boundary, for `hcom send` as much as for `hcom agent`. An agent
-defined only in a project catalog is addressable from inside that project, and from another
-directory only if a catalog in scope imports it: in the example above `wdt_main` is reachable from
-anywhere while the project's other agents are reachable only from inside `ansible-wdt`. hcom never
-scans the filesystem for unrelated project catalogs. When a name is out of scope this way, hcom
-names the catalog that defines it instead of reporting an unknown agent; do not read that as the
-entry having been removed.
+An import's `agents` list is a scope boundary, for `hcom send` as much as for `hcom agent`, and the
+isolation is deliberate. An agent defined only in a project catalog is addressable from inside that
+project, and from another directory only if a catalog in scope imports it: in the example above
+`wdt_main` is reachable from anywhere while the project's other agents stay reachable only from
+inside `ansible-wdt`. hcom never scans the filesystem for unrelated project catalogs. A name out of
+scope is reported as unknown plus a note that scope depends on the directory — hcom does not tell a
+caller out of scope which catalog defines that name, so do not read "unknown" from outside a
+project as the entry having been removed, and do not build tooling that works around the boundary.
 Each catalog discovers bundles in a sibling `agents/` directory, including bundle-only agents.
 Missing files, requested names, and import cycles are errors.
 

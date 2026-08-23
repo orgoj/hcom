@@ -1789,10 +1789,11 @@ fn agent_unknown_name_suggests_a_close_match() {
     );
 }
 
-/// "unknown agent" for an entry an import filtered out sent a user hunting for
-/// a catalog entry that was never deleted. Name the file and the way back in.
+/// A selective import hides a project's other agents on purpose. Someone
+/// outside must not learn from an error that they exist, where they live, or
+/// how to pull them in — the scope note says only that scope is directional.
 #[test]
-fn agent_unknown_name_reports_an_import_filtered_entry() {
+fn agent_unknown_name_keeps_an_import_filtered_entry_private() {
     let h = Hcom::new();
     let project = h.root_path().join("proj");
     std::fs::create_dir_all(project.join(".hcom")).expect("create project catalog dir");
@@ -1814,20 +1815,23 @@ fn agent_unknown_name_reports_an_import_filtered_entry() {
     let (code, _stdout, stderr) = h.run(["agent", "show", "p_two"]);
     assert_ne!(code, 0, "stderr={stderr}");
     assert!(stderr.contains("unknown agent 'p_two'"), "stderr={stderr}");
-    assert!(stderr.contains("is defined in"), "stderr={stderr}");
     assert!(
-        stderr.contains(
+        stderr.contains("Catalog scope depends on the directory"),
+        "stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains(
             &project
                 .join(".hcom")
                 .join("agents.json")
                 .display()
                 .to_string()
         ),
-        "stderr={stderr}"
+        "leaked the hidden catalog's path: stderr={stderr}"
     );
     assert!(
-        stderr.contains(r#"Add "p_two" to that import"#),
-        "stderr={stderr}"
+        !stderr.contains("is defined in"),
+        "leaked that the agent exists: stderr={stderr}"
     );
 
     let (code, stdout, stderr) = h.run(["agent", "show", "p_main"]);
@@ -1848,7 +1852,7 @@ fn agent_unknown_name_explains_catalog_scope() {
     let (code, _stdout, stderr) = h.run(["agent", "show", "absent_one"]);
     assert_ne!(code, 0, "stderr={stderr}");
     assert!(
-        stderr.contains("Catalog scope: a project .hcom/agents.json is in scope"),
+        stderr.contains("Catalog scope depends on the directory"),
         "stderr={stderr}"
     );
 }

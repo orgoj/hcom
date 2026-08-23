@@ -202,15 +202,12 @@ fn build_unmatched_error(unmatched: &[String], full_names: &[String]) -> String 
     if !suggestions.is_empty() {
         msg.push_str(&format!("\nDid you mean: {}?", suggestions.join(", ")));
     }
-    // A configured agent that no import selects is unreachable from here while
-    // its definition sits untouched in the project catalog; "unknown or
-    // unavailable" alone reads as "this agent is gone".
-    for target in unmatched.iter().filter(|t| !t.contains(':')) {
-        if let Some(hint) = crate::commands::agent::out_of_scope_catalog_hint(target) {
-            msg.push('\n');
-            msg.push_str(&hint);
-        }
-    }
+    // A name can also be unreachable because the catalog holding it is not in
+    // scope from this directory, which "unknown or unavailable" alone reads as
+    // "this agent is gone". The note says only that; which agents a project
+    // keeps to itself stays the project's business.
+    msg.push('\n');
+    msg.push_str(crate::commands::agent::OUT_OF_SCOPE_NOTE);
     msg.push_str(&format!(
         "\nAvailable: {}",
         format_recipients(full_names, 30)

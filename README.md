@@ -332,7 +332,7 @@ same inside and outside a project. Later scalar values replace earlier ones: a p
 `system_prompt` replaces the global text rather than appending to it, and `""` clears it. Recursive
 imports apply before the importing catalog's local entries. An agent defined only in a project
 catalog is addressable from inside that project, and from elsewhere only where a catalog in scope
-imports it.
+imports it; a project's other agents stay private to it.
 
 Catalog `session`/`window` placement is honored when Herdr is the configured default, including
 nested launches and targeted-message autostart; a parent agent's Herdr location is not inherited.

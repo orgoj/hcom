@@ -68,10 +68,11 @@ by exact match in `hcom agent list`. If neither matches, ask the user — do not
 - Send the task directly with `hcom send @<name> --intent request -- "..."`. Targeted send resolves
   the catalog and automatically starts a missing or stopped configured agent, so no `hcom list` or
   `hcom agent` preflight is needed.
-- Catalogs are scoped: an agent defined only in a project `.hcom/agents.json` is addressable from
-  inside that project, and from elsewhere only where a catalog in scope imports it. A name that is
-  out of scope is reported with the catalog that defines it, which is not the same as a name that
-  does not exist.
+- Catalogs are scoped on purpose: an agent defined only in a project `.hcom/agents.json` is
+  addressable from inside that project, and from elsewhere only where a catalog in scope imports
+  it. A project's other agents are private to it. From outside, an out-of-scope name is
+  indistinguishable from a name that does not exist, and that is intended — report it as
+  unreachable from here rather than guessing at what a project might be hiding.
 - If the user distinguishes an "hcom agent" from an "hcom instance", preserve that distinction
   literally.
 - Treat every new or updated catalog agent as clean-starting. Do not add `"resume": true`, pass
@@ -187,7 +188,7 @@ hcom claude          # fresh start
 | symptom | diagnosis | fix |
 |---------|-----------|-----|
 | catalog agent not in `hcom list` | agent stopped or never launched | target it directly; `hcom send` starts it on demand |
-| known agent reported unknown or unavailable | its project catalog is not in scope from this directory | run from inside that project, or add the name to the importing catalog's `agents` list |
+| known agent reported unknown or unavailable | its catalog is not in scope from this directory | work from inside that project; exporting it elsewhere is the project owner's decision |
 | message sent but not delivered | check `hcom events --last 5` | verify @mention matches agent name/tag |
 | message reaches more than one agent | duplicate base name across tags | target the full `@tag-name` to hit exactly one |
 | messages leaking between workflows | no thread isolation | always use `--thread` |

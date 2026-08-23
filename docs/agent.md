@@ -214,11 +214,13 @@ global catalog act as a registry from which agents can be inspected or a project
 started without changing to that project's directory. hcom does not scan the filesystem for
 unrelated project catalogs; they must be reachable through an import.
 
-Addressability follows that same boundary. An agent defined only in a project catalog can be
-launched and messaged from inside its project, and from anywhere else only if a catalog in scope
-imports it — so a selective import makes exactly the listed agents reachable across repositories
-and leaves the rest reachable only from their own project. When a name is out of scope this way,
-`hcom agent` and `hcom send` say which catalog defines it instead of reporting it as unknown.
+Addressability follows that same boundary, and the isolation is the point. An agent defined only in
+a project catalog can be launched and messaged from inside its project, and from anywhere else only
+if a catalog in scope imports it — a selective import publishes exactly the listed agents across
+repositories and keeps the project's other agents to that project. An unreachable name is reported
+as unknown with a note that catalog scope depends on the directory; hcom deliberately does not
+disclose to a caller out of scope whether the name exists elsewhere or in which catalog, because
+that disclosure would undo the boundary the import was drawn to create.
 
 `hcom agent list --local` limits any listing format to the nearest project's direct and imported
 agents, excluding global and additive catalogs. Combine it with `--all` to include project-imported
