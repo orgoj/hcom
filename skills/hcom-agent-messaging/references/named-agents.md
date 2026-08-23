@@ -248,8 +248,8 @@ The effective CLI is the command-line `--cli` value, otherwise the agent's `cli`
 3. Command-line flags and passthrough arguments.
 
 Tool-profile scalar values override their shared equivalents. Tool-profile arguments append after
-top-level arguments. Command-line `--model`, `--reasoning`, `--prompt`, and `--system-prompt`
-override both; unknown command-line arguments append last and are forwarded to the selected tool.
+top-level arguments. Command-line `--model`, `--reasoning`, `--hcom-prompt`, and
+`--hcom-system-prompt` override both; unknown command-line arguments append last and are forwarded to the selected tool.
 
 ```bash
 hcom agent reviewer --cli claude

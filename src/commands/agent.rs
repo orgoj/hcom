@@ -84,7 +84,9 @@ Flags:
   --as <name>               Run under a different instance name
   --tag / --model <val>     Forwarded to hcom / the tool
   --reasoning <val>         Reasoning effort (Claude, Antigravity, and Codex)
-  --prompt / --system-prompt <text>
+  --hcom-prompt <text>      Initial user prompt (catalog key: prompt)
+  --hcom-system-prompt <text>
+                            Invocation-local instructions (catalog key: system_prompt)
   --pre <cmd>               Shell command run in the window before the agent
   --env K=V                 Extra environment variable (repeatable)
   --catalog <path>          Use this file instead of the project catalog
@@ -964,11 +966,11 @@ fn parse_cli(argv: &[String]) -> Result<Cli> {
                 cli.def.reasoning = Some(value()?);
                 i += 2;
             }
-            "--prompt" | "--hcom-prompt" => {
+            "--hcom-prompt" => {
                 cli.def.prompt = Some(value()?);
                 i += 2;
             }
-            "--system-prompt" | "--hcom-system-prompt" => {
+            "--hcom-system-prompt" => {
                 cli.def.system_prompt = Some(value()?);
                 i += 2;
             }
@@ -3066,7 +3068,7 @@ mod tests {
                 "cli",
                 "--reasoning",
                 "xhigh",
-                "--prompt",
+                "--hcom-prompt",
                 "cli prompt",
                 "--extra",
             ],
