@@ -58,7 +58,9 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   system_prompt replaces rather than appends, and an explicit empty string clears it.
 
   Every catalog may use \"imports\" to reference all or selected agents from other
-  catalogs.
+  catalogs. A project agent is addressable, by `hcom agent` and by `hcom send`,
+  from inside its project, and elsewhere only where a catalog in scope imports
+  it - a selective import's \"agents\" list leaves the rest out of scope.
   A sibling agents/<name>/AGENTS.md also defines an agent and is appended to its
   system instructions after the fixed JSON system_prompt. Bundle-local skills are
   discovered from agents/<name>/skills/*/SKILL.md. A project agent ignores a
@@ -887,11 +889,51 @@ fn wait_for_catalog_agent_registration(
     }
 }
 
+/// Why a name that exists in a catalog on disk is not addressable from here.
+///
+/// An import with an `agents` list drops every entry it does not select, so a
+/// project agent can be fully defined and still resolve to "unknown agent".
+/// Reporting only "unknown" sends people looking for an entry they never
+/// deleted, so name the catalog and the two ways to bring it into scope. The
+/// wide load keeps import-filtered entries, and that difference is exactly what
+/// we are diagnosing. Returns None for a name no reachable catalog defines: a
+/// project catalog outside the current directory is not discoverable at all.
+pub(crate) fn out_of_scope_catalog_hint(name: &str) -> Option<String> {
+    if !crate::identity::is_valid_base_name(name) {
+        return None;
+    }
+    let wide = Catalogs::load_for_groups(false, None).ok()?;
+    let file = wide
+        .base_files
+        .iter()
+        .chain(&wide.project_files)
+        .find(|f| f.label.starts_with("import:") && f.catalog.agents.contains_key(name))?;
+    let mut msg = format!(
+        "'{name}' is defined in {} but is not in scope here: that catalog is imported with an \"agents\" list that does not select it.",
+        file.path.display()
+    );
+    msg.push_str(&format!(
+        "\nAdd \"{name}\" to that import, or run hcom from inside {}.",
+        catalog_relative_base(&file.path).display()
+    ));
+    Some(msg)
+}
+
 fn unknown_agent_error(name: &str, catalogs: &Catalogs) -> anyhow::Error {
     let names = catalogs.names();
     let mut msg = format!("unknown agent '{name}'");
     if let Some(close) = closest(name, names.keys()) {
         msg.push_str(&format!(" (did you mean '{close}'?)"));
+    }
+    match out_of_scope_catalog_hint(name) {
+        Some(hint) => {
+            msg.push('\n');
+            msg.push_str(&hint);
+        }
+        None if !names.is_empty() => msg.push_str(
+            "\nCatalog scope: a project .hcom/agents.json is in scope inside its project, or where another catalog imports it.",
+        ),
+        None => {}
     }
     if names.is_empty() {
         let paths = catalogs.paths();

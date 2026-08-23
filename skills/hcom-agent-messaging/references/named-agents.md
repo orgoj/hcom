@@ -10,7 +10,8 @@ names.
 
 `hcom agent list` answers "who can be addressed at all"; `hcom list` answers "who is running right
 now". A catalog agent absent from `hcom list` is stopped, not unknown, and an exact name is never
-resolved to a similar one.
+resolved to a similar one. "Who can be addressed at all" is also directory-dependent: see
+[Imports and additive client catalogs](#imports-and-additive-client-catalogs).
 
 ## Catalogs and precedence
 
@@ -82,6 +83,14 @@ the global catalog.
 Imports are recursive and load before the importing file's local definitions. Relative `from`
 paths resolve against the importing file. Omitting `agents` imports all agents; an empty list
 imports none. Imported agents retain their source catalog's defaults and relative directory base.
+
+An import's `agents` list is a scope boundary, for `hcom send` as much as for `hcom agent`. An agent
+defined only in a project catalog is addressable from inside that project, and from another
+directory only if a catalog in scope imports it: in the example above `wdt_main` is reachable from
+anywhere while the project's other agents are reachable only from inside `ansible-wdt`. hcom never
+scans the filesystem for unrelated project catalogs. When a name is out of scope this way, hcom
+names the catalog that defines it instead of reporting an unknown agent; do not read that as the
+entry having been removed.
 Each catalog discovers bundles in a sibling `agents/` directory, including bundle-only agents.
 Missing files, requested names, and import cycles are errors.
 

@@ -1789,6 +1789,70 @@ fn agent_unknown_name_suggests_a_close_match() {
     );
 }
 
+/// "unknown agent" for an entry an import filtered out sent a user hunting for
+/// a catalog entry that was never deleted. Name the file and the way back in.
+#[test]
+fn agent_unknown_name_reports_an_import_filtered_entry() {
+    let h = Hcom::new();
+    let project = h.root_path().join("proj");
+    std::fs::create_dir_all(project.join(".hcom")).expect("create project catalog dir");
+    std::fs::write(
+        project.join(".hcom").join("agents.json"),
+        r#"{"defaults":{"cli":"codex"},"agents":{"p_main":{"dir":"/tmp"},"p_two":{"dir":"/tmp"}}}"#,
+    )
+    .expect("write project catalog");
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["p_main"]}}],"agents":{{"glob":{{"dir":"/tmp","cli":"codex"}}}}}}"#,
+            serde_json::to_string(&project.join(".hcom").join("agents.json").to_string_lossy())
+                .expect("encode path")
+        ),
+    )
+    .expect("write global catalog");
+
+    let (code, _stdout, stderr) = h.run(["agent", "show", "p_two"]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(stderr.contains("unknown agent 'p_two'"), "stderr={stderr}");
+    assert!(stderr.contains("is defined in"), "stderr={stderr}");
+    assert!(
+        stderr.contains(
+            &project
+                .join(".hcom")
+                .join("agents.json")
+                .display()
+                .to_string()
+        ),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains(r#"Add "p_two" to that import"#),
+        "stderr={stderr}"
+    );
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "p_main"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+}
+
+/// A name no reachable catalog defines still needs the scope note: the user
+/// cannot tell "misspelled" from "the catalog holding it is not in scope here".
+#[test]
+fn agent_unknown_name_explains_catalog_scope() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"glob":{"dir":"/tmp","cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, _stdout, stderr) = h.run(["agent", "show", "absent_one"]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(
+        stderr.contains("Catalog scope: a project .hcom/agents.json is in scope"),
+        "stderr={stderr}"
+    );
+}
+
 #[test]
 fn agent_dry_run_renders_the_hcom_command_without_launching() {
     let h = Hcom::new();

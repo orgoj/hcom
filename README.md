@@ -330,7 +330,9 @@ The precedence chain is built-in defaults, global catalog `defaults`, each match
 `defaults` and named entry, the matching `tools.<cli>` profile, then command-line flags. It is the
 same inside and outside a project. Later scalar values replace earlier ones: a project
 `system_prompt` replaces the global text rather than appending to it, and `""` clears it. Recursive
-imports apply before the importing catalog's local entries.
+imports apply before the importing catalog's local entries. An agent defined only in a project
+catalog is addressable from inside that project, and from elsewhere only where a catalog in scope
+imports it.
 
 Catalog `session`/`window` placement is honored when Herdr is the configured default, including
 nested launches and targeted-message autostart; a parent agent's Herdr location is not inherited.
