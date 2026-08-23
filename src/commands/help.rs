@@ -817,6 +817,11 @@ fn generate_tool_help(spec: &crate::integration_spec::IntegrationSpec) -> String
     lines.push(
         "    2  Still launching after readiness wait, or blocked on user attention".to_string(),
     );
+    lines.push(format!(
+        "  Inline readiness wait for {}: {}s. Exit 2 is not a failure - the agent",
+        spec.name, spec.launch.inline_ready_wait_secs
+    ));
+    lines.push("  keeps starting and messages queued for it are still delivered.".to_string());
     lines.push(String::new());
     lines.push(format!("  Run \"{} --help\" for {} options.", t, t));
     lines.push("  Run \"hcom config terminal --info\" for terminal presets.".to_string());

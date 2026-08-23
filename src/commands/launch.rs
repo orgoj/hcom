@@ -17,7 +17,16 @@ use anyhow::{Result, bail};
 use serde_json::json;
 use std::time::Instant;
 
-pub(crate) const INLINE_SINGLE_LAUNCH_WAIT_SECS: u64 = 10;
+/// How long a single inline launch waits for launch readiness, per tool.
+///
+/// TUI startup cost differs by an order of magnitude between CLIs, so one
+/// fixed window fits none of them. Expiring ends only the wait: the agent
+/// keeps starting and messages queued for it are still delivered.
+pub(crate) fn inline_launch_wait_secs(tool: &str) -> u64 {
+    LaunchTool::from_str(tool)
+        .map(|t| t.spec().launch.inline_ready_wait_secs)
+        .unwrap_or(crate::integration_spec::ADHOC.launch.inline_ready_wait_secs)
+}
 
 /// Run the launch command. `argv` is the full argv[1..] including count/tool.
 pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
@@ -169,7 +178,7 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
         run_here: hcom_flags.run_here,
         hcom_config: &hcom_config,
         inline_readiness_wait_secs: if ctx.is_inside_ai_tool() && count == 1 {
-            Some(INLINE_SINGLE_LAUNCH_WAIT_SECS)
+            Some(inline_launch_wait_secs(launch_tool.as_str()))
         } else {
             None
         },
@@ -1285,6 +1294,19 @@ mod tests {
 
         assert!(line.contains("Still launching after 10.0s: mari (0/1 ready"));
         assert!(line.contains("hcom events launch batch-2 --timeout 30"));
+    }
+
+    #[test]
+    fn inline_launch_wait_is_per_tool() {
+        assert_eq!(inline_launch_wait_secs("claude"), 90);
+        assert_eq!(inline_launch_wait_secs("claude-pty"), 90);
+        assert_eq!(inline_launch_wait_secs("codex"), 45);
+        // Unknown launch surfaces fall back to the adhoc profile rather than
+        // to a zero-length wait.
+        assert_eq!(
+            inline_launch_wait_secs("not-a-tool"),
+            crate::integration_spec::ADHOC.launch.inline_ready_wait_secs
+        );
     }
 
     #[test]

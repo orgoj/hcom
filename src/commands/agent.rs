@@ -809,11 +809,55 @@ pub(crate) fn catalog_message_targets() -> Result<Vec<(String, Option<String>)>>
         .collect())
 }
 
+/// How long autostart waits for the launched agent's instance row to appear.
+///
+/// This wait is the one place where expiry really does drop the message (a
+/// send with no recipient row has nowhere to queue), so it is generous: the
+/// row is normally reserved within milliseconds of the launch starting.
+const CATALOG_REGISTRATION_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What a launch exit code means for the send that triggered the autostart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AutostartOutcome {
+    /// Agent reported ready.
+    Started,
+    /// Still launching, or blocked on user attention: the process is up, only
+    /// readiness was not observed within the inline wait.
+    StillLaunching,
+    /// The agent could not be spawned at all.
+    Failed,
+}
+
+pub(crate) fn classify_autostart_exit(code: i32) -> AutostartOutcome {
+    match code {
+        0 => AutostartOutcome::Started,
+        2 => AutostartOutcome::StillLaunching,
+        _ => AutostartOutcome::Failed,
+    }
+}
+
 /// Start a configured agent using its effective catalog start mode.
+///
+/// A launch that is merely still starting must not abort the send: the message
+/// is written to the DB after the instance row is reserved, so the agent
+/// receives it once its delivery loop starts. Treating that as a start failure
+/// used to discard the payload while reporting a failure that had not happened.
 pub(crate) fn autostart_catalog_agent(db: &HcomDb, name: &str) -> Result<()> {
-    match cmd_launch(name, &[])? {
-        0 => wait_for_catalog_agent_registration(db, name, std::time::Duration::from_secs(10)),
-        code => bail!("could not start catalog agent '{name}' (exit {code})"),
+    let code = cmd_launch(name, &[])?;
+    match classify_autostart_exit(code) {
+        AutostartOutcome::Started => {
+            wait_for_catalog_agent_registration(db, name, CATALOG_REGISTRATION_WAIT)
+        }
+        AutostartOutcome::StillLaunching => {
+            wait_for_catalog_agent_registration(db, name, CATALOG_REGISTRATION_WAIT)?;
+            println!(
+                "Agent '{name}' is still starting - message queued, it is delivered when the agent is ready."
+            );
+            Ok(())
+        }
+        AutostartOutcome::Failed => {
+            bail!("could not start catalog agent '{name}' (exit {code})")
+        }
     }
 }
 
@@ -2442,6 +2486,16 @@ mod tests {
 
     fn def_from(json: &str) -> AgentDef {
         serde_json::from_str(json).unwrap()
+    }
+
+    /// Exit 2 is "readiness not observed yet", not "start failed". Sends must
+    /// survive it, or the payload is lost while the agent comes up fine.
+    #[test]
+    fn still_launching_is_not_an_autostart_failure() {
+        assert_eq!(classify_autostart_exit(0), AutostartOutcome::Started);
+        assert_eq!(classify_autostart_exit(2), AutostartOutcome::StillLaunching);
+        assert_eq!(classify_autostart_exit(1), AutostartOutcome::Failed);
+        assert_eq!(classify_autostart_exit(127), AutostartOutcome::Failed);
     }
 
     fn live_agent(name: &str, status: &str) -> LiveAgent {

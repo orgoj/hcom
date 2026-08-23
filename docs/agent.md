@@ -34,7 +34,8 @@ Two separate registries answer two different questions:
 `hcom list` shows live instances only, so a configured agent missing from it is stopped, not
 unknown. Address it by its exact name: `hcom send @<name>` starts a missing or stopped configured
 agent before delivering. A name is never resolved to a similar one — `bin` is the agent `bin`, not
-a running `project1_bin`.
+a running `project1_bin`. If the agent is still starting when the readiness wait ends, the message
+is queued and delivered once the agent is ready; the send still succeeds.
 
 ## Catalogs and precedence
 

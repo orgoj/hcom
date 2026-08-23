@@ -192,7 +192,9 @@ pub fn do_resume(
     }
 
     let inline_readiness_wait_secs = if ctx.is_inside_ai_tool() {
-        Some(crate::commands::launch::INLINE_SINGLE_LAUNCH_WAIT_SECS)
+        Some(crate::commands::launch::inline_launch_wait_secs(
+            &plan.launch.tool,
+        ))
     } else {
         None
     };

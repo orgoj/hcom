@@ -302,6 +302,16 @@ fn sweep_expired_reqwatch_graces(db: &HcomDb, now: f64) {
             continue;
         }
 
+        // The DELETE was the claim, not the end of the watch: re-arm it (minus
+        // the spent grace) so a later `stopped` event still reaches the caller.
+        let mut rearmed = sub.clone();
+        rearmed["idle_notified"] = serde_json::json!(true);
+        if let Some(obj) = rearmed.as_object_mut() {
+            obj.remove("idle_grace_until");
+            obj.remove("idle_grace_event_id");
+        }
+        kv_store_sub(db, &key, &rearmed);
+
         let sub_id = sub
             .get("id")
             .and_then(|v| v.as_str())
@@ -603,6 +613,11 @@ pub(crate) fn process_logged_event(
             .get("filters")
             .cloned()
             .unwrap_or(serde_json::Value::Null);
+        // An idle notice does not end a request watch: the target may still be
+        // working and the request stands. Keep the watch armed for the target's
+        // `stopped` event (and for the reply that cancels it) instead of
+        // consuming the one-shot subscription on the first idle event.
+        let mut reqwatch_idle_keep = false;
         if sub_filters.get("request_watch").is_some() {
             let request_id = sub_filters
                 .get("request_id")
@@ -668,6 +683,22 @@ pub(crate) fn process_logged_event(
                     }
                     super::reqwatch_policy::ReqwatchNotifyDecision::Proceed => {}
                 }
+
+                if event_type == "status" {
+                    if sub
+                        .get("idle_notified")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        // Idle was reported once already; further turn
+                        // boundaries add nothing. Stay armed for `stopped`.
+                        let mut sub_mut = sub.clone();
+                        sub_mut["last_id"] = serde_json::json!(event_id);
+                        kv_store_sub(db, key, &sub_mut);
+                        continue;
+                    }
+                    reqwatch_idle_keep = true;
+                }
             }
         }
 
@@ -706,7 +737,16 @@ pub(crate) fn process_logged_event(
             }
         }
 
-        if sub.get("once").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if reqwatch_idle_keep {
+            let mut sub_mut = sub.clone();
+            sub_mut["last_id"] = serde_json::json!(event_id);
+            sub_mut["idle_notified"] = serde_json::json!(true);
+            if let Some(obj) = sub_mut.as_object_mut() {
+                obj.remove("idle_grace_until");
+                obj.remove("idle_grace_event_id");
+            }
+            kv_store_sub(db, key, &sub_mut);
+        } else if sub.get("once").and_then(|v| v.as_bool()).unwrap_or(false) {
             if let Err(e) = db.kv_set(key, None) {
                 crate::log::log_error(
                     "db",
@@ -937,14 +977,20 @@ fn format_sub_notification(
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "?".to_string());
             let target = f.get("target").and_then(|v| v.as_str()).unwrap_or(instance);
-            let action = if event_type == "status" {
-                "went idle"
-            } else {
-                "stopped"
-            };
+            // A `listening` status is a turn boundary, not proof the target is
+            // done: it can go idle mid-task and resume working. Saying it
+            // "did not respond" reads as "no answer is coming" and invites the
+            // requester to redo the delegated work. Only the `stopped` life
+            // event is a real non-answer.
+            if event_type == "status" {
+                return format!(
+                    "[sub:{}] #{} {} is idle and has not replied to your request #{} yet. Your request still stands - keep waiting (end your turn); do not redo the work yourself. You are notified again if {} stops.",
+                    sub_id, event_id, target, request_id, target
+                );
+            }
             return format!(
-                "[sub:{}] #{} {} {} without responding to your request #{}",
-                sub_id, event_id, target, action, request_id
+                "[sub:{}] #{} {} stopped without responding to your request #{} - no reply is coming.",
+                sub_id, event_id, target, request_id
             );
         }
 
@@ -1167,7 +1213,7 @@ mod tests {
         db.conn()
             .query_row(
                 "SELECT COUNT(*) FROM events WHERE type = 'message'
-                 AND json_extract(data, '$.text') LIKE '%without responding to your request%'
+                 AND json_extract(data, '$.text') LIKE '%to your request #%'
                  AND json_extract(data, '$.text') LIKE ?1",
                 params![pattern],
                 |row| row.get(0),
@@ -1391,9 +1437,63 @@ mod tests {
             before + 1,
             "expired grace should emit one abandoned-request notice"
         );
+        let rearmed: serde_json::Value =
+            serde_json::from_str(&db.kv_get(&sub_key).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            rearmed.get("idle_notified").and_then(|v| v.as_bool()),
+            Some(true),
+            "idle notice should be marked, not repeated: {rearmed}"
+        );
+        assert!(
+            rearmed.get("idle_grace_until").is_none(),
+            "spent grace should be cleared: {rearmed}"
+        );
+        cleanup_test_db(db_path);
+    }
+
+    /// An idle notice is not the end of the request: the watch stays armed so
+    /// the caller still learns if the target stops without replying.
+    #[test]
+    fn test_reqwatch_idle_notice_keeps_watch_armed_for_stop() {
+        let (db, db_path) = setup_full_test_db();
+        let request_id = setup_reqwatch_pair(&db, "gora", "nova", "gemini");
+        let sub_key = format!("events_sub:reqwatch-{request_id}-nova");
+        let before = count_reqwatch_without_reply_notifications(&db, "gora");
+
+        let idle = serde_json::json!({"status": "listening", "context": ""});
+        db.log_event("status", "nova", &idle).unwrap();
+        assert_eq!(
+            count_reqwatch_without_reply_notifications(&db, "gora"),
+            before + 1,
+            "first idle should notify"
+        );
+
+        // A second turn boundary adds nothing and must not notify again.
+        db.log_event("status", "nova", &idle).unwrap();
+        assert_eq!(
+            count_reqwatch_without_reply_notifications(&db, "gora"),
+            before + 1,
+            "repeated idle should stay quiet"
+        );
+        assert!(
+            db.kv_get(&sub_key).unwrap().is_some(),
+            "watch should stay armed after an idle notice"
+        );
+
+        db.log_event(
+            "life",
+            "nova",
+            &serde_json::json!({"action": "stopped", "by": "pty"}),
+        )
+        .unwrap();
+        assert_eq!(
+            count_reqwatch_without_reply_notifications(&db, "gora"),
+            before + 2,
+            "stop after idle should still reach the caller"
+        );
         assert!(
             db.kv_get(&sub_key).unwrap().is_none(),
-            "one-shot reqwatch should be claimed and removed"
+            "stop ends the watch"
         );
         cleanup_test_db(db_path);
     }

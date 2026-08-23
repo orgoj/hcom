@@ -127,6 +127,11 @@ hcom send @luna @nova -- "luna and nova see this" # Multiple mentions
 If a targeted local name or tag member is defined in the effective `hcom agent` catalog but is not
 running, `send` starts it automatically. Broadcasts never start catalog agents.
 
+A cold TUI can take longer to report readiness than the launch wait. When that happens, `send`
+prints `Agent '<name>' is still starting - message queued` and exits successfully; the message is
+delivered once the agent's delivery loop runs. Only a real spawn failure fails the send, so a
+failed `send` always means the message was not stored.
+
 **Common mistake:** Forgetting `--` before the message text. Without `--`, the message text might be parsed as flags.
 
 ## Heartbeat and Stale Detection
@@ -148,6 +153,15 @@ hcom send @worker- --intent ack -- "Got it, thanks"                 # Worker ign
 ```
 
 The bootstrap teaches agents: `request -> always respond`, `inform -> respond only if useful`, `ack -> don't respond`.
+
+## Request-Watch Notices
+
+A `--intent request` send arms a watch on the target. It reports two different things:
+
+- `<name> is idle and has not replied to your request #N yet` — a turn boundary, not a refusal.
+  The target can go idle mid-task and keep working. The request stands: keep waiting, and do not
+  redo the delegated work. It is reported once per request, and the watch stays armed.
+- `<name> stopped without responding to your request #N` — the target is gone; no reply is coming.
 
 ## Thread vs Reply-To vs Scope
 

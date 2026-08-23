@@ -172,6 +172,11 @@ continues through the normal unread/wake mechanism as the new process registers.
 without writing its message if a requested name is neither deliverable nor defined in the catalog,
 or if its catalog launch fails.
 
+A slow-starting TUI is not a launch failure. When the readiness wait ends before the agent reports
+ready, `send` notes that the agent is still starting, writes the message anyway, and exits 0; the
+agent receives it when its delivery loop starts. The readiness wait itself is per CLI, since TUI
+startup times differ by an order of magnitude — `hcom <tool> --help` prints the tool's value.
+
 This behavior applies to direct names, catalog tag groups, and missing catalog members already
 recorded in a `--thread`. It does not apply to broadcasts: a message without targets reaches current
 deliverable instances only and never starts the whole catalog. Remote `name:DEVICE` targets are

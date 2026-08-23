@@ -109,7 +109,9 @@ Use `--terminal tmux-split` only when the child should split the launching agent
 For agents defined in the effective `hcom agent` JSON catalog, a targeted send is also the normal
 launch operation: `hcom send @audit_api --intent request -- "..."` starts `audit_api` when it is
 missing or stopped, then delivers the message. Do not add `hcom list`/`hcom agent` preflight logic.
-Broadcasts do not auto-start catalog agents. See `references/named-agents.md` for routing details.
+Broadcasts do not auto-start catalog agents. If the agent is still starting when the send returns,
+the message is queued and delivered when the agent is ready — the send still succeeds. See
+`references/named-agents.md` for routing details.
 
 For multiple agents, omit `--as` and capture the generated names from launch output; one explicit name cannot be assigned to a multi-agent launch.
 
@@ -231,6 +233,9 @@ Choose replies from the received intent, not from conversational politeness:
 - Do not reply to `inform` unless it requires a concrete substantive response.
 - Reserve `ack` for an explicit protocol that specifically requires a receipt;
   ordinary agent tasks never require it.
+- An `[hcom-events]` notice that a target `is idle and has not replied ... yet` is a turn
+  boundary, not a refusal. The request stands: keep waiting instead of taking the delegated
+  work back. Only `stopped without responding` means no reply is coming.
 - Treat a message as delivered only when `hcom send` exits successfully and
   prints `Sent to:`. On any CLI error, the message was not delivered; correct
   the command and retry before proceeding or reporting success.
