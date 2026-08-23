@@ -38,33 +38,41 @@ a running `project1_bin`.
 
 ## Catalogs and precedence
 
-hcom merges catalog layers in this order. Later values win:
+hcom resolves effective values through this chain, from weakest to strongest, regardless of the
+directory where the command runs:
 
 1. built-in defaults
 2. `defaults` in `~/.hcom/agents.json`
-3. the named entry in `~/.hcom/agents.json`
-4. catalogs listed by `HCOM_AGENT_CATALOGS`
-5. `defaults`, named entries, and bundles in the nearest parent `.hcom`
+3. the matching catalog's `defaults`
+4. the named agent entry
+5. the matching `tools.<effective-cli>` profile
 6. command-line flags
 
 Set `HCOM_AGENTS_FILE` to replace the global catalog path. `HCOM_AGENT_CATALOGS` is a
 platform-specific path-separated list of additive catalogs; it does not replace the global one.
 
-The project search walks parent directories until it finds the nearest `.hcom`, independently of
-Git boundaries. The global `~/.hcom` is never a project scope. A project agent fully shadows a
-same-named global/additive agent instead of inheriting its fields.
+Steps 3-4 repeat for every matching imported, additive, or project catalog in catalog order.
+Imports are recursive and apply before the importing file's local entries. Additive catalogs apply
+left to right.
 
-Scalar fields replace earlier values. `env`, `args`, and tool profiles merge. Relative `dir`
-paths use `$HOME` in the global catalog, the directory containing `.hcom` in project
-catalogs (including when imported), and the catalog directory in other imported/additive
-catalogs. hcom expands `~` and environment variables.
+The project search walks parent directories until it finds the nearest `.hcom`, independently of
+Git boundaries. The global `~/.hcom` is never a project scope. A project agent ignores a same-named
+global/additive entry, but global `defaults` remain its lowest catalog layer. Consequently, the
+same project agent inherits the same global defaults whether hcom runs inside the project or from
+an external catalog that imports it.
+
+`env`, `args`, `groups`, and tool-profile definitions merge; later scalar values replace earlier
+ones. In particular, a later `system_prompt` replaces rather than appends to the earlier text, and
+an explicit empty string clears it. Relative `dir` paths use `$HOME` in the global catalog, the
+directory containing `.hcom` in project catalogs (including when imported), and the catalog
+directory in other imported/additive catalogs. hcom expands `~` and environment variables.
 
 Keep paths in project catalogs relative to the project root. Do not store machine-specific
 absolute paths in a versioned `.hcom/agents.json`; use absolute or `~`-based paths only in
 machine-local catalogs such as `~/.hcom/agents.json`.
 
-Global catalog `defaults` apply throughout the non-project catalog group. Project defaults apply
-only to project agents.
+Global catalog `defaults` apply to every agent. Project defaults apply only to project agents and
+override global defaults field by field.
 
 Unknown catalog fields are errors. This catches misspelled configuration instead of silently
 ignoring it.

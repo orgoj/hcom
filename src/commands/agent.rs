@@ -41,20 +41,28 @@ pub fn help_text() -> String {
   hcom agent edit [--project]                Open a catalog in $EDITOR (creates a starter file)
   hcom agent completions bash|zsh|fish       Shell completion for agent names
 
-Catalog and bundles (later layers win; env and args merge, scalars replace):
+Catalog and bundles (weakest to strongest, regardless of launch directory):
   1. built-in defaults (cli={DEFAULT_CLI})
   2. \"defaults\" in ~/.hcom/{GLOBAL_FILE}          (override path: HCOM_AGENTS_FILE)
-  3. agent entry in ~/.hcom/{GLOBAL_FILE}
-  4. catalogs in {EXTRA_CATALOGS_ENV}                 (platform path-separated)
-  5. \"defaults\" and agent in .hcom/{PROJECT_FILE}   (nearest parent .hcom; Git-independent)
+  3. matching catalog \"defaults\"
+  4. the named agent entry
+  5. the matching tools.<effective-cli> profile
   6. command-line flags
 
+  Steps 3-4 repeat for each matching imported, additive, or project catalog in
+  catalog order. Imports are recursive and apply before the importing file's
+  local entries; {EXTRA_CATALOGS_ENV} catalogs apply left to right. The nearest
+  project .hcom is Git-independent. Global defaults remain the lowest catalog
+  layer for a project agent whether hcom runs inside or outside that project.
+  env and args merge; later scalar values replace earlier ones. In particular,
+  system_prompt replaces rather than appends, and an explicit empty string clears it.
+
   Every catalog may use \"imports\" to reference all or selected agents from other
-  catalogs. Imported layers are applied before the importing file's local entries.
+  catalogs.
   A sibling agents/<name>/AGENTS.md also defines an agent and is appended to its
   system instructions after the fixed JSON system_prompt. Bundle-local skills are
-  discovered from agents/<name>/skills/*/SKILL.md. Project agents fully shadow
-  same-named non-project agents.
+  discovered from agents/<name>/skills/*/SKILL.md. A project agent ignores a
+  same-named non-project entry but still inherits global defaults.
   Relative import paths resolve against the importing file. Relative \"dir\" resolves
   against $HOME globally, the parent of project .hcom (also when imported), or its
   file for other catalogs.
@@ -725,9 +733,9 @@ impl Catalogs {
             .iter()
             .any(|f| f.catalog.agents.contains_key(name))
         {
-            return Self::resolve_from(&self.project_files, name, false);
+            return Self::resolve_from(&self.project_files, &self.base_files, name);
         }
-        Self::resolve_from(&self.base_files, name, true)
+        Self::resolve_from(&self.base_files, &self.base_files, name)
     }
 
     fn group_members(&self, group: &str) -> Vec<String> {
@@ -748,23 +756,25 @@ impl Catalogs {
             .collect()
     }
 
-    fn resolve_from(files: &[CatalogFile], name: &str, global_defaults: bool) -> Option<AgentDef> {
+    fn resolve_from(
+        files: &[CatalogFile],
+        base_files: &[CatalogFile],
+        name: &str,
+    ) -> Option<AgentDef> {
         if !files.iter().any(|f| f.catalog.agents.contains_key(name)) {
             return None;
         }
         // Global defaults are the lowest-precedence base for every catalog
-        // agent, including agents brought in by imports. Apply them before the
-        // catalog-order merge so an imported or project definition can override
-        // them even though imports are stored before their importing file.
+        // agent, including project agents and agents brought in by imports.
+        // Apply them before the catalog-order merge so imported and project
+        // definitions can override them.
         let mut def = AgentDef::default();
-        if global_defaults {
-            for file in files.iter().filter(|file| file.label == "global") {
-                def.merge_from(&file.catalog.defaults);
-            }
+        for file in base_files.iter().filter(|file| file.label == "global") {
+            def.merge_from(&file.catalog.defaults);
         }
         for file in files {
             let entry = file.catalog.agents.get(name);
-            if (!global_defaults || file.label != "global") && entry.is_some() {
+            if file.label != "global" && entry.is_some() {
                 def.merge_from(&file.catalog.defaults);
             }
             if let Some(entry) = entry {
@@ -2535,6 +2545,16 @@ mod tests {
     }
 
     #[test]
+    fn merge_replaces_system_prompt_and_empty_string_clears_it() {
+        let mut def = def_from(r#"{"system_prompt":"global"}"#);
+        def.merge_from(&def_from(r#"{"system_prompt":"project"}"#));
+        assert_eq!(def.system_prompt.as_deref(), Some("project"));
+
+        def.merge_from(&def_from(r#"{"system_prompt":""}"#));
+        assert_eq!(effective("agent", def, &Cli::default()).system_prompt, None);
+    }
+
+    #[test]
     fn merge_accumulates_unique_groups() {
         let mut base = def_from(r#"{"groups":["all","review"]}"#);
         base.merge_from(&def_from(r#"{"groups":["review","backend"]}"#));
@@ -2641,7 +2661,7 @@ mod tests {
             Some("claude")
         );
         assert_eq!(a.model.as_deref(), Some("gpt-5"));
-        assert_eq!(a.dir, None, "project agent fully shadows global config");
+        assert_eq!(a.dir, None, "project agent ignores same-named global entry");
 
         let b = c.resolve("b").unwrap();
         assert_eq!(
@@ -2649,7 +2669,11 @@ mod tests {
             Some("/repo"),
             "project dir is relative to the catalog"
         );
-        assert_eq!(b.terminal, None, "global defaults do not leak into project");
+        assert_eq!(
+            b.terminal.as_deref(),
+            Some("herdr"),
+            "global defaults fill fields omitted by the project"
+        );
         assert!(c.resolve("missing").is_none());
         assert_eq!(c.names().get("a").map(String::as_str), Some("project"));
     }

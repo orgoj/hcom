@@ -12,7 +12,7 @@ AI agents running in separate terminals are isolated. hcom connects them via hoo
 
 ```bash
 curl -fsSL https://github.com/orgoj/hcom/releases/latest/download/hcom-installer.sh | sh
-hcom claude       # or: hcom gemini, hcom codex, hcom opencode, hcom kilo, hcom pi, hcom omp, hcom agy, hcom cursor-agent, hcom kimi, hcom copilot
+hcom claude       # or: hcom gemini, hcom codex, hcom opencode, hcom kilo, hcom pi, hcom omp, hcom antigravity (agy binary), hcom cursor (cursor-agent binary), hcom kimi, hcom copilot, hcom hermes
 hcom              # TUI dashboard
 ```
 
@@ -87,7 +87,8 @@ hcom agent reviewer --as review_backend
 
 The positional name selects catalog configuration; `--as` selects the runtime identity used for
 messaging and lifecycle operations. Aliases are not catalog entries and targeted sends do not
-auto-start them. See `references/named-agents.md` for full semantics.
+auto-start them. Catalog layers resolve identically inside and outside a project; see
+`references/named-agents.md` for the complete precedence and scalar replacement rules.
 
 Use `--as` for one intentional, stable agent name. It is valid only when launching one agent:
 
@@ -123,8 +124,9 @@ For multiple agents, omit `--as` and capture the generated names from launch out
 | codex | automatic | `hcom codex` |
 | opencode | automatic | `hcom opencode` |
 | kilo code | automatic | `hcom kilo` |
-| antigravity | automatic | `hcom agy` |
-| cursor | automatic | `hcom cursor-agent` |
+| antigravity (`agy` binary) | automatic | `hcom antigravity` |
+| cursor (`cursor-agent` binary) | automatic | `hcom cursor` |
+| hermes | automatic | `hcom hermes` |
 | any other ai tool | manual via `hcom listen` | `hcom start` (run inside tool) |
 
 session binding (hcom transcript, hcom r/f by session id) happens on first message or first prompt for all hcom-launched tools.

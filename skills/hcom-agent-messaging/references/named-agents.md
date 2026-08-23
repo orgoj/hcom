@@ -14,18 +14,28 @@ resolved to a similar one.
 
 ## Catalogs and precedence
 
-hcom reads these catalogs:
+hcom resolves effective values through this chain, from weakest to strongest, regardless of the
+directory where the command runs:
 
-1. `~/.hcom/agents.json` for machine-wide agents. Override its path with `HCOM_AGENTS_FILE`.
-2. Catalogs listed in `HCOM_AGENT_CATALOGS`, separated with the platform path separator, for
-   additive client-specific views.
-3. The nearest parent `.hcom/agents.json` and `.hcom/agents/<name>/` bundles, found independently
-   of Git roots, for project agents that fully shadow same-named global agents.
-4. Command-line flags, which have the highest precedence.
+1. built-in defaults
+2. `defaults` in `~/.hcom/agents.json` (replace its path with `HCOM_AGENTS_FILE`)
+3. the matching catalog's `defaults`
+4. the named agent entry
+5. the matching `tools.<effective-cli>` profile
+6. command-line flags
 
-Global defaults apply to the non-project catalog group. Project agents resolve independently and
-do not inherit global fields. Within each group, scalar fields replace earlier values while `env`,
-`args`, `groups`, and matching `tools` profiles merge.
+Steps 3-4 repeat for every matching imported, additive, or project catalog in catalog order.
+Imports are recursive and apply before the importing file's local entries. Catalogs in
+`HCOM_AGENT_CATALOGS` apply left to right.
+
+The nearest parent `.hcom` is found independently of Git roots. A project agent ignores a
+same-named global/additive entry, but global `defaults` remain its lowest catalog layer.
+Consequently, the same project agent inherits the same global defaults whether hcom runs inside
+the project or from an external catalog that imports it.
+
+`env`, `args`, `groups`, and tool-profile definitions merge; later scalar values replace earlier
+ones. In particular, a later `system_prompt` replaces rather than appends to the earlier text, and
+an explicit empty string clears it.
 
 Relative `dir` values resolve from `$HOME` globally, from the directory containing
 `.hcom` for project catalogs (including when imported), and from the catalog directory for other

@@ -1268,6 +1268,32 @@ fn agent_help_lists_catalog_layers() {
     assert!(stdout.contains("--for-humans"), "stdout={stdout}");
     assert!(stdout.contains("hcom agent list"), "stdout={stdout}");
     assert!(
+        stdout.contains("regardless of launch directory"),
+        "stdout={stdout}"
+    );
+    for layer in [
+        "1. built-in defaults",
+        "2. \"defaults\" in ~/.hcom/agents.json",
+        "3. matching catalog \"defaults\"",
+        "4. the named agent entry",
+        "5. the matching tools.<effective-cli> profile",
+        "6. command-line flags",
+    ] {
+        assert!(stdout.contains(layer), "missing {layer}: {stdout}");
+    }
+    assert!(
+        stdout.contains("system_prompt replaces rather than appends"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("explicit empty string clears it"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("Imports are recursive and apply before"),
+        "stdout={stdout}"
+    );
+    assert!(
         stdout.contains("not a parent agent's location"),
         "stdout={stdout}"
     );
@@ -1366,6 +1392,86 @@ fn project_bundle_fully_shadows_same_named_global_agent() {
     assert!(!stdout.contains("/global"), "stdout={stdout}");
     assert!(!stdout.contains("global-model"), "stdout={stdout}");
     assert!(stdout.contains("Project reviewer."), "stdout={stdout}");
+}
+
+#[test]
+fn project_agent_resolves_identically_inside_and_outside_project() {
+    let h = Hcom::new();
+    let project = h.root_path().join("wdt");
+    let project_catalog = project.join(".hcom/agents.json");
+    std::fs::create_dir_all(project_catalog.parent().unwrap()).expect("create project catalog dir");
+    std::fs::write(
+        &project_catalog,
+        r#"{"defaults":{"cli":"codex","system_prompt":"Project instructions."},
+            "agents":{"wdt_main":{"dir":".","model":"shared",
+                "tools":{"codex":{"model":"profile-model"}}}}}"#,
+    )
+    .expect("write project catalog");
+    std::fs::write(
+        h.path().join("agents.json"),
+        serde_json::json!({
+            "defaults": {
+                "terminal": "herdr",
+                "system_prompt": "Global instructions."
+            },
+            "imports": [{
+                "from": project_catalog,
+                "agents": ["wdt_main"]
+            }]
+        })
+        .to_string(),
+    )
+    .expect("write global catalog");
+
+    let outside = h
+        .cmd()
+        .args(["agent", "show", "wdt_main"])
+        .output()
+        .expect("show imported project agent outside project");
+    let inside = h
+        .cmd()
+        .current_dir(&project)
+        .args(["agent", "show", "wdt_main"])
+        .output()
+        .expect("show project agent inside project");
+    let outside_stdout = String::from_utf8_lossy(&outside.stdout);
+    let outside_stderr = String::from_utf8_lossy(&outside.stderr);
+    let inside_stdout = String::from_utf8_lossy(&inside.stdout);
+    let inside_stderr = String::from_utf8_lossy(&inside.stderr);
+
+    assert!(
+        outside.status.success(),
+        "stdout={outside_stdout} stderr={outside_stderr}"
+    );
+    assert!(
+        inside.status.success(),
+        "stdout={inside_stdout} stderr={inside_stderr}"
+    );
+    let inside_command = inside_stdout
+        .split_once("\ncommand:\n")
+        .expect("inside show command")
+        .1;
+    let outside_command = outside_stdout
+        .split_once("\ncommand:\n")
+        .expect("outside show command")
+        .1;
+    assert_eq!(inside_command, outside_command);
+    assert_eq!(
+        inside_stdout
+            .lines()
+            .find(|line| line.starts_with("terminal:")),
+        outside_stdout
+            .lines()
+            .find(|line| line.starts_with("terminal:"))
+    );
+    assert!(
+        inside_stdout.contains("terminal:  preset herdr"),
+        "global catalog defaults must apply: {inside_stdout}"
+    );
+    assert!(!inside_stdout.contains("(hcom config default)"));
+    assert!(inside_stdout.contains("Project instructions."));
+    assert!(!inside_stdout.contains("Global instructions."));
+    assert!(inside_stdout.contains("model:     profile-model"));
 }
 
 #[test]

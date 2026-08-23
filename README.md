@@ -274,7 +274,7 @@ What you might type from a shell. Agents run their own commands that they learn 
 ### Spawn
 
 ```bash
-hcom [N] claude|gemini|codex|agy|opencode|kilo|pi|omp|cursor-agent|kimi|copilot   # launch N agents
+hcom [N] claude|gemini|codex|opencode|kilo|pi|omp|antigravity|cursor|kimi|copilot|hermes   # launch N agents
 hcom r <name|session_id>                # resume agent
 hcom f <name|session_id>                # fork session
 hcom kill <name|tag:T|all>              # kill + close terminal pane
@@ -325,6 +325,12 @@ hcom agent edit                     # open the catalog in $EDITOR (creates a sta
 Targeted messages start missing or stopped catalog agents before delivery. Catalog precedence,
 imports, tool profiles, terminal placement, resume behavior, instruction transport, and bundle skills are
 documented in [Named agents](docs/agent.md).
+
+The precedence chain is built-in defaults, global catalog `defaults`, each matching catalog's
+`defaults` and named entry, the matching `tools.<cli>` profile, then command-line flags. It is the
+same inside and outside a project. Later scalar values replace earlier ones: a project
+`system_prompt` replaces the global text rather than appending to it, and `""` clears it. Recursive
+imports apply before the importing catalog's local entries.
 
 Catalog `session`/`window` placement is honored when Herdr is the configured default, including
 nested launches and targeted-message autostart; a parent agent's Herdr location is not inherited.
