@@ -1,6 +1,5 @@
 # Repository instructions
 
-- If the repository root contains `AGENTS.local.md`, read it: uncommitted rules for the machine you work on, such as how a build is deployed there, that add to these instructions. Most clones do not have it; that is the normal case and needs no action — never create it, ask about it, or report it as missing.
 - Never use the `hcom-agent-messaging` skill here; use the current source and documentation.
 - On `orgoj`, increment `orgoj.N` in `Cargo.toml` and `Cargo.lock` at the first binary-affecting change after each commit, once per uncommitted change set. Pure non-binary changes require no bump or rebuild.
 - Run every Cargo build and test outside the sandbox.
