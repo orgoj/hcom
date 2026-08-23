@@ -233,6 +233,9 @@ Choose replies from the received intent, not from conversational politeness:
 - Do not reply to `inform` unless it requires a concrete substantive response.
 - Reserve `ack` for an explicit protocol that specifically requires a receipt;
   ordinary agent tasks never require it.
+- A task you delegated stays with the delegate until they report it. Do not inspect,
+  verify or audit the result yourself — reporting on their own work is their job, and a
+  second pass duplicates the report that is coming.
 - An `[hcom-events]` notice that a target `is idle and has not replied ... yet` is a turn
   boundary, not a refusal. The request stands: keep waiting instead of taking the delegated
   work back. Only `stopped without responding` means no reply is coming.

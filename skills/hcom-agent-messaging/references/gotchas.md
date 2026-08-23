@@ -163,6 +163,10 @@ A `--intent request` send arms a watch on the target. It reports two different t
   redo the delegated work. It is reported once per request, and the watch stays armed.
 - `<name> stopped without responding to your request #N` — the target is gone; no reply is coming.
 
+Neither notice hands the work back to you. A delegated task stays with the delegate until they
+report it, verification included — inspecting the result yourself duplicates the report that is
+coming and is not the requester's job.
+
 ## Thread vs Reply-To vs Scope
 
 | Mechanism | When to use | What it does |
