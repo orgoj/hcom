@@ -131,12 +131,19 @@ pub fn do_resume(
                 );
             }
         }
+        // `--dry-run` always previews and never runs (it beats `--go`), so a
+        // failure to build the plan is an error rather than a silent launch.
+        if resume_dry_run(extra_args) {
+            let plan = prepare_resume_plan(&db, &name, fork, extra_args, flags)?;
+            print_resume_preview(&plan, &hcom_config, &name, fork, true);
+            return Ok(0);
+        }
         if ctx.is_inside_ai_tool()
             && !flags.go
             && should_preview_resume_rpc(extra_args)
             && let Ok(plan) = prepare_resume_plan(&db, &name, fork, extra_args, flags)
         {
-            print_resume_preview(&plan, &hcom_config, &name, fork);
+            print_resume_preview(&plan, &hcom_config, &name, fork, false);
             return Ok(0);
         }
 
@@ -178,8 +185,9 @@ pub fn do_resume(
 
     let (resolved, plan) = resolve_name_to_plan(&db, &name, fork, extra_args, flags)?;
     let is_adoption = plan.launch.name.is_none();
-    if ctx.is_inside_ai_tool() && !flags.go && should_preview_resume_rpc(extra_args) {
-        print_resume_preview(&plan, &hcom_config, &resolved, fork);
+    let dry_run = resume_dry_run(extra_args);
+    if dry_run || (ctx.is_inside_ai_tool() && !flags.go && should_preview_resume_rpc(extra_args)) {
+        print_resume_preview(&plan, &hcom_config, &resolved, fork, dry_run);
         return Ok(0);
     }
 
@@ -705,6 +713,7 @@ fn print_resume_preview(
     hcom_config: &crate::config::HcomConfig,
     name: &str,
     fork: bool,
+    dry_run: bool,
 ) {
     let is_adoption = plan.launch.name.is_none();
     let identity_note = if fork {
@@ -729,7 +738,15 @@ fn print_resume_preview(
         config: hcom_config,
         show_config_args: false,
         notes: &notes,
+        dry_run,
     });
+}
+
+/// True when `--dry-run` appears among the resume/fork args. Unlike the
+/// guardrail preview this is unconditional and outranks `--go`.
+fn resume_dry_run(extra_args: &[String]) -> bool {
+    let (_, launch_flags, _) = extract_resume_flags(extra_args);
+    launch_flags.dry_run
 }
 
 fn should_preview_resume_rpc(extra_args: &[String]) -> bool {
@@ -3065,6 +3082,16 @@ mod tests {
         assert_eq!(dir, None);
         assert_eq!(flags.tag, None);
         assert_eq!(flags.terminal, None);
+        assert_eq!(remaining, s(&["--model", "opus"]));
+    }
+
+    #[test]
+    fn test_resume_dry_run_flag() {
+        assert!(resume_dry_run(&s(&["--dry-run", "--model", "opus"])));
+        assert!(!resume_dry_run(&s(&["--model", "opus"])));
+        // After `--` it is the tool's flag, not hcom's.
+        assert!(!resume_dry_run(&s(&["--", "--dry-run"])));
+        let (_, _, remaining) = extract_resume_flags(&s(&["--dry-run", "--model", "opus"]));
         assert_eq!(remaining, s(&["--model", "opus"]));
     }
 

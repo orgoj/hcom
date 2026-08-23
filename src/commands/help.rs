@@ -940,6 +940,9 @@ Launch:\n\
   hcom f <name>                         Fork agent session ({forkable})\n\
   hcom kill <name(s)|tag:T|all>         Kill + close terminal pane\n\
 \n\
+  Any flag hcom does not know is forwarded verbatim to the tool; -- ends\n\
+  hcom's own flags. Use --dry-run to see the command without running it.\n\
+\n\
 Commands:\n\
   send         Send message to your buddies\n\
   listen       Block until message or event arrives\n\
@@ -980,6 +983,7 @@ const SHARED_LAUNCH_FLAGS: &[(&str, &str)] = &[
         "--hcom-system-prompt <text>",
         "Invocation-local agent instructions",
     ),
+    ("--dry-run", "Print the launch preview, run nothing"),
 ];
 
 /// Shared help body for `hcom r` / `hcom f` (both accept the same target

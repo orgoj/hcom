@@ -50,7 +50,10 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     let preview_background = headless || is_background_from_args(&launch_tool, &tool_args);
 
     let ctx = HcomContext::from_os();
-    if ctx.is_inside_ai_tool() && !flags.go && (!tool_args.is_empty() || count > 5) {
+    // `--dry-run` always previews and never launches (it beats `--go`); the
+    // unflagged preview stays an agent-only guardrail.
+    let dry_run = hcom_flags.dry_run;
+    if dry_run || (ctx.is_inside_ai_tool() && !flags.go && (!tool_args.is_empty() || count > 5)) {
         let remote_launch_note = "Remote launch requested; the target device will still apply its own configured defaults.";
         let remote_preview_note = "Mode shown here is only a local preview; the remote target decides the final launch mode.";
         let notes = if remote_device.is_some() {
@@ -70,6 +73,7 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
             config: &hcom_config,
             show_config_args: remote_device.is_none(),
             notes: if remote_device.is_some() { &notes } else { &[] },
+            dry_run,
         });
         return Ok(0);
     }
@@ -355,6 +359,8 @@ pub(crate) struct LaunchPreview<'a> {
     pub config: &'a HcomConfig,
     pub show_config_args: bool,
     pub notes: &'a [&'a str],
+    /// Preview was explicitly requested via `--dry-run` (not the `--go` gate).
+    pub dry_run: bool,
 }
 
 pub(crate) fn print_launch_preview(preview: LaunchPreview<'_>) {
@@ -400,7 +406,11 @@ pub(crate) fn print_launch_preview(preview: LaunchPreview<'_>) {
         .unwrap_or_else(|| preview.config.terminal.clone());
 
     println!("\n== LAUNCH PREVIEW ==");
-    println!("Add --go to proceed.\n");
+    if preview.dry_run {
+        println!("Dry run: nothing was launched. Drop --dry-run to proceed.\n");
+    } else {
+        println!("Add --go to proceed.\n");
+    }
     println!("Action: {}", preview.action);
     println!(
         "Tool: {:<10} Count: {:<4} Mode: {}",
@@ -448,6 +458,9 @@ pub(crate) struct HcomLaunchFlags {
     pub run_here: Option<bool>,
     pub batch_id: Option<String>,
     pub dir: Option<String>,
+    /// `--dry-run`: print the launch preview and exit without launching.
+    /// Unconditional (unlike the agent-guardrail preview) and wins over `--go`.
+    pub dry_run: bool,
 }
 
 /// Parse launch argv: extract count, tool name, hcom flags, and tool-specific args.
@@ -640,6 +653,10 @@ pub(crate) fn extract_launch_flags(args: &[String]) -> (HcomLaunchFlags, Vec<Str
             }
             "--headless" => {
                 flags.headless = true;
+                i += 1;
+            }
+            "--dry-run" => {
+                flags.dry_run = true;
                 i += 1;
             }
             "--hcom-system-prompt" if i + 1 < args.len() => {
@@ -1077,6 +1094,23 @@ mod tests {
             parse_launch_argv(&s(&["claude", "--system", "you are helpful"])).unwrap();
         assert_eq!(flags.system_prompt, Some("you are helpful".to_string()));
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_parse_launch_argv_dry_run_is_hcom_flag() {
+        // --dry-run belongs to hcom: it must not reach the tool, where it would
+        // be an unknown option (the class of typo this flag closes).
+        let (_, _, flags, args) =
+            parse_launch_argv(&s(&["claude", "--dry-run", "--model", "haiku"])).unwrap();
+        assert!(flags.dry_run);
+        assert_eq!(args, s(&["--model", "haiku"]));
+    }
+
+    #[test]
+    fn test_parse_launch_argv_dry_run_after_double_dash_goes_to_tool() {
+        let (_, _, flags, args) = parse_launch_argv(&s(&["claude", "--", "--dry-run"])).unwrap();
+        assert!(!flags.dry_run);
+        assert_eq!(args, s(&["--dry-run"]));
     }
 
     #[test]

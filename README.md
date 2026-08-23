@@ -292,8 +292,12 @@ hcom launch flags:
 | `--device <name>` | Spawn on a remote device (via relay) |
 | `--hcom-prompt <text>` | Initial user prompt |
 | `--hcom-system-prompt <text>` | Invocation-local agent instructions (native channel or marked fallback) |
+| `--dry-run` | Print the launch preview and run nothing (wins over `--go`) |
 
-Anything else is forwarded to the tool: `--model sonnet`, `--yolo`, etc.
+Anything else is forwarded verbatim to the tool: `--model sonnet`, `--yolo`, etc. A flag hcom does
+not know is never an error here — it lands in the tool's argv, so a typo in an hcom flag surfaces as
+the tool's own "unknown option". `--` ends hcom's flags explicitly, and `--dry-run` shows the
+resulting command without launching anything.
 
 ### Named agents
 
