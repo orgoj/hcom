@@ -1259,6 +1259,10 @@ fn agent_help_lists_catalog_layers() {
         stdout.contains("agents/<name>/AGENTS.md"),
         "stdout={stdout}"
     );
+    assert!(
+        stdout.contains("agy and antigravity use --add-dir"),
+        "stdout={stdout}"
+    );
     assert!(stdout.contains("--as <name>"), "stdout={stdout}");
     assert!(stdout.contains("@<group>"), "stdout={stdout}");
     assert!(stdout.contains("\"groups\""), "stdout={stdout}");
@@ -1881,6 +1885,41 @@ fn agent_dry_run_renders_the_hcom_command_without_launching() {
     let (code, list, _stderr) = h.run(["list", "--json"]);
     assert_eq!(code, 0);
     assert_eq!(list.trim(), "[]", "dry-run must not create an instance");
+}
+
+#[test]
+fn agent_agy_external_bundle_dry_run_adds_bundle_to_workspace() {
+    let h = Hcom::new();
+    let workspace = h.root_path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    for name in ["agy_agent", "antigravity_agent"] {
+        let bundle = h.path().join("agents").join(name);
+        std::fs::create_dir_all(&bundle).expect("create bundle");
+        std::fs::write(bundle.join("AGENTS.md"), "Editable agent memory.")
+            .expect("write bundle instructions");
+    }
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"agents":{{
+                "agy_agent":{{"dir":{},"cli":"agy"}},
+                "antigravity_agent":{{"dir":{},"cli":"antigravity"}}
+            }}}}"#,
+            serde_json::to_string(&workspace).unwrap(),
+            serde_json::to_string(&workspace).unwrap()
+        ),
+    )
+    .expect("write catalog");
+
+    for name in ["agy_agent", "antigravity_agent"] {
+        let bundle = h.path().join("agents").join(name);
+        let (code, stdout, stderr) = h.run(["agent", name, "--dry-run"]);
+        assert_eq!(code, 0, "name={name} stdout={stdout} stderr={stderr}");
+        assert!(
+            stdout.contains(&format!("--add-dir {}", bundle.display())),
+            "name={name} stdout={stdout}"
+        );
+    }
 }
 
 #[test]

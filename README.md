@@ -305,8 +305,9 @@ resulting command without launching anything.
 `~/.hcom/agents/<name>/AGENTS.md` or the nearest project `.hcom/agents/<name>/AGENTS.md` defines an
 agent even without a JSON entry. Its contents follow the fixed `system_prompt`; immediate
 `skills/*/SKILL.md` children are advertised through one shared lazy-loading manifest. Both are
-reread on clean start and named resume. An instance name is unique: launching one that already runs prints
-its status and exits. Use `--as` to run the same definition concurrently.
+reread on clean start and named resume. For Antigravity, an external bundle is made writable with
+`agy --add-dir`. An instance name is unique: launching one that already runs prints its status and
+exits. Use `--as` to run the same definition concurrently.
 
 ```bash
 hcom agent wdt_main                 # launch (or report that it already runs)

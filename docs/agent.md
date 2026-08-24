@@ -106,7 +106,8 @@ skill directory named in the manifest.
 
 If a bundle is outside the working directory, hcom grants only that directory through the CLI's
 additional-workspace mechanism. Launch fails clearly when the CLI cannot make it writable at
-startup.
+startup. Antigravity (`agy` or `antigravity`) receives the bundle through its repeatable
+`--add-dir` option.
 
 ## Catalog format
 

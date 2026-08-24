@@ -66,6 +66,8 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   system instructions after the fixed JSON system_prompt. Bundle-local skills are
   discovered from agents/<name>/skills/*/SKILL.md. A project agent ignores a
   same-named non-project entry but still inherits global defaults.
+  External bundles are granted through each CLI's additional-workspace mechanism;
+  agy and antigravity use --add-dir.
   Relative import paths resolve against the importing file. Relative \"dir\" resolves
   against $HOME globally, the parent of project .hcom (also when imported), or its
   file for other catalogs.
@@ -1384,7 +1386,7 @@ fn apply_bundle_access(eff: &mut Effective) {
     }
 
     match eff.cli.as_str() {
-        "claude" | "codex" => {
+        "claude" | "codex" | "agy" | "antigravity" => {
             eff.bundle_args.extend(["--add-dir".into(), dir]);
         }
         "gemini" => {
@@ -2853,6 +2855,8 @@ mod tests {
         for (cli, expected) in [
             ("claude", vec!["--add-dir", "/agent/reviewer"]),
             ("codex", vec!["--add-dir", "/agent/reviewer"]),
+            ("agy", vec!["--add-dir", "/agent/reviewer"]),
+            ("antigravity", vec!["--add-dir", "/agent/reviewer"]),
             ("gemini", vec!["--include-directories", "/agent/reviewer"]),
             ("omp", vec!["--add-dir=/agent/reviewer"]),
             ("copilot", vec!["--add-dir=/agent/reviewer"]),

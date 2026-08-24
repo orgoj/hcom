@@ -50,7 +50,8 @@ The fixed JSON `system_prompt` is followed by the current `AGENTS.md` and a mani
 `skills/*/SKILL.md` children. hcom rereads both on every clean launch/named resume, and referenced
 files resolve relative to their bundle or skill directory. For an external bundle,
 hcom grants only that directory when the CLI supports startup-time additional workspaces;
-otherwise launch fails clearly.
+otherwise launch fails clearly. Antigravity (`agy` or `antigravity`) uses its repeatable
+`--add-dir` option.
 
 ## Imports and additive client catalogs
 
