@@ -195,7 +195,7 @@ hcom claude          # fresh start
 | message reaches more than one agent | duplicate base name across tags | target the full `@tag-name` to hit exactly one |
 | messages leaking between workflows | no thread isolation | always use `--thread` |
 
-### "Instance '<name>' already exists"
+### "Instance `<name>` already exists"
 
 Preserve evidence before running `hcom list`, because listing may reconcile stale rows:
 
@@ -247,9 +247,13 @@ Choose replies from the received intent, not from conversational politeness:
 - An `[hcom-events]` notice that a target `is idle and has not replied ... yet` is a turn
   boundary, not a refusal. The request stands: keep waiting instead of taking the delegated
   work back. Only `stopped without responding` means no reply is coming.
-- Treat a message as delivered only when `hcom send` exits successfully and
-  prints `Sent to:`. On any CLI error, the message was not delivered; correct
-  the command and retry before proceeding or reporting success.
+- `Sent to:` proves successful routing and durable enqueue only. It does not
+  prove that the target consumed, processed, acknowledged, or replied to the
+  event. Report "sent/queued" at this point. Claim end-to-end delivery only
+  after a target response or integration-specific completion evidence. For a
+  manual-ack bridge, require its completion marker and the listener returning
+  to `listening`; recipient cursor or `delivered_to` alone is insufficient. On
+  any CLI error, no event was enqueued; correct the command and retry.
 
 ### Hermes / shell delivery guardrails
 
@@ -324,7 +328,6 @@ with `HCOM_DIR` set, uses that path instead of `~/.hcom`.
 | `references/cross-tool.md` | claude + codex + gemini + opencode + kilo + pi + omp + antigravity + cursor + kimi + copilot collaboration details and per-tool quirks |
 | `references/gotchas.md` | debugging scripts — timing, message delivery, intent system, cleanup |
 | `references/script-template.md` | writing a new script from scratch — full template with commentary |
-| `references/scripts/` | 6 tested, working example scripts |
 
 ---
 
