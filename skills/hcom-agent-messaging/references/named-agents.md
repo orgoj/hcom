@@ -90,7 +90,7 @@ isolation is deliberate. An agent defined only in a project catalog is addressab
 project, and from another directory only if a catalog in scope imports it: in the example above
 `wdt_main` is reachable from anywhere while the project's other agents stay reachable only from
 inside `ansible-wdt`. hcom never scans the filesystem for unrelated project catalogs. A name out of
-scope is reported as unknown plus a note that scope depends on the directory — hcom does not tell a
+scope is reported as unknown plus a note that scope depends on the directory; hcom does not tell a
 caller out of scope which catalog defines that name, so do not read "unknown" from outside a
 project as the entry having been removed, and do not build tooling that works around the boundary.
 Each catalog discovers bundles in a sibling `agents/` directory, including bundle-only agents.
@@ -186,7 +186,7 @@ or if its catalog launch fails.
 A slow-starting TUI is not a launch failure. When the readiness wait ends before the agent reports
 ready, `send` notes that the agent is still starting, writes the message anyway, and exits 0; the
 agent receives it when its delivery loop starts. The readiness wait itself is per CLI, since TUI
-startup times differ by an order of magnitude — `hcom <tool> --help` prints the tool's value.
+startup times differ by an order of magnitude: `hcom <tool> --help` prints the tool's value.
 
 This behavior applies to direct names, catalog tag groups, and missing catalog members already
 recorded in a `--thread`. It does not apply to broadcasts: a message without targets reaches current
@@ -309,7 +309,7 @@ installed integrations own classification, lifecycle state, and resume metadata.
 
 Agent and `defaults` fields:
 
-- `description` — one line on what the agent is for; the only field other agents see in
+- `description`: one line on what the agent is for; the only field other agents see in
   `hcom agent list --for-agents`
 - `cli`, `dir`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`, `reasoning`
 - `prompt`, `system_prompt`, `pre`, and boolean `resume`

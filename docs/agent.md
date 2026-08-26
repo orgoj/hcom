@@ -1,8 +1,6 @@
 # Named agents
 
-`hcom agent` launches recurring agents from JSON catalogs and editable bundles. A catalog keeps
-launch settings; `agents/<name>/AGENTS.md` keeps the agent's evolving instructions and can refer to
-other files in the same bundle.
+`hcom agent` launches recurring agents from JSON catalogs and editable bundles. A catalog stores launch settings; `agents/<name>/AGENTS.md` stores evolving instructions and references supporting files in the same bundle.
 
 ```bash
 hcom agent wdt_main                 # launch, or report that it is already running
@@ -14,10 +12,14 @@ hcom agent list --for-agents        # only names and descriptions, for another a
 hcom agent list @wdt                # show only members of the wdt catalog group
 hcom agent list --all               # include agents hidden by recursive selective imports
 hcom agent list --local             # only direct and imported agents from this project
+hcom agent list --json              # full JSON output with effective config and status
+hcom agent list --names             # output agent names only
+hcom agent list --groups            # output catalog group names only
 hcom agent show wdt_main            # effective configuration and exact command
 hcom agent attach wdt_main          # focus its managed terminal window
 hcom agent edit                     # edit the global catalog
 hcom agent edit --project           # edit the current project's catalog
+hcom agent completions bash         # output shell completions for bash, zsh, or fish
 ```
 
 Run `hcom agent --help` for all flags. `--dry-run` prints commands without launching them.
@@ -31,11 +33,7 @@ Two separate registries answer two different questions:
 | who is running right now | `hcom list` |
 | who can be addressed at all | `hcom agent list` |
 
-`hcom list` shows live instances only, so a configured agent missing from it is stopped, not
-unknown. Address it by its exact name: `hcom send @<name>` starts a missing or stopped configured
-agent before delivering. A name is never resolved to a similar one — `bin` is the agent `bin`, not
-a running `project1_bin`. If the agent is still starting when the readiness wait ends, the message
-is queued and delivered once the agent is ready; the send still succeeds.
+`hcom list` shows live instances only, so a configured agent missing from it is stopped, not unknown. Address it by its exact name: `hcom send @<name>` starts a missing or stopped configured agent before delivering. A name never resolves to a similar one: `bin` is the agent `bin`, not a running `project1_bin`. If the agent is still starting when the readiness wait ends, the message is queued and delivered once the agent is ready; the send still succeeds.
 
 ## Catalogs and precedence
 
@@ -169,22 +167,57 @@ Supported agent fields:
 | `args` | Additional CLI arguments |
 | `tools.<cli>` | Per-CLI `model`, `reasoning`, `prompt`, `system_prompt`, and `args` overrides |
 
-The selected `tools.<cli>` profile replaces shared scalar values and appends its `args`.
-Command-line flags override both. Top-level `model`, `reasoning`, and `args` remain useful for
-agents that always use one CLI.
+The selected `tools.<cli>` profile replaces shared scalar values and appends its `args`. Command-line flags override both. Top-level `model`, `reasoning`, and `args` remain useful for agents that always use one CLI.
 
-`reasoning` maps to `--effort` for Claude and Antigravity (`agy`), and to Codex's
-`model_reasoning_effort`. Other CLIs reject the field at launch; use `tools.<cli>.args` when that
-CLI has its own reasoning control. `--reasoning` overrides the catalog value.
+`reasoning` maps to `--effort` for Claude and Antigravity (`agy`), and to Codex's `model_reasoning_effort`. Other CLIs reject the field at launch; use `tools.<cli>.args` when that CLI has its own reasoning control. `--reasoning` overrides the catalog value.
 
-`groups` is independent of `tag`: it does not change runtime display names, message routing, or
-`hcom kill tag:...`. An agent may belong to multiple catalog groups. Group membership merges
-additively across catalog layers and duplicate names are ignored. Group names use lowercase
-letters, numbers, and underscores.
+`groups` is independent of `tag`: it does not change runtime display names, message routing, or `hcom kill tag:...`. An agent can belong to multiple catalog groups. Group membership merges additively across catalog layers and duplicate names are ignored. Group names use lowercase letters, numbers, and underscores.
+
+## Command-line flags
+
+`hcom agent <name>` and `hcom agent show <name>` accept the following flags:
+
+| Flag | Purpose |
+|---|---|
+| `--cli <tool>`, `--tool <tool>` | Select CLI (`claude`, `codex`, `gemini`, `opencode`, `kilo`, `pi`, `omp`, `antigravity`, `cursor`, `kimi`, `copilot`, `hermes`) |
+| `--dir <path>` | Working directory |
+| `--terminal <preset>` | Terminal preset, or `here` |
+| `--terminal-command <cmd>` | Raw terminal command with `{script}` (sets `HCOM_TERMINAL`) |
+| `--session <name>` | tmux session or Herdr workspace (empty string disables) |
+| `--window <name>` | tmux window or Herdr tab (defaults to agent name) |
+| `--as <name>` | Launch under an alternate runtime instance name |
+| `--tag <val>` | Runtime group tag forwarded to hcom |
+| `--model <val>` | Forwarded model name |
+| `--reasoning <val>` | Reasoning effort (Claude, Antigravity, and Codex) |
+| `--hcom-prompt <text>` | Initial user prompt (overrides catalog `prompt`) |
+| `--hcom-system-prompt <text>` | Invocation-local instructions (overrides catalog `system_prompt`) |
+| `--pre <cmd>` | Shell command run before the agent starts |
+| `--env KEY=VALUE` | Extra environment variable (repeatable) |
+| `--catalog <path>` | Use this file instead of the project catalog |
+| `--no-project` | Ignore nearest project `.hcom/agents.json` |
+| `--attach` | Focus window after launching |
+| `--restart` | Kill running agent first instead of reporting it |
+| `--resume` | Continue previous session |
+| `--clean` | Start clean session (overrides configured resume) |
+| `--dry-run` | Print commands without launching anything |
+| `[tool-args...]` | Arguments after `--` or unparsed flags are forwarded to the CLI |
+
+`hcom agent list` accepts the following options:
+
+| Option | Purpose |
+|---|---|
+| `@<group>` | Show only members of one catalog group |
+| `--all` | Include agents from all reachable imports, including selective omissions |
+| `--local` | Show only direct and imported agents from the current project |
+| `--json` | Output full JSON array with effective configurations and live statuses |
+| `--names` | Output agent names only, one per line |
+| `--groups` | Output reachable catalog group names (`@<group>`), one per line |
+| `--for-agents` | Output `<name>  <description>` format only (default for non-terminals and pipes) |
+| `--for-humans` | Output full table even when stdout is not a terminal |
 
 ## Imports
 
-A catalog may import every agent or a selected set from another catalog:
+A catalog can import all agents or a selected subset from another catalog:
 
 ```json
 {
@@ -201,48 +234,21 @@ A catalog may import every agent or a selected set from another catalog:
 }
 ```
 
-Omitting `agents` imports all entries; an empty list imports none. Relative `from` paths use the
-importing catalog's directory. Imports are recursive, load before local entries, preserve the
-source catalog's defaults and path base, and reject cycles or unknown selected agents.
-Every imported or additive catalog discovers bundles in an `agents/` directory beside that
-catalog file; bundle-only agents participate in selective imports normally.
+Omitting `agents` imports all entries; an empty list imports none. Relative `from` paths use the importing catalog's directory. Imports are recursive, load before local entries, preserve the source catalog's defaults and path base, and reject cycles or unknown selected agents. Every imported or additive catalog discovers bundles in an `agents/` directory beside that catalog file; bundle-only agents participate in selective imports normally.
 
-For normal listing, direct launch, and message routing, an import's `agents` list remains a
-visibility boundary. `hcom agent list --all` and `hcom agent @<group>` deliberately traverse every
-recursively reachable import and consider all of its agents, including entries omitted by a
-selective import. `--all` also works with the `--names` and `--json` listing formats. This lets a
-global catalog act as a registry from which agents can be inspected or a project group can be
-started without changing to that project's directory. hcom does not scan the filesystem for
-unrelated project catalogs; they must be reachable through an import.
+For normal listing, direct launch, and message routing, an import's `agents` list remains a visibility boundary. `hcom agent list --all` and `hcom agent @<group>` traverse every recursively reachable import and consider all agents, including entries omitted by a selective import. `--all` also works with `--names` and `--json`. This lets a global catalog act as a registry from which agents can be inspected or a project group can be started without switching to that project's directory. hcom does not scan the filesystem for unrelated project catalogs; they must be reachable through an import.
 
-Addressability follows that same boundary, and the isolation is the point. An agent defined only in
-a project catalog can be launched and messaged from inside its project, and from anywhere else only
-if a catalog in scope imports it — a selective import publishes exactly the listed agents across
-repositories and keeps the project's other agents to that project. An unreachable name is reported
-as unknown with a note that catalog scope depends on the directory; hcom deliberately does not
-disclose to a caller out of scope whether the name exists elsewhere or in which catalog, because
-that disclosure would undo the boundary the import was drawn to create.
+Addressability follows that same boundary. An agent defined only in a project catalog can be launched and messaged from inside its project, and from anywhere else only if a catalog in scope imports it. A selective import publishes exactly the listed agents across repositories and keeps the project's other agents private to that project. An unreachable name is reported as unknown with a note that catalog scope depends on the directory; hcom does not disclose to a caller out of scope whether the name exists elsewhere or in which catalog.
 
-`hcom agent list --local` limits any listing format to the nearest project's direct and imported
-agents, excluding global and additive catalogs. Combine it with `--all` to include project-imported
-agents hidden by selective imports.
+`hcom agent list --local` limits any listing format to the nearest project's direct and imported agents, excluding global and additive catalogs. Combine it with `--all` to include project-imported agents hidden by selective imports.
 
-The table produced by `hcom agent list` shows each agent's effective CLI and model. An unset model is
-shown as `-`; JSON output includes it as `model: null`. Per-CLI tool profiles are resolved before
-the value is displayed.
+The table produced by `hcom agent list` shows each agent's effective CLI and model. An unset model appears as `-`; JSON output includes it as `model: null`. Per-CLI tool profiles are resolved before displaying values.
 
-`hcom agent list --for-agents` prints one `<name>  <description>` line per agent and nothing else —
-no CLI, model, directory, terminal, or status. It is the listing meant for another agent deciding
-whom to delegate to; an agent without a `description` shows `-`. Without either flag, an interactive
-terminal gets the table and any other output (a pipe, an agent's shell) gets `--for-agents`;
-`--for-humans` forces the table. `--json`, `--names`, and `--groups` are unaffected. A description
-spanning several lines in the catalog is collapsed to one line on output.
+`hcom agent list --for-agents` prints one `<name>  <description>` line per agent (no CLI, model, directory, terminal, or status). It is the listing meant for another agent deciding where to delegate; an agent without a `description` shows `-`. Without either flag, an interactive terminal receives the table and any other output (a pipe, an agent shell) receives `--for-agents`; `--for-humans` forces the table. `--json`, `--names`, and `--groups` are unaffected. A multi-line catalog description is collapsed to one line on output.
 
 ## Private agent skills
 
-Private skills live only under `<bundle>/skills/`. Each immediate child containing `SKILL.md` is
-listed in the common lazy-loading manifest; hcom does not register it through a CLI-specific skill
-system. Normal user, project, and plugin skills remain available.
+Private skills live under `<bundle>/skills/`. Each immediate child directory containing `SKILL.md` is listed in the common lazy-loading manifest; hcom does not register it through a CLI-specific skill system. User, project, and plugin skills remain available.
 
 Use one child directory per skill:
 
@@ -256,13 +262,9 @@ Use one child directory per skill:
     └── scripts/
 ```
 
-YAML frontmatter supplies `name` and `description`. Missing or malformed values fall back to the
-directory basename and first Markdown heading, then to `Agent-local skill; read SKILL.md for
-details.` `hcom agent show` warns about malformed metadata, duplicate names, and skipped symlinks
-that escape the bundle. `hcom agent list --json` exposes `{name, description, path}` entries.
+YAML frontmatter supplies `name` and `description`. Missing or malformed values fall back to the directory basename and first Markdown heading, then to `Agent-local skill; read SKILL.md for details.` `hcom agent show` warns about malformed metadata, duplicate names, and skipped symlinks that escape the bundle. `hcom agent list --json` exposes `{name, description, path}` entries.
 
-`skills_dir` and `--skills-dir` have been removed. Move each old skill to
-`agents/<name>/skills/<skill>/SKILL.md`; old configuration produces a targeted migration error.
+Legacy `skills_dir` and `--skills-dir` are unsupported. Move each skill to `agents/<name>/skills/<skill>/SKILL.md`; old configurations produce a migration error.
 
 ## Instruction transport
 
@@ -278,26 +280,17 @@ that escape the bundle. `hcom agent list --json` exposes `{name, description, pa
 | Hermes | `HERMES_EPHEMERAL_SYSTEM_PROMPT` |
 | Antigravity / Cursor / Kimi | marked fallback in the existing one-time hcom bootstrap |
 
-Per-instance files are stored under `$HCOM_DIR/system-prompts/<tool>/<instance>/`. The fallback is
-an approximation: it is subordinate to genuine system/developer messages, though agents are told
-to treat it above ordinary task text. It is not emitted as a separate user task or meta-turn.
+Per-instance files are stored under `$HCOM_DIR/system-prompts/<tool>/<instance>/`. The fallback is an approximation: it is subordinate to genuine system/developer messages, though agents are instructed to prioritize it above ordinary task text. It is not emitted as a separate user task or meta-turn.
 
 Use `hcom agent show <name> --cli <tool>` to inspect the exact effective command before launch.
 
 ## Starting, resuming, and messaging
 
-The built-in start mode is clean. Set `"resume": true` in defaults or an agent entry to continue
-its stopped session. `--resume` and `--clean` override the catalog; if both occur, the last one
-wins. `--restart` first replaces a running instance, then applies the selected start mode.
+The default start mode is clean. Set `"resume": true` in defaults or an agent entry to continue its stopped session. `--resume` and `--clean` override the catalog; if both occur, the last one wins. `--restart` first replaces a running instance, then applies the selected start mode.
 
-An hcom-managed agent may invoke another AI CLI directly. The child inherits the
-parent environment, but hcom rejects hooks whose actual CLI does not match the
-tool bound to the inherited process identity. This keeps raw nested CLI sessions
-from replacing the parent's session, transcript, or delivery binding.
+An hcom-managed agent can invoke another AI CLI directly. The child inherits the parent environment, but hcom rejects hooks whose actual CLI does not match the tool bound to the inherited process identity. This keeps nested CLI sessions from replacing the parent's session, transcript, or delivery binding.
 
-An instance name is unique. Launching an already-running name reports its status and exits without
-opening another instance. To run one catalog definition concurrently, assign each instance a
-different name:
+An instance name is unique. Launching an already-running name reports its status and exits without opening another instance. To run one catalog definition concurrently, assign each instance a different name:
 
 ```bash
 hcom agent wdt_main --as wdt_review
@@ -305,15 +298,9 @@ hcom agent wdt_main --as wdt_backend
 hcom agent show wdt_main --as wdt_review # inspect the aliased command
 ```
 
-`wdt_main` remains the catalog key used to resolve configuration. The `--as` value becomes the
-runtime identity used by `hcom list`, messages, duplicate detection, `--restart`, `--attach`, and
-resume history. It is also the default tmux window or Herdr tab name; an explicit catalog or CLI
-`window` still wins. Address an aliased instance directly, for example
-`hcom send @wdt_review -- "Review this"`. Catalog-driven message startup continues to use the
-canonical catalog name and does not invent or restart aliases.
+`wdt_main` remains the catalog key used to resolve configuration. The `--as` value becomes the runtime identity used by `hcom list`, messages, duplicate detection, `--restart`, `--attach`, and resume history. It is also the default tmux window or Herdr tab name; an explicit catalog or CLI `window` still takes precedence. Address an aliased instance directly, for example `hcom send @wdt_review -- "Review this"`. Catalog-driven message startup uses the canonical catalog name and does not invent or restart aliases.
 
-To launch several named agents together, add `groups` to their catalog definitions and target the
-group with `@`:
+To launch several named agents together, add `groups` to their catalog definitions and target the group with `@`:
 
 ```bash
 hcom agent @wdt
@@ -321,10 +308,7 @@ hcom agent @wdt --dry-run
 hcom agent @wdt --restart --clean
 ```
 
-Flags are shared by every member, except `--as` and `--attach`, which are invalid for group
-launches. Members are processed in name order; already-running agents count as successful. A
-failure does not prevent later members from being attempted, but the command returns exit 1 after
-printing its summary. Group launches require separate terminal panes and reject `terminal: here`.
+Flags are shared by every member, except `--as` and `--attach`, which are invalid for group launches. Members are processed in name order; already-running agents count as successful. A failure does not prevent subsequent members from launching, but the command returns exit code 1 after printing its summary. Group launches require separate terminal panes and reject `terminal: here`.
 
 A targeted message starts a missing or stopped catalog agent before delivery:
 
@@ -332,14 +316,11 @@ A targeted message starts a missing or stopped catalog agent before delivery:
 hcom send @wdt_main --intent request -- "Review the current change"
 ```
 
-This works for direct names, catalog tag groups, multiple recipients, and stopped catalog members
-in an existing thread. Unknown names fail without storing the message. Broadcasts address only
-currently deliverable instances and never start the whole catalog.
+This works for direct names, catalog tag groups, multiple recipients, and stopped catalog members in an existing thread. Unknown names fail without storing the message. Broadcasts address only currently deliverable instances and never start the whole catalog.
 
 ## Terminal placement
 
-`terminal` selects the launch backend. `session` and `window` configure placement for tmux and
-Herdr.
+`terminal` selects the launch backend. `session` and `window` configure placement for tmux and Herdr.
 
 hcom chooses the launch strategy in this order:
 
@@ -347,17 +328,21 @@ hcom chooses the launch strategy in this order:
 2. explicit `terminal`: launch through that terminal preset
 3. hcom's configured default terminal
 
-For tmux, `session` selects or creates the tmux session and `window` selects the window. For Herdr,
-`session` selects or creates the space (called a workspace by the CLI), `window` selects or creates
-the tab, and each agent runs in a pane split inside that tab. When a project catalog supplies no
-Herdr session, hcom uses the name of the directory containing `.hcom`; unless `window`
-is configured explicitly, each agent gets a tab named after the agent. This placement also applies
-when Herdr comes from hcom's configured default, including nested launches and message autostart;
-the launching agent's workspace and tab are not inherited. Other non-tmux terminal
-presets ignore `session` with a warning. Managed agents retain normal hcom lifecycle behavior,
-including closing their pane through `hcom kill`.
+For tmux, `session` selects or creates the tmux session and `window` selects the window. For Herdr, `session` selects or creates the space (called a workspace by the CLI), `window` selects or creates the tab, and each agent runs in a pane split inside that tab. When a project catalog supplies no Herdr session, hcom uses the name of the directory containing `.hcom`; unless `window` is configured explicitly, each agent gets a tab named after the agent. This placement also applies when Herdr comes from hcom's configured default, including nested launches and message autostart; the launching agent's workspace and tab are not inherited. Other non-tmux terminal presets ignore `session` with a warning. Managed agents retain normal hcom lifecycle behavior, including closing their pane through `hcom kill`.
 
-For Herdr-known tools, hcom identifies the outer PTY process to Herdr on Unix/macOS; on Windows,
-Herdr detects the tool in the descendant process tree. Herdr's screen manifests or native
-integrations own working/idle/blocked state and session-resume metadata. The hcom
-`pane.report_agent` fallback is reserved for tools Herdr does not recognize.
+For Herdr-recognized tools, hcom identifies the outer PTY process to Herdr on Unix/macOS; on Windows, Herdr detects the tool in the descendant process tree. Herdr screen manifests and native integrations manage working, idle, blocked state and session-resume metadata. The hcom `pane.report_agent` fallback is reserved for tools Herdr does not recognize.
+
+## Shell completions
+
+Generate shell completions for agent names and groups:
+
+```bash
+# Bash
+hcom agent completions bash > ~/.local/share/bash-completion/completions/hcom-agent
+
+# Zsh
+hcom agent completions zsh > ~/.zsh/completions/_hcom_agent
+
+# Fish
+hcom agent completions fish > ~/.config/fish/completions/hcom-agent.fish
+```

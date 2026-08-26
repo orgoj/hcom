@@ -6,7 +6,9 @@
 
 > **Hook your coding agents together**
 
-`hcom` is a CLI that coding agents use to message, watch, and spawn each other across terminals. It integrates with Claude Code, Codex, OpenCode, Kilo Code, Pi, Oh My Pi, Antigravity, Cursor, Kimi, Gemini and Copilot - in any combination, without changing how you use them.
+This repository is a fork of [`aannoo/hcom`](https://github.com/aannoo/hcom). Its primary addition is the [`agent` subcommand](docs/agent.md), providing persistent named agent catalogs, directory bundles, private agent skills, and multi-agent group launches.
+
+`hcom` is a CLI that coding agents use to message, watch, and spawn each other across terminals. It integrates with Claude Code, Codex, OpenCode, Kilo Code, Pi, Oh My Pi, Antigravity, Cursor, Kimi, Gemini, and Copilot in any combination, without changing how you use them.
 
 Use it to coordinate pipelines, run different AI CLIs as each other's subagents, or just instead of copy-paste.
 
