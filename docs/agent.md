@@ -1,6 +1,6 @@
 # Named agents
 
-`hcom agent` launches recurring agents from JSON catalogs and editable bundles. A catalog stores launch settings; `agents/<name>/AGENTS.md` stores evolving instructions and references supporting files in the same bundle.
+`hcom agent` launches recurring agents from JSON catalogs and editable bundles. A catalog stores launch settings; `agents/<name>/SOUL.md` stores evolving instructions and references supporting files in the same bundle.
 
 ```bash
 hcom agent wdt_main                 # launch, or report that it is already running
@@ -85,20 +85,20 @@ Global and project layouts are identical:
 ├── agents.json                 ├── agents.json
 └── agents/                     └── agents/
     └── reviewer/                   └── reviewer/
-        ├── AGENTS.md                   ├── AGENTS.md
+        ├── SOUL.md                     ├── SOUL.md
         └── skills/                     └── skills/
             └── review/                     └── review/
                 └── SKILL.md                    └── SKILL.md
 ```
 
-`agents/<name>/AGENTS.md` defines an agent even without a matching JSON entry. A JSON-only agent
+`agents/<name>/SOUL.md` defines an agent even without a matching JSON entry. A JSON-only agent
 also remains valid. Discovered directory names must contain only lowercase letters, numbers, and
-underscores.
+underscores. Bundle `AGENTS.md` files are not read as a fallback.
 
 The effective `agent_instructions` contains the fixed JSON `system_prompt`, then an `# Agent bundle
-instructions` section with absolute bundle and `AGENTS.md` paths and its current contents, then an
+instructions` section with absolute bundle and `SOUL.md` paths and its current contents, then an
 `# Available agent skills` manifest. Empty sections are omitted. `prompt` remains the initial user
-message. hcom rereads `AGENTS.md` and skills on every clean start and named-agent resume, so an
+message. hcom rereads `SOUL.md` and skills on every clean start and named-agent resume, so an
 agent may improve its bundle for its next launch. Relative references resolve from the bundle or
 skill directory named in the manifest.
 

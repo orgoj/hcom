@@ -304,10 +304,11 @@ resulting command without launching anything.
 ### Named agents
 
 `hcom agent` launches recurring agents from JSON settings and editable bundles. A bundle at
-`~/.hcom/agents/<name>/AGENTS.md` or the nearest project `.hcom/agents/<name>/AGENTS.md` defines an
+`~/.hcom/agents/<name>/SOUL.md` or the nearest project `.hcom/agents/<name>/SOUL.md` defines an
 agent even without a JSON entry. Its contents follow the fixed `system_prompt`; immediate
 `skills/*/SKILL.md` children are advertised through one shared lazy-loading manifest. Both are
-reread on clean start and named resume. For Antigravity, an external bundle is made writable with
+reread on clean start and named resume. Bundle `AGENTS.md` files are not read as a fallback. For
+Antigravity, an external bundle is made writable with
 `agy --add-dir`. An instance name is unique: launching one that already runs prints its status and
 exits. Use `--as` to run the same definition concurrently.
 

@@ -2,11 +2,11 @@
 
 Use `hcom agent` for recurring agents whose working directory, CLI, prompts, environment, and
 terminal setup should live in versionable configuration instead of shell history. An editable
-`agents/<name>/AGENTS.md` bundle supplies evolving instructions and defines the agent even without
+`agents/<name>/SOUL.md` bundle supplies evolving instructions and defines the agent even without
 a JSON entry. An instance name
 is unique: launching a name that is already running reports its status and exits without creating
 a duplicate. Use `--as` to launch one catalog definition concurrently under distinct instance
-names.
+names. Bundle `AGENTS.md` files are not read as a fallback.
 
 `hcom agent list` answers "who can be addressed at all"; `hcom list` answers "who is running right
 now". A catalog agent absent from `hcom list` is stopped, not unknown, and an exact name is never
@@ -46,7 +46,7 @@ Keep paths in project catalogs relative to the project root. Do not store machin
 absolute paths in a versioned `.hcom/agents.json`; use absolute or `~`-based paths only in
 machine-local catalogs such as `~/.hcom/agents.json`.
 
-The fixed JSON `system_prompt` is followed by the current `AGENTS.md` and a manifest of immediate
+The fixed JSON `system_prompt` is followed by the current `SOUL.md` and a manifest of immediate
 `skills/*/SKILL.md` children. hcom rereads both on every clean launch/named resume, and referenced
 files resolve relative to their bundle or skill directory. For an external bundle,
 hcom grants only that directory when the CLI supports startup-time additional workspaces;

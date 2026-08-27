@@ -62,9 +62,10 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   from inside its project, and elsewhere only where a catalog in scope imports
   it - a selective import's \"agents\" list keeps the project's other agents
   private to that project.
-  A sibling agents/<name>/AGENTS.md also defines an agent and is appended to its
+  A sibling agents/<name>/SOUL.md also defines an agent and is appended to its
   system instructions after the fixed JSON system_prompt. Bundle-local skills are
-  discovered from agents/<name>/skills/*/SKILL.md. A project agent ignores a
+  discovered from agents/<name>/skills/*/SKILL.md. AGENTS.md is not a fallback.
+  A project agent ignores a
   same-named non-project entry but still inherits global defaults.
   External bundles are granted through each CLI's additional-workspace mechanism;
   agy and antigravity use --add-dir.
@@ -444,7 +445,7 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
             }
             let name = entry.file_name().to_string_lossy().into_owned();
             let dir = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path());
-            let instructions = dir.join("AGENTS.md");
+            let instructions = dir.join("SOUL.md");
             if instructions.is_file() {
                 if !crate::identity::is_valid_base_name(&name) {
                     bail!("invalid agent bundle name '{}': {}", name, dir.display());
@@ -2762,11 +2763,11 @@ mod tests {
     fn bundle_instructions_follow_fixed_system_prompt() {
         let mut def = def_from(r#"{"dir":"/work","system_prompt":"fixed"}"#);
         def.agent_dir = Some("/work/.hcom/agents/reviewer".into());
-        def.instructions = Some("/work/.hcom/agents/reviewer/AGENTS.md".into());
+        def.instructions = Some("/work/.hcom/agents/reviewer/SOUL.md".into());
         def.instructions_content = Some("learned".into());
         let eff = effective("reviewer", def, &Cli::default());
         let prompt = eff.system_prompt.unwrap();
-        assert!(prompt.starts_with("fixed\n\n# Agent bundle instructions\n\nBundle directory: `/work/.hcom/agents/reviewer`\nInstruction file: `/work/.hcom/agents/reviewer/AGENTS.md`"));
+        assert!(prompt.starts_with("fixed\n\n# Agent bundle instructions\n\nBundle directory: `/work/.hcom/agents/reviewer`\nInstruction file: `/work/.hcom/agents/reviewer/SOUL.md`"));
         assert!(prompt.ends_with("learned"));
         assert!(eff.bundle_args.is_empty(), "bundle is inside workspace");
     }
@@ -2897,7 +2898,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("agents/Bad-Name");
         std::fs::create_dir_all(&bundle).unwrap();
-        std::fs::write(bundle.join("AGENTS.md"), "instructions").unwrap();
+        std::fs::write(bundle.join("SOUL.md"), "instructions").unwrap();
         let error = load_catalog_file(&tmp.path().join("agents.json"), tmp.path(), "test".into())
             .unwrap_err()
             .to_string();

@@ -1255,10 +1255,7 @@ fn agent_help_lists_catalog_layers() {
     assert!(stdout.starts_with("Usage:"), "stdout={stdout}");
     assert!(stdout.contains("agents.json"), "stdout={stdout}");
     assert!(stdout.contains(".hcom/agents.json"), "stdout={stdout}");
-    assert!(
-        stdout.contains("agents/<name>/AGENTS.md"),
-        "stdout={stdout}"
-    );
+    assert!(stdout.contains("agents/<name>/SOUL.md"), "stdout={stdout}");
     assert!(
         stdout.contains("agy and antigravity use --add-dir"),
         "stdout={stdout}"
@@ -1321,11 +1318,8 @@ fn agent_bundle_is_discovered_across_nested_git_roots_and_composes_prompt() {
     let bundle = project.join(".hcom/agents/reviewer");
     std::fs::create_dir_all(nested.join(".git")).expect("create nested git marker");
     std::fs::create_dir_all(&bundle).expect("create agent bundle");
-    std::fs::write(
-        bundle.join("AGENTS.md"),
-        "Improve this file when you learn.",
-    )
-    .expect("write agent instructions");
+    std::fs::write(bundle.join("SOUL.md"), "Improve this file when you learn.")
+        .expect("write agent instructions");
     std::fs::write(
         project.join(".hcom/agents.json"),
         r#"{"agents":{"reviewer":{"cli":"claude","dir":".","system_prompt":"Fixed identity."}}}"#,
@@ -1353,7 +1347,7 @@ fn agent_bundle_is_discovered_across_nested_git_roots_and_composes_prompt() {
     );
     assert!(
         stdout.find("Fixed identity.") < stdout.find("Improve this file when you learn."),
-        "fixed prompt must precede AGENTS.md: {stdout}"
+        "fixed prompt must precede SOUL.md: {stdout}"
     );
 
     let json_output = h
@@ -1366,8 +1360,28 @@ fn agent_bundle_is_discovered_across_nested_git_roots_and_composes_prompt() {
     assert_eq!(rows[0]["agent_dir"], bundle.to_string_lossy().as_ref());
     assert_eq!(
         rows[0]["instructions"],
-        bundle.join("AGENTS.md").to_string_lossy().as_ref()
+        bundle.join("SOUL.md").to_string_lossy().as_ref()
     );
+}
+
+#[test]
+fn agent_ignores_legacy_agents_md_only_bundle() {
+    let h = Hcom::new();
+    let bundle = h.path().join("agents/legacy");
+    std::fs::create_dir_all(&bundle).expect("create legacy bundle");
+    std::fs::write(bundle.join("AGENTS.md"), "Legacy instructions.")
+        .expect("write legacy instructions");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"known":{"cli":"claude"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "list", "--no-project", "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let rows: serde_json::Value = serde_json::from_str(&stdout).expect("agent JSON");
+    assert_eq!(rows.as_array().map(Vec::len), Some(1), "stdout={stdout}");
+    assert_eq!(rows[0]["name"], "known", "stdout={stdout}");
 }
 
 #[test]
@@ -1381,7 +1395,7 @@ fn project_bundle_fully_shadows_same_named_global_agent() {
     let project = h.root_path().join("project");
     let bundle = project.join(".hcom/agents/reviewer");
     std::fs::create_dir_all(&bundle).expect("create project bundle");
-    std::fs::write(bundle.join("AGENTS.md"), "Project reviewer.").expect("write instructions");
+    std::fs::write(bundle.join("SOUL.md"), "Project reviewer.").expect("write instructions");
 
     let output = h
         .cmd()
@@ -1895,7 +1909,7 @@ fn agent_agy_external_bundle_dry_run_adds_bundle_to_workspace() {
     for name in ["agy_agent", "antigravity_agent"] {
         let bundle = h.path().join("agents").join(name);
         std::fs::create_dir_all(&bundle).expect("create bundle");
-        std::fs::write(bundle.join("AGENTS.md"), "Editable agent memory.")
+        std::fs::write(bundle.join("SOUL.md"), "Editable agent memory.")
             .expect("write bundle instructions");
     }
     std::fs::write(

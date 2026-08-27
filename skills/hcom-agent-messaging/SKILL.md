@@ -120,6 +120,9 @@ Broadcasts do not auto-start catalog agents. If the agent is still starting when
 the message is queued and delivered when the agent is ready — the send still succeeds. See
 `references/named-agents.md` for routing details.
 
+Editable bundle instructions live only in `agents/<name>/SOUL.md`; bundle `AGENTS.md` files are
+not read as a fallback.
+
 For multiple agents, omit `--as` and capture the generated names from launch output; one explicit name cannot be assigned to a multi-agent launch.
 
 ---
