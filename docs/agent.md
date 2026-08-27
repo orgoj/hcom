@@ -107,6 +107,83 @@ additional-workspace mechanism. Launch fails clearly when the CLI cannot make it
 startup. Antigravity (`agy` or `antigravity`) receives the bundle through its repeatable
 `--add-dir` option.
 
+## Example: project fleet with local memory
+
+A machine catalog can keep general-purpose agents alongside selective imports from project
+catalogs. In this example, `general_research` is available everywhere, while only the project's
+coordinator is published outside its repository:
+
+```jsonc
+{
+  "version": 1,
+  "imports": [
+    {
+      "from": "~/work/example-project/.hcom/agents.json",
+      "agents": ["project_main"]
+    }
+  ],
+  "agents": {
+    "general_research": {
+      "description": "General web and documentation research",
+      "dir": "~/work/research",
+      "cli": "antigravity"
+    },
+    "agent_coach": {
+      "description": "Maintain local agent catalogs and bundles",
+      "dir": "~",
+      "cli": "claude"
+    }
+  }
+}
+```
+
+The project catalog keeps its specialist roles private to the project. Different roles can use
+different CLIs without changing how they communicate:
+
+```jsonc
+{
+  "version": 1,
+  "defaults": {
+    "dir": ".",
+    "session": "example-project",
+    "system_prompt": "Read NOTES.md when resuming unfinished work. Consult relevant MEMORY/*.md files before related tasks. Keep portable project knowledge in the repository, not in bundle memory."
+  },
+  "agents": {
+    "project_main": {
+      "description": "Coordinate project work and delegate specialist tasks",
+      "cli": "claude"
+    },
+    "project_research": {
+      "description": "Research project-specific external sources",
+      "cli": "antigravity"
+    },
+    "project_senior": {
+      "description": "Review architecture and high-risk changes",
+      "cli": "codex"
+    },
+    "project_security": {
+      "description": "Review security-sensitive changes and findings",
+      "cli": "codex"
+    }
+  }
+}
+```
+
+A bundle may use a small, file-based memory convention:
+
+```text
+.hcom/agents/project_main/
+├── SOUL.md                 # stable role, boundaries, and critical rules
+├── NOTES.md                # current local work and decisions
+└── MEMORY/
+    └── release-checks.md   # longer lessons recalled for related tasks
+```
+
+hcom automatically injects `SOUL.md`; `NOTES.md` and `MEMORY/` are ordinary files, not special
+hcom features. The catalog `system_prompt` or `SOUL.md` must tell the agent when to read them.
+Clean starts and named-agent resumes reread the bundle, while an already-running session retains
+the prompt it started with.
+
 ## Catalog format
 
 ```jsonc
