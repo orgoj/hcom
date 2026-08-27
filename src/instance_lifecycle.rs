@@ -680,6 +680,29 @@ pub fn cleanup_stale_instances(
 
     if let Ok(instances) = db.iter_instances_full() {
         for data in &instances {
+            if tracked_process_identity_is_gone(data) {
+                // Clear the stale PID before the normal stop path. If the
+                // numeric PID has already been reused, stop_instance must not
+                // signal or preserve the unrelated replacement process.
+                let cleared = db
+                    .conn()
+                    .execute(
+                        "UPDATE instances SET pid = NULL WHERE name = ?1 AND pid = ?2",
+                        rusqlite::params![data.name, data.pid],
+                    )
+                    .unwrap_or(0);
+                if cleared == 1 {
+                    crate::hooks::common::stop_instance(
+                        db,
+                        &data.name,
+                        "system",
+                        "exit:process_gone",
+                    );
+                    deleted += 1;
+                }
+                continue;
+            }
+
             let computed = get_instance_status(data, db);
 
             if computed.status != ST_INACTIVE {
@@ -714,6 +737,35 @@ pub fn cleanup_stale_instances(
     }
 
     deleted
+}
+
+/// A persisted process identity combines PID with the process incarnation's
+/// start time (and boot ID where available), so this remains safe across PID
+/// reuse and reboots. Older rows without that identity retain heartbeat-based
+/// cleanup behavior.
+fn tracked_process_identity_is_gone(data: &InstanceRow) -> bool {
+    if data.status == ST_INACTIVE || data.status == ST_LAUNCHING || data.origin_device_id.is_some()
+    {
+        return false;
+    }
+    let Some(pid) = data.pid.and_then(|pid| u32::try_from(pid).ok()) else {
+        return false;
+    };
+    let Some(expected) = data
+        .launch_context
+        .as_deref()
+        .and_then(|context| serde_json::from_str::<serde_json::Value>(context).ok())
+        .and_then(|context| {
+            context
+                .get("process_identity")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+    else {
+        return false;
+    };
+
+    !crate::sys::process::has_identity(pid, &expected)
 }
 
 fn cleanup_stale_remote_instances(db: &HcomDb) {
@@ -1269,6 +1321,57 @@ WARNING: proceeding, even though we could not update PATH: Operation not permitt
         let deleted = cleanup_stale_placeholders(&db);
         assert_eq!(deleted, 0);
         assert!(db.get_instance_full("real").unwrap().is_some());
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_cleanup_keeps_matching_process_incarnation() {
+        crate::config::Config::init();
+        let (db, path) = setup_test_db();
+        let now = now_epoch_i64();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, status_time, created_at, tool) \
+                 VALUES ('alive', 'active', ?1, ?1, 'codex')",
+                [now],
+            )
+            .unwrap();
+        db.update_instance_pid("alive", std::process::id()).unwrap();
+
+        let row = db.get_instance_full("alive").unwrap().unwrap();
+        assert!(
+            row.launch_context
+                .as_deref()
+                .is_some_and(|context| context.contains("process_identity"))
+        );
+        assert_eq!(cleanup_stale_instances(&db, 0, 0), 0);
+        assert!(db.get_instance_full("alive").unwrap().is_some());
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_cleanup_stops_reused_pid_without_signalling_replacement() {
+        crate::config::Config::init();
+        let (db, path) = setup_test_db();
+        let now = now_epoch_i64();
+        db.conn()
+            .execute(
+                "INSERT INTO instances \
+                 (name, status, status_time, created_at, tool, background, pid, launch_context) \
+                 VALUES ('reused', 'active', ?1, ?1, 'codex', 1, ?2, ?3)",
+                rusqlite::params![
+                    now,
+                    std::process::id() as i64,
+                    r#"{"process_identity":"different-incarnation"}"#
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(cleanup_stale_instances(&db, 0, 0), 1);
+        assert!(db.get_instance_full("reused").unwrap().is_none());
+        assert!(crate::sys::process::is_alive(std::process::id()));
 
         cleanup(path);
     }

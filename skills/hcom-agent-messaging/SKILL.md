@@ -210,7 +210,8 @@ hcom events --agent <name> --last 20
 ```
 
 Then check whether the process or terminal still exists. If the instance is dead, run
-`hcom list` to trigger normal stale reconciliation and retry the launch. Use
+`hcom list` to trigger normal stale reconciliation; new records use a persisted
+process-incarnation identity so PID reuse cannot keep a dead row alive. Retry the launch. Use
 `hcom kill <name>` only for a genuinely live managed instance. Do not use
 `hcom reset all` for a single-name collision.
 

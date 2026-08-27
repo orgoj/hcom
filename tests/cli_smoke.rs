@@ -587,6 +587,38 @@ fn unknown_command_errors() {
 }
 
 #[test]
+fn list_reconciles_a_reused_tracked_pid_without_signalling_it() {
+    let h = Hcom::new();
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO instances \
+         (name, status, status_time, created_at, tool, background, pid, launch_context) \
+         VALUES ('reused', 'active', ?1, ?1, 'codex', 1, ?2, ?3)",
+        rusqlite::params![
+            now,
+            std::process::id() as i64,
+            r#"{"process_identity":"different-incarnation"}"#
+        ],
+    )
+    .expect("insert reused-pid fixture");
+
+    let (code, stdout, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let remains: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM instances WHERE name = 'reused'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(remains, 0, "stdout={stdout} stderr={stderr}");
+}
+
+#[test]
 fn antigravity_e2e_hook_dispatch() {
     let h = Hcom::new();
     let transcript = tempfile::NamedTempFile::new().expect("temp transcript");

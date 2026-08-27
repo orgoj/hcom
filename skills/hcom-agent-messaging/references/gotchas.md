@@ -136,7 +136,7 @@ failed `send` always means the message was not stored.
 
 ## Heartbeat and Stale Detection
 
-Agents are marked stale (inactive) if their heartbeat is not updated within tool-dependent thresholds. After system sleep/wake, hcom gives a grace period where heartbeat checks are suspended to prevent mass stale detection after laptop lid close/open.
+Agents are marked stale (inactive) if their heartbeat is not updated within tool-dependent thresholds. Newly launched agents also persist a process-incarnation identity, so `hcom list` can safely reconcile a dead or PID-reused local process immediately; older records fall back to heartbeat cleanup. After system sleep/wake, hcom gives a grace period where heartbeat checks are suspended to prevent mass stale detection after laptop lid close/open.
 
 ## Intent System Misuse
 

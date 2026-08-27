@@ -212,6 +212,12 @@ impl HcomDb {
             "UPDATE instances SET pid = ? WHERE name = ?",
             params![pid as i64, name],
         )?;
+        if let Some(identity) = crate::sys::process::identity(pid) {
+            self.store_launch_context(
+                name,
+                &serde_json::json!({ "process_identity": identity }).to_string(),
+            )?;
+        }
         Ok(())
     }
 

@@ -195,6 +195,17 @@ fn resolve_codex_home() -> Option<(PathBuf, bool)> {
     dirs::home_dir().map(|h| (h.join(".codex"), false))
 }
 
+/// Resolve the Codex state directory from the environment prepared for the
+/// child process, falling back to Codex's normal home-relative default.
+pub(crate) fn resolve_codex_home_from_env(
+    env: &std::collections::HashMap<String, String>,
+) -> Option<(PathBuf, bool)> {
+    if let Some(value) = env.get("CODEX_HOME").filter(|value| !value.is_empty()) {
+        return Some((PathBuf::from(value), true));
+    }
+    dirs::home_dir().map(|home| (home.join(".codex"), false))
+}
+
 /// Probe whether `CODEX_HOME` is writable before launching codex.
 ///
 /// When hcom is invoked from inside a sandboxed parent codex (e.g.
@@ -211,8 +222,12 @@ pub fn ensure_codex_home_writable() -> Result<()> {
     let Some((codex_home, explicit_env)) = resolve_codex_home() else {
         return Ok(());
     };
+    ensure_codex_home_writable_at(&codex_home, explicit_env)
+}
+
+pub(crate) fn ensure_codex_home_writable_at(codex_home: &Path, explicit_env: bool) -> Result<()> {
     let probe_dir = if codex_home.exists() {
-        codex_home.as_path()
+        codex_home
     } else if explicit_env {
         return Ok(());
     } else {
@@ -301,6 +316,17 @@ impl CodexHookTrustOutcome {
 /// Split from `preprocess_codex_args` because the outcome also governs
 /// workspace-trust injection, which happens earlier in the launch sequence.
 pub fn resolve_codex_hook_trust(codex_args: &[String], launch_dir: &Path) -> CodexHookTrustOutcome {
+    let Some((codex_home, _)) = resolve_codex_home() else {
+        return CodexHookTrustOutcome::NoActionNeeded;
+    };
+    resolve_codex_hook_trust_at(codex_args, launch_dir, &codex_home)
+}
+
+pub(crate) fn resolve_codex_hook_trust_at(
+    codex_args: &[String],
+    launch_dir: &Path,
+    codex_home: &Path,
+) -> CodexHookTrustOutcome {
     if !codex_supports_bypass_hook_trust() {
         return CodexHookTrustOutcome::NoActionNeeded;
     }
@@ -310,7 +336,7 @@ pub fn resolve_codex_hook_trust(codex_args: &[String], launch_dir: &Path) -> Cod
         return CodexHookTrustOutcome::NoActionNeeded;
     }
 
-    match crate::hooks::codex::resolve_codex_hook_trust_state(launch_dir) {
+    match crate::hooks::codex::resolve_codex_hook_trust_state_at(launch_dir, codex_home) {
         crate::hooks::codex::CodexHookTrustState::Trusted => CodexHookTrustOutcome::NoActionNeeded,
         crate::hooks::codex::CodexHookTrustState::BypassSafeFromHooksList => {
             warn_bypass_granted("Codex's own hook list");
@@ -816,6 +842,17 @@ mod tests {
 
         assert!(!home.join(".codex").exists());
         assert!(!home.join(".hcom_writable_probe").exists());
+    }
+
+    #[test]
+    fn test_resolve_codex_home_uses_effective_child_env_override() {
+        let child_home = PathBuf::from("/effective/child/codex-home");
+        let env = std::collections::HashMap::from([(
+            "CODEX_HOME".to_string(),
+            child_home.to_string_lossy().into_owned(),
+        )]);
+
+        assert_eq!(resolve_codex_home_from_env(&env), Some((child_home, true)));
     }
 
     /// Resolve the hook-trust decision and apply it, the way the launcher does

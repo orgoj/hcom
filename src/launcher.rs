@@ -483,6 +483,27 @@ fn isolated_tool_config_dir(tool: &LaunchTool) -> Option<std::path::PathBuf> {
     Some(root.join(dirname))
 }
 
+/// Make the tool config directory explicit in the effective child environment.
+fn ensure_tool_config_env(tool: &LaunchTool, env: &mut HashMap<String, String>) {
+    let Some(env_var) = tool.spec().launch.config_dir_env else {
+        return;
+    };
+    if env.contains_key(env_var) {
+        return;
+    }
+    if let Some(value) = std::env::var(env_var)
+        .ok()
+        .filter(|value| !value.is_empty())
+    {
+        env.insert(env_var.to_string(), value);
+    } else if let Some(config_dir) = isolated_tool_config_dir(tool) {
+        env.insert(
+            env_var.to_string(),
+            config_dir.to_string_lossy().into_owned(),
+        );
+    }
+}
+
 /// Get the per-instance instruction file path for file-based transports.
 fn get_system_prompt_path(tool: &str, instance: &str) -> std::path::PathBuf {
     paths::hcom_path(&["system-prompts", tool, instance, "instructions.md"])
@@ -668,7 +689,11 @@ fn format_plugin_install_error(
 ///
 /// Uses verify-first pattern: read-only check first, only write if needed.
 /// Strict gate: refuses to launch if hooks can't be installed.
-fn ensure_hooks_installed(tool: &LaunchTool, include_permissions: bool) -> Result<()> {
+fn ensure_hooks_installed(
+    tool: &LaunchTool,
+    include_permissions: bool,
+    codex_home: Option<&std::path::Path>,
+) -> Result<()> {
     match tool {
         // Hermes invokes hcom lifecycle commands directly when HCOM_PROCESS_ID
         // is present; there is no external hook configuration to install.
@@ -726,12 +751,15 @@ fn ensure_hooks_installed(tool: &LaunchTool, include_permissions: bool) -> Resul
             Ok(())
         }
         LaunchTool::Codex => {
-            if crate::hooks::codex::verify_codex_hooks_installed(include_permissions)
-                && crate::hooks::codex::codex_current_feature_enabled()
+            let codex_home = codex_home.expect("Codex launch must resolve CODEX_HOME");
+            if crate::hooks::codex::verify_codex_hooks_installed_at(include_permissions, codex_home)
+                && crate::hooks::codex::codex_current_feature_enabled_at(codex_home)
             {
                 return Ok(());
             }
-            if let Err(e) = crate::hooks::codex::try_setup_codex_hooks(include_permissions) {
+            if let Err(e) =
+                crate::hooks::codex::try_setup_codex_hooks_at(include_permissions, codex_home)
+            {
                 if matches!(e, crate::hooks::codex::SetupError::HookTrustFailed { .. }) {
                     crate::log::log_warn(
                         "codex",
@@ -744,8 +772,8 @@ fn ensure_hooks_installed(tool: &LaunchTool, include_permissions: bool) -> Resul
                     let diag = install_diag_context(
                         tool,
                         &[
-                            ("config_path", crate::hooks::codex::get_codex_config_path()),
-                            ("hooks_path", crate::hooks::codex::get_codex_hooks_path()),
+                            ("config_path", codex_home.join("config.toml")),
+                            ("hooks_path", codex_home.join("hooks.json")),
                         ],
                     );
                     bail!(
@@ -1460,11 +1488,9 @@ fn finalize_background_launch(
     instances::update_instance_position(
         ctx.db,
         ctx.instance_name,
-        &serde_json::Map::from_iter([
-            ("pid".to_string(), json!(pid)),
-            ("background_log_file".to_string(), json!(&log_file)),
-        ]),
+        &serde_json::Map::from_iter([("background_log_file".to_string(), json!(&log_file))]),
     );
+    let _ = ctx.db.update_instance_pid(ctx.instance_name, pid);
     crate::pidtrack::record_pid(&crate::pidtrack::PidRecord {
         process_id: ctx.process_id,
         terminal_preset: &effective_preset,
@@ -1826,14 +1852,6 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         c
     });
 
-    // For Codex: probe CODEX_HOME writability synchronously. Sandboxed parent
-    // codex would otherwise spawn a child that hangs on the readonly-state-DB
-    // repair prompt. Failing here lets the parent's sandbox-escalation flow
-    // surface the denial to the user.
-    if matches!(normalized, LaunchTool::Codex) {
-        crate::tools::codex_preprocessing::ensure_codex_home_writable()?;
-    }
-
     let inside_ai_tool = crate::shared::context::HcomContext::from_os().is_inside_ai_tool();
     let terminal_mode = params
         .terminal
@@ -1847,9 +1865,6 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         inside_ai_tool,
     );
 
-    // Ensure hooks are installed (strict: refuse to launch without hooks)
-    ensure_hooks_installed(&normalized, hcom_config.auto_approve)?;
-
     // Build base environment for the current launch regime, then overlay
     // config.toml + ~/.hcom/env which win.
     let mut base_env = build_launch_env(
@@ -1860,19 +1875,25 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         base_env.extend(caller_env.clone());
     }
     base_env.remove("HCOM_TERMINAL");
-    if let Some(env_var) = normalized.spec().launch.config_dir_env
-        && !base_env.contains_key(env_var)
-        && std::env::var(env_var)
-            .ok()
-            .filter(|v| !v.is_empty())
-            .is_none()
-        && let Some(config_dir) = isolated_tool_config_dir(&normalized)
-    {
-        base_env.insert(
-            env_var.to_string(),
-            config_dir.to_string_lossy().to_string(),
-        );
+    ensure_tool_config_env(&normalized, &mut base_env);
+
+    // Codex preflight, hook setup, trust inspection, and the child must all use
+    // the same effective CODEX_HOME after config and caller overlays.
+    let codex_home = if matches!(normalized, LaunchTool::Codex) {
+        crate::tools::codex_preprocessing::resolve_codex_home_from_env(&base_env)
+    } else {
+        None
+    };
+    if let Some((ref path, explicit_env)) = codex_home {
+        crate::tools::codex_preprocessing::ensure_codex_home_writable_at(path, explicit_env)?;
     }
+
+    // Ensure hooks are installed (strict: refuse to launch without hooks).
+    ensure_hooks_installed(
+        &normalized,
+        hcom_config.auto_approve,
+        codex_home.as_ref().map(|(path, _)| path.as_path()),
+    )?;
 
     // Tag resolution
     let effective_tag = if let Some(ref tag) = params.tag {
@@ -1950,7 +1971,10 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
     // paired with a project layer that hcom itself just marked trusted — that
     // layer could contribute a hook source the scan never saw.
     let codex_hook_trust = if matches!(normalized, LaunchTool::Codex) {
-        codex_preprocessing::resolve_codex_hook_trust(&params.args, &canonical_dir)
+        let (codex_home, _) = codex_home
+            .as_ref()
+            .expect("Codex launch must resolve CODEX_HOME");
+        codex_preprocessing::resolve_codex_hook_trust_at(&params.args, &canonical_dir, codex_home)
     } else {
         codex_preprocessing::CodexHookTrustOutcome::NoActionNeeded
     };
@@ -3420,6 +3444,21 @@ mod tests {
         assert_eq!(env.get("HCOM_TAG").map(String::as_str), Some("config-tag"));
 
         unsafe { std::env::remove_var("HCOM_TAG") }
+    }
+
+    #[test]
+    #[serial]
+    fn test_tool_config_env_preserves_ambient_codex_home() {
+        let _guard = EnvVarGuard::remove(vec!["CODEX_HOME".to_string()]);
+        unsafe { std::env::set_var("CODEX_HOME", "/isolated/codex-home") };
+        let mut env = HashMap::new();
+
+        ensure_tool_config_env(&LaunchTool::Codex, &mut env);
+
+        assert_eq!(
+            env.get("CODEX_HOME").map(String::as_str),
+            Some("/isolated/codex-home")
+        );
     }
 
     #[test]

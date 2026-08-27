@@ -203,8 +203,10 @@ hcom reset all               # last resort: archive database, hooks, and config
 ```
 
 For `Instance '<name>' already exists` after a reboot, run `hcom list` and retry.
-Current releases also reconcile stale launch records automatically when reusing an
-explicit name.
+For newly launched agents, listing compares the recorded process incarnation—not
+just its reusable numeric PID—and immediately reconciles a process lost to exit or
+reboot. Older records retain heartbeat-based stale cleanup. Current releases also
+reconcile stale launch records automatically when reusing an explicit name.
 
 Running another AI CLI directly from an hcom-managed agent is safe: foreign child
 hooks cannot reuse the parent's inherited process identity. If an older release

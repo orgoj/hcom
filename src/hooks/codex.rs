@@ -510,7 +510,7 @@ fn dispatch_result_to_stdout(db: &HcomDb, hook_name: &str, result: HookResult) -
             }
             0
         }
-        HookResult::Block { reason } => {
+        HookResult::Block { reason, .. } => {
             // Codex hooks on exit 2 read the reason from stderr, not stdout.
             let _ = std::io::stderr().lock().write_all(reason.as_bytes());
             2
@@ -581,10 +581,37 @@ pub fn dispatch_codex_hook_native(hook_name: &str) -> i32 {
 // Settings management — hooks.json, config.toml, execpolicy
 // ---------------------------------------------------------------------------
 
+thread_local! {
+    /// Launch-time override used while preparing one Codex child. A thread-local
+    /// scope avoids mutating the process environment while keeping the existing
+    /// hook-management helpers reusable for manual `hcom hooks` commands.
+    static CODEX_CONFIG_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+fn with_codex_config_dir<T>(codex_home: &Path, operation: impl FnOnce() -> T) -> T {
+    struct Restore(Option<PathBuf>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CODEX_CONFIG_DIR_OVERRIDE.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+
+    let previous = CODEX_CONFIG_DIR_OVERRIDE.with(|slot| slot.replace(Some(codex_home.into())));
+    let _restore = Restore(previous);
+    operation()
+}
+
 /// Resolve the Codex config directory.
 ///
 /// Priority: CODEX_HOME env var → tool_config_root()/.codex
 fn codex_config_dir() -> PathBuf {
+    if let Some(path) = CODEX_CONFIG_DIR_OVERRIDE.with(|slot| slot.borrow().clone()) {
+        return path;
+    }
     if let Ok(dir) = std::env::var("CODEX_HOME")
         && !dir.is_empty()
     {
@@ -1227,6 +1254,7 @@ fn fetch_codex_hook_list(cwd: &Path) -> Result<Vec<CodexHookListEntry>, String> 
     {
         let mut child = crate::terminal::executable_command("codex")
             .args(["app-server", "--listen", "stdio://"])
+            .env("CODEX_HOME", codex_config_dir())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1680,6 +1708,13 @@ pub(crate) fn resolve_codex_hook_trust_state(launch_dir: &Path) -> CodexHookTrus
             reason: format!("local hook scan was inconclusive: {e}"),
         },
     }
+}
+
+pub(crate) fn resolve_codex_hook_trust_state_at(
+    launch_dir: &Path,
+    codex_home: &Path,
+) -> CodexHookTrustState {
+    with_codex_config_dir(codex_home, || resolve_codex_hook_trust_state(launch_dir))
 }
 
 /// Enumerate every Codex hook definition that could be in scope for a launch in
@@ -2218,6 +2253,10 @@ pub(crate) fn codex_current_feature_enabled() -> bool {
         && !codex_deprecated_feature_present(&config_path, feature_key)
 }
 
+pub(crate) fn codex_current_feature_enabled_at(codex_home: &Path) -> bool {
+    with_codex_config_dir(codex_home, codex_current_feature_enabled)
+}
+
 fn verify_hooks_json_at(hooks_path: &Path) -> Result<(), VerifyFailReason> {
     let content = std::fs::read_to_string(hooks_path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => {
@@ -2570,12 +2609,25 @@ pub fn try_setup_codex_hooks(include_permissions: bool) -> Result<(), SetupError
     Ok(())
 }
 
+pub(crate) fn try_setup_codex_hooks_at(
+    include_permissions: bool,
+    codex_home: &Path,
+) -> Result<(), SetupError> {
+    with_codex_config_dir(codex_home, || try_setup_codex_hooks(include_permissions))
+}
+
 pub fn setup_codex_hooks(include_permissions: bool) -> bool {
     try_setup_codex_hooks(include_permissions).is_ok()
 }
 
 pub fn verify_codex_hooks_installed(check_permissions: bool) -> bool {
     verify_codex_hooks_inner(check_permissions).is_ok()
+}
+
+pub(crate) fn verify_codex_hooks_installed_at(check_permissions: bool, codex_home: &Path) -> bool {
+    with_codex_config_dir(codex_home, || {
+        verify_codex_hooks_installed(check_permissions)
+    })
 }
 
 pub(crate) fn verify_codex_hooks_inner(check_permissions: bool) -> Result<(), VerifyFailReason> {
@@ -2767,6 +2819,22 @@ mod tests {
 
         assert!(remove_codex_hooks());
         assert!(!verify_codex_hooks_installed(false));
+    }
+
+    #[test]
+    #[serial]
+    fn test_setup_codex_hooks_targets_effective_child_home() {
+        let (tmp, _hcom_dir, _home, _guard) = isolated_test_env();
+        unsafe { std::env::set_var("HCOM_TEST_CODEX_CLI_VERSION", "codex-cli 0.130.0") };
+        let ambient_config = get_codex_config_path();
+        let child_home = tmp.path().join("child-codex-home");
+
+        try_setup_codex_hooks_at(false, &child_home).unwrap();
+
+        assert!(child_home.join("config.toml").exists());
+        assert!(child_home.join("hooks.json").exists());
+        assert!(verify_codex_hooks_installed_at(false, &child_home));
+        assert!(!ambient_config.exists());
     }
 
     #[test]
