@@ -184,6 +184,17 @@ hcom features. The catalog `system_prompt` or `SOUL.md` must tell the agent when
 Clean starts and named-agent resumes reread the bundle, while an already-running session retains
 the prompt it started with.
 
+### Safe unattended execution with Dippy
+
+When multiple agents run in parallel and execute shell commands, interactive approval prompts can cause severe click fatigue, while running completely unrestricted carries obvious safety risks.
+
+A recommended solution is [Dippy](https://github.com/orgoj/Dippy), an approval firewall for AI CLI tools built on a full Bash AST parser (`parable`). Unlike naive regexes, Dippy analyzes the complete syntactic tree (pipelines, subshells, compound commands, and option flags) against declarative allowrules.
+
+In a recurring agent fleet, this enables a self-improving autonomy loop:
+- Safe, vetted commands execute unattended with zero prompts.
+- Interactive approval is requested only for genuinely unvetted or sensitive commands.
+- Meta-agents (e.g. a dedicated tooling developer or coach) can analyze execution audit logs to refine allowrules, progressively increasing fleet autonomy without sacrificing safety.
+
 ## Catalog format
 
 ```jsonc
