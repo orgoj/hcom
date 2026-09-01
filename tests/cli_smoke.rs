@@ -2288,3 +2288,18 @@ fn agent_session_uses_tmux_window_with_terminal_here() {
     assert!(stdout.contains("--terminal here"), "stdout={stdout}");
     assert!(stdout.contains(r#"exec "${SHELL:-"#), "stdout={stdout}");
 }
+
+#[test]
+fn herdr_autostart_config_and_env() {
+    let h = Hcom::new();
+    let (code, stdout, _) = h.run(["config", "herdr_autostart"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "true");
+
+    let (code, _, _) = h.run(["config", "herdr_autostart", "false"]);
+    assert_eq!(code, 0);
+
+    let (code, stdout, _) = h.run(["config", "herdr_autostart"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "false");
+}

@@ -516,6 +516,10 @@ const CONFIG_HELP: &[HelpEntry] = &[
         "  title_mode",
         "Terminal/tab title: combined, label, or off",
     ),
+    (
+        "  herdr_autostart",
+        "Auto-start Herdr server if not running",
+    ),
     ("", "hcom config <key> --info for details"),
     ("", ""),
     ("", "Precedence: defaults < config.toml < env vars"),

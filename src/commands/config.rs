@@ -160,6 +160,11 @@ pub const CONFIG_KEYS: &[(&str, &str, &str)] = &[
         "string",
     ),
     (
+        "HCOM_HERDR_AUTOSTART",
+        "Auto-start Herdr server when not running (true/false)",
+        "boolean",
+    ),
+    (
         "HCOM_RELAY",
         "Relay MQTT broker URL (config file only)",
         "string",
@@ -201,6 +206,7 @@ fn toml_path_for_key(field_name: &str) -> Option<&'static str> {
     match field_name {
         "terminal" => Some("terminal.active"),
         "title_mode" => Some("terminal.title_mode"),
+        "herdr_autostart" => Some("terminal.herdr_autostart"),
         "tag" => Some("launch.tag"),
         "hints" => Some("launch.hints"),
         "notes" => Some("launch.notes"),
@@ -450,6 +456,7 @@ pub fn config_get(key: &str) -> (String, &'static str) {
         "HCOM_AUTO_APPROVE" => "true",
         "HCOM_AUTO_TRUST_WORKSPACE" => "true",
         "HCOM_TITLE_MODE" => "combined",
+        "HCOM_HERDR_AUTOSTART" => "true",
         _ => "",
     };
     (default.to_string(), "default")
@@ -1569,6 +1576,31 @@ Notes:
   - This affects terminal/tab titles, not the visible PTY output.
   - Tools that do not emit terminal titles have no live child title to append.
   - The same setting can be provided with HCOM_TITLE_MODE in the environment.",
+        ),
+
+        "HCOM_HERDR_AUTOSTART" => Some(
+            "\
+HCOM_HERDR_AUTOSTART - Auto-start Herdr server when not running
+
+Default: true
+
+Purpose:
+  Controls whether hcom automatically spawns `herdr server` in the background
+  when launching agents into Herdr if no Herdr server is currently running.
+
+Values:
+  true  - Auto-start `herdr server` headless and wait for socket readiness (default)
+  false - Fail immediately with a clear error if Herdr server is not running
+
+Usage:
+  hcom config terminal.herdr_autostart true    # Enable autostart (default)
+  hcom config terminal.herdr_autostart false   # Disable autostart
+  hcom config herdr_autostart                  # Show current value
+
+Notes:
+  - This allows headless agent launches (e.g. on remote servers) into Herdr
+    without requiring a persistent TUI session to be running beforehand.
+  - The same setting can be provided with HCOM_HERDR_AUTOSTART in the environment.",
         ),
 
         "HCOM_NAME_EXPORT" => Some(

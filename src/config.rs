@@ -151,6 +151,7 @@ const TOML_KEY_MAP: &[(&str, &str)] = &[
     ("name_export", "preferences.name_export"),
     ("auto_trust_workspace", "launch.auto_trust_workspace"),
     ("title_mode", "terminal.title_mode"),
+    ("herdr_autostart", "terminal.herdr_autostart"),
 ];
 
 /// Mapping: HcomConfig field name -> HCOM_* env var key.
@@ -190,6 +191,7 @@ const FIELD_TO_ENV: &[(&str, &str)] = &[
     ("name_export", "HCOM_NAME_EXPORT"),
     ("auto_trust_workspace", "HCOM_AUTO_TRUST_WORKSPACE"),
     ("title_mode", "HCOM_TITLE_MODE"),
+    ("herdr_autostart", "HCOM_HERDR_AUTOSTART"),
 ];
 
 /// Relay fields — file-only, no env var override.
@@ -307,6 +309,8 @@ pub struct HcomConfig {
     /// `{icon} name [tool]` only, `"off"` leaves the tool's own title untouched.
     /// See [`crate::shared::TitleMode`].
     pub title_mode: String,
+    /// Auto-start Herdr server in the background if not running (default: true).
+    pub herdr_autostart: bool,
 }
 
 impl Default for HcomConfig {
@@ -342,6 +346,7 @@ impl Default for HcomConfig {
             name_export: String::new(),
             auto_trust_workspace: true,
             title_mode: "combined".to_string(),
+            herdr_autostart: true,
         }
     }
 }
@@ -530,6 +535,7 @@ impl HcomConfig {
                 Some(if self.auto_trust_workspace { "1" } else { "0" }.into())
             }
             "title_mode" => Some(self.title_mode.clone()),
+            "herdr_autostart" => Some(if self.herdr_autostart { "1" } else { "0" }.into()),
             _ => None,
         }
     }
@@ -585,6 +591,7 @@ impl HcomConfig {
             // The CLI set path (`config_set_at_path`) validates against
             // `VALID_TITLE_MODES` before this is ever written to the file.
             "title_mode" => self.title_mode = value.to_string(),
+            "herdr_autostart" => self.herdr_autostart = !is_falsy(value),
             _ => return Err(format!("unknown field: {field}")),
         }
         Ok(())
@@ -713,7 +720,12 @@ impl HcomConfig {
         }
 
         // Load boolean fields
-        for bool_field in &["relay_enabled", "auto_approve", "auto_trust_workspace"] {
+        for bool_field in &[
+            "relay_enabled",
+            "auto_approve",
+            "auto_trust_workspace",
+            "herdr_autostart",
+        ] {
             if let Some(val) = get_var(bool_field) {
                 match val {
                     TomlFieldValue::Bool(b) => {
@@ -1012,6 +1024,7 @@ fn default_toml_structure() -> toml::Value {
     let toml_str = r#"[terminal]
 active = "default"
 title_mode = "combined"
+herdr_autostart = true
 
 [relay]
 url = ""
@@ -2125,6 +2138,20 @@ mod tests {
 
         let config = HcomConfig::load_from_sources(&file_config, Some(&env)).unwrap();
         assert_eq!(config.title_mode, "off");
+    }
+
+    #[test]
+    fn test_load_from_sources_herdr_autostart_default_and_env_override() {
+        let file_config = HashMap::new();
+        let env = HashMap::new();
+        let config = HcomConfig::load_from_sources(&file_config, Some(&env)).unwrap();
+        assert!(config.herdr_autostart);
+
+        let mut env_override = HashMap::new();
+        env_override.insert("HCOM_HERDR_AUTOSTART".to_string(), "0".to_string());
+        let config_override =
+            HcomConfig::load_from_sources(&file_config, Some(&env_override)).unwrap();
+        assert!(!config_override.herdr_autostart);
     }
 
     #[test]

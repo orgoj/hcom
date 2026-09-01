@@ -1895,6 +1895,69 @@ fn parse_herdr_pane_id(captured: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Check if the Herdr server is responding via `herdr status server --json`.
+fn herdr_server_is_running() -> bool {
+    let output = std::process::Command::new("herdr")
+        .args(["status", "server", "--json"])
+        .output();
+    match output {
+        Ok(out) => {
+            if !out.status.success() {
+                return false;
+            }
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                val.get("running")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
+}
+
+/// Ensure the Herdr server is running before issuing placement or launch commands.
+/// If not running and `herdr_autostart` is enabled (the default), auto-start
+/// `herdr server` in the background (detached) and wait for it to become ready.
+fn ensure_herdr_server_running() -> Result<()> {
+    if herdr_server_is_running() {
+        return Ok(());
+    }
+
+    let autostart = crate::config::HcomConfig::load(None)
+        .map(|c| c.herdr_autostart)
+        .unwrap_or(true);
+
+    if !autostart {
+        bail!(
+            "Herdr server is not running (herdr_autostart is disabled). Start it with `herdr` or `herdr server`, or enable autostart with `hcom config set terminal.herdr_autostart true`."
+        );
+    }
+
+    let mut cmd = std::process::Command::new("herdr");
+    cmd.arg("server");
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    crate::sys::process::detach_session(&mut cmd);
+
+    cmd.spawn().context("Failed to spawn `herdr server`")?;
+
+    let start = std::time::Instant::now();
+    let timeout = std::time::Duration::from_secs(3);
+    while start.elapsed() < timeout {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if herdr_server_is_running() {
+            return Ok(());
+        }
+    }
+
+    bail!(
+        "Herdr server was started but did not become ready within 3s. Check herdr server logs in ~/.config/herdr/."
+    );
+}
+
 /// Launch a herdr pane in two steps: `tab create` (whose stdout JSON carries
 /// the new pane id) then `pane run <pane_id> "bash <script>"` to start hcom's
 /// normal runner inside it. Returns `(success, captured_stdout)` where the
@@ -1905,6 +1968,8 @@ fn launch_herdr_two_step(
     ctx: TerminalCommandContext<'_>,
     inside_ai_tool: bool,
 ) -> Result<(bool, String)> {
+    ensure_herdr_server_running()?;
+
     // Step 1: open the pane. `tab create` takes no script, so substitute
     // placeholders directly — the generic `substitute_open_argv` requires a
     // `{script}` slot this command intentionally lacks.
