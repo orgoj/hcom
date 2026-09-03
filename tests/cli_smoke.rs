@@ -74,6 +74,27 @@ fn send_help_explains_autostart_acknowledgement() {
 }
 
 #[test]
+fn transcript_without_model_history_points_to_transport_events() {
+    let h = Hcom::new();
+    let agent = h.start();
+
+    let (code, stdout, stderr) = h.run(["transcript", &agent]);
+    assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains(&format!("No model transcript is registered for {agent}.")),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("hcom events --agent {agent} --type message")),
+        "stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("no messages have been exchanged"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
 fn config_terminal_accepts_here_mode() {
     let h = Hcom::new();
 
