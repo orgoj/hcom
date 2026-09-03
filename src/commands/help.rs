@@ -221,7 +221,7 @@ const SEND_HELP: &[HelpEntry] = &[
     ),
     (
         "",
-        "Targeted missing/stopped catalog agents start automatically; broadcasts never start agents.",
+        "Targeted catalog agents start automatically; send waits briefly for the first event's acknowledgement, then leaves it queued/pending. Broadcasts never start agents.",
     ),
     ("", ""),
     ("Envelope:", ""),

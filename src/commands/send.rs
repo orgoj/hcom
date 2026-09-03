@@ -1,6 +1,8 @@
 //! `hcom send` command — send messages to hcom instances.
 
+use std::collections::HashSet;
 use std::io::{IsTerminal, Read as IoRead};
+use std::time::{Duration, Instant};
 
 use crate::db::HcomDb;
 use crate::db::subscriptions::create_request_watches;
@@ -22,7 +24,9 @@ Target matching:
     @luna:BOXE                     exact or uniquely prefixed remote agent
   Partial local names are rejected to avoid accidental fan-out.
   A targeted stopped/missing local agent is started automatically when its
-  name is defined in the effective hcom agent catalog. Broadcasts never start agents.
+  name is defined in the effective hcom agent catalog. Send briefly waits for
+  that first event's acknowledgement; otherwise it reports queued/pending.
+  Broadcasts never start agents.
 
 Inline bundle (attach structured context):
     --title <text>                 Create and attach bundle inline
@@ -217,25 +221,85 @@ impl SendArgs {
 }
 
 /// Get formatted recipient feedback showing who received the message.
-fn get_recipient_feedback(db: &HcomDb, delivered_to: &[String]) -> String {
+const AUTOSTART_DELIVERY_ACK_WAIT: Duration = Duration::from_secs(15);
+const AUTOSTART_DELIVERY_ACK_POLL: Duration = Duration::from_millis(50);
+
+fn get_recipient_feedback(
+    db: &HcomDb,
+    delivered_to: &[String],
+    pending_autostarts: &HashSet<String>,
+) -> String {
     if delivered_to.is_empty() {
         return format!("Sent to: {SENDER}");
     }
-    if delivered_to.len() > 10 {
-        return format!("Sent to {} agents", delivered_to.len());
-    }
-
-    let mut parts = Vec::new();
+    let mut delivered = Vec::new();
+    let mut pending = Vec::new();
     for name in delivered_to {
         if let Ok(Some(data)) = db.get_instance_full(name) {
             let icon = status_icon(&data.status);
             let display = identity::get_display_name(db, name);
-            parts.push(format!("{icon} {display}"));
+            let rendered = format!("{icon} {display}");
+            if pending_autostarts.contains(name) {
+                pending.push(rendered);
+            } else {
+                delivered.push(rendered);
+            }
         } else {
-            parts.push(format!("◌ {name}"));
+            let rendered = format!("◌ {name}");
+            if pending_autostarts.contains(name) {
+                pending.push(rendered);
+            } else {
+                delivered.push(rendered);
+            }
         }
     }
-    format!("Sent to: {}", parts.join(", "))
+    let mut lines = Vec::new();
+    if delivered.len() > 10 {
+        lines.push(format!("Sent to {} agents", delivered.len()));
+    } else if !delivered.is_empty() {
+        lines.push(format!("Sent to: {}", delivered.join(", ")));
+    }
+    if pending.len() > 10 {
+        lines.push(format!(
+            "Queued; delivery pending for {} agents",
+            pending.len()
+        ));
+    } else if !pending.is_empty() {
+        lines.push(format!("Queued; delivery pending: {}", pending.join(", ")));
+    }
+    lines.join("\n")
+}
+
+fn wait_for_autostart_delivery_ack(
+    db: &HcomDb,
+    event_id: i64,
+    autostarted: &[String],
+) -> HashSet<String> {
+    wait_for_autostart_delivery_ack_until(db, event_id, autostarted, AUTOSTART_DELIVERY_ACK_WAIT)
+}
+
+fn wait_for_autostart_delivery_ack_until(
+    db: &HcomDb,
+    event_id: i64,
+    autostarted: &[String],
+    timeout: Duration,
+) -> HashSet<String> {
+    if autostarted.is_empty() {
+        return HashSet::new();
+    }
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        let pending: HashSet<String> = autostarted
+            .iter()
+            .filter(|name| db.get_cursor(name) < event_id)
+            .cloned()
+            .collect();
+        if pending.is_empty() || Instant::now() >= deadline {
+            return pending;
+        }
+        std::thread::sleep(AUTOSTART_DELIVERY_ACK_POLL);
+    }
 }
 
 struct ResolvedDelivery {
@@ -245,6 +309,12 @@ struct ResolvedDelivery {
     delivered_to: Vec<String>,
     catalog_starts: Vec<String>,
     is_thread_resolved: bool,
+}
+
+struct SendOutcome {
+    delivered_to: Vec<String>,
+    autostarted: Vec<String>,
+    event_id: i64,
 }
 
 fn deliverable_instances(db: &HcomDb) -> Result<Vec<InstanceInfo>, String> {
@@ -422,6 +492,25 @@ fn send_message_with_catalog(
     explicit_targets: Option<&[String]>,
     catalog_instances: &[InstanceInfo],
 ) -> Result<Vec<String>, String> {
+    send_message_with_catalog_outcome(
+        db,
+        identity,
+        message,
+        envelope,
+        explicit_targets,
+        catalog_instances,
+    )
+    .map(|outcome| outcome.delivered_to)
+}
+
+fn send_message_with_catalog_outcome(
+    db: &HcomDb,
+    identity: &SenderIdentity,
+    message: &str,
+    envelope: Option<&MessageEnvelope>,
+    explicit_targets: Option<&[String]>,
+    catalog_instances: &[InstanceInfo],
+) -> Result<SendOutcome, String> {
     validate_message(message)?;
 
     let delivery = resolve_delivery(
@@ -494,7 +583,7 @@ fn send_message_with_catalog(
     };
 
     // Log event to DB
-    let _event_id = db
+    let event_id = db
         .log_event("message", &routing_instance, &data)
         .map_err(|e| format!("Failed to write message to database: {e}"))?;
 
@@ -513,7 +602,7 @@ fn send_message_with_catalog(
             && delivery.effective_scope == MessageScope::Mentions
             && !delivery.is_thread_resolved
         {
-            create_request_watches(db, &identity.name, _event_id, &delivery.delivered_to);
+            create_request_watches(db, &identity.name, event_id, &delivery.delivered_to);
         }
     }
 
@@ -523,7 +612,11 @@ fn send_message_with_catalog(
     // Trigger relay push so remote devices see the message immediately
     crate::relay::trigger_push();
 
-    Ok(delivery.delivered_to)
+    Ok(SendOutcome {
+        delivered_to: delivery.delivered_to,
+        autostarted: delivery.catalog_starts,
+        event_id,
+    })
 }
 
 /// Resolve reply_to to local event ID. Returns None if not found.
@@ -1080,7 +1173,7 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         || envelope.thread.is_some()
         || envelope.bundle_id.is_some();
 
-    let delivered_to = match send_message_with_catalog(
+    let outcome = match send_message_with_catalog_outcome(
         db,
         &sender_identity,
         &message,
@@ -1095,13 +1188,16 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         }
     };
 
+    let pending_autostarts =
+        wait_for_autostart_delivery_ack(db, outcome.event_id, &outcome.autostarted);
+
     // ── Feedback ──
     if args.quiet {
         crate::relay::worker::ensure_worker(true);
         return 0;
     }
 
-    let feedback = get_recipient_feedback(db, &delivered_to);
+    let feedback = get_recipient_feedback(db, &outcome.delivered_to, &pending_autostarts);
 
     // Show unread messages if instance context (full delivery with cursor advance)
     if matches!(sender_identity.kind, SenderKind::Instance) {
@@ -1525,6 +1621,100 @@ mod tests {
         let shm = PathBuf::from(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(wal);
         let _ = std::fs::remove_file(shm);
+    }
+
+    #[test]
+    #[serial]
+    fn autostart_ack_wait_tracks_the_specific_message_event() {
+        let (db, path, _env) = setup_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, last_event_id, created_at) \
+                 VALUES ('reviewer', 'listening', 7, 0)",
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            wait_for_autostart_delivery_ack_until(
+                &db,
+                7,
+                &["reviewer".to_string()],
+                Duration::ZERO,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            wait_for_autostart_delivery_ack_until(
+                &db,
+                8,
+                &["reviewer".to_string()],
+                Duration::ZERO,
+            ),
+            HashSet::from(["reviewer".to_string()])
+        );
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn autostart_ack_wait_observes_a_later_cursor_advance() {
+        let (db, path, _env) = setup_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, last_event_id, created_at) \
+                 VALUES ('reviewer', 'listening', 7, 0)",
+                [],
+            )
+            .unwrap();
+
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            let writer_db = HcomDb::open_at(&writer_path).unwrap();
+            writer_db
+                .conn()
+                .execute(
+                    "UPDATE instances SET last_event_id = 8 WHERE name = 'reviewer'",
+                    [],
+                )
+                .unwrap();
+        });
+
+        let pending = wait_for_autostart_delivery_ack_until(
+            &db,
+            8,
+            &["reviewer".to_string()],
+            Duration::from_secs(1),
+        );
+        writer.join().unwrap();
+        assert!(pending.is_empty());
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn pending_autostart_feedback_does_not_claim_delivery() {
+        let (db, path, _env) = setup_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, created_at) \
+                 VALUES ('reviewer', 'listening', 0)",
+                [],
+            )
+            .unwrap();
+
+        let feedback = get_recipient_feedback(
+            &db,
+            &["reviewer".to_string()],
+            &HashSet::from(["reviewer".to_string()]),
+        );
+        assert!(feedback.contains("Queued; delivery pending:"));
+        assert!(!feedback.contains("Sent to:"));
+
+        cleanup_test_db(path);
     }
 
     #[test]

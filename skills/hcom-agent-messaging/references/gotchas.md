@@ -127,10 +127,10 @@ hcom send @luna @nova -- "luna and nova see this" # Multiple mentions
 If a targeted local name or tag member is defined in the effective `hcom agent` catalog but is not
 running, `send` starts it automatically. Broadcasts never start catalog agents.
 
-A cold TUI can take longer to report readiness than the launch wait. When that happens, `send`
-prints `Agent '<name>' is still starting - message queued` and exits successfully; the message is
-delivered once the agent's delivery loop runs. Only a real spawn failure fails the send, so a
-failed `send` always means the message was not stored.
+A cold TUI can take longer to report readiness or acknowledge its first event. When that happens,
+`send` reports that the agent is still starting and/or prints `Queued; delivery pending`, then exits
+successfully; the durable message is delivered once the agent's delivery loop runs. Only a real
+spawn failure fails before storage, so the caller must not repeat a successful pending send.
 
 **Common mistake:** Forgetting `--` before the message text. Without `--`, the message text might be parsed as flags.
 

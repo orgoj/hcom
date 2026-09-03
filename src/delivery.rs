@@ -1432,6 +1432,9 @@ fn launch_ready_observed(
     if config.require_prompt_empty && !screen.prompt_empty {
         return false;
     }
+    if config.tool == "codex" && screen.last_output.elapsed() < CODEX_LAUNCH_READY_QUIET_PERIOD {
+        return false;
+    }
     true
 }
 
@@ -1673,6 +1676,15 @@ enum VerifyTimeoutDecision {
     Reset,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerifyRecoveryDecision {
+    Delivered,
+    RetryOwnedWake,
+    Reinject,
+    ForeignPrompt,
+    WakeUnacknowledged,
+}
+
 fn verify_timeout_decision(
     tool: Option<Tool>,
     has_pending: bool,
@@ -1686,8 +1698,33 @@ fn verify_timeout_decision(
     }
     if inject_attempt < 3 {
         VerifyTimeoutDecision::Retry
+    } else if matches!(tool, Some(Tool::Codex)) {
+        VerifyTimeoutDecision::FastFail
     } else {
         VerifyTimeoutDecision::Reset
+    }
+}
+
+fn verify_recovery_decision(
+    tool: Option<Tool>,
+    timeout: VerifyTimeoutDecision,
+    input_text: Option<&str>,
+    injected_text: &str,
+) -> VerifyRecoveryDecision {
+    match timeout {
+        VerifyTimeoutDecision::DeliveredWithoutCursor => VerifyRecoveryDecision::Delivered,
+        VerifyTimeoutDecision::FastFail => VerifyRecoveryDecision::WakeUnacknowledged,
+        VerifyTimeoutDecision::Reset => VerifyRecoveryDecision::Reinject,
+        VerifyTimeoutDecision::Retry
+            if matches!(tool, Some(Tool::Codex))
+                && prompt_ownership(input_text, injected_text) == PromptOwnership::Exclusive =>
+        {
+            VerifyRecoveryDecision::RetryOwnedWake
+        }
+        VerifyTimeoutDecision::Retry if input_text.is_none_or(str::is_empty) => {
+            VerifyRecoveryDecision::Reinject
+        }
+        VerifyTimeoutDecision::Retry => VerifyRecoveryDecision::ForeignPrompt,
     }
 }
 
@@ -1712,6 +1749,11 @@ const PHASE2_TIMEOUT: Duration = Duration::from_secs(2);
 /// Overall verification timeout for cursor advance.
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Codex can expose its composer while startup banners and hook initialization
+/// are still redrawing the TUI. Every new output refreshes `last_output`, so this
+/// is a quiet-screen requirement rather than a fixed startup delay.
+const CODEX_LAUNCH_READY_QUIET_PERIOD: Duration = Duration::from_secs(1);
+
 /// How long to wait in idle state before checking again.
 const IDLE_WAIT: Duration = Duration::from_secs(30);
 
@@ -1726,12 +1768,13 @@ const MAX_ENTER_ATTEMPTS: u32 = 3;
 /// - `WaitTextRender`: confirms injected text appeared in the prompt, sends Enter on match
 /// - `WaitTextClear`: verifies prompt cleared after Enter, retries Enter on timeout
 /// - `VerifyCursor`: waits for hook-side cursor advance (falls back to has_pending==false)
-/// - `WakeUnacknowledged`: Claude accepted the wake but its hook did not consume
+/// - `WakeUnacknowledged`: the tool accepted the wake but its hook did not consume
 ///   pending messages; automatic reinjection stays latched until hook-side
 ///   progress, a subsequent session-switcher cycle, or a process restart
 ///
-/// Non-Claude failed verification returns to `Pending`; success goes to `Idle`
-/// or `Pending` (if more queued).
+/// Failed verification either preserves Codex-owned wake authority for a direct
+/// Enter retry or pauses durably; success goes to `Idle` or `Pending` (if newer
+/// messages are queued).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum State {
     Idle,
@@ -2478,7 +2521,33 @@ pub fn run_delivery_loop(
                             continue;
                         }
 
-                        // Max retries - go back to pending
+                        // An owned Codex wake must not pass through the generic
+                        // prompt gate: that would misclassify our own text as a
+                        // user draft and spin forever.
+                        let parsed_tool = Tool::from_str(&config.tool).ok();
+                        if matches!(parsed_tool, Some(Tool::Codex))
+                            && prompt_ownership(input_text.as_deref(), &injected_text)
+                                == PromptOwnership::Exclusive
+                        {
+                            let context = "tui:wake-unacknowledged".to_string();
+                            let detail = "delivery paused; owned wake was not submitted";
+                            if let Err(e) = db.set_gate_status(&current_name, &context, detail) {
+                                log_warn("native", "delivery.gate_status_fail", &format!("{}", e));
+                            }
+                            last_block_context = context;
+                            block_since = Some(Instant::now());
+                            log_warn(
+                                "native",
+                                "delivery.wake_unacknowledged",
+                                &format!(
+                                    "{} owned wake remained after {} Enter attempts; leaving messages pending",
+                                    config.tool, MAX_ENTER_ATTEMPTS
+                                ),
+                            );
+                            delivery_state = State::WakeUnacknowledged;
+                            attempt = 0;
+                            continue;
+                        }
                         log_warn(
                             "native",
                             "delivery.phase2_max_retries",
@@ -2540,22 +2609,37 @@ pub fn run_delivery_loop(
                     }
 
                     if elapsed > VERIFY_TIMEOUT {
-                        inject_attempt += 1;
                         let has_pending = db.has_pending(&current_name);
                         let parsed_tool = Tool::from_str(&config.tool).ok();
-                        let decision =
-                            verify_timeout_decision(parsed_tool, has_pending, inject_attempt);
+                        let next_inject_attempt = inject_attempt + 1;
+                        let timeout_decision =
+                            verify_timeout_decision(parsed_tool, has_pending, next_inject_attempt);
+                        let input_text = state
+                            .screen
+                            .read()
+                            .ok()
+                            .and_then(|screen| screen.input_text.clone());
+                        let recovery = verify_recovery_decision(
+                            parsed_tool,
+                            timeout_decision,
+                            input_text.as_deref(),
+                            &injected_text,
+                        );
                         log_warn(
                             "native",
                             "delivery.verify_timeout",
                             &format!(
-                                "Cursor verify timeout (before={}, current={}, inject_attempt={}, decision={:?})",
-                                cursor_before, current_cursor, inject_attempt, decision
+                                "Cursor verify timeout (before={}, current={}, inject_attempt={}, decision={:?}, recovery={:?})",
+                                cursor_before,
+                                current_cursor,
+                                next_inject_attempt,
+                                timeout_decision,
+                                recovery
                             ),
                         );
 
-                        match decision {
-                            VerifyTimeoutDecision::DeliveredWithoutCursor => {
+                        match recovery {
+                            VerifyRecoveryDecision::Delivered => {
                                 // Cursor advance is the primary proof, but "no
                                 // pending rows" is also sufficient — avoids
                                 // wedging when hook delivery succeeded but
@@ -2581,7 +2665,42 @@ pub fn run_delivery_loop(
                                 inject_attempt = 0;
                                 continue;
                             }
-                            VerifyTimeoutDecision::Retry => {
+                            VerifyRecoveryDecision::RetryOwnedWake => {
+                                let user_active = state.is_user_active();
+                                let approval = state
+                                    .screen
+                                    .read()
+                                    .map(|screen| screen.approval)
+                                    .unwrap_or(true);
+                                delivery_state = State::WaitTextClear;
+                                phase_started_at = Instant::now();
+                                enter_attempt = 0;
+                                if !user_active && !approval {
+                                    inject_attempt = next_inject_attempt;
+                                    enter_attempt = 1;
+                                    log_info(
+                                        "native",
+                                        "delivery.retry_owned_wake",
+                                        &format!(
+                                            "Retrying Enter for owned wake (inject_attempt={})",
+                                            inject_attempt
+                                        ),
+                                    );
+                                    inject_enter(state.inject_port);
+                                } else {
+                                    log_info(
+                                        "native",
+                                        "delivery.owned_wake_paused",
+                                        &format!(
+                                            "Owned wake retry paused (user_active={}, approval={})",
+                                            user_active, approval
+                                        ),
+                                    );
+                                }
+                                continue;
+                            }
+                            VerifyRecoveryDecision::Reinject => {
+                                inject_attempt = next_inject_attempt;
                                 log_info(
                                     "native",
                                     "delivery.retry",
@@ -2594,9 +2713,20 @@ pub fn run_delivery_loop(
                                 attempt += 1;
                                 continue;
                             }
-                            VerifyTimeoutDecision::FastFail => {
+                            VerifyRecoveryDecision::ForeignPrompt => {
+                                log_warn(
+                                    "native",
+                                    "delivery.retry_foreign_prompt",
+                                    "Prompt no longer contains only the owned wake; refusing automatic submission",
+                                );
+                                delivery_state = State::Pending;
+                                attempt += 1;
+                                continue;
+                            }
+                            VerifyRecoveryDecision::WakeUnacknowledged => {
+                                inject_attempt = next_inject_attempt;
                                 let context = "tui:wake-unacknowledged".to_string();
-                                let detail = "delivery paused; kill and resume this agent to retry";
+                                let detail = "delivery paused; wake was not acknowledged";
                                 if let Err(e) = db.set_gate_status(&current_name, &context, detail)
                                 {
                                     log_warn(
@@ -2611,25 +2741,13 @@ pub fn run_delivery_loop(
                                     "native",
                                     "delivery.wake_unacknowledged",
                                     &format!(
-                                        "Claude wake was not acknowledged for {}; leaving messages pending and stopping automatic retries",
-                                        current_name
+                                        "{} wake was not acknowledged for {}; leaving messages pending and stopping automatic retries",
+                                        config.tool, current_name
                                     ),
                                 );
                                 delivery_state = State::WakeUnacknowledged;
                                 attempt = 0;
                                 continue;
-                            }
-                            VerifyTimeoutDecision::Reset => {
-                                log_warn(
-                                    "native",
-                                    "delivery.failed",
-                                    &format!(
-                                        "Delivery failed after {} attempts, resetting",
-                                        inject_attempt
-                                    ),
-                                );
-                                delivery_state = State::Pending;
-                                attempt = 0;
                             }
                         }
                     }
@@ -2639,7 +2757,7 @@ pub fn run_delivery_loop(
 
                 State::WakeUnacknowledged => {
                     // Keep the delivery loop and its endpoints alive, but do not
-                    // submit another prompt. A valid hook from the bound Claude
+                    // submit another prompt. A valid hook from the bound tool
                     // session consumes the pending rows and/or advances the
                     // cursor, which safely rearms delivery for anything newer.
                     notify.wait(IDLE_WAIT);
@@ -2681,8 +2799,12 @@ pub fn run_delivery_loop(
                             "native",
                             "delivery.wake_rearmed",
                             &format!(
-                                "Claude delivery rearmed for {} (cursor {} -> {}, pending={})",
-                                current_name, cursor_before, current_cursor, has_pending
+                                "{} delivery rearmed for {} (cursor {} -> {}, pending={})",
+                                config.tool,
+                                current_name,
+                                cursor_before,
+                                current_cursor,
+                                has_pending
                             ),
                         );
                     }
@@ -3046,8 +3168,36 @@ mod tests {
         );
         assert_eq!(
             verify_timeout_decision(Some(Tool::Codex), true, 3),
-            VerifyTimeoutDecision::Reset
+            VerifyTimeoutDecision::FastFail
         );
+    }
+
+    #[test]
+    fn codex_verify_retry_preserves_exact_wake_ownership() {
+        assert_eq!(
+            verify_recovery_decision(
+                Some(Tool::Codex),
+                VerifyTimeoutDecision::Retry,
+                Some("<hcom>"),
+                "<hcom>",
+            ),
+            VerifyRecoveryDecision::RetryOwnedWake
+        );
+    }
+
+    #[test]
+    fn codex_verify_retry_never_submits_mixed_or_foreign_text() {
+        for input in [Some("<hcom> user draft"), Some("user draft"), None] {
+            assert_ne!(
+                verify_recovery_decision(
+                    Some(Tool::Codex),
+                    VerifyTimeoutDecision::Retry,
+                    input,
+                    "<hcom>",
+                ),
+                VerifyRecoveryDecision::RetryOwnedWake
+            );
+        }
     }
 
     #[test]
@@ -3282,6 +3432,21 @@ mod tests {
             &db,
             n,
             &ToolConfig::cursor(),
+            &state
+        ));
+    }
+
+    #[test]
+    fn codex_launch_readiness_requires_a_quiet_eligible_screen() {
+        let (_dir, db) = open_ready_test_db();
+        let mut screen = safe_screen();
+        screen.last_output = Instant::now();
+        let state = make_state(screen, 500);
+
+        assert!(!launch_ready_observed(
+            &db,
+            "toli",
+            &ToolConfig::codex(),
             &state
         ));
     }

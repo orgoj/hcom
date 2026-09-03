@@ -116,8 +116,9 @@ Use `--terminal tmux-split` only when the child should split the launching agent
 For agents defined in the effective `hcom agent` JSON catalog, a targeted send is also the normal
 launch operation: `hcom send @audit_api --intent request -- "..."` starts `audit_api` when it is
 missing or stopped, then delivers the message. Do not add `hcom list`/`hcom agent` preflight logic.
-Broadcasts do not auto-start catalog agents. If the agent is still starting when the send returns,
-the message is queued and delivered when the agent is ready — the send still succeeds. See
+Broadcasts do not auto-start catalog agents. Send briefly waits for an autostarted target to
+acknowledge the initial event. If the agent is still starting when that check expires, output says
+`Queued; delivery pending`; the durable message is delivered later and send still succeeds. See
 `references/named-agents.md` for routing details.
 
 Editable bundle instructions live only in `agents/<name>/SOUL.md`; bundle `AGENTS.md` files are
@@ -251,9 +252,11 @@ Choose replies from the received intent, not from conversational politeness:
 - An `[hcom-events]` notice that a target `is idle and has not replied ... yet` is a turn
   boundary, not a refusal. The request stands: keep waiting instead of taking the delegated
   work back. Only `stopped without responding` means no reply is coming.
-- `Sent to:` proves successful routing and durable enqueue only. It does not
-  prove that the target consumed, processed, acknowledged, or replied to the
-  event. Report "sent/queued" at this point. Claim end-to-end delivery only
+- For an already-running target, `Sent to:` proves routing and durable enqueue only. For an
+  autostarted target, it additionally proves cursor acknowledgement of that initial event during
+  the bounded post-start check. Neither proves that the target finished processing or replied.
+  `Queued; delivery pending:` means the autostart check expired while the durable event remained
+  unread. Report "sent/queued" at this point. Claim end-to-end delivery only
   after a target response or integration-specific completion evidence. For a
   manual-ack bridge, require its completion marker and the listener returning
   to `listening`; recipient cursor or `delivered_to` alone is insufficient. On

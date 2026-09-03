@@ -62,6 +62,18 @@ fn help_prints_and_exits_zero() {
 }
 
 #[test]
+fn send_help_explains_autostart_acknowledgement() {
+    let h = Hcom::new();
+    let (code, stdout, stderr) = h.run(["send", "--help"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("first event's acknowledgement"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("queued/pending"), "stdout={stdout}");
+}
+
+#[test]
 fn config_terminal_accepts_here_mode() {
     let h = Hcom::new();
 
@@ -2139,7 +2151,7 @@ fn agent_start_mode_uses_catalog_and_cli_override() {
 }
 
 #[test]
-fn targeted_send_starts_catalog_agent_and_routes_message() {
+fn targeted_send_starts_catalog_agent_and_reports_unacknowledged_message_pending() {
     let h = Hcom::new();
     std::fs::write(
         h.path().join("agents.json"),
@@ -2159,7 +2171,11 @@ fn targeted_send_starts_catalog_agent_and_routes_message() {
         "review this",
     ]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-    assert!(stdout.contains("Sent to:"), "stdout={stdout}");
+    assert!(
+        stdout.contains("Queued; delivery pending:"),
+        "stdout={stdout}"
+    );
+    assert!(!stdout.contains("Sent to:"), "stdout={stdout}");
     assert!(stdout.contains("reviewer"), "stdout={stdout}");
 
     let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1"]);

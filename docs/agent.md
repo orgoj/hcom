@@ -33,7 +33,7 @@ Two separate registries answer two different questions:
 | who is running right now | `hcom list` |
 | who can be addressed at all | `hcom agent list` |
 
-`hcom list` shows live instances only, so a configured agent missing from it is stopped, not unknown. Address it by its exact name: `hcom send @<name>` starts a missing or stopped configured agent before delivering. A name never resolves to a similar one: `bin` is the agent `bin`, not a running `project1_bin`. If the agent is still starting when the readiness wait ends, the message is queued and delivered once the agent is ready; the send still succeeds.
+`hcom list` shows live instances only, so a configured agent missing from it is stopped, not unknown. Address it by its exact name: `hcom send @<name>` starts a missing or stopped configured agent before delivering. A name never resolves to a similar one: `bin` is the agent `bin`, not a running `project1_bin`. After autostart, send briefly waits for that exact message event to be acknowledged. If the agent is still starting or its UI is settling, the message remains durable, send succeeds, and the output says `Queued; delivery pending` rather than claiming delivery.
 
 ## Catalogs and precedence
 
@@ -405,6 +405,10 @@ hcom send @wdt_main --intent request -- "Review the current change"
 ```
 
 This works for direct names, catalog tag groups, multiple recipients, and stopped catalog members in an existing thread. Unknown names fail without storing the message. Broadcasts address only currently deliverable instances and never start the whole catalog.
+
+For an autostarted target, `Sent to:` means the initial event was acknowledged during the bounded
+post-start check. `Queued; delivery pending:` means the check expired first; the message remains
+stored and the delivery loop continues after the command returns.
 
 ## Terminal placement
 
