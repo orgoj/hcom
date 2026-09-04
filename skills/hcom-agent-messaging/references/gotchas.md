@@ -104,6 +104,15 @@ for n in $names; do
 done
 ```
 
+## Clearing an Agent's Context
+
+`/clear` (and its aliases) ends the hcom session and starts a new one in the same
+terminal. An hcom-launched agent takes its own name back on that new session, so
+`hcom send @name` keeps reaching the same terminal. A session hcom did not launch
+still gets a fresh generated name, and so does a launched one whose name is
+already held by another running instance — check `hcom list` after clearing if a
+name matters.
+
 ## Agent Cleanup on Error
 
 Without cleanup, orphan headless agents run indefinitely consuming resources. Always use `trap cleanup ERR INT TERM` and track launched names. See `script-template.md` for the full pattern.

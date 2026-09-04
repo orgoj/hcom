@@ -316,20 +316,26 @@ fn handle_sessionstart(db: &HcomDb, ctx: &HcomContext, payload: &HookPayload) ->
                 } else {
                     "gemini"
                 };
-                match instance_binding::create_orphaned_pty_identity(
-                    db,
-                    session_id,
-                    Some(pid.as_str()),
-                    orphan_tool,
-                ) {
-                    Some(name) => {
+                // A still-running hcom launch keeps its own name across a
+                // clear; only a genuinely unknown session becomes an orphan.
+                let reclaimed =
+                    common::reclaim_launch_identity(db, ctx, session_id, pid.as_str(), orphan_tool);
+                match reclaimed.or_else(|| {
+                    instance_binding::create_orphaned_pty_identity(
+                        db,
+                        session_id,
+                        Some(pid.as_str()),
+                        orphan_tool,
+                    )
+                    .inspect(|name| {
                         log::log_info(
                             "hooks",
                             "gemini.sessionstart.orphan_created",
                             &format!("instance={} process_id={} tool={}", name, pid, orphan_tool),
                         );
-                        name
-                    }
+                    })
+                }) {
+                    Some(name) => name,
                     None => return hook_noop(),
                 }
             } else {

@@ -753,6 +753,92 @@ pub fn recover_process_binding_for_instance(
     Some(instance_name.to_string())
 }
 
+/// Reclaim the launch identity of a live process whose bindings a session clear
+/// destroyed.
+///
+/// `/clear` fires SessionEnd (hard stop: instance row plus session and process
+/// bindings deleted) and SessionStart in the *same* live process, so
+/// `bind_session_to_process` finds nothing. Without this the terminal is renamed
+/// to a generated orphan name and the configured name falls free — the next
+/// `hcom send @name` then launches a second terminal for an agent that is
+/// already running. The launcher exports `HCOM_INSTANCE_NAME`, so the process
+/// still knows which identity it was started as: re-create that row and rebind.
+///
+/// Declines when a live instance already holds the name, leaving the caller's
+/// orphan path to run.
+#[allow(clippy::too_many_arguments)]
+pub fn reclaim_launched_identity(
+    db: &HcomDb,
+    launch_name: &str,
+    session_id: &str,
+    process_id: &str,
+    tool: &str,
+    tag: Option<&str>,
+    background: bool,
+) -> Option<String> {
+    if launch_name.is_empty() || session_id.is_empty() || process_id.is_empty() {
+        return None;
+    }
+
+    if let Ok(Some(existing)) = db.get_instance_full(launch_name)
+        && existing.session_id.as_deref() != Some(session_id)
+        && existing.status != ST_INACTIVE
+    {
+        crate::log::log_info(
+            "binding",
+            "reclaim_launched_identity.name_taken",
+            &format!(
+                "name={} status={} session_id={:?}",
+                launch_name, existing.status, existing.session_id
+            ),
+        );
+        return None;
+    }
+
+    if let Err(e) = db.clear_session_id_from_other_instances(session_id, launch_name) {
+        crate::log::log_error("binding", "reclaim.clear_session", &format!("{e}"));
+        return None;
+    }
+
+    if !initialize_instance_in_position_file(
+        db,
+        launch_name,
+        Some(session_id),
+        None,
+        None,
+        None,
+        None,
+        Some(tool),
+        background,
+        tag,
+        None,
+        None,
+        None,
+        None,
+    ) {
+        return None;
+    }
+
+    if let Err(e) = db.rebind_session(session_id, launch_name) {
+        crate::log::log_error("binding", "reclaim.rebind_session", &format!("{e}"));
+        return None;
+    }
+    if let Err(e) = db.set_process_binding(process_id, session_id, launch_name) {
+        crate::log::log_error("binding", "reclaim.set_process_binding", &format!("{e}"));
+        return None;
+    }
+
+    crate::log::log_info(
+        "binding",
+        "reclaim_launched_identity",
+        &format!(
+            "instance={} session_id={} process_id={} tool={}",
+            launch_name, session_id, process_id, tool
+        ),
+    );
+    Some(launch_name.to_string())
+}
+
 /// Initialize the DB row and default bindings for an instance identity.
 ///
 /// This is the shared setup path used by launch, resume, and orphan recovery.
@@ -1399,6 +1485,126 @@ mod tests {
             Some(name.clone())
         );
         assert_eq!(db.get_process_binding("pid-orphan").unwrap(), Some(name));
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn reclaim_takes_back_name_cleared_away() {
+        crate::config::Config::init();
+        let (db, path) = setup_test_db();
+
+        // /clear deleted the row and both bindings; the process lives on.
+        let result = reclaim_launched_identity(
+            &db,
+            "wdt_main",
+            "sess-after-clear",
+            "pid-live",
+            "claude",
+            Some("wdt"),
+            false,
+        );
+        assert_eq!(result.as_deref(), Some("wdt_main"));
+
+        let inst = db.get_instance_full("wdt_main").unwrap().unwrap();
+        assert_eq!(inst.session_id.as_deref(), Some("sess-after-clear"));
+        assert_eq!(inst.tool, "claude");
+        assert_eq!(inst.tag.as_deref(), Some("wdt"));
+        assert_eq!(
+            db.get_session_binding("sess-after-clear")
+                .unwrap()
+                .as_deref(),
+            Some("wdt_main")
+        );
+        assert_eq!(
+            db.get_process_binding("pid-live").unwrap().as_deref(),
+            Some("wdt_main")
+        );
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn reclaim_declines_name_held_by_live_instance() {
+        crate::config::Config::init();
+        let (db, path) = setup_test_db();
+        let now = now_epoch_i64();
+
+        // A second launch already runs under the name.
+        let mut data = serde_json::Map::new();
+        data.insert("name".into(), serde_json::json!("wdt_main"));
+        data.insert("status".into(), serde_json::json!(ST_LISTENING));
+        data.insert("status_context".into(), serde_json::json!("start"));
+        data.insert("created_at".into(), serde_json::json!(now));
+        data.insert("session_id".into(), serde_json::json!("sess-other"));
+        db.save_instance_named("wdt_main", &data).unwrap();
+
+        let result = reclaim_launched_identity(
+            &db,
+            "wdt_main",
+            "sess-after-clear",
+            "pid-live",
+            "claude",
+            None,
+            false,
+        );
+        assert_eq!(result, None, "must not steal a live instance's name");
+
+        let inst = db.get_instance_full("wdt_main").unwrap().unwrap();
+        assert_eq!(inst.session_id.as_deref(), Some("sess-other"));
+        assert_eq!(db.get_process_binding("pid-live").unwrap(), None);
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn reclaim_reuses_inactive_row_of_same_name() {
+        crate::config::Config::init();
+        let (db, path) = setup_test_db();
+        let now = now_epoch_i64();
+
+        let mut data = serde_json::Map::new();
+        data.insert("name".into(), serde_json::json!("wdt_main"));
+        data.insert("status".into(), serde_json::json!(ST_INACTIVE));
+        data.insert("status_context".into(), serde_json::json!("exit:clear"));
+        data.insert("created_at".into(), serde_json::json!(now));
+        data.insert("session_id".into(), serde_json::json!("sess-old"));
+        db.save_instance_named("wdt_main", &data).unwrap();
+
+        let result = reclaim_launched_identity(
+            &db,
+            "wdt_main",
+            "sess-after-clear",
+            "pid-live",
+            "claude",
+            None,
+            false,
+        );
+        assert_eq!(result.as_deref(), Some("wdt_main"));
+
+        let inst = db.get_instance_full("wdt_main").unwrap().unwrap();
+        assert_eq!(inst.session_id.as_deref(), Some("sess-after-clear"));
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn reclaim_requires_name_session_and_process() {
+        crate::config::Config::init();
+        let (db, path) = setup_test_db();
+
+        assert_eq!(
+            reclaim_launched_identity(&db, "", "sess", "pid", "claude", None, false),
+            None
+        );
+        assert_eq!(
+            reclaim_launched_identity(&db, "wdt_main", "", "pid", "claude", None, false),
+            None
+        );
+        assert_eq!(
+            reclaim_launched_identity(&db, "wdt_main", "sess", "", "claude", None, false),
+            None
+        );
 
         cleanup(path);
     }

@@ -505,12 +505,18 @@ fn handle_sessionstart(db: &HcomDb, ctx: &HcomContext, payload: &HookPayload) ->
                     );
                     return hook_noop();
                 }
-                match instance_binding::create_orphaned_pty_identity(
-                    db,
-                    session_id,
-                    Some(pid.as_str()),
-                    "kimi",
-                ) {
+                // A still-running hcom launch keeps its own name across a
+                // clear; only a genuinely unknown session becomes an orphan.
+                let reclaimed =
+                    common::reclaim_launch_identity(db, ctx, session_id, pid.as_str(), "kimi");
+                match reclaimed.or_else(|| {
+                    instance_binding::create_orphaned_pty_identity(
+                        db,
+                        session_id,
+                        Some(pid.as_str()),
+                        "kimi",
+                    )
+                }) {
                     Some(name) => name,
                     None => return hook_noop(),
                 }

@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::bootstrap;
 use crate::db::{HcomDb, InstanceRow, Message};
 use crate::identity;
+use crate::instance_binding;
 use crate::instance_lifecycle as lifecycle;
 use crate::instances;
 use crate::log;
@@ -1807,6 +1808,41 @@ pub fn soft_finalize_session(
     }
 }
 
+/// Reclaim the name an hcom-launched process was started under, for a
+/// SessionStart that found no binding (typically right after `/clear`).
+///
+/// Returns `None` for instances hcom did not launch, when the launcher exported
+/// no name, or when a live instance still holds that name — the caller then
+/// falls back to creating an orphan identity.
+pub fn reclaim_launch_identity(
+    db: &HcomDb,
+    ctx: &HcomContext,
+    session_id: &str,
+    process_id: &str,
+    tool: &str,
+) -> Option<String> {
+    if !ctx.is_launched {
+        return None;
+    }
+    let env_nonempty = |key: &str| {
+        ctx.raw_env
+            .get(key)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    let launch_name = env_nonempty("HCOM_INSTANCE_NAME")?;
+
+    instance_binding::reclaim_launched_identity(
+        db,
+        launch_name,
+        session_id,
+        process_id,
+        tool,
+        env_nonempty("HCOM_TAG"),
+        ctx.is_background,
+    )
+}
+
 /// Set inactive status, persist updates, and stop instance.
 ///
 /// Common to Claude and Gemini SessionEnd handlers. Catches all errors
@@ -2000,6 +2036,63 @@ mod tests {
         // instance has no row (the common case for a stale notify target).
         let (_dir, _hcom_dir, _home, _guard) = isolated_test_env();
         notify_hook_instance("nonexistent");
+    }
+
+    fn launch_env(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn reclaim_launch_identity_restores_launch_name() {
+        crate::config::Config::init();
+        let (_dir, db) = make_test_db();
+        let ctx = HcomContext::from_env(
+            &launch_env(&[
+                ("HCOM_LAUNCHED", "1"),
+                ("HCOM_INSTANCE_NAME", "wdt_main"),
+                ("HCOM_TAG", "wdt"),
+            ]),
+            std::path::PathBuf::from("/tmp"),
+        );
+
+        let name = reclaim_launch_identity(&db, &ctx, "sess-after-clear", "pid-live", "claude");
+        assert_eq!(name.as_deref(), Some("wdt_main"));
+
+        let inst = db.get_instance_full("wdt_main").unwrap().unwrap();
+        assert_eq!(inst.session_id.as_deref(), Some("sess-after-clear"));
+        assert_eq!(inst.tag.as_deref(), Some("wdt"));
+    }
+
+    #[test]
+    fn reclaim_launch_identity_skips_instances_hcom_did_not_launch() {
+        crate::config::Config::init();
+        let (_dir, db) = make_test_db();
+
+        // Name present but no HCOM_LAUNCHED: a vanilla session that merely
+        // inherited the variable must not seize the agent's name.
+        let inherited = HcomContext::from_env(
+            &launch_env(&[("HCOM_INSTANCE_NAME", "wdt_main")]),
+            std::path::PathBuf::from("/tmp"),
+        );
+        assert_eq!(
+            reclaim_launch_identity(&db, &inherited, "sess", "pid", "claude"),
+            None
+        );
+
+        // Launched, but the launcher exported no name.
+        let unnamed = HcomContext::from_env(
+            &launch_env(&[("HCOM_LAUNCHED", "1")]),
+            std::path::PathBuf::from("/tmp"),
+        );
+        assert_eq!(
+            reclaim_launch_identity(&db, &unnamed, "sess", "pid", "claude"),
+            None
+        );
+
+        assert_eq!(db.get_session_binding("sess").unwrap(), None);
     }
 
     fn make_test_db() -> (tempfile::TempDir, crate::db::HcomDb) {

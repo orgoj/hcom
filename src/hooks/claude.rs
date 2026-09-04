@@ -1208,6 +1208,13 @@ fn bind_and_bootstrap(
     let mut instance_name =
         instance_binding::bind_session_to_process(db, session_id, Some(process_id));
 
+    // /clear tore down the row of a still-running hcom launch: take the
+    // launch name back instead of renaming this terminal to an orphan and
+    // leaving the name free for a second launch of the same agent.
+    if instance_name.is_none() {
+        instance_name = common::reclaim_launch_identity(db, ctx, session_id, process_id, "claude");
+    }
+
     // Orphaned PTY: process_id exists but no binding (e.g., after /clear)
     if instance_name.is_none() {
         instance_name = instance_binding::create_orphaned_pty_identity(
