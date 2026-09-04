@@ -51,8 +51,10 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
 
   Steps 3-4 repeat for each matching imported, additive, or project catalog in
   catalog order. Imports are recursive and apply before the importing file's
-  local entries; {EXTRA_CATALOGS_ENV} catalogs apply left to right. The nearest
-  project .hcom is Git-independent. Global defaults remain the lowest catalog
+  local entries; {EXTRA_CATALOGS_ENV} catalogs apply left to right. Project
+  .hcom discovery is Git-independent: every .hcom on the path from the launch
+  directory up applies, outermost weakest, so a nested project also addresses
+  the enclosing project's agents. Global defaults remain the lowest catalog
   layer for a project agent whether hcom runs inside or outside that project.
   env and args merge; later scalar values replace earlier ones. In particular,
   system_prompt replaces rather than appends, and an explicit empty string clears it.
@@ -104,7 +106,7 @@ Flags:
   --pre <cmd>               Shell command run in the window before the agent
   --env K=V                 Extra environment variable (repeatable)
   --catalog <path>          Use this file instead of the project catalog
-  --no-project              Ignore the nearest project .hcom/{PROJECT_FILE}
+  --no-project              Ignore every enclosing project .hcom/{PROJECT_FILE}
   --attach                  Focus the window after launching (or when already running)
   --restart                 Kill a running agent first instead of reporting it
   --resume                  Continue the agent's previous session
@@ -579,22 +581,35 @@ fn global_catalog_path() -> PathBuf {
     }
 }
 
-/// Nearest project `.hcom` walking up from `start`, independent of Git roots.
-/// The user's global hcom directory is not a project scope.
-fn find_project_hcom_dir(start: &Path) -> Option<PathBuf> {
+/// Every project `.hcom` walking up from `start`, outermost first, independent
+/// of Git roots. A nested project sees the enclosing project's agents, with the
+/// nearest catalog strongest. The user's global hcom directory is not a project
+/// scope.
+fn find_project_hcom_dirs(start: &Path) -> Vec<PathBuf> {
     let global = global_catalog_path()
         .parent()
         .map(normalize)
         .unwrap_or_else(|| normalize(&crate::paths::hcom_dir()));
+    let mut found = Vec::new();
     let mut dir = Some(start);
     while let Some(d) = dir {
         let candidate = normalize(&d.join(PROJECT_DIR));
         if candidate.is_dir() && candidate != global {
-            return Some(candidate);
+            found.push(candidate);
         }
         dir = d.parent();
     }
-    None
+    found.reverse();
+    found
+}
+
+/// Root a project catalog's relative paths resolve against.
+fn project_root_of(hcom_dir: &Path) -> PathBuf {
+    if hcom_dir.file_name().is_some_and(|name| name == PROJECT_DIR) {
+        hcom_dir.parent().unwrap_or(hcom_dir).to_path_buf()
+    } else {
+        hcom_dir.to_path_buf()
+    }
 }
 
 struct Catalogs {
@@ -664,26 +679,21 @@ impl Catalogs {
                 if !p.is_file() {
                     bail!("catalog not found: {}", p.display());
                 }
-                p.parent().map(Path::to_path_buf)
+                p.parent().map(Path::to_path_buf).into_iter().collect()
             }
-            None if no_project => None,
+            None if no_project => Vec::new(),
             None => std::env::current_dir()
                 .ok()
-                .and_then(|cwd| find_project_hcom_dir(&cwd)),
+                .map(|cwd| find_project_hcom_dirs(&cwd))
+                .unwrap_or_default(),
         };
-        let project_root = project_hcom.as_ref().map(|dir| {
-            if dir.file_name().is_some_and(|name| name == PROJECT_DIR) {
-                dir.parent().unwrap_or(dir).to_path_buf()
-            } else {
-                dir.clone()
-            }
-        });
+        let project_root = project_hcom.last().map(|dir| project_root_of(dir));
         let mut project_files = Vec::new();
-        if let Some(hcom_dir) = project_hcom {
+        for hcom_dir in &project_hcom {
             let path = explicit
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| hcom_dir.join(PROJECT_FILE));
-            let base = project_root.clone().unwrap_or_else(|| hcom_dir.clone());
+            let base = project_root_of(hcom_dir);
             if path.is_file() {
                 project_files.extend(load_catalog_tree_with_mode(
                     &path,
@@ -2456,7 +2466,8 @@ fn cmd_edit(rest: &[String]) -> Result<i32> {
     let project = rest.iter().any(|a| a == "--project");
     let path = if project {
         let cwd = std::env::current_dir()?;
-        find_project_hcom_dir(&cwd)
+        find_project_hcom_dirs(&cwd)
+            .pop()
             .unwrap_or_else(|| cwd.join(PROJECT_DIR))
             .join(PROJECT_FILE)
     } else {

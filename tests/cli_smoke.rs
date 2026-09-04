@@ -1430,6 +1430,64 @@ fn agent_bundle_is_discovered_across_nested_git_roots_and_composes_prompt() {
 }
 
 #[test]
+fn nested_project_catalog_sees_enclosing_project_agents_and_overrides_them() {
+    let h = Hcom::new();
+    let outer = h.root_path().join("outer");
+    let inner = outer.join("repos/inner");
+    std::fs::create_dir_all(outer.join(".hcom")).expect("create outer catalog dir");
+    std::fs::create_dir_all(inner.join(".hcom")).expect("create inner catalog dir");
+    std::fs::write(
+        outer.join(".hcom/agents.json"),
+        r#"{"agents":{"outer_only":{"cli":"claude","dir":"."},"shared":{"cli":"claude","dir":".","description":"from outer"}}}"#,
+    )
+    .expect("write outer catalog");
+    std::fs::write(
+        inner.join(".hcom/agents.json"),
+        r#"{"agents":{"inner_only":{"cli":"claude","dir":"."},"shared":{"cli":"claude","dir":".","description":"from inner"}}}"#,
+    )
+    .expect("write inner catalog");
+
+    let output = h
+        .cmd()
+        .current_dir(&inner)
+        .args(["agent", "list", "--json"])
+        .output()
+        .expect("list nested catalogs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr={stderr}");
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).expect("agent JSON");
+    let rows = rows.as_array().expect("array");
+    let by_name = |name: &str| {
+        rows.iter()
+            .find(|row| row["name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing from {rows:?}"))
+    };
+    assert_eq!(
+        by_name("outer_only")["dir"],
+        outer.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        by_name("inner_only")["dir"],
+        inner.to_string_lossy().as_ref()
+    );
+    let shared = by_name("shared");
+    assert_eq!(shared["description"], "from inner");
+    assert_eq!(shared["dir"], inner.to_string_lossy().as_ref());
+
+    let outer_output = h
+        .cmd()
+        .current_dir(&outer)
+        .args(["agent", "list", "--names"])
+        .output()
+        .expect("list outer catalog");
+    let outer_names = String::from_utf8_lossy(&outer_output.stdout);
+    assert!(
+        !outer_names.contains("inner_only"),
+        "a nested project must stay private to itself: {outer_names}"
+    );
+}
+
+#[test]
 fn agent_ignores_legacy_agents_md_only_bundle() {
     let h = Hcom::new();
     let bundle = h.path().join("agents/legacy");

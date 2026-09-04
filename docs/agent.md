@@ -54,9 +54,11 @@ Steps 3-4 repeat for every matching imported, additive, or project catalog in ca
 Imports are recursive and apply before the importing file's local entries. Additive catalogs apply
 left to right.
 
-The project search walks parent directories until it finds the nearest `.hcom`, independently of
-Git boundaries. The global `~/.hcom` is never a project scope. A project agent ignores a same-named
-global/additive entry, but global `defaults` remain its lowest catalog layer. Consequently, the
+The project search walks parent directories and collects every `.hcom` on the way up, independently
+of Git boundaries. All of them apply, the outermost weakest and the nearest strongest, so an agent
+in a nested repository can also address the enclosing project's agents; a nested project's own
+agents stay private to it. The global `~/.hcom` is never a project scope. A project agent ignores a
+same-named global/additive entry, but global `defaults` remain its lowest catalog layer. Consequently, the
 same project agent inherits the same global defaults whether hcom runs inside the project or from
 an external catalog that imports it.
 
@@ -282,7 +284,7 @@ The selected `tools.<cli>` profile replaces shared scalar values and appends its
 | `--pre <cmd>` | Shell command run before the agent starts |
 | `--env KEY=VALUE` | Extra environment variable (repeatable) |
 | `--catalog <path>` | Use this file instead of the project catalog |
-| `--no-project` | Ignore nearest project `.hcom/agents.json` |
+| `--no-project` | Ignore every enclosing project `.hcom/agents.json` |
 | `--attach` | Focus window after launching |
 | `--restart` | Kill running agent first instead of reporting it |
 | `--resume` | Continue previous session |
@@ -328,7 +330,7 @@ For normal listing, direct launch, and message routing, an import's `agents` lis
 
 Addressability follows that same boundary. An agent defined only in a project catalog can be launched and messaged from inside its project, and from anywhere else only if a catalog in scope imports it. A selective import publishes exactly the listed agents across repositories and keeps the project's other agents private to that project. An unreachable name is reported as unknown with a note that catalog scope depends on the directory; hcom does not disclose to a caller out of scope whether the name exists elsewhere or in which catalog.
 
-`hcom agent list --local` limits any listing format to the nearest project's direct and imported agents, excluding global and additive catalogs. Combine it with `--all` to include project-imported agents hidden by selective imports.
+`hcom agent list --local` limits any listing format to the direct and imported agents of the enclosing project catalogs, excluding global and additive catalogs. Combine it with `--all` to include project-imported agents hidden by selective imports.
 
 The table produced by `hcom agent list` shows each agent's effective CLI and model. An unset model appears as `-`; JSON output includes it as `model: null`. Per-CLI tool profiles are resolved before displaying values.
 

@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "hcom"
-version = "0.7.24-orgoj.46"
+version = "0.7.24-orgoj.47"
 dependencies = [
  "anyhow",
  "base64",

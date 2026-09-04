@@ -29,7 +29,9 @@ Steps 3-4 repeat for every matching imported, additive, or project catalog in ca
 Imports are recursive and apply before the importing file's local entries. Catalogs in
 `HCOM_AGENT_CATALOGS` apply left to right.
 
-The nearest parent `.hcom` is found independently of Git roots. A project agent ignores a
+Every parent `.hcom` up from the launch directory is found independently of Git roots; all of them
+apply, the outermost weakest and the nearest strongest, so an agent in a nested repository also
+addresses the enclosing project's agents while its own stay private to it. A project agent ignores a
 same-named global/additive entry, but global `defaults` remain its lowest catalog layer.
 Consequently, the same project agent inherits the same global defaults whether hcom runs inside
 the project or from an external catalog that imports it.
@@ -102,9 +104,9 @@ agents in every recursively reachable import, including agents omitted by an imp
 list. The listing flag also works with `--names` and `--json`. This supports inspecting agents or
 starting a project group from another directory while keeping its other agents out of the normal
 external address book. hcom does not discover unrelated catalogs by scanning the filesystem.
-`hcom agent list --local` limits listings to the nearest project's direct and recursively imported
-agents; global and additive catalogs are excluded. Combine it with `--all` to include agents hidden
-by the project's selective imports.
+`hcom agent list --local` limits listings to the direct and recursively imported agents of the
+enclosing project catalogs; global and additive catalogs are excluded. Combine it with `--all` to
+include agents hidden by the project's selective imports.
 
 ## Basic catalog
 
