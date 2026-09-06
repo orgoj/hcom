@@ -1438,7 +1438,7 @@ fn nested_project_catalog_sees_enclosing_project_agents_and_overrides_them() {
     std::fs::create_dir_all(inner.join(".hcom")).expect("create inner catalog dir");
     std::fs::write(
         outer.join(".hcom/agents.json"),
-        r#"{"agents":{"outer_only":{"cli":"claude","dir":"."},"shared":{"cli":"claude","dir":".","description":"from outer"}}}"#,
+        r#"{"defaults":{"model":"opus"},"agents":{"outer_only":{"cli":"claude","dir":"."},"shared":{"cli":"claude","dir":".","description":"from outer"}}}"#,
     )
     .expect("write outer catalog");
     std::fs::write(
@@ -1469,6 +1469,11 @@ fn nested_project_catalog_sees_enclosing_project_agents_and_overrides_them() {
     assert_eq!(
         by_name("inner_only")["dir"],
         inner.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        by_name("inner_only")["model"],
+        "opus",
+        "an agent of a nested project inherits the enclosing project's defaults"
     );
     let shared = by_name("shared");
     assert_eq!(shared["description"], "from inner");

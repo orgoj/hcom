@@ -51,8 +51,9 @@ Set `HCOM_AGENTS_FILE` to replace the global catalog path. `HCOM_AGENT_CATALOGS`
 platform-specific path-separated list of additive catalogs; it does not replace the global one.
 
 Steps 3-4 repeat for every matching imported, additive, or project catalog in catalog order.
-Imports are recursive and apply before the importing file's local entries. Additive catalogs apply
-left to right.
+A catalog's `defaults` apply to every agent it defines and to every agent it brings in — by import,
+or as the enclosing project of a nested `.hcom`. Imports are recursive and apply before the
+importing file's local entries. Additive catalogs apply left to right.
 
 The project search walks parent directories and collects every `.hcom` on the way up, independently
 of Git boundaries. All of them apply, the outermost weakest and the nearest strongest, so an agent

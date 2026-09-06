@@ -50,7 +50,9 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   6. command-line flags
 
   Steps 3-4 repeat for each matching imported, additive, or project catalog in
-  catalog order. Imports are recursive and apply before the importing file's
+  catalog order. A catalog's \"defaults\" apply to every agent it defines and to
+  every agent it brings in - by import, or as the enclosing project of a nested
+  .hcom. Imports are recursive and apply before the importing file's
   local entries; {EXTRA_CATALOGS_ENV} catalogs apply left to right. Project
   .hcom discovery is Git-independent: every .hcom on the path from the launch
   directory up applies, outermost weakest, so a nested project also addresses
@@ -310,6 +312,9 @@ struct CatalogFile {
     path: PathBuf,
     label: String,
     catalog: Catalog,
+    /// Agents this file's `defaults` apply to: its own entries plus every agent
+    /// it brought in, by import or as an enclosing project catalog.
+    defaults_apply_to: BTreeSet<String>,
 }
 
 /// Expand `~` and `$VAR`, then absolutize against `base`.
@@ -469,6 +474,7 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
     Ok(CatalogFile {
         path: path.to_path_buf(),
         label,
+        defaults_apply_to: catalog.agents.keys().cloned().collect(),
         catalog,
     })
 }
@@ -556,6 +562,11 @@ fn load_catalog_tree_with_mode(
                     .filter(|f| !f.catalog.agents.is_empty()),
             );
         }
+        // An importing catalog's defaults are a layer under the agents it
+        // brings in, not only under its own entries.
+        current
+            .defaults_apply_to
+            .extend(files.iter().flat_map(|f| f.catalog.agents.keys().cloned()));
         files.push(current);
         Ok(files)
     })();
@@ -688,14 +699,14 @@ impl Catalogs {
                 .unwrap_or_default(),
         };
         let project_root = project_hcom.last().map(|dir| project_root_of(dir));
-        let mut project_files = Vec::new();
+        let mut per_dir: Vec<Vec<CatalogFile>> = Vec::new();
         for hcom_dir in &project_hcom {
             let path = explicit
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| hcom_dir.join(PROJECT_FILE));
             let base = project_root_of(hcom_dir);
             if path.is_file() {
-                project_files.extend(load_catalog_tree_with_mode(
+                per_dir.push(load_catalog_tree_with_mode(
                     &path,
                     &base,
                     "project".to_string(),
@@ -703,9 +714,27 @@ impl Catalogs {
                     include_all_import_agents,
                 )?);
             } else {
-                project_files.push(load_catalog_file(&path, &base, "project".to_string())?);
+                per_dir.push(vec![load_catalog_file(
+                    &path,
+                    &base,
+                    "project".to_string(),
+                )?]);
             }
         }
+
+        // An enclosing project's defaults are a layer under the agents of every
+        // project nested inside it, exactly as an import's are.
+        for i in 0..per_dir.len() {
+            let inner: BTreeSet<String> = per_dir[i + 1..]
+                .iter()
+                .flatten()
+                .flat_map(|f| f.catalog.agents.keys().cloned())
+                .collect();
+            for file in &mut per_dir[i] {
+                file.defaults_apply_to.extend(inner.iter().cloned());
+            }
+        }
+        let project_files: Vec<CatalogFile> = per_dir.into_iter().flatten().collect();
 
         Ok(Self {
             base_files,
@@ -790,7 +819,7 @@ impl Catalogs {
         }
         for file in files {
             let entry = file.catalog.agents.get(name);
-            if file.label != "global" && entry.is_some() {
+            if file.label != "global" && file.defaults_apply_to.contains(name) {
                 def.merge_from(&file.catalog.defaults);
             }
             if let Some(entry) = entry {
@@ -2699,6 +2728,7 @@ mod tests {
                 CatalogFile {
                     path: base.join("catalog.json"),
                     label: label.to_string(),
+                    defaults_apply_to: catalog.agents.keys().cloned().collect(),
                     catalog,
                 }
             })
@@ -2964,6 +2994,43 @@ mod tests {
             catalogs.resolve("hermes_local").unwrap().dir.as_deref(),
             Some(overlay.to_string_lossy().as_ref())
         );
+    }
+
+    #[test]
+    fn importing_catalog_defaults_reach_agents_it_only_imports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inner = tmp.path().join("inner");
+        let outer = tmp.path().join("outer");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::create_dir_all(&outer).unwrap();
+        std::fs::write(
+            inner.join("agents.json"),
+            r#"{"agents":{"nested":{"dir":"."}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            outer.join("agents.json"),
+            r#"{"imports":[{"from":"../inner/agents.json"}],
+                "defaults":{"cli":"claude","session":"shared"},
+                "agents":{"local":{}}}"#,
+        )
+        .unwrap();
+
+        let files = load_catalog_tree(
+            &outer.join("agents.json"),
+            &outer,
+            "extra".to_string(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let catalogs = Catalogs {
+            base_files: files,
+            project_files: Vec::new(),
+            project_root: None,
+        };
+        let nested = catalogs.resolve("nested").unwrap();
+        assert_eq!(nested.cli.as_deref(), Some("claude"));
+        assert_eq!(nested.session.as_deref(), Some("shared"));
     }
 
     #[test]

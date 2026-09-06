@@ -26,8 +26,9 @@ directory where the command runs:
 6. command-line flags
 
 Steps 3-4 repeat for every matching imported, additive, or project catalog in catalog order.
-Imports are recursive and apply before the importing file's local entries. Catalogs in
-`HCOM_AGENT_CATALOGS` apply left to right.
+A catalog's `defaults` apply to every agent it defines and to every agent it brings in — by import,
+or as the enclosing project of a nested `.hcom`. Imports are recursive and apply before the
+importing file's local entries. Catalogs in `HCOM_AGENT_CATALOGS` apply left to right.
 
 Every parent `.hcom` up from the launch directory is found independently of Git roots; all of them
 apply, the outermost weakest and the nearest strongest, so an agent in a nested repository also

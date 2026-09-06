@@ -338,7 +338,8 @@ The precedence chain is built-in defaults, global catalog `defaults`, each match
 `defaults` and named entry, the matching `tools.<cli>` profile, then command-line flags. It is the
 same inside and outside a project. Later scalar values replace earlier ones: a project
 `system_prompt` replaces the global text rather than appending to it, and `""` clears it. Recursive
-imports apply before the importing catalog's local entries. An agent defined only in a project
+imports apply before the importing catalog's local entries, and a catalog's `defaults` also cover
+the agents it brings in, whether by import or as the enclosing project of a nested `.hcom`. An agent defined only in a project
 catalog is addressable from inside that project, and from elsewhere only where a catalog in scope
 imports it; a project's other agents stay private to it.
 
