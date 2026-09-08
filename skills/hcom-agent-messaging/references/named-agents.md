@@ -285,6 +285,8 @@ hcom agent reviewer --cli claude
 hcom agent reviewer --cli codex
 hcom agent show reviewer --cli codex
 hcom agent reviewer --cli codex --model gpt-5.4 --reasoning high --dry-run
+hcom agent reviewer --cli claude --continue # fresh session with handoff summary from previous session
+hcom agent reviewer --continue --last 3     # include last 3 exchanges in handoff prompt
 ```
 
 Top-level `model`, `reasoning`, and `args` remain valid for simple single-CLI agents and existing
@@ -315,7 +317,7 @@ Agent and `defaults` fields:
 - `description`: one line on what the agent is for; the only field other agents see in
   `hcom agent list --for-agents`
 - `cli`, `dir`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`, `reasoning`
-- `prompt`, `system_prompt`, `pre`, and boolean `resume`
+- `prompt`, `system_prompt`, `pre`, boolean `resume`, and boolean `continue`
 - `env` object and `args` array
 - `tools` object keyed by CLI name
 

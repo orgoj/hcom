@@ -318,6 +318,8 @@ exits. Use `--as` to run the same definition concurrently.
 hcom agent wdt_main                 # launch (or report that it already runs)
 hcom agent @wdt                     # launch every member of a catalog group
 hcom agent wdt_main --as wdt_review # same config, independent instance named wdt_review
+hcom agent wdt_main --continue      # clean session with handoff summary from previous session
+hcom agent wdt_main --cli claude --continue # switch tool (e.g. from Codex) with previous context
 hcom agent wdt_main --cli codex     # unknown flags are forwarded to `hcom <cli>`
 hcom agent list                     # catalog + effective CLI/model + live status + source
 hcom agent list --for-agents        # only names and catalog "description" entries

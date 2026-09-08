@@ -112,7 +112,9 @@ Flags:
   --attach                  Focus the window after launching (or when already running)
   --restart                 Kill a running agent first instead of reporting it
   --resume                  Continue the agent's previous session
-  --clean                   Start a clean session (overrides configured resume)
+  --continue                Start a clean session with handoff summary from previous session
+  --clean                   Start a clean session (overrides configured resume/continue)
+  --last <N>                Number of recent exchanges for --continue (overrides config continue_last)
   --dry-run                 Print the commands without running anything
 
   Any other flag is forwarded verbatim to `hcom <cli>`.
@@ -125,8 +127,8 @@ Catalog tool profiles:
   Common fields are applied first, then the tool profile, then command-line flags.
 
 Start mode:
-  \"resume\": true|false may be set in catalog defaults or an agent entry.
-  Unset falls back to false (clean); --resume and --clean override the catalog.
+  \"resume\": true|false or \"continue\": true|false may be set in catalog defaults or an agent entry.
+  Unset falls back to false (clean); --resume, --continue, and --clean override the catalog.
 
 Terminal strategy, in order:
   1. terminal_command set          -> hcom launches with HCOM_TERMINAL=<cmd>
@@ -196,6 +198,8 @@ struct AgentDef {
     system_prompt: Option<String>,
     pre: Option<String>,
     resume: Option<bool>,
+    #[serde(rename = "continue")]
+    continue_session: Option<bool>,
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
@@ -263,6 +267,7 @@ impl AgentDef {
             system_prompt,
             pre,
             resume,
+            continue_session,
             agent_dir,
             instructions,
             instructions_content
@@ -1013,6 +1018,8 @@ struct Cli {
     dry_run: bool,
     restart: bool,
     resume: Option<bool>,
+    continue_session: Option<bool>,
+    continue_last: Option<usize>,
     no_project: bool,
     catalog: Option<PathBuf>,
     passthrough: Vec<String>,
@@ -1117,11 +1124,26 @@ fn parse_cli(argv: &[String]) -> Result<Cli> {
             }
             "--resume" => {
                 cli.resume = Some(true);
+                cli.continue_session = Some(false);
                 i += 1;
             }
             "--clean" => {
                 cli.resume = Some(false);
+                cli.continue_session = Some(false);
                 i += 1;
+            }
+            "--continue" => {
+                cli.continue_session = Some(true);
+                cli.resume = Some(false);
+                i += 1;
+            }
+            "--last" => {
+                cli.continue_last = Some(
+                    value()?
+                        .parse::<usize>()
+                        .map_err(|e| anyhow::anyhow!("invalid --last: {e}"))?,
+                );
+                i += 2;
             }
             "--dry-run" => {
                 cli.dry_run = true;
@@ -1138,6 +1160,7 @@ fn parse_cli(argv: &[String]) -> Result<Cli> {
 
 // ── Effective configuration ─────────────────────────────────────────────
 
+#[derive(Clone)]
 struct Effective {
     name: String,
     description: Option<String>,
@@ -1162,6 +1185,8 @@ struct Effective {
     bundle_args: Vec<String>,
     bundle_access_error: Option<String>,
     resume: bool,
+    continue_session: bool,
+    continue_last: Option<usize>,
     env: BTreeMap<String, String>,
     extra: Vec<String>,
 }
@@ -1406,7 +1431,13 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         instructions: nonempty(def.instructions),
         bundle_args: Vec::new(),
         bundle_access_error: None,
-        resume: cli.resume.or(def.resume).unwrap_or(false),
+        resume: if cli.continue_session.or(def.continue_session).unwrap_or(false) {
+            false
+        } else {
+            cli.resume.or(def.resume).unwrap_or(false)
+        },
+        continue_session: cli.continue_session.or(def.continue_session).unwrap_or(false),
+        continue_last: cli.continue_last,
         env: def.env,
         extra,
     };
@@ -2020,6 +2051,85 @@ fn apply_herdr_placement(
     }
 }
 
+fn build_continue_prompt(
+    db: &HcomDb,
+    agent_name: &str,
+    last_n: usize,
+    custom_prompt: Option<&str>,
+) -> Result<String> {
+    let resolved = crate::commands::transcript::resolve_instance_transcript(db, agent_name);
+    let Some((_name, path, agent_type, session_id)) = resolved else {
+        bail!("cannot continue '{agent_name}': no previous session found");
+    };
+
+    if !Path::new(&path).exists() {
+        bail!("cannot continue '{agent_name}': transcript file '{path}' does not exist");
+    }
+
+    let backend = crate::transcript::backend_from_agent_or_path(&agent_type, &path)
+        .map_err(|e| anyhow::anyhow!("cannot continue '{agent_name}': {e}"))?;
+    let opts = crate::transcript::ReadOptions {
+        last: usize::MAX,
+        detailed: false,
+        session_id,
+        allow_codex_retry: true,
+    };
+    let exchanges = crate::transcript::read(Path::new(&path), backend, &opts)
+        .map_err(|e| anyhow::anyhow!("failed to read transcript for '{agent_name}': {e}"))?;
+    if exchanges.is_empty() {
+        bail!("cannot continue '{agent_name}': transcript has no conversation history");
+    }
+
+    let initial_prompt = exchanges.first().map(|e| e.user.trim()).unwrap_or("");
+    let mut files: Vec<String> = exchanges
+        .iter()
+        .flat_map(|e| e.files.iter().cloned())
+        .collect();
+    files.sort();
+    files.dedup();
+
+    let n = last_n.max(1);
+    let recent_exchanges: Vec<&crate::transcript::Exchange> = exchanges
+        .iter()
+        .rev()
+        .take(n)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    let mut out = format!(
+        "# Continuation of session for `{agent_name}`\nPrevious tool: `{agent_type}`\n\n"
+    );
+    if !initial_prompt.is_empty() {
+        out.push_str(&format!("## Initial Goal\n> {}\n\n", initial_prompt.replace('\n', "\n> ")));
+    }
+    if !files.is_empty() {
+        out.push_str("## Modified Files\n");
+        for f in &files {
+            out.push_str(&format!("- {f}\n"));
+        }
+        out.push('\n');
+    }
+    out.push_str(&format!("## Recent Activity (last {} exchanges)\n", recent_exchanges.len()));
+    for ex in recent_exchanges {
+        out.push_str(&format!("### Step {}\n", ex.position));
+        if !ex.user.trim().is_empty() {
+            out.push_str(&format!("- **User:** {}\n", ex.user.trim()));
+        }
+        if !ex.action.trim().is_empty() {
+            out.push_str(&format!("- **Assistant ({}):** {}\n", agent_type, ex.action.trim()));
+        }
+    }
+    if let Some(cp) = custom_prompt.filter(|s| !s.trim().is_empty()) {
+        out.push_str(&format!("\n## Instructions\n{cp}\n"));
+    } else {
+        out.push_str("\n## Instructions\nContinue where the previous session left off.\n");
+    }
+
+    Ok(out)
+}
+
 fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
     if let Some(error) = &eff.reasoning_error {
         bail!("{error}");
@@ -2027,10 +2137,23 @@ fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
     if let Some(error) = &eff.bundle_access_error {
         bail!("{error}");
     }
-    if resume {
+    let mut eff_owned;
+    let eff = if eff.continue_session {
         let db = HcomDb::open()?;
-        crate::commands::resume::validate_tracked_resume(&db, &eff.name)?;
-    }
+        let cfg = crate::commands::launch::load_hcom_config();
+        let last_n = eff.continue_last.unwrap_or(cfg.continue_last as usize);
+        let continue_prompt =
+            build_continue_prompt(&db, &eff.name, last_n, eff.prompt.as_deref())?;
+        eff_owned = eff.clone();
+        eff_owned.prompt = Some(continue_prompt);
+        &eff_owned
+    } else {
+        if resume {
+            let db = HcomDb::open()?;
+            crate::commands::resume::validate_tracked_resume(&db, &eff.name)?;
+        }
+        eff
+    };
     let configured_terminal = configured_terminal();
     let (strategy, warnings) =
         choose_strategy(eff, tmux_bin().is_some(), configured_terminal.as_deref());
@@ -2039,6 +2162,8 @@ fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
     }
     if resume {
         println!("resuming '{}' ({})", eff.name, eff.cli);
+    } else if eff.continue_session {
+        println!("continuing '{}' ({})", eff.name, eff.cli);
     }
 
     match strategy {
@@ -2381,7 +2506,27 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     if let Some(path) = &eff.instructions {
         println!("instructions: {path}");
     }
-    println!("start:     {}", if eff.resume { "resume" } else { "clean" });
+    if eff.continue_session {
+        if let Ok(db) = HcomDb::open() {
+            let cfg = crate::commands::launch::load_hcom_config();
+            let last_n = eff.continue_last.unwrap_or(cfg.continue_last as usize);
+            if let Ok(continue_prompt) =
+                build_continue_prompt(&db, &eff.name, last_n, eff.prompt.as_deref())
+            {
+                eff.prompt = Some(continue_prompt);
+            }
+        }
+    }
+    println!(
+        "start:     {}",
+        if eff.continue_session {
+            "continue"
+        } else if eff.resume {
+            "resume"
+        } else {
+            "clean"
+        }
+    );
     match &strategy {
         Strategy::Tmux { session, window } => {
             println!("terminal:  tmux {session}:{window} (--terminal here)")

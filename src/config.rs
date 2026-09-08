@@ -126,6 +126,7 @@ const TOML_KEY_MAP: &[(&str, &str)] = &[
     ("hints", "launch.hints"),
     ("notes", "launch.notes"),
     ("subagent_timeout", "launch.subagent_timeout"),
+    ("continue_last", "launch.continue_last"),
     ("auto_subscribe", "launch.auto_subscribe"),
     ("claude_args", "launch.claude.args"),
     ("gemini_args", "launch.gemini.args"),
@@ -158,6 +159,7 @@ const TOML_KEY_MAP: &[(&str, &str)] = &[
 const FIELD_TO_ENV: &[(&str, &str)] = &[
     ("timeout", "HCOM_TIMEOUT"),
     ("subagent_timeout", "HCOM_SUBAGENT_TIMEOUT"),
+    ("continue_last", "HCOM_CONTINUE_LAST"),
     ("terminal", "HCOM_TERMINAL"),
     ("hints", "HCOM_HINTS"),
     ("notes", "HCOM_NOTES"),
@@ -276,6 +278,7 @@ impl std::error::Error for HcomConfigError {}
 pub struct HcomConfig {
     pub timeout: i64,
     pub subagent_timeout: i64,
+    pub continue_last: i64,
     pub terminal: String,
     pub hints: String,
     pub notes: String,
@@ -318,6 +321,7 @@ impl Default for HcomConfig {
         Self {
             timeout: 86400,
             subagent_timeout: 30,
+            continue_last: 5,
             terminal: "default".to_string(),
             hints: String::new(),
             notes: String::new(),
@@ -384,6 +388,17 @@ impl HcomConfig {
                 format!(
                     "subagent_timeout must be 1-86400 seconds, got {}",
                     self.subagent_timeout
+                ),
+            );
+        }
+
+        // Validate continue_last
+        if !(1..=100).contains(&self.continue_last) {
+            errors.insert(
+                "continue_last".into(),
+                format!(
+                    "continue_last must be 1-100, got {}",
+                    self.continue_last
                 ),
             );
         }
@@ -505,6 +520,7 @@ impl HcomConfig {
         match field {
             "timeout" => Some(self.timeout.to_string()),
             "subagent_timeout" => Some(self.subagent_timeout.to_string()),
+            "continue_last" => Some(self.continue_last.to_string()),
             "terminal" => Some(self.terminal.clone()),
             "hints" => Some(self.hints.clone()),
             "notes" => Some(self.notes.clone()),
@@ -552,6 +568,11 @@ impl HcomConfig {
                 self.subagent_timeout = value
                     .parse()
                     .map_err(|_| format!("subagent_timeout must be an integer, got '{value}'"))?;
+            }
+            "continue_last" => {
+                self.continue_last = value
+                    .parse()
+                    .map_err(|_| format!("continue_last must be an integer, got '{value}'"))?;
             }
             "terminal" => self.terminal = value.to_string(),
             "hints" => self.hints = value.to_string(),
@@ -669,7 +690,7 @@ impl HcomConfig {
         };
 
         // Load integer fields
-        for int_field in &["timeout", "subagent_timeout"] {
+        for int_field in &["timeout", "subagent_timeout", "continue_last"] {
             if let Some(val) = get_var(int_field) {
                 match val {
                     TomlFieldValue::Int(i) => {
@@ -1038,6 +1059,7 @@ tag = ""
 hints = ""
 notes = ""
 subagent_timeout = 30
+continue_last = 5
 auto_subscribe = "collision"
 auto_trust_workspace = true
 

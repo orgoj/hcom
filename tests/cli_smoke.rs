@@ -1333,6 +1333,8 @@ fn agent_help_lists_catalog_layers() {
     assert!(stdout.contains("--for-agents"), "stdout={stdout}");
     assert!(stdout.contains("--for-humans"), "stdout={stdout}");
     assert!(stdout.contains("hcom agent list"), "stdout={stdout}");
+    assert!(stdout.contains("--continue"), "stdout={stdout}");
+    assert!(stdout.contains("--last <N>"), "stdout={stdout}");
     assert!(
         stdout.contains("regardless of launch directory"),
         "stdout={stdout}"
@@ -2233,6 +2235,108 @@ fn agent_start_mode_uses_catalog_and_cli_override() {
     assert!(stdout.contains("start:     clean"), "stdout={stdout}");
     assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
 }
+
+#[test]
+fn agent_continue_without_previous_session_fails() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"solo":{"dir":"/tmp","cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, _stdout, stderr) = h.run(["agent", "solo", "--continue"]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("cannot continue 'solo'"), "stderr={stderr}");
+}
+
+#[test]
+fn agent_continue_dry_run_builds_handoff_prompt_from_previous_session() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"solo":{"dir":"/tmp","cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+
+    let transcript_dir = tempfile::tempdir().unwrap();
+    let transcript_path = transcript_dir.path().join("rollout.jsonl");
+    let content = [
+        serde_json::json!({
+            "type": "response_item",
+            "timestamp": "2026-03-27T10:00:00Z",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Implement OAuth flow"}]
+            }
+        }),
+        serde_json::json!({
+            "type": "response_item",
+            "timestamp": "2026-03-27T10:00:01Z",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Working on auth.rs"}]
+            }
+        }),
+        serde_json::json!({
+            "type": "response_item",
+            "timestamp": "2026-03-27T10:00:02Z",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Add unit tests"}]
+            }
+        }),
+        serde_json::json!({
+            "type": "response_item",
+            "timestamp": "2026-03-27T10:00:03Z",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Tests added"}]
+            }
+        }),
+    ]
+    .iter()
+    .map(serde_json::Value::to_string)
+    .collect::<Vec<_>>()
+    .join("\n");
+    std::fs::write(&transcript_path, content).unwrap();
+
+    let _ = h.run(["list", "--json"]);
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "INSERT INTO instances (name, created_at, transcript_path, tool, status, status_context) VALUES ('solo', 1000, ?1, 'codex', 'inactive', 'exit:0')",
+        [transcript_path.to_str().unwrap()],
+    )
+    .expect("insert instance");
+
+    let (code, stdout, stderr) =
+        h.run(["agent", "solo", "--cli", "claude", "--continue", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("claude --as solo"), "stdout={stdout}");
+    assert!(stdout.contains("--hcom-prompt"), "stdout={stdout}");
+    assert!(stdout.contains("Implement OAuth flow"), "stdout={stdout}");
+    assert!(stdout.contains("Add unit tests"), "stdout={stdout}");
+
+    let (code, show_out, stderr) = h.run(["agent", "show", "solo", "--continue"]);
+    assert_eq!(code, 0, "stdout={show_out} stderr={stderr}");
+    assert!(show_out.contains("start:     continue"), "stdout={show_out}");
+
+    let (code, stdout_last, stderr) = h.run([
+        "agent", "solo", "--cli", "claude", "--continue", "--last", "1", "--dry-run",
+        "--hcom-prompt", "finish now",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout_last} stderr={stderr}");
+    assert!(
+        stdout_last.contains("Recent Activity (last 1 exchanges)"),
+        "stdout={stdout_last}"
+    );
+    assert!(stdout_last.contains("finish now"), "stdout={stdout_last}");
+}
+
 
 #[test]
 fn targeted_send_starts_catalog_agent_and_reports_unacknowledged_message_pending() {

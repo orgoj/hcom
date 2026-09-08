@@ -73,6 +73,11 @@ pub const CONFIG_KEYS: &[(&str, &str, &str)] = &[
         "integer",
     ),
     (
+        "HCOM_CONTINUE_LAST",
+        "Number of recent exchanges for --continue (default: 5)",
+        "integer",
+    ),
+    (
         "HCOM_CLAUDE_ARGS",
         "Default args for claude on launch",
         "string",
@@ -453,6 +458,7 @@ pub fn config_get(key: &str) -> (String, &'static str) {
     let default = match key {
         "HCOM_TIMEOUT" => "86400",
         "HCOM_SUBAGENT_TIMEOUT" => "30",
+        "HCOM_CONTINUE_LAST" => "5",
         "HCOM_AUTO_APPROVE" => "true",
         "HCOM_AUTO_TRUST_WORKSPACE" => "true",
         "HCOM_TITLE_MODE" => "combined",
@@ -1415,6 +1421,21 @@ Notes:
   - Only applies to Claude Code's Task tool spawned agents
   - Parent agent blocks until subagent completes or times out
   - Increase for complex subagent tasks",
+        ),
+
+        "HCOM_CONTINUE_LAST" => Some(
+            "\
+HCOM_CONTINUE_LAST - Number of recent exchanges for --continue
+
+Default: 5
+
+Purpose:
+  Default number of recent exchanges included in the handoff summary
+  when launching or continuing an agent with --continue.
+
+Usage:
+  hcom config continue_last 10
+  export HCOM_CONTINUE_LAST=10",
         ),
 
         "HCOM_CLAUDE_ARGS" => Some(

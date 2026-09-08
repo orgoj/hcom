@@ -254,6 +254,7 @@ Supported agent fields:
 | `system_prompt` | Additional system prompt |
 | `pre` | Shell command run before the CLI |
 | `resume` | Resume the previous session by default |
+| `continue` | Continue previous session with handoff summary by default |
 | `env` | Environment variables merged by key |
 | `args` | Additional CLI arguments |
 | `tools.<cli>` | Per-CLI `model`, `reasoning`, `prompt`, `system_prompt`, and `args` overrides |
@@ -288,8 +289,10 @@ The selected `tools.<cli>` profile replaces shared scalar values and appends its
 | `--no-project` | Ignore every enclosing project `.hcom/agents.json` |
 | `--attach` | Focus window after launching |
 | `--restart` | Kill running agent first instead of reporting it |
-| `--resume` | Continue previous session |
-| `--clean` | Start clean session (overrides configured resume) |
+| `--resume` | Resume previous session |
+| `--continue` | Start clean session with handoff summary from previous session |
+| `--last <N>` | Number of recent exchanges for `--continue` (overrides `continue_last`) |
+| `--clean` | Start clean session (overrides configured resume or continue) |
 | `--dry-run` | Print commands without launching anything |
 | `[tool-args...]` | Arguments after `--` or unparsed flags are forwarded to the CLI |
 
@@ -377,7 +380,7 @@ Use `hcom agent show <name> --cli <tool>` to inspect the exact effective command
 
 ## Starting, resuming, and messaging
 
-The default start mode is clean. Set `"resume": true` in defaults or an agent entry to continue its stopped session. `--resume` and `--clean` override the catalog; if both occur, the last one wins. `--restart` first replaces a running instance, then applies the selected start mode.
+The default start mode is clean. Set `"resume": true` in defaults or an agent entry to continue its stopped session natively. Set `"continue": true` to start a clean session with a synthesized handoff prompt summarizing the previous session (initial goal, modified files, and recent exchanges). `--resume`, `--continue`, and `--clean` override the catalog; if multiple occur, the last one wins. `--last <N>` controls how many recent exchanges are included in the continuation prompt (overriding the `continue_last` configuration value, which defaults to 5). When switching between different AI CLIs (for example, switching from Codex to Claude when hitting rate limits), use `--cli <new-cli> --continue` to carry over the previous session context. `--restart` first replaces a running instance, then applies the selected start mode.
 
 An hcom-managed agent can invoke another AI CLI directly. The child inherits the parent environment, but hcom rejects hooks whose actual CLI does not match the tool bound to the inherited process identity. This keeps nested CLI sessions from replacing the parent's session, transcript, or delivery binding.
 
