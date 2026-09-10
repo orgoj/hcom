@@ -15,7 +15,23 @@ use crate::router::GlobalFlags;
 use crate::shared::HcomContext;
 use anyhow::{Result, bail};
 use serde_json::json;
+use std::collections::HashMap;
 use std::time::Instant;
+
+fn catalog_launch_env() -> Result<Option<HashMap<String, String>>> {
+    let Some(raw) = std::env::var_os(super::agent::CATALOG_LAUNCH_ENV) else {
+        return Ok(None);
+    };
+    let raw = raw
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("catalog launch environment is not valid UTF-8"))?;
+    decode_catalog_launch_env(&raw).map(Some)
+}
+
+fn decode_catalog_launch_env(raw: &str) -> Result<HashMap<String, String>> {
+    serde_json::from_str(raw)
+        .map_err(|e| anyhow::anyhow!("invalid catalog launch environment: {e}"))
+}
 
 /// How long a single inline launch waits for launch readiness, per tool.
 ///
@@ -31,6 +47,7 @@ pub(crate) fn inline_launch_wait_secs(tool: &str) -> u64 {
 /// Run the launch command. `argv` is the full argv[1..] including count/tool.
 pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     let (count, tool, hcom_flags, tool_args) = parse_launch_argv(argv)?;
+    let catalog_env = catalog_launch_env()?;
     let launch_tool = LaunchTool::from_str(&tool)?;
 
     // Count validation
@@ -210,7 +227,7 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|_| ".".to_string())
             }),
-            env: None,
+            env: catalog_env,
             launcher: Some(launcher_name.clone()),
             run_here: hcom_flags.run_here,
             batch_id: hcom_flags.batch_id,
@@ -1189,6 +1206,20 @@ mod tests {
         let config = HcomConfig::default();
         let (args, _bg) = prepare_launch_execution(&lt("codex"), &s(&[]), &config, true);
         assert!(!args.iter().any(|t| t == "-p"));
+    }
+
+    #[test]
+    fn catalog_launch_env_decodes_invocation_local_values() {
+        let env = decode_catalog_launch_env(
+            r#"{"DIPPY_CONFIG_ONLY":"/tmp/reviewer.dippy","ROLE":"reviewer"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            env.get("DIPPY_CONFIG_ONLY").map(String::as_str),
+            Some("/tmp/reviewer.dippy")
+        );
+        assert_eq!(env.get("ROLE").map(String::as_str), Some("reviewer"));
+        assert!(decode_catalog_launch_env(r#"{"ROLE":1}"#).is_err());
     }
 
     #[test]

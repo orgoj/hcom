@@ -223,6 +223,10 @@ const SEND_HELP: &[HelpEntry] = &[
         "",
         "Targeted catalog agents start automatically; send waits briefly for the first event's acknowledgement, then leaves it queued/pending. Broadcasts never start agents.",
     ),
+    (
+        "",
+        "A catalog agent with roaming=true materializes as <name>_<project> in the sender's Git/project root.",
+    ),
     ("", ""),
     ("Envelope:", ""),
     ("  --intent <type>", "request | inform | ack"),

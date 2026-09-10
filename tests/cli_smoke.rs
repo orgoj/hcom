@@ -71,6 +71,8 @@ fn send_help_explains_autostart_acknowledgement() {
         "stdout={stdout}"
     );
     assert!(stdout.contains("queued/pending"), "stdout={stdout}");
+    assert!(stdout.contains("roaming"), "stdout={stdout}");
+    assert!(stdout.contains("<name>_<project>"), "stdout={stdout}");
 }
 
 #[test]
@@ -1328,6 +1330,8 @@ fn agent_help_lists_catalog_layers() {
     assert!(stdout.contains("--as <name>"), "stdout={stdout}");
     assert!(stdout.contains("@<group>"), "stdout={stdout}");
     assert!(stdout.contains("\"groups\""), "stdout={stdout}");
+    assert!(stdout.contains("\"roaming\": true"), "stdout={stdout}");
+    assert!(stdout.contains("DIPPY_CONFIG_ONLY"), "stdout={stdout}");
     assert!(stdout.contains("--all"), "stdout={stdout}");
     assert!(stdout.contains("--local"), "stdout={stdout}");
     assert!(stdout.contains("--for-agents"), "stdout={stdout}");
@@ -2470,6 +2474,210 @@ fn targeted_send_starts_catalog_agent_and_reports_unacknowledged_message_pending
         .and_then(|items| items.iter().find(|item| item["name"] == "reviewer"))
         .expect("autostarted reviewer instance");
     assert_eq!(reviewer["unread_count"], 1);
+}
+
+#[test]
+fn targeted_send_materializes_roaming_agent_in_the_senders_git_root() {
+    let h = Hcom::new();
+    let project = h.root_path().join("weather-app");
+    let nested = project.join("services/api");
+    std::fs::create_dir_all(project.join(".git")).expect("create git marker");
+    std::fs::create_dir_all(&nested).expect("create nested working directory");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex",
+            "env":{"DIPPY_CONFIG_ONLY":"/tmp/roaming-senior.dippy"},
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let output = h
+        .cmd()
+        .current_dir(&nested)
+        .args([
+            "send",
+            "--from",
+            "bigboss",
+            "@reviewer",
+            "--intent",
+            "request",
+            "--",
+            "review this",
+        ])
+        .output()
+        .expect("send to roaming agent");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("reviewer_weather_app"), "stdout={stdout}");
+
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1", "--full"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
+    assert_eq!(event["data"]["text"], "review this");
+    assert_eq!(
+        event["data"]["mentions"],
+        serde_json::json!(["reviewer_weather_app"])
+    );
+    assert_eq!(
+        event["data"]["delivered_to"],
+        serde_json::json!(["reviewer_weather_app"])
+    );
+
+    let (code, instances, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "instances={instances} stderr={stderr}");
+    let instances: serde_json::Value =
+        serde_json::from_str(&instances).expect("instance list JSON");
+    let reviewer = instances
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["name"] == "reviewer_weather_app")
+        })
+        .expect("materialized reviewer instance");
+    assert_eq!(reviewer["directory"], project.to_string_lossy().as_ref());
+
+    let launch_dir = h.path().join(".tmp/launch");
+    let launch_files = std::fs::read_dir(&launch_dir)
+        .expect("read launch directory")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        launch_files.contains("DIPPY_CONFIG_ONLY")
+            && launch_files.contains("/tmp/roaming-senior.dippy"),
+        "catalog env did not reach launched process: {launch_files}"
+    );
+}
+
+#[test]
+fn agent_show_materializes_roaming_agent_for_the_current_project() {
+    let h = Hcom::new();
+    let project = h.root_path().join("forecast-service");
+    let nested = project.join("src/jobs");
+    std::fs::create_dir_all(project.join(".git")).expect("create git marker");
+    std::fs::create_dir_all(&nested).expect("create nested working directory");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+
+    let output = h
+        .cmd()
+        .current_dir(&nested)
+        .args(["agent", "show", "reviewer"])
+        .output()
+        .expect("show roaming agent");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("name:      reviewer_forecast_service"));
+    assert!(stdout.contains("roaming:   true"));
+    assert!(
+        stdout.contains(&format!("dir:       {}", project.display())),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("codex --as reviewer_forecast_service"));
+}
+
+#[test]
+fn roaming_send_from_an_agent_uses_its_recorded_directory_not_process_cwd() {
+    let h = Hcom::new();
+    let project = h.root_path().join("agent-project");
+    let other = h.root_path().join("unrelated-cwd");
+    std::fs::create_dir_all(project.join(".git")).expect("create git marker");
+    std::fs::create_dir_all(&other).expect("create unrelated directory");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+    let sender = h.start_with_process_id("roaming-sender-process");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "UPDATE instances SET directory = ?1 WHERE name = ?2",
+        rusqlite::params![project.to_string_lossy().as_ref(), sender],
+    )
+    .expect("move sender context to project");
+    conn.execute(
+        "INSERT INTO instances (name, status, directory, created_at) \
+         VALUES ('reviewer_agent_project', 'listening', ?1, 1000.0)",
+        [project.to_string_lossy().as_ref()],
+    )
+    .expect("insert materialized reviewer");
+
+    let output = h
+        .cmd()
+        .current_dir(&other)
+        .env("HCOM_PROCESS_ID", "roaming-sender-process")
+        .args(["send", "@reviewer", "--", "inspect"])
+        .output()
+        .expect("send from registered agent");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("reviewer_agent_project"), "stdout={stdout}");
+    assert!(
+        !stdout.contains("reviewer_unrelated_cwd"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn roaming_agent_rejects_catalog_static_placement() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"dir":"/tmp"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "reviewer"]);
+    assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("roaming agent 'reviewer' cannot set dir"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
+fn roaming_send_rejects_same_slug_for_a_different_project_root() {
+    let h = Hcom::new();
+    let first = h.root_path().join("one/app");
+    let second = h.root_path().join("two/app");
+    std::fs::create_dir_all(first.join(".git")).expect("create first git marker");
+    std::fs::create_dir_all(second.join(".git")).expect("create second git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "INSERT INTO instances (name, status, directory, created_at) \
+         VALUES ('reviewer_app', 'stopped', ?1, 1000.0)",
+        [first.to_string_lossy().as_ref()],
+    )
+    .expect("insert first project reviewer");
+
+    let output = h
+        .cmd()
+        .current_dir(&second)
+        .args(["send", "--from", "bigboss", "@reviewer", "--", "inspect"])
+        .output()
+        .expect("send from colliding project");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("project directory basenames must be unique"),
+        "stderr={stderr}"
+    );
 }
 
 #[test]

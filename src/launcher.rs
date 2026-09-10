@@ -1874,6 +1874,7 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
     if let Some(ref caller_env) = params.env {
         base_env.extend(caller_env.clone());
     }
+    base_env.remove(crate::commands::agent::CATALOG_LAUNCH_ENV);
     base_env.remove("HCOM_TERMINAL");
     ensure_tool_config_env(&normalized, &mut base_env);
 

@@ -241,6 +241,7 @@ Supported agent fields:
 |---|---|
 | `description` | One line on what the agent is for, shown to other agents |
 | `dir` | CLI working directory |
+| `roaming` | Materialize one project-local instance per sender project |
 | `cli` | CLI selected by default |
 | `terminal` | hcom terminal preset, or `here` |
 | `terminal_command` | Raw terminal command containing `{script}` |
@@ -264,6 +265,43 @@ The selected `tools.<cli>` profile replaces shared scalar values and appends its
 `reasoning` maps to `--effort` for Claude and Antigravity (`agy`), and to Codex's `model_reasoning_effort`. Other CLIs reject the field at launch; use `tools.<cli>.args` when that CLI has its own reasoning control. `--reasoning` overrides the catalog value.
 
 `groups` is independent of `tag`: it does not change runtime display names, message routing, or `hcom kill tag:...`. `hcom agent @<group>` launches every agent in a catalog group, and `hcom kill @<group>` terminates all active agents in that group. An agent can belong to multiple catalog groups. Group membership merges additively across catalog layers and duplicate names are ignored. Group names use lowercase letters, numbers, and underscores.
+
+## Roaming agents
+
+Set `"roaming": true` for a reusable role that needs an independent session in each project:
+
+```jsonc
+{
+  "agents": {
+    "reviewer": {
+      "description": "Read-only roaming reviewer",
+      "roaming": true,
+      "cli": "codex",
+      "env": {
+        "DIPPY_CONFIG_ONLY": "~/.hcom/dippy/roaming-reviewer.dippy"
+      }
+    }
+  }
+}
+```
+
+A roaming definition must not set `dir`, `session`, or `window`; hcom owns its project placement.
+For an agent sender, hcom starts from the sender instance's recorded directory. For an external
+sender such as `bigboss`, it starts from the `hcom send` CWD. It chooses the nearest ancestor with
+`.git` (a directory or gitfile), otherwise the nearest ancestor with `.hcom/agents.json`, otherwise
+the start directory itself.
+
+The root basename is normalized to lowercase ASCII with separators replaced by underscores.
+`hcom send @reviewer` from `~/projects/weather-app` therefore addresses
+`reviewer_weather_app`. The original message text keeps `@reviewer`, while stored mentions, thread
+memberships, request watches, and delivery use the materialized name. `hcom agent reviewer`,
+`hcom agent show reviewer`, and `hcom agent attach reviewer` resolve the current project the same
+way. `hcom agent list` shows the archetype; `hcom list` shows running materialized instances.
+
+Two different roots with the same normalized basename are rejected if their materialized name
+would collide. Broadcasts never start a roaming agent. Catalog `env` values are transported to the
+materialized process even when another AI agent triggers the launch; hcom does not interpret the
+variables or provide a permission engine itself.
 
 ## Command-line flags
 

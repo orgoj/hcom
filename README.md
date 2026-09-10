@@ -336,6 +336,13 @@ for that first event to be acknowledged; if startup is still settling, it succee
 imports, tool profiles, terminal placement, resume behavior, instruction transport, and bundle skills are
 documented in [Named agents](docs/agent.md).
 
+A catalog entry with `"roaming": true` is a project-local archetype. It omits `dir`, `session`,
+and `window`; `hcom send @reviewer` resolves the sender's nearest Git root (then the nearest
+`.hcom/agents.json`, then the sender directory), routes to `reviewer_<project>`, and starts that
+instance in the resolved root when needed. Different projects therefore get separate sessions.
+Catalog `env` is preserved during autostart, including an isolated policy such as
+`"DIPPY_CONFIG_ONLY": "/path/to/reviewer.dippy"`. Broadcasts never materialize roaming agents.
+
 The precedence chain is built-in defaults, global catalog `defaults`, each matching catalog's
 `defaults` and named entry, the matching `tools.<cli>` profile, then command-line flags. It is the
 same inside and outside a project. Later scalar values replace earlier ones: a project

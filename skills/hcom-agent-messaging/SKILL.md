@@ -73,6 +73,9 @@ by exact match in `hcom agent list`. If neither matches, ask the user — do not
   it. A project's other agents are private to it. From outside, an out-of-scope name is
   indistinguishable from a name that does not exist, and that is intended — report it as
   unreachable from here rather than guessing at what a project might be hiding.
+- A catalog entry with `roaming: true` is an archetype. Send to its catalog name normally; hcom
+  resolves the sender's project and routes to `<name>_<project>`, starting that instance in the
+  project root when missing. Do not invent the materialized name yourself or pre-launch it.
 - An Antigravity catalog agent whose bundle is outside its working directory receives that bundle
   through `agy --add-dir`; do not move or duplicate the bundle into the project.
 - If the user distinguishes an "hcom agent" from an "hcom instance", preserve that distinction

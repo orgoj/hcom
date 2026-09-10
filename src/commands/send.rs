@@ -26,6 +26,8 @@ Target matching:
   A targeted stopped/missing local agent is started automatically when its
   name is defined in the effective hcom agent catalog. Send briefly waits for
   that first event's acknowledgement; otherwise it reports queued/pending.
+  A catalog agent with \"roaming\": true resolves to <name>_<project> in the
+  sender's Git/project root and starts there when missing.
   Broadcasts never start agents.
 
 Inline bundle (attach structured context):
@@ -307,7 +309,7 @@ struct ResolvedDelivery {
     effective_scope: MessageScope,
     effective_mentions: Vec<String>,
     delivered_to: Vec<String>,
-    catalog_starts: Vec<String>,
+    catalog_starts: Vec<super::agent::CatalogRoute>,
     is_thread_resolved: bool,
 }
 
@@ -345,7 +347,7 @@ fn resolve_delivery(
     message: &str,
     envelope: Option<&MessageEnvelope>,
     explicit_targets: Option<&[String]>,
-    catalog_instances: &[InstanceInfo],
+    catalog_instances: &[super::agent::CatalogRoute],
 ) -> Result<ResolvedDelivery, String> {
     // Deliverable agents: exclude session-stopped (exit:*) and launch_failed placeholders.
     // Adhoc instances use inactive:tool:* between commands — still @mentionable.
@@ -357,9 +359,21 @@ fn resolve_delivery(
     for catalog in catalog_instances {
         if !routing_rows
             .iter()
-            .any(|inst| inst.name.eq_ignore_ascii_case(&catalog.name))
+            .any(|inst| inst.name.eq_ignore_ascii_case(&catalog.alias))
         {
-            routing_rows.push(catalog.clone());
+            routing_rows.push(InstanceInfo {
+                name: catalog.alias.clone(),
+                tag: catalog.tag.clone(),
+            });
+        }
+        if !routing_rows
+            .iter()
+            .any(|inst| inst.name.eq_ignore_ascii_case(&catalog.instance))
+        {
+            routing_rows.push(InstanceInfo {
+                name: catalog.instance.clone(),
+                tag: catalog.tag.clone(),
+            });
         }
     }
     let scope_result = compute_scope(message, &routing_rows, explicit_targets)?;
@@ -385,15 +399,55 @@ fn resolve_delivery(
     } else {
         MessageScope::Mentions
     };
-    let effective_mentions = if thread_delivery_members.is_empty() {
+    let raw_mentions = if thread_delivery_members.is_empty() {
         scope_result.mentions.clone()
     } else {
         thread_delivery_members.clone()
     };
+    let mut effective_mentions = Vec::new();
+    for mention in raw_mentions {
+        let canonical = catalog_instances
+            .iter()
+            .find(|route| route.alias.eq_ignore_ascii_case(&mention))
+            .map(|route| route.instance.clone())
+            .unwrap_or(mention);
+        if !effective_mentions
+            .iter()
+            .any(|name: &String| name.eq_ignore_ascii_case(&canonical))
+        {
+            effective_mentions.push(canonical);
+        }
+    }
 
     let scope_data = build_scope_data(identity, effective_scope, &effective_mentions);
+    let mut delivery_rows = rows.clone();
+    for catalog in catalog_instances {
+        if !delivery_rows
+            .iter()
+            .any(|inst| inst.name.eq_ignore_ascii_case(&catalog.instance))
+        {
+            delivery_rows.push(InstanceInfo {
+                name: catalog.instance.clone(),
+                tag: catalog.tag.clone(),
+            });
+        }
+    }
+    if is_thread_resolved {
+        for member in &effective_mentions {
+            if !delivery_rows
+                .iter()
+                .any(|inst| inst.name.eq_ignore_ascii_case(member))
+                && let Some(existing) = db.get_instance_full(member).map_err(|e| e.to_string())?
+            {
+                delivery_rows.push(InstanceInfo {
+                    name: existing.name,
+                    tag: existing.tag,
+                });
+            }
+        }
+    }
     let recipient_rows = if effective_scope == MessageScope::Mentions {
-        &routing_rows
+        &delivery_rows
     } else {
         &rows
     };
@@ -404,16 +458,27 @@ fn resolve_delivery(
         })
         .map(|inst| inst.name.clone())
         .collect();
-    let catalog_starts = delivered_to
+    let mut catalog_starts = Vec::new();
+    for name in delivered_to
         .iter()
         .filter(|name| !rows.iter().any(|inst| inst.name.eq_ignore_ascii_case(name)))
-        .filter(|name| {
-            catalog_instances
-                .iter()
-                .any(|inst| inst.name.eq_ignore_ascii_case(name))
-        })
-        .cloned()
-        .collect();
+    {
+        if let Some(route) = catalog_instances
+            .iter()
+            .find(|route| route.instance.eq_ignore_ascii_case(name))
+        {
+            catalog_starts.push(route.clone());
+            continue;
+        }
+        for route in catalog_instances {
+            if let Some(retargeted) =
+                super::agent::retarget_roaming_route(db, route, name).map_err(|e| e.to_string())?
+            {
+                catalog_starts.push(retargeted);
+                break;
+            }
+        }
+    }
 
     Ok(ResolvedDelivery {
         original_scope: scope_result.scope,
@@ -490,7 +555,7 @@ fn send_message_with_catalog(
     message: &str,
     envelope: Option<&MessageEnvelope>,
     explicit_targets: Option<&[String]>,
-    catalog_instances: &[InstanceInfo],
+    catalog_instances: &[super::agent::CatalogRoute],
 ) -> Result<Vec<String>, String> {
     send_message_with_catalog_outcome(
         db,
@@ -509,7 +574,7 @@ fn send_message_with_catalog_outcome(
     message: &str,
     envelope: Option<&MessageEnvelope>,
     explicit_targets: Option<&[String]>,
-    catalog_instances: &[InstanceInfo],
+    catalog_instances: &[super::agent::CatalogRoute],
 ) -> Result<SendOutcome, String> {
     validate_message(message)?;
 
@@ -521,8 +586,8 @@ fn send_message_with_catalog_outcome(
         explicit_targets,
         catalog_instances,
     )?;
-    for name in &delivery.catalog_starts {
-        super::agent::autostart_catalog_agent(db, name).map_err(|e| e.to_string())?;
+    for route in &delivery.catalog_starts {
+        super::agent::autostart_catalog_agent(db, route).map_err(|e| e.to_string())?;
     }
     let scope_str = delivery.effective_scope.as_str();
 
@@ -614,7 +679,11 @@ fn send_message_with_catalog_outcome(
 
     Ok(SendOutcome {
         delivered_to: delivery.delivered_to,
-        autostarted: delivery.catalog_starts,
+        autostarted: delivery
+            .catalog_starts
+            .into_iter()
+            .map(|route| route.instance)
+            .collect(),
         event_id,
     })
 }
@@ -1023,11 +1092,8 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         || message.contains('@')
         || envelope.thread.is_some()
     {
-        match super::agent::catalog_message_targets() {
-            Ok(targets) => targets
-                .into_iter()
-                .map(|(name, tag)| InstanceInfo { name, tag })
-                .collect(),
+        match super::agent::catalog_message_targets(db, &sender_identity) {
+            Ok(targets) => targets,
             Err(e) => {
                 eprintln!("Error: cannot load agent catalog for message routing: {e:#}");
                 return 1;
@@ -1727,9 +1793,12 @@ mod tests {
             instance_data: None,
             session_id: None,
         };
-        let catalog = vec![InstanceInfo {
-            name: "reviewer".into(),
+        let catalog = vec![crate::commands::agent::CatalogRoute {
+            alias: "reviewer".into(),
+            instance: "reviewer".into(),
             tag: Some("review".into()),
+            launch_name: "reviewer".into(),
+            launch_dir: None,
         }];
 
         let targeted = resolve_delivery(
@@ -1742,7 +1811,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(targeted.delivered_to, vec!["reviewer"]);
-        assert_eq!(targeted.catalog_starts, vec!["reviewer"]);
+        assert_eq!(targeted.catalog_starts[0].instance, "reviewer");
 
         let tagged = resolve_delivery(
             &db,
@@ -1754,11 +1823,83 @@ mod tests {
         )
         .unwrap();
         assert_eq!(tagged.delivered_to, vec!["reviewer"]);
-        assert_eq!(tagged.catalog_starts, vec!["reviewer"]);
+        assert_eq!(tagged.catalog_starts[0].instance, "reviewer");
 
         let broadcast = resolve_delivery(&db, &sender, "hello", None, None, &catalog).unwrap();
         assert!(broadcast.delivered_to.is_empty());
         assert!(broadcast.catalog_starts.is_empty());
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn roaming_catalog_alias_routes_inline_mentions_to_the_materialized_instance() {
+        let (db, path, _env) = setup_test_db();
+        let sender = SenderIdentity {
+            kind: SenderKind::External,
+            name: "bigboss".into(),
+            instance_data: None,
+            session_id: None,
+        };
+        let catalog = vec![crate::commands::agent::CatalogRoute {
+            alias: "reviewer".into(),
+            instance: "reviewer_weather".into(),
+            tag: None,
+            launch_name: "reviewer".into(),
+            launch_dir: Some(std::path::PathBuf::from("/projects/weather")),
+        }];
+
+        let delivery =
+            resolve_delivery(&db, &sender, "@reviewer inspect this", None, None, &catalog).unwrap();
+        assert_eq!(delivery.effective_mentions, vec!["reviewer_weather"]);
+        assert_eq!(delivery.delivered_to, vec!["reviewer_weather"]);
+        assert_eq!(delivery.catalog_starts[0].launch_name, "reviewer");
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn stopped_roaming_thread_member_restarts_in_its_original_project() {
+        let (db, path, _env) = setup_test_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, directory, created_at) \
+                 VALUES ('reviewer_project', 'stopped', ?1, 1000.0)",
+                [project.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        db.add_thread_memberships("review", None, &["reviewer_project".to_string()]);
+        let sender = SenderIdentity {
+            kind: SenderKind::External,
+            name: "bigboss".into(),
+            instance_data: None,
+            session_id: None,
+        };
+        let envelope = MessageEnvelope {
+            thread: Some("review".into()),
+            ..Default::default()
+        };
+        let catalog = vec![crate::commands::agent::CatalogRoute {
+            alias: "reviewer".into(),
+            instance: "reviewer_elsewhere".into(),
+            tag: None,
+            launch_name: "reviewer".into(),
+            launch_dir: Some(std::path::PathBuf::from("/projects/elsewhere")),
+        }];
+
+        let delivery =
+            resolve_delivery(&db, &sender, "continue", Some(&envelope), None, &catalog).unwrap();
+        assert_eq!(delivery.delivered_to, vec!["reviewer_project"]);
+        assert_eq!(delivery.catalog_starts[0].instance, "reviewer_project");
+        assert_eq!(
+            delivery.catalog_starts[0].launch_dir.as_deref(),
+            Some(project.as_path())
+        );
 
         cleanup_test_db(path);
     }
@@ -1784,15 +1925,18 @@ mod tests {
             thread: Some("review".into()),
             ..Default::default()
         };
-        let catalog = vec![InstanceInfo {
-            name: "reviewer".into(),
+        let catalog = vec![crate::commands::agent::CatalogRoute {
+            alias: "reviewer".into(),
+            instance: "reviewer".into(),
             tag: None,
+            launch_name: "reviewer".into(),
+            launch_dir: None,
         }];
 
         let delivery =
             resolve_delivery(&db, &sender, "next task", Some(&envelope), None, &catalog).unwrap();
         assert_eq!(delivery.delivered_to, vec!["reviewer"]);
-        assert_eq!(delivery.catalog_starts, vec!["reviewer"]);
+        assert_eq!(delivery.catalog_starts[0].instance, "reviewer");
 
         cleanup_test_db(path);
     }

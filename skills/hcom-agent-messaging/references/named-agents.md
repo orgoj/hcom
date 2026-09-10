@@ -169,6 +169,33 @@ default tmux window or Herdr tab. An explicit `window` remains unchanged. Addres
 its alias, such as `hcom send @review_api -- "Review this"`. Targeted sends to catalog names only
 auto-start the canonical catalog instance; aliases must be launched explicitly.
 
+## Roaming archetypes
+
+`"roaming": true` defines a role that materializes once per project. Do not set `dir`, `session`,
+or `window` on that definition. A targeted send to `@reviewer` uses the sender instance's recorded
+directory (or the shell CWD for an external sender), selects the nearest Git root, and routes to a
+runtime name such as `reviewer_weather_app`. Without a Git root it falls back to the nearest
+`.hcom/agents.json` root, then the starting directory.
+
+The materialized name, not the archetype alias, is stored in mentions, thread membership, request
+watches, and delivery metadata. The original message text remains unchanged. Direct
+`hcom agent/show/attach reviewer` commands resolve the current project identically. Broadcasts do
+not materialize roaming agents, and roots whose normalized basenames collide fail safely.
+
+Catalog `env` reaches the materialized process during nested autostart. A read-only roaming role
+can therefore select a separately managed Dippy policy with one variable:
+
+```json
+{
+  "agents": {
+    "reviewer": {
+      "roaming": true,
+      "env": { "DIPPY_CONFIG_ONLY": "~/.hcom/dippy/roaming-reviewer.dippy" }
+    }
+  }
+}
+```
+
 ## Message-driven startup
 
 A targeted message treats the effective catalog as an address book as well as a launcher. If a
@@ -317,7 +344,7 @@ Agent and `defaults` fields:
 
 - `description`: one line on what the agent is for; the only field other agents see in
   `hcom agent list --for-agents`
-- `cli`, `dir`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`, `reasoning`
+- `cli`, `dir`, boolean `roaming`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`, `reasoning`
 - `prompt`, `system_prompt`, `pre`, boolean `resume`, and boolean `continue`
 - `env` object and `args` array
 - `tools` object keyed by CLI name

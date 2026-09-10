@@ -11,11 +11,13 @@ use anyhow::{Result, bail};
 use serde::Deserialize;
 
 use crate::db::HcomDb;
+use crate::shared::{SenderIdentity, SenderKind};
 
 const GLOBAL_FILE: &str = "agents.json";
 const PROJECT_DIR: &str = ".hcom";
 const PROJECT_FILE: &str = "agents.json";
 const EXTRA_CATALOGS_ENV: &str = "HCOM_AGENT_CATALOGS";
+pub(crate) const CATALOG_LAUNCH_ENV: &str = "HCOM_CATALOG_LAUNCH_ENV";
 const DEFAULT_CLI: &str = "claude";
 
 // ── CLI entry ───────────────────────────────────────────────────────────
@@ -77,6 +79,13 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   against $HOME globally, the parent of project .hcom (also when imported), or its
   file for other catalogs.
   ~ and $VAR are expanded.
+
+Roaming agents:
+  \"roaming\": true defines a project-local archetype without dir/session/window.
+  A targeted send to @<name> resolves the sender's Git/project root and addresses
+  <name>_<project>. Missing instances start in that root. Broadcasts never start them.
+  Catalog env values are passed to the materialized process; for an isolated Dippy
+  policy use \"env\": {{\"DIPPY_CONFIG_ONLY\": \"/path/to/policy.dippy\"}}.
 
 Catalog groups:
   \"groups\": [\"review\", \"all\"] assigns launch-only groups independently of the
@@ -182,6 +191,7 @@ fn run(argv: &[String]) -> Result<i32> {
 struct AgentDef {
     description: Option<String>,
     dir: Option<String>,
+    roaming: Option<bool>,
     #[serde(default)]
     skills_dir: Option<serde_json::Value>,
     cli: Option<String>,
@@ -255,6 +265,7 @@ impl AgentDef {
         take!(
             description,
             dir,
+            roaming,
             cli,
             terminal,
             terminal_command,
@@ -844,19 +855,224 @@ impl Catalogs {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CatalogRoute {
+    pub alias: String,
+    pub instance: String,
+    pub tag: Option<String>,
+    pub launch_name: String,
+    pub launch_dir: Option<PathBuf>,
+}
+
+pub(crate) fn retarget_roaming_route(
+    db: &HcomDb,
+    route: &CatalogRoute,
+    instance: &str,
+) -> Result<Option<CatalogRoute>> {
+    if route.launch_dir.is_none() || !instance.starts_with(&format!("{}_", route.alias)) {
+        return Ok(None);
+    }
+    let Some(existing) = db.get_instance_full(instance)? else {
+        return Ok(None);
+    };
+    let directory = PathBuf::from(&existing.directory);
+    if !directory.is_dir() {
+        return Ok(None);
+    }
+    let root = roaming_project_root(&directory);
+    let expected = format!("{}_{}", route.alias, roaming_project_slug(&root)?);
+    if expected != instance {
+        return Ok(None);
+    }
+    let mut retargeted = route.clone();
+    retargeted.instance = instance.to_string();
+    retargeted.launch_dir = Some(root);
+    Ok(Some(retargeted))
+}
+
+fn canonical_directory(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| normalize(path))
+}
+
+fn roaming_context_directory(identity: &SenderIdentity) -> Result<PathBuf> {
+    let raw = if identity.kind == SenderKind::Instance {
+        identity
+            .instance_data
+            .as_ref()
+            .and_then(|data| data.get("directory"))
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot route a roaming agent: sender '{}' has no working directory",
+                    identity.name
+                )
+            })?
+    } else {
+        std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("cannot route a roaming agent: cannot read CWD: {e}"))?
+    };
+    if !raw.is_dir() {
+        bail!(
+            "cannot route a roaming agent: context directory '{}' does not exist or is not a directory",
+            raw.display()
+        );
+    }
+    Ok(canonical_directory(&raw))
+}
+
+fn roaming_project_root(start: &Path) -> PathBuf {
+    let start = canonical_directory(start);
+    if let Some(root) = start.ancestors().find(|dir| dir.join(".git").exists()) {
+        return root.to_path_buf();
+    }
+    if let Some(root) = start
+        .ancestors()
+        .find(|dir| dir.join(PROJECT_DIR).join(PROJECT_FILE).is_file())
+    {
+        return root.to_path_buf();
+    }
+    start
+}
+
+fn roaming_project_slug(root: &Path) -> Result<String> {
+    let basename = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let mut slug = String::new();
+    let mut separator = false;
+    for ch in basename.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            separator = false;
+        } else if !slug.is_empty() && !separator {
+            slug.push('_');
+            separator = true;
+        }
+    }
+    while slug.ends_with('_') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        bail!(
+            "cannot route a roaming agent: project root '{}' has no usable name",
+            root.display()
+        );
+    }
+    Ok(slug)
+}
+
+fn validate_roaming_definition(name: &str, def: &AgentDef) -> Result<()> {
+    if def.roaming != Some(true) {
+        return Ok(());
+    }
+    let conflicts = [
+        def.dir
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|_| "dir"),
+        def.session
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|_| "session"),
+        def.window
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|_| "window"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if !conflicts.is_empty() {
+        bail!(
+            "roaming agent '{name}' cannot set {}; hcom derives project placement",
+            conflicts.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn materialize_roaming_definition(
+    db: &HcomDb,
+    name: &str,
+    def: &AgentDef,
+    start: &Path,
+) -> Result<Option<(String, PathBuf)>> {
+    validate_roaming_definition(name, def)?;
+    if def.roaming != Some(true) {
+        return Ok(None);
+    }
+    let root = roaming_project_root(start);
+    let instance = format!("{name}_{}", roaming_project_slug(&root)?);
+    if let Some(existing) = db.get_instance_full(&instance)? {
+        if existing.directory.is_empty() {
+            bail!(
+                "cannot route roaming agent '{name}': instance '{instance}' has no recorded project directory"
+            );
+        }
+        if canonical_directory(Path::new(&existing.directory)) != root {
+            bail!(
+                "cannot route roaming agent '{name}': instance '{instance}' already belongs to '{}', not '{}'; project directory basenames must be unique",
+                existing.directory,
+                root.display()
+            );
+        }
+    }
+    Ok(Some((instance, root)))
+}
+
+fn roaming_route(
+    db: &HcomDb,
+    identity: &SenderIdentity,
+    name: &str,
+    def: &AgentDef,
+) -> Result<Option<CatalogRoute>> {
+    if def.roaming != Some(true) {
+        validate_roaming_definition(name, def)?;
+        return Ok(None);
+    }
+    let Some((instance, root)) =
+        materialize_roaming_definition(db, name, def, &roaming_context_directory(identity)?)?
+    else {
+        return Ok(None);
+    };
+    let eff = effective(name, def.clone(), &Cli::default());
+    Ok(Some(CatalogRoute {
+        alias: name.to_string(),
+        instance,
+        tag: eff.tag,
+        launch_name: name.to_string(),
+        launch_dir: Some(root),
+    }))
+}
+
 /// Catalog agent identities available for message routing, including stopped agents.
-pub(crate) fn catalog_message_targets() -> Result<Vec<(String, Option<String>)>> {
+pub(crate) fn catalog_message_targets(
+    db: &HcomDb,
+    identity: &SenderIdentity,
+) -> Result<Vec<CatalogRoute>> {
     let catalogs = Catalogs::load(false, None)?;
-    Ok(catalogs
-        .names()
-        .keys()
-        .filter(|name| !name.contains(':'))
-        .filter_map(|name| {
-            let def = catalogs.resolve(name)?;
+    let mut routes = Vec::new();
+    for name in catalogs.names().keys().filter(|name| !name.contains(':')) {
+        let Some(def) = catalogs.resolve(name) else {
+            continue;
+        };
+        if let Some(route) = roaming_route(db, identity, name, &def)? {
+            routes.push(route);
+        } else {
             let eff = effective(name, def, &Cli::default());
-            Some((name.clone(), eff.tag))
-        })
-        .collect())
+            routes.push(CatalogRoute {
+                alias: name.clone(),
+                instance: name.clone(),
+                tag: eff.tag,
+                launch_name: name.clone(),
+                launch_dir: None,
+            });
+        }
+    }
+    Ok(routes)
 }
 
 /// How long autostart waits for the launched agent's instance row to appear.
@@ -892,8 +1108,22 @@ pub(crate) fn classify_autostart_exit(code: i32) -> AutostartOutcome {
 /// is written to the DB after the instance row is reserved, so the agent
 /// receives it once its delivery loop starts. Treating that as a start failure
 /// used to discard the payload while reporting a failure that had not happened.
-pub(crate) fn autostart_catalog_agent(db: &HcomDb, name: &str) -> Result<()> {
-    let code = cmd_launch(name, &[])?;
+pub(crate) fn autostart_catalog_agent(db: &HcomDb, route: &CatalogRoute) -> Result<()> {
+    let catalogs = Catalogs::load(false, None)?;
+    let cli = Cli {
+        as_name: Some(route.instance.clone()),
+        ..Cli::default()
+    };
+    let code = launch_named_with_roaming(
+        &route.launch_name,
+        &cli,
+        &catalogs,
+        route
+            .launch_dir
+            .as_deref()
+            .map(|dir| (route.instance.as_str(), dir)),
+    )?;
+    let name = &route.instance;
     match classify_autostart_exit(code) {
         AutostartOutcome::Started => {
             wait_for_catalog_agent_registration(db, name, CATALOG_REGISTRATION_WAIT)
@@ -1166,6 +1396,7 @@ fn parse_cli(argv: &[String]) -> Result<Cli> {
 #[derive(Clone)]
 struct Effective {
     name: String,
+    roaming: bool,
     description: Option<String>,
     cli: String,
     dir: String,
@@ -1409,6 +1640,7 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
     });
     let mut effective = Effective {
         name: name.to_string(),
+        roaming: def.roaming.unwrap_or(false),
         description: nonempty(def.description).map(|text| single_line(&text)),
         cli: selected_cli,
         dir: nonempty(def.dir).unwrap_or_else(|| {
@@ -1668,6 +1900,14 @@ fn window_command(eff: &Effective, resume: bool) -> String {
         .iter()
         .map(|(k, v)| format!("{k}={}", shell_words::quote(v)))
         .collect();
+    if !eff.env.is_empty() {
+        let encoded =
+            serde_json::to_string(&eff.env).expect("catalog env serialization cannot fail");
+        parts.push(format!(
+            "{CATALOG_LAUNCH_ENV}={}",
+            shell_words::quote(&encoded)
+        ));
+    }
     let mut argv = vec![hcom_bin()];
     argv.extend(hcom_argv(eff, Some("here"), resume));
     parts.push(shell_words::join(argv.iter().map(String::as_str)));
@@ -1914,16 +2154,45 @@ fn cmd_launch(name: &str, rest: &[String]) -> Result<i32> {
 }
 
 fn launch_named(name: &str, cli: &Cli, catalogs: &Catalogs) -> Result<i32> {
-    let def = catalogs
+    launch_named_with_roaming(name, cli, catalogs, None)
+}
+
+fn launch_named_with_roaming(
+    name: &str,
+    cli: &Cli,
+    catalogs: &Catalogs,
+    materialized: Option<(&str, &Path)>,
+) -> Result<i32> {
+    let mut def = catalogs
         .resolve(name)
         .ok_or_else(|| unknown_agent_error(name, catalogs))?;
-    let instance_name = cli.as_name.as_deref().unwrap_or(name);
+    let mut roaming_root = None;
+    let default_instance = if def.roaming == Some(true) {
+        validate_roaming_definition(name, &def)?;
+        let (instance, root) = match materialized {
+            Some((instance, root)) => (instance.to_string(), root.to_path_buf()),
+            None => {
+                let cwd = std::env::current_dir()
+                    .map_err(|e| anyhow::anyhow!("cannot read CWD for roaming agent: {e}"))?;
+                let db = HcomDb::open()?;
+                materialize_roaming_definition(&db, name, &def, &cwd)?
+                    .expect("roaming definition must materialize")
+            }
+        };
+        def.dir = Some(root.to_string_lossy().into_owned());
+        roaming_root = Some(root);
+        instance
+    } else {
+        validate_roaming_definition(name, &def)?;
+        name.to_string()
+    };
+    let instance_name = cli.as_name.as_deref().unwrap_or(&default_instance);
     let window_explicit = def.window.is_some() || cli.def.window.is_some();
     let mut eff = effective(instance_name, def, cli);
     let configured_terminal = configured_terminal();
     apply_herdr_placement(
         &mut eff,
-        catalogs.project_root.as_deref(),
+        roaming_root.as_deref().or(catalogs.project_root.as_deref()),
         window_explicit,
         configured_terminal.as_deref(),
     );
@@ -2244,6 +2513,12 @@ fn run_hcom(
     for (k, v) in &eff.env {
         cmd.env(k, v);
     }
+    if !eff.env.is_empty() {
+        cmd.env(
+            CATALOG_LAUNCH_ENV,
+            serde_json::to_string(&eff.env).expect("catalog env serialization cannot fail"),
+        );
+    }
     if let Some(tc) = terminal_command {
         cmd.env("HCOM_TERMINAL", tc);
     }
@@ -2394,12 +2669,13 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
             let eff = effective(name, def, &Cli::default());
             out.push(serde_json::json!({
                 "name": name,
+                "roaming": eff.roaming,
                 "description": eff.description,
                 "source": source,
                 "cli": eff.cli,
                 "model": eff.model,
                 "reasoning": eff.reasoning,
-                "dir": eff.dir,
+                "dir": (!eff.roaming).then_some(eff.dir),
                 "agent_dir": eff.agent_dir,
                 "instructions": eff.instructions,
                 "skills": eff.skills,
@@ -2433,7 +2709,11 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
                 eff.cli,
                 eff.model.unwrap_or_else(|| "-".to_string()),
                 where_,
-                shorten_home(&eff.dir),
+                if eff.roaming {
+                    "<project>".to_string()
+                } else {
+                    shorten_home(&eff.dir)
+                },
                 format!("{status}  [{source}]"),
             ]
         })
@@ -2483,16 +2763,30 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     };
     let cli = parse_cli(&rest[1..])?;
     let catalogs = Catalogs::load(cli.no_project, cli.catalog.as_deref())?;
-    let def = catalogs
+    let mut def = catalogs
         .resolve(&name)
         .ok_or_else(|| unknown_agent_error(&name, &catalogs))?;
-    let instance_name = cli.as_name.as_deref().unwrap_or(&name);
     let window_explicit = def.window.is_some() || cli.def.window.is_some();
+    let mut roaming_root = None;
+    let default_instance = if def.roaming == Some(true) {
+        let cwd = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("cannot read CWD for roaming agent: {e}"))?;
+        let db = HcomDb::open()?;
+        let (instance, root) = materialize_roaming_definition(&db, &name, &def, &cwd)?
+            .expect("roaming definition must materialize");
+        def.dir = Some(root.to_string_lossy().into_owned());
+        roaming_root = Some(root);
+        instance
+    } else {
+        validate_roaming_definition(&name, &def)?;
+        name.clone()
+    };
+    let instance_name = cli.as_name.as_deref().unwrap_or(&default_instance);
     let mut eff = effective(instance_name, def, &cli);
     let configured_terminal = configured_terminal();
     apply_herdr_placement(
         &mut eff,
-        catalogs.project_root.as_deref(),
+        roaming_root.as_deref().or(catalogs.project_root.as_deref()),
         window_explicit,
         configured_terminal.as_deref(),
     );
@@ -2507,6 +2801,7 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     }
 
     println!("name:      {}", eff.name);
+    println!("roaming:   {}", eff.roaming);
     if let Some(description) = &eff.description {
         println!("description: {description}");
     }
@@ -2624,15 +2919,27 @@ fn cmd_attach(rest: &[String]) -> Result<i32> {
     };
     let cli = parse_cli(&rest[1..])?;
     let catalogs = Catalogs::load(cli.no_project, cli.catalog.as_deref())?;
-    let def = catalogs.resolve(&name).unwrap_or_default();
-    let eff = effective(&name, def, &cli);
-    match find_live(&name) {
+    let mut def = catalogs.resolve(&name).unwrap_or_default();
+    let instance_name = if def.roaming == Some(true) {
+        let cwd = std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("cannot read CWD for roaming agent: {e}"))?;
+        let db = HcomDb::open()?;
+        let (instance, root) = materialize_roaming_definition(&db, &name, &def, &cwd)?
+            .expect("roaming definition must materialize");
+        def.dir = Some(root.to_string_lossy().into_owned());
+        instance
+    } else {
+        validate_roaming_definition(&name, &def)?;
+        name.clone()
+    };
+    let eff = effective(&instance_name, def, &cli);
+    match find_live(&instance_name) {
         Some(live) => {
             focus_running(&eff, &live)?;
             Ok(0)
         }
         None => {
-            eprintln!("agent '{name}' is not running");
+            eprintln!("agent '{instance_name}' is not running");
             Ok(1)
         }
     }
@@ -2719,6 +3026,46 @@ mod tests {
         assert_eq!(classify_autostart_exit(2), AutostartOutcome::StillLaunching);
         assert_eq!(classify_autostart_exit(1), AutostartOutcome::Failed);
         assert_eq!(classify_autostart_exit(127), AutostartOutcome::Failed);
+    }
+
+    #[test]
+    fn roaming_context_uses_the_sender_directory_and_nearest_git_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("Weather App");
+        let nested = project.join("services/api");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        let sender = SenderIdentity {
+            kind: SenderKind::Instance,
+            name: "developer".into(),
+            instance_data: Some(serde_json::json!({"directory": nested})),
+            session_id: None,
+        };
+
+        let context = roaming_context_directory(&sender).unwrap();
+        let root = roaming_project_root(&context);
+        assert_eq!(root, canonical_directory(&project));
+        assert_eq!(roaming_project_slug(&root).unwrap(), "weather_app");
+    }
+
+    #[test]
+    fn roaming_context_falls_back_to_the_nearest_project_catalog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("docs");
+        let nested = project.join("drafts");
+        std::fs::create_dir_all(project.join(".hcom")).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(project.join(".hcom/agents.json"), "{}").unwrap();
+        assert_eq!(roaming_project_root(&nested), canonical_directory(&project));
+    }
+
+    #[test]
+    fn roaming_definition_rejects_static_placement() {
+        let def = def_from(r#"{"roaming":true,"dir":"/tmp","session":"review"}"#);
+        let error = validate_roaming_definition("reviewer", &def)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("dir, session"), "{error}");
     }
 
     fn live_agent(name: &str, status: &str) -> LiveAgent {
@@ -3674,6 +4021,8 @@ mod tests {
         let cmd = window_command(&eff, false);
         assert!(cmd.starts_with("exec \"${SHELL:-/bin/bash}\" -lic "));
         assert!(cmd.contains("source .venv/bin/activate && AWS_PROFILE=wdt "));
+        assert!(cmd.contains(CATALOG_LAUNCH_ENV));
+        assert!(cmd.contains("AWS_PROFILE"));
         assert!(cmd.contains("--terminal here"));
         assert!(cmd.contains("; exec \"${SHELL:-/bin/bash}\" -l"));
     }
