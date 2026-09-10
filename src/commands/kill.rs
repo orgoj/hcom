@@ -1,4 +1,4 @@
-//! Kill command: `hcom kill <name(s)|all|tag:X>`
+//! Kill command: `hcom kill <name(s)|@<group>|all|tag:X>`
 //!
 //!
 //! Sends SIGTERM to process groups and optionally closes terminal panes.
@@ -19,7 +19,7 @@ use anyhow::{Result, bail};
 #[derive(clap::Parser, Debug)]
 #[command(name = "kill", about = "Kill agent processes")]
 pub struct KillArgs {
-    /// Targets to kill (names, "all", or "tag:X")
+    /// Targets to kill (names, "@<group>", "all", or "tag:X")
     pub targets: Vec<String>,
 }
 
@@ -276,14 +276,8 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
 
     let catalogs = crate::commands::agent::Catalogs::load_for_groups(false, None).ok();
 
-    // If any target is "all" (or "@all" and not a catalog group), just kill all
-    if targets.iter().any(|t| {
-        t == "all"
-            || (t == "@all"
-                && !catalogs
-                    .as_ref()
-                    .is_some_and(|c| c.group_names().contains("all")))
-    }) {
+    // If any target is "all", just kill all
+    if targets.iter().any(|t| t == "all") {
         return kill_all(&db, &hcom_dir, &initiator);
     }
 
@@ -291,25 +285,29 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     for target in &targets {
         let exit = if let Some(tag) = target.strip_prefix("tag:") {
             kill_by_tag(&db, &hcom_dir, tag, &initiator)?
-        } else if let Some(stripped) = target.strip_prefix('@') {
-            if stripped.is_empty() {
+        } else if let Some(group) = target.strip_prefix('@') {
+            if group.is_empty() {
                 eprintln!("Error: Empty target '@' is not allowed");
                 1
-            } else if let Some(tag) = stripped.strip_prefix("tag:") {
+            } else if let Some(tag) = group.strip_prefix("tag:") {
                 kill_by_tag(&db, &hcom_dir, tag, &initiator)?
-            } else if let Some(ref cats) = catalogs
-                && (cats.group_names().contains(stripped)
-                    || !cats.group_members(stripped).is_empty())
-            {
-                let members = cats.group_members(stripped);
-                if members.is_empty() {
-                    eprintln!("group '@{}' is empty", stripped);
+            } else {
+                let (has_group, members) = match catalogs.as_ref() {
+                    Some(cats) => (
+                        cats.group_names().contains(group),
+                        cats.group_members(group),
+                    ),
+                    None => (false, Vec::new()),
+                };
+                if !has_group && members.is_empty() {
+                    eprintln!("unknown or empty agent group '@{}'", group);
+                    1
+                } else if members.is_empty() {
+                    eprintln!("group '@{}' is empty", group);
                     1
                 } else {
-                    kill_by_group(&db, &hcom_dir, stripped, &members, &initiator)?
+                    kill_by_group(&db, &hcom_dir, group, &members, &initiator)?
                 }
-            } else {
-                kill_single(&db, &hcom_dir, target, &initiator)?
             }
         } else {
             kill_single(&db, &hcom_dir, target, &initiator)?
@@ -689,10 +687,8 @@ fn kill_single(
     target: &str,
     initiator: &str,
 ) -> Result<i32> {
-    let clean_target = target.strip_prefix('@').unwrap_or(target);
     // Resolve display name
-    let name = identity::resolve_display_name(db, clean_target)
-        .unwrap_or_else(|| clean_target.to_string());
+    let name = identity::resolve_display_name(db, target).unwrap_or_else(|| target.to_string());
 
     let inst = match db.get_instance_full(&name)? {
         Some(inst) => inst,
@@ -700,11 +696,10 @@ fn kill_single(
             // Check orphans
             let orphans = pidtrack::get_orphan_processes(hcom_dir, None);
             // Also match by PID number (TUI sends kill by PID for orphans)
-            let target_pid = clean_target.parse::<u32>().ok();
+            let target_pid = target.parse::<u32>().ok();
             if let Some(orphan) = orphans.iter().find(|o| {
-                o.names.contains(&clean_target.to_string())
-                    || o.names.contains(&target.to_string())
-                    || o.process_id == clean_target
+                o.names.contains(&target.to_string())
+                    || o.process_id == target
                     || target_pid == Some(o.pid)
             }) {
                 let (result, pane_closed, pane_retry_command) = terminal::kill_process(
@@ -716,20 +711,20 @@ fn kill_single(
                     &orphan.terminal_id,
                     &orphan.zellij_session_name,
                 );
-                let result = normalize_kill_result(clean_target, orphan.pid, result, pane_closed);
+                let result = normalize_kill_result(target, orphan.pid, result, pane_closed);
                 let pane_info =
                     pane_info_str(pane_closed, &orphan.terminal_preset, &orphan.pane_id);
                 match result {
                     terminal::KillResult::Sent => {
                         println!(
                             "Sent SIGTERM to process group {} for stopped instance '{}'{}",
-                            orphan.pid, clean_target, pane_info
+                            orphan.pid, target, pane_info
                         );
                     }
                     terminal::KillResult::AlreadyDead => {
                         println!(
                             "Process group {} not found for '{}' (already terminated){}",
-                            orphan.pid, clean_target, pane_info
+                            orphan.pid, target, pane_info
                         );
                     }
                     terminal::KillResult::PermissionDenied => {
@@ -748,17 +743,10 @@ fn kill_single(
                 );
             }
             let mut msg = format!("Agent '{}' not found", target);
-            if let Ok(cats) = crate::commands::agent::Catalogs::load_for_groups(false, None) {
-                if target.starts_with('@') {
-                    let groups = cats.group_names();
-                    if let Some(close) =
-                        crate::commands::agent::closest(clean_target, groups.iter())
-                    {
-                        msg.push_str(&format!(" (did you mean '@{close}'?)"));
-                    }
-                } else if cats.group_names().contains(clean_target) {
-                    msg.push_str(&format!("\nDid you mean @{clean_target}? Groups require @"));
-                }
+            if let Ok(cats) = crate::commands::agent::Catalogs::load_for_groups(false, None)
+                && cats.group_names().contains(target)
+            {
+                msg.push_str(&format!("\nDid you mean @{target}? Groups require @"));
             }
             bail!(msg);
         }

@@ -2169,8 +2169,16 @@ fn kill_by_group_and_at_prefix() {
     )
     .expect("insert worker_b");
 
-    // Single agent kill with @ prefix works
+    // @ prefix is strictly for groups; @worker_a is not a group so it fails
     let (code, stdout, stderr) = h.run(["kill", "@worker_a"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("unknown or empty agent group '@worker_a'"),
+        "stderr={stderr}"
+    );
+
+    // Single agent kill works by plain agent name
+    let (code, stdout, stderr) = h.run(["kill", "worker_a"]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     assert!(stdout.contains("worker_a"), "stdout={stdout}");
 
