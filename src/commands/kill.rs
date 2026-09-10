@@ -274,8 +274,16 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     let hcom_dir = paths::hcom_dir();
     let initiator = resolve_initiator(&db, explicit_name.as_deref());
 
-    // If any target is "all", just kill all
-    if targets.iter().any(|t| t == "all") {
+    let catalogs = crate::commands::agent::Catalogs::load_for_groups(false, None).ok();
+
+    // If any target is "all" (or "@all" and not a catalog group), just kill all
+    if targets.iter().any(|t| {
+        t == "all"
+            || (t == "@all"
+                && !catalogs
+                    .as_ref()
+                    .is_some_and(|c| c.group_names().contains("all")))
+    }) {
         return kill_all(&db, &hcom_dir, &initiator);
     }
 
@@ -283,6 +291,26 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     for target in &targets {
         let exit = if let Some(tag) = target.strip_prefix("tag:") {
             kill_by_tag(&db, &hcom_dir, tag, &initiator)?
+        } else if let Some(stripped) = target.strip_prefix('@') {
+            if stripped.is_empty() {
+                eprintln!("Error: Empty target '@' is not allowed");
+                1
+            } else if let Some(tag) = stripped.strip_prefix("tag:") {
+                kill_by_tag(&db, &hcom_dir, tag, &initiator)?
+            } else if let Some(ref cats) = catalogs
+                && (cats.group_names().contains(stripped)
+                    || !cats.group_members(stripped).is_empty())
+            {
+                let members = cats.group_members(stripped);
+                if members.is_empty() {
+                    eprintln!("group '@{}' is empty", stripped);
+                    1
+                } else {
+                    kill_by_group(&db, &hcom_dir, stripped, &members, &initiator)?
+                }
+            } else {
+                kill_single(&db, &hcom_dir, target, &initiator)?
+            }
         } else {
             kill_single(&db, &hcom_dir, target, &initiator)?
         };
@@ -535,6 +563,125 @@ fn kill_by_tag(db: &HcomDb, hcom_dir: &std::path::Path, tag: &str, initiator: &s
     Ok(if failed > 0 || incomplete > 0 { 1 } else { 0 })
 }
 
+/// Kill instances belonging to a catalog group.
+fn kill_by_group(
+    db: &HcomDb,
+    hcom_dir: &std::path::Path,
+    group: &str,
+    members: &[String],
+    initiator: &str,
+) -> Result<i32> {
+    let member_set: HashSet<&str> = members.iter().map(|s| s.as_str()).collect();
+    let instances = db.iter_instances_full()?;
+
+    let group_instances: Vec<_> = instances
+        .into_iter()
+        .filter(|inst| {
+            inst.origin_device_id.is_none()
+                && (member_set.contains(inst.name.as_str())
+                    || member_set.contains(identity::get_full_name(inst).as_str()))
+                && (inst.pid.is_some() || inst.status != "stopped")
+        })
+        .collect();
+
+    let mut killed = 0;
+    let mut failed = 0;
+    let mut incomplete = 0;
+
+    let mut active_pids = HashSet::new();
+
+    for inst in &group_instances {
+        if let Some(pid) = inst.pid {
+            active_pids.insert(pid as u32);
+            let is_headless = inst.background != 0;
+            let (result, pane_closed, pane_retry_command, preset_name, pane_id) =
+                kill_instance(db, &inst.name, pid as u32, inst, is_headless);
+            let pane_info = pane_info_str(pane_closed, &preset_name, &pane_id);
+            match result {
+                terminal::KillResult::Sent => {
+                    println!(
+                        "Sent SIGTERM to process group {} for '{}'{}",
+                        pid, inst.name, pane_info
+                    );
+                    killed += 1;
+                }
+                terminal::KillResult::AlreadyDead => {
+                    println!(
+                        "Process group {} already terminated for '{}'",
+                        pid, inst.name
+                    );
+                    killed += 1;
+                }
+                terminal::KillResult::PermissionDenied => {
+                    eprintln!(
+                        "Permission denied to kill process group {} for '{}'",
+                        pid, inst.name
+                    );
+                    failed += 1;
+                }
+            }
+            incomplete +=
+                report_incomplete_pane_cleanup(result.into(), pane_retry_command.as_deref()) as i32;
+            stop_instance(db, &inst.name, initiator, "killed");
+        } else {
+            // No PID tracked but instance marked active — clean up DB entry
+            println!("No tracked process for '{}', stopping instance.", inst.name);
+            stop_instance(db, &inst.name, initiator, "killed");
+        }
+    }
+
+    // Also kill orphan processes belonging to this group
+    let orphans = pidtrack::get_orphan_processes(hcom_dir, Some(&active_pids));
+    let group_orphans: Vec<_> = orphans
+        .iter()
+        .filter(|o| o.names.iter().any(|n| member_set.contains(n.as_str())))
+        .collect();
+    for orphan in &group_orphans {
+        let names = orphan.names.join(", ");
+        let (result, pane_closed, pane_retry_command) = terminal::kill_process(
+            orphan.pid,
+            &orphan.terminal_preset,
+            &orphan.pane_id,
+            &orphan.process_id,
+            &orphan.kitty_listen_on,
+            &orphan.terminal_id,
+            &orphan.zellij_session_name,
+        );
+        let result = normalize_kill_result(&names, orphan.pid, result, pane_closed);
+        let pane_info = pane_info_str(pane_closed, &orphan.terminal_preset, &orphan.pane_id);
+        match result {
+            terminal::KillResult::Sent => {
+                println!(
+                    "Sent SIGTERM to stopped process group {} for '{}'{}",
+                    orphan.pid, names, pane_info
+                );
+                killed += 1;
+            }
+            terminal::KillResult::AlreadyDead => {
+                println!(
+                    "Process group {} already terminated for '{}'",
+                    orphan.pid, names
+                );
+            }
+            terminal::KillResult::PermissionDenied => {
+                eprintln!("Permission denied to kill process group {}", orphan.pid);
+                failed += 1;
+            }
+        }
+        incomplete +=
+            report_incomplete_pane_cleanup(result.into(), pane_retry_command.as_deref()) as i32;
+        pidtrack::remove_pid(hcom_dir, orphan.pid);
+    }
+
+    if group_instances.is_empty() && group_orphans.is_empty() {
+        eprintln!("No active agents in group '@{}'", group);
+        return Ok(1);
+    }
+
+    println!("Killed {} (group:@{})", killed, group);
+    Ok(if failed > 0 || incomplete > 0 { 1 } else { 0 })
+}
+
 /// Kill a single instance by name.
 fn kill_single(
     db: &HcomDb,
@@ -542,8 +689,10 @@ fn kill_single(
     target: &str,
     initiator: &str,
 ) -> Result<i32> {
+    let clean_target = target.strip_prefix('@').unwrap_or(target);
     // Resolve display name
-    let name = identity::resolve_display_name(db, target).unwrap_or_else(|| target.to_string());
+    let name = identity::resolve_display_name(db, clean_target)
+        .unwrap_or_else(|| clean_target.to_string());
 
     let inst = match db.get_instance_full(&name)? {
         Some(inst) => inst,
@@ -551,10 +700,11 @@ fn kill_single(
             // Check orphans
             let orphans = pidtrack::get_orphan_processes(hcom_dir, None);
             // Also match by PID number (TUI sends kill by PID for orphans)
-            let target_pid = target.parse::<u32>().ok();
+            let target_pid = clean_target.parse::<u32>().ok();
             if let Some(orphan) = orphans.iter().find(|o| {
-                o.names.contains(&target.to_string())
-                    || o.process_id == target
+                o.names.contains(&clean_target.to_string())
+                    || o.names.contains(&target.to_string())
+                    || o.process_id == clean_target
                     || target_pid == Some(o.pid)
             }) {
                 let (result, pane_closed, pane_retry_command) = terminal::kill_process(
@@ -566,20 +716,20 @@ fn kill_single(
                     &orphan.terminal_id,
                     &orphan.zellij_session_name,
                 );
-                let result = normalize_kill_result(target, orphan.pid, result, pane_closed);
+                let result = normalize_kill_result(clean_target, orphan.pid, result, pane_closed);
                 let pane_info =
                     pane_info_str(pane_closed, &orphan.terminal_preset, &orphan.pane_id);
                 match result {
                     terminal::KillResult::Sent => {
                         println!(
                             "Sent SIGTERM to process group {} for stopped instance '{}'{}",
-                            orphan.pid, target, pane_info
+                            orphan.pid, clean_target, pane_info
                         );
                     }
                     terminal::KillResult::AlreadyDead => {
                         println!(
                             "Process group {} not found for '{}' (already terminated){}",
-                            orphan.pid, target, pane_info
+                            orphan.pid, clean_target, pane_info
                         );
                     }
                     terminal::KillResult::PermissionDenied => {
@@ -597,7 +747,20 @@ fn kill_single(
                     },
                 );
             }
-            bail!("Agent '{}' not found", target);
+            let mut msg = format!("Agent '{}' not found", target);
+            if let Ok(cats) = crate::commands::agent::Catalogs::load_for_groups(false, None) {
+                if target.starts_with('@') {
+                    let groups = cats.group_names();
+                    if let Some(close) =
+                        crate::commands::agent::closest(clean_target, groups.iter())
+                    {
+                        msg.push_str(&format!(" (did you mean '@{close}'?)"));
+                    }
+                } else if cats.group_names().contains(clean_target) {
+                    msg.push_str(&format!("\nDid you mean @{clean_target}? Groups require @"));
+                }
+            }
+            bail!(msg);
         }
     };
 
@@ -760,6 +923,13 @@ mod tests {
         use clap::Parser;
         let args = KillArgs::try_parse_from(["kill", "nozu", "zelu"]).unwrap();
         assert_eq!(args.targets, vec!["nozu", "zelu"]);
+    }
+
+    #[test]
+    fn test_kill_args_parse_at_group() {
+        use clap::Parser;
+        let args = KillArgs::try_parse_from(["kill", "@workers"]).unwrap();
+        assert_eq!(args.targets, vec!["@workers"]);
     }
 
     #[test]

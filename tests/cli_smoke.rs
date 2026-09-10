@@ -2126,6 +2126,72 @@ fn agent_group_dry_run_includes_agents_hidden_by_selective_import() {
 }
 
 #[test]
+fn kill_by_group_and_at_prefix() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{
+            "worker_a":{"dir":"/tmp","cli":"claude","groups":["workers"]},
+            "worker_b":{"dir":"/tmp","cli":"gemini","groups":["workers"]}
+        }}"#,
+    )
+    .expect("write catalog");
+
+    // Initially nothing running, kill @workers fails with no active agents
+    let (code, stdout, stderr) = h.run(["kill", "@workers"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("No active agents in group '@workers'"),
+        "stderr={stderr}"
+    );
+
+    // Bare group name without @ suggests @workers
+    let (code, stdout, stderr) = h.run(["kill", "workers"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("Agent 'workers' not found\nDid you mean @workers? Groups require @"),
+        "stderr={stderr}"
+    );
+
+    // Populate active instances for worker_a and worker_b
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO instances (name, status, status_time, created_at, tool, pid) \
+         VALUES ('worker_a', 'listening', ?1, ?1, 'claude', 999991)",
+        rusqlite::params![now],
+    )
+    .expect("insert worker_a");
+    conn.execute(
+        "INSERT INTO instances (name, status, status_time, created_at, tool, pid) \
+         VALUES ('worker_b', 'listening', ?1, ?1, 'gemini', 999992)",
+        rusqlite::params![now],
+    )
+    .expect("insert worker_b");
+
+    // Single agent kill with @ prefix works
+    let (code, stdout, stderr) = h.run(["kill", "@worker_a"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("worker_a"), "stdout={stdout}");
+
+    // Group kill works and kills remaining member worker_b
+    let (code, stdout, stderr) = h.run(["kill", "@workers"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("Killed 1 (group:@workers)"),
+        "stdout={stdout}"
+    );
+
+    // Now group is completely stopped
+    let (code, stdout, stderr) = h.run(["kill", "@workers"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("No active agents in group '@workers'"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
 fn agent_zsh_completions_add_names_and_groups_separately() {
     let h = Hcom::new();
     let (code, stdout, stderr) = h.run(["agent", "completions", "zsh"]);
@@ -2313,8 +2379,14 @@ fn agent_continue_dry_run_builds_handoff_prompt_from_previous_session() {
     )
     .expect("insert instance");
 
-    let (code, stdout, stderr) =
-        h.run(["agent", "solo", "--cli", "claude", "--continue", "--dry-run"]);
+    let (code, stdout, stderr) = h.run([
+        "agent",
+        "solo",
+        "--cli",
+        "claude",
+        "--continue",
+        "--dry-run",
+    ]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     assert!(stdout.contains("claude --as solo"), "stdout={stdout}");
     assert!(stdout.contains("--hcom-prompt"), "stdout={stdout}");
@@ -2323,11 +2395,22 @@ fn agent_continue_dry_run_builds_handoff_prompt_from_previous_session() {
 
     let (code, show_out, stderr) = h.run(["agent", "show", "solo", "--continue"]);
     assert_eq!(code, 0, "stdout={show_out} stderr={stderr}");
-    assert!(show_out.contains("start:     continue"), "stdout={show_out}");
+    assert!(
+        show_out.contains("start:     continue"),
+        "stdout={show_out}"
+    );
 
     let (code, stdout_last, stderr) = h.run([
-        "agent", "solo", "--cli", "claude", "--continue", "--last", "1", "--dry-run",
-        "--hcom-prompt", "finish now",
+        "agent",
+        "solo",
+        "--cli",
+        "claude",
+        "--continue",
+        "--last",
+        "1",
+        "--dry-run",
+        "--hcom-prompt",
+        "finish now",
     ]);
     assert_eq!(code, 0, "stdout={stdout_last} stderr={stderr}");
     assert!(
@@ -2336,7 +2419,6 @@ fn agent_continue_dry_run_builds_handoff_prompt_from_previous_session() {
     );
     assert!(stdout_last.contains("finish now"), "stdout={stdout_last}");
 }
-
 
 #[test]
 fn targeted_send_starts_catalog_agent_and_reports_unacknowledged_message_pending() {

@@ -309,12 +309,11 @@ mod host_label {
             //    targetable name; without this display-only override Herdr's
             //    sidebar would show that name in both rows. Guard by agent kind
             //    so stale metadata cannot apply after the pane changes tools.
-            if !self.display_agent_set {
-                if let Some(agent) = crate::terminal::herdr_agent_label(tool) {
-                    if self.send(|backend| backend.report_metadata(agent)) {
-                        self.display_agent_set = true;
-                    }
-                }
+            if !self.display_agent_set
+                && let Some(agent) = crate::terminal::herdr_agent_label(tool)
+                && self.send(|backend| backend.report_metadata(agent))
+            {
+                self.display_agent_set = true;
             }
 
             // 4. Set herdr's canonical agent `name` once so `herdr agent

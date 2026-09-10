@@ -412,6 +412,7 @@ const START_HELP: &[HelpEntry] = &[
 
 const KILL_HELP: &[HelpEntry] = &[
     ("kill <name>", "Kill process (+ close terminal pane)"),
+    ("kill @<group>", "Kill all agents in catalog group"),
     ("kill tag:<name>", "Kill all with tag"),
     ("kill all", "Kill all with tracked PIDs"),
     ("", ""),
@@ -947,7 +948,7 @@ Launch:\n\
   hcom [N] {launchable} [flags] [tool-args]\n\
   hcom r <name>                         Resume stopped agent\n\
   hcom f <name>                         Fork agent session ({forkable})\n\
-  hcom kill <name(s)|tag:T|all>         Kill + close terminal pane\n\
+  hcom kill <name(s)|@group|tag:T|all>   Kill + close terminal pane\n\
 \n\
   Any flag hcom does not know is forwarded verbatim to the tool; -- ends\n\
   hcom's own flags. Use --dry-run to see the command without running it.\n\

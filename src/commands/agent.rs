@@ -628,7 +628,7 @@ fn project_root_of(hcom_dir: &Path) -> PathBuf {
     }
 }
 
-struct Catalogs {
+pub(crate) struct Catalogs {
     base_files: Vec<CatalogFile>,
     project_files: Vec<CatalogFile>,
     project_root: Option<PathBuf>,
@@ -639,7 +639,7 @@ impl Catalogs {
         Self::load_with_mode(no_project, explicit, false)
     }
 
-    fn load_for_groups(no_project: bool, explicit: Option<&Path>) -> Result<Self> {
+    pub(crate) fn load_for_groups(no_project: bool, explicit: Option<&Path>) -> Result<Self> {
         Self::load_with_mode(no_project, explicit, true)
     }
 
@@ -788,7 +788,7 @@ impl Catalogs {
         Self::resolve_from(&self.base_files, &self.base_files, name)
     }
 
-    fn group_members(&self, group: &str) -> Vec<String> {
+    pub(crate) fn group_members(&self, group: &str) -> Vec<String> {
         self.names()
             .into_keys()
             .filter(|name| {
@@ -798,7 +798,7 @@ impl Catalogs {
             .collect()
     }
 
-    fn group_names(&self) -> BTreeSet<String> {
+    pub(crate) fn group_names(&self) -> BTreeSet<String> {
         self.names()
             .into_keys()
             .filter_map(|name| self.resolve(&name))
@@ -981,7 +981,10 @@ fn unknown_agent_error(name: &str, catalogs: &Catalogs) -> anyhow::Error {
     anyhow::anyhow!(msg)
 }
 
-fn closest<'a, I: Iterator<Item = &'a String>>(target: &str, candidates: I) -> Option<String> {
+pub(crate) fn closest<'a, I: Iterator<Item = &'a String>>(
+    target: &str,
+    candidates: I,
+) -> Option<String> {
     let mut best: Option<(usize, String)> = None;
     for c in candidates {
         let d = levenshtein(target, c);
@@ -1431,12 +1434,19 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         instructions: nonempty(def.instructions),
         bundle_args: Vec::new(),
         bundle_access_error: None,
-        resume: if cli.continue_session.or(def.continue_session).unwrap_or(false) {
+        resume: if cli
+            .continue_session
+            .or(def.continue_session)
+            .unwrap_or(false)
+        {
             false
         } else {
             cli.resume.or(def.resume).unwrap_or(false)
         },
-        continue_session: cli.continue_session.or(def.continue_session).unwrap_or(false),
+        continue_session: cli
+            .continue_session
+            .or(def.continue_session)
+            .unwrap_or(false),
         continue_last: cli.continue_last,
         env: def.env,
         extra,
@@ -1906,10 +1916,10 @@ fn cmd_launch(name: &str, rest: &[String]) -> Result<i32> {
 fn launch_named(name: &str, cli: &Cli, catalogs: &Catalogs) -> Result<i32> {
     let def = catalogs
         .resolve(name)
-        .ok_or_else(|| unknown_agent_error(name, &catalogs))?;
+        .ok_or_else(|| unknown_agent_error(name, catalogs))?;
     let instance_name = cli.as_name.as_deref().unwrap_or(name);
     let window_explicit = def.window.is_some() || cli.def.window.is_some();
-    let mut eff = effective(instance_name, def, &cli);
+    let mut eff = effective(instance_name, def, cli);
     let configured_terminal = configured_terminal();
     apply_herdr_placement(
         &mut eff,
@@ -1943,7 +1953,7 @@ fn launch_named(name: &str, cli: &Cli, catalogs: &Catalogs) -> Result<i32> {
         }
     }
 
-    launch(&eff, &cli, eff.resume)
+    launch(&eff, cli, eff.resume)
 }
 
 fn cmd_launch_group(group: &str, rest: &[String]) -> Result<i32> {
@@ -2098,11 +2108,13 @@ fn build_continue_prompt(
         .rev()
         .collect();
 
-    let mut out = format!(
-        "# Continuation of session for `{agent_name}`\nPrevious tool: `{agent_type}`\n\n"
-    );
+    let mut out =
+        format!("# Continuation of session for `{agent_name}`\nPrevious tool: `{agent_type}`\n\n");
     if !initial_prompt.is_empty() {
-        out.push_str(&format!("## Initial Goal\n> {}\n\n", initial_prompt.replace('\n', "\n> ")));
+        out.push_str(&format!(
+            "## Initial Goal\n> {}\n\n",
+            initial_prompt.replace('\n', "\n> ")
+        ));
     }
     if !files.is_empty() {
         out.push_str("## Modified Files\n");
@@ -2111,14 +2123,21 @@ fn build_continue_prompt(
         }
         out.push('\n');
     }
-    out.push_str(&format!("## Recent Activity (last {} exchanges)\n", recent_exchanges.len()));
+    out.push_str(&format!(
+        "## Recent Activity (last {} exchanges)\n",
+        recent_exchanges.len()
+    ));
     for ex in recent_exchanges {
         out.push_str(&format!("### Step {}\n", ex.position));
         if !ex.user.trim().is_empty() {
             out.push_str(&format!("- **User:** {}\n", ex.user.trim()));
         }
         if !ex.action.trim().is_empty() {
-            out.push_str(&format!("- **Assistant ({}):** {}\n", agent_type, ex.action.trim()));
+            out.push_str(&format!(
+                "- **Assistant ({}):** {}\n",
+                agent_type,
+                ex.action.trim()
+            ));
         }
     }
     if let Some(cp) = custom_prompt.filter(|s| !s.trim().is_empty()) {
@@ -2142,8 +2161,7 @@ fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
         let db = HcomDb::open()?;
         let cfg = crate::commands::launch::load_hcom_config();
         let last_n = eff.continue_last.unwrap_or(cfg.continue_last as usize);
-        let continue_prompt =
-            build_continue_prompt(&db, &eff.name, last_n, eff.prompt.as_deref())?;
+        let continue_prompt = build_continue_prompt(&db, &eff.name, last_n, eff.prompt.as_deref())?;
         eff_owned = eff.clone();
         eff_owned.prompt = Some(continue_prompt);
         &eff_owned
@@ -2506,15 +2524,15 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     if let Some(path) = &eff.instructions {
         println!("instructions: {path}");
     }
-    if eff.continue_session {
-        if let Ok(db) = HcomDb::open() {
-            let cfg = crate::commands::launch::load_hcom_config();
-            let last_n = eff.continue_last.unwrap_or(cfg.continue_last as usize);
-            if let Ok(continue_prompt) =
-                build_continue_prompt(&db, &eff.name, last_n, eff.prompt.as_deref())
-            {
-                eff.prompt = Some(continue_prompt);
-            }
+    if eff.continue_session
+        && let Ok(db) = HcomDb::open()
+    {
+        let cfg = crate::commands::launch::load_hcom_config();
+        let last_n = eff.continue_last.unwrap_or(cfg.continue_last as usize);
+        if let Ok(continue_prompt) =
+            build_continue_prompt(&db, &eff.name, last_n, eff.prompt.as_deref())
+        {
+            eff.prompt = Some(continue_prompt);
         }
     }
     println!(

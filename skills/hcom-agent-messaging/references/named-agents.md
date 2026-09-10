@@ -158,7 +158,8 @@ The listing shows the effective CLI and its resolved model. An unset table value
 `model: null`. Models from the selected CLI's tool profile are resolved before display.
 
 `groups` is a list of catalog-only launch sets; it does not affect runtime display names, message
-routing, or `hcom kill tag:...`. `hcom agent @<group>` processes members in name order, applies its
+routing, or `hcom kill tag:...`. `hcom agent @<group>` launches every agent in a catalog group, and
+`hcom kill @<group>` terminates all active agents in that group. `hcom agent @<group>` processes members in name order, applies its
 flags to every member, continues after individual failures, and returns exit 1 if any member
 failed. `--as`, `--attach`, and `terminal: here` are invalid for group launches.
 

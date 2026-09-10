@@ -263,7 +263,7 @@ The selected `tools.<cli>` profile replaces shared scalar values and appends its
 
 `reasoning` maps to `--effort` for Claude and Antigravity (`agy`), and to Codex's `model_reasoning_effort`. Other CLIs reject the field at launch; use `tools.<cli>.args` when that CLI has its own reasoning control. `--reasoning` overrides the catalog value.
 
-`groups` is independent of `tag`: it does not change runtime display names, message routing, or `hcom kill tag:...`. An agent can belong to multiple catalog groups. Group membership merges additively across catalog layers and duplicate names are ignored. Group names use lowercase letters, numbers, and underscores.
+`groups` is independent of `tag`: it does not change runtime display names, message routing, or `hcom kill tag:...`. `hcom agent @<group>` launches every agent in a catalog group, and `hcom kill @<group>` terminates all active agents in that group. An agent can belong to multiple catalog groups. Group membership merges additively across catalog layers and duplicate names are ignored. Group names use lowercase letters, numbers, and underscores.
 
 ## Command-line flags
 

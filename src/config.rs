@@ -396,10 +396,7 @@ impl HcomConfig {
         if !(1..=100).contains(&self.continue_last) {
             errors.insert(
                 "continue_last".into(),
-                format!(
-                    "continue_last must be 1-100, got {}",
-                    self.continue_last
-                ),
+                format!("continue_last must be 1-100, got {}", self.continue_last),
             );
         }
 
