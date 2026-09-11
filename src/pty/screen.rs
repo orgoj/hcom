@@ -540,7 +540,8 @@ impl ScreenTracker {
     }
 
     /// Check if text after a prompt character is dim (placeholder styling).
-    /// Returns `Some(true)` if majority dim (placeholder), `Some(false)` if real input.
+    /// Returns `Some(true)` if all visible characters are dim (placeholder),
+    /// `Some(false)` if any non-dim characters exist (real user input) or no styled text.
     /// Returns `None` if the prompt glyph can't be located on the row.
     fn is_dim_after_prompt(&self, row: u16, prompt_char: &str) -> Option<bool> {
         let screen = self.parser.screen();
@@ -558,8 +559,8 @@ impl ScreenTracker {
         }
         let prompt_col = prompt_col?;
 
-        // Scan cells after prompt (skip prompt + space)
-        let start_col = prompt_col + 2;
+        // Scan cells after prompt glyph (skip prompt glyph itself; whitespace is skipped below)
+        let start_col = prompt_col + 1;
         let mut dim_count: u32 = 0;
         let mut non_dim_count: u32 = 0;
 
@@ -581,7 +582,7 @@ impl ScreenTracker {
             }
         }
 
-        Some(!(non_dim_count > 0 && non_dim_count > dim_count))
+        Some(dim_count > 0 && non_dim_count == 0)
     }
 
     /// Check if prompt is empty (tool-specific)
@@ -700,7 +701,7 @@ impl ScreenTracker {
 
             let is_placeholder = self
                 .is_dim_after_prompt(row_idx as u16, &prompt_char.to_string())
-                .unwrap_or(true);
+                .unwrap_or(false);
             return Some((text, is_placeholder));
         }
 
@@ -2026,6 +2027,45 @@ mod tests {
         t.process(&data);
         t.process("────────────────────\r\n".as_bytes());
         assert_eq!(t.get_claude_input_text(), Some(String::new()));
+    }
+
+    #[test]
+    fn claude_prompt_with_short_user_text_and_dim_ghost_text() {
+        // User typed "hi" (normal intensity), followed by dim auto-completion / ghost text.
+        // Even though dim characters outnumber non-dim characters, this is real user input
+        // and must NEVER be treated as an empty placeholder prompt.
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        let mut data = Vec::new();
+        data.extend_from_slice("❯ hi".as_bytes());
+        data.extend_from_slice(b"\x1b[2m"); // SGR dim on
+        data.extend_from_slice(b" suggestions and ghost text");
+        data.extend_from_slice(b"\x1b[0m"); // SGR reset
+        data.extend_from_slice(b"\r\n");
+        t.process(&data);
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        assert!(!t.is_prompt_empty("claude"));
+        assert_eq!(
+            t.get_claude_input_text(),
+            Some("hi suggestions and ghost text".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_prompt_with_single_char_user_text_and_dim_hints() {
+        // User typed a single character "a" (non-dim) while right-aligned dim text
+        // (like shortcuts or hints) exists on the row. Must not be treated as empty.
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        let mut data = Vec::new();
+        data.extend_from_slice("❯ a".as_bytes());
+        data.extend_from_slice(b"\x1b[2m"); // SGR dim on
+        data.extend_from_slice(b"            ? for shortcuts");
+        data.extend_from_slice(b"\x1b[0m"); // SGR reset
+        data.extend_from_slice(b"\r\n");
+        t.process(&data);
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        assert!(!t.is_prompt_empty("claude"));
     }
 
     // ---- trim_with_nbsp ----
