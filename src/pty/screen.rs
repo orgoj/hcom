@@ -750,10 +750,11 @@ impl ScreenTracker {
         };
 
         // Determine insertion column (where input text starts, skipping prompt + space)
-        let insertion_col = if screen
-            .cell(row, prompt_col + 1)
-            .is_some_and(|c| c.contents().chars().all(|ch| ch.is_whitespace() || ch == '\u{00A0}'))
-        {
+        let insertion_col = if screen.cell(row, prompt_col + 1).is_some_and(|c| {
+            c.contents()
+                .chars()
+                .all(|ch| ch.is_whitespace() || ch == '\u{00A0}')
+        }) {
             prompt_col + 2
         } else {
             prompt_col + 1
@@ -2260,7 +2261,10 @@ mod tests {
         // Cursor at row 1, col 4 (1-based: row 2, col 5) - after "hi"
         t.process(b"\x1b[2;5H");
         assert!(!t.is_prompt_empty("claude"));
-        assert_eq!(t.get_claude_input_text(), Some("hi suggestions".to_string()));
+        assert_eq!(
+            t.get_claude_input_text(),
+            Some("hi suggestions".to_string())
+        );
     }
 
     #[test]
