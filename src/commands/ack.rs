@@ -18,9 +18,7 @@ pub fn cmd_ack(db: &HcomDb, args: &AckArgs, ctx: Option<&CommandContext>) -> i32
     let resolved = ctx
         .and_then(|c| c.identity.clone())
         .map(Ok)
-        .unwrap_or_else(|| {
-            identity::resolve_identity(db, explicit_name, None, None, None, None, None)
-        });
+        .unwrap_or_else(|| identity::resolve_identity(db, explicit_name, None, None, None, None));
     let identity = match resolved {
         Ok(identity) => identity,
         Err(error) => {

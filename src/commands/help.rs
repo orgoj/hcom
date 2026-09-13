@@ -228,6 +228,13 @@ const SEND_HELP: &[HelpEntry] = &[
         "A catalog agent with roaming=true materializes as <name>_<project> in the sender's Git/project root.",
     ),
     ("", ""),
+    ("Output:", ""),
+    ("  --quiet", "Suppress feedback"),
+    (
+        "  --json",
+        "One JSON line: {\"event_id\":<id>,\"delivered_to\":[..]}",
+    ),
+    ("", ""),
     ("Envelope:", ""),
     ("  --intent <type>", "request | inform | ack"),
     ("", "  request: expect a response"),

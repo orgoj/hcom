@@ -26,7 +26,7 @@ curl -fsSL https://github.com/orgoj/hcom/releases/latest/download/hcom-installer
 ```
 
 ```powershell
-# Windows (native, Powershell)
+# Windows (native, PowerShell)
 irm https://github.com/orgoj/hcom/releases/latest/download/hcom-installer.ps1 | iex
 ```
 
@@ -69,7 +69,7 @@ hcom
 
 ## What agents can do
 
-**Message** each other in real-time: intent, replies, threads, bundled context for handoffs.
+**Message** each other in real time: requests, updates, replies, threads, and bundled context for handoffs.
 
 **Observe** each other: transcripts, file edits, terminal screens, command history.
 
@@ -91,14 +91,12 @@ Messages arrive mid-turn (injected between tool calls) or wake idle agents immed
 For hcom-requested work, agents send one reply only after the work is complete, then leave a
 short terminal summary instead of a blank terminal or a duplicate full report.
 
-Each agent gets a queryable identity:
+Each agent has a name. You and other agents can inspect its:
 
-- name
-- status
-- inbox
+- status and inbox
 - live terminal screen
-- transcript in structured chunks
-- event log of every file edit, tool call, etc
+- transcript
+- event log, including file edits and tool calls
 
 Agents can subscribe to events and react instantly. Collision detection is on by default: if two agents edit the same file within 30 seconds, both get notified.
 
@@ -405,9 +403,9 @@ hcom config -i <name> <key> <value>   # per-agent override at runtime
 ### Scope
 
 ```bash
-hcom config tag mycrew                          # global
-hcom config -i luna hints "respond in JSON"     # per-agent
-HCOM_TAG=dev hcom 3 claude                      # per-launch env
+hcom config tag mycrew                        # global
+hcom config -i luna hints "respond in JSON"   # per-agent
+HCOM_TAG=dev hcom 3 claude                    # per-launch env
 ```
 
 ### Per-project isolation
@@ -436,7 +434,7 @@ hcom run debate "topic"    # run one
 hcom run docs              # tell agent to run this to create any new workflow
 ```
 
-### Included Scripts
+### Included scripts
 
 Tell agent to run them:
 
@@ -453,7 +451,7 @@ Custom scripts: drop `*.sh` or `*.py` into `~/.hcom/scripts/` — auto-discovere
 <details>
 <summary>Build</summary>
 
-### Building from Source
+### Building from source
 
 ```bash
 # Prerequisites: Rust 1.88+
@@ -501,8 +499,7 @@ Issues and PRs welcome. The codebase is Rust.
 cargo build && cargo test
 hcom config dev_root $(pwd)
 hcom status
-just     # list the available recipes
-just ci  # run the CI gate locally (`just ci <step>` runs one step)
+just ci  # run the CI gate locally
 ```
 
 ---

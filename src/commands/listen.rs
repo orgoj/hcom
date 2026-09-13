@@ -137,7 +137,7 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
             Ok((id.clone(), id.name.clone()))
         } else {
             let name = explicit_name.or(c.explicit_name.as_deref());
-            match identity::resolve_identity(db, name, None, None, None, None, None) {
+            match identity::resolve_identity(db, name, None, None, None, None) {
                 Ok(id) => {
                     let n = id.name.clone();
                     Ok((id, n))
@@ -146,7 +146,7 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
             }
         }
     } else {
-        match identity::resolve_identity(db, explicit_name, None, None, None, None, None) {
+        match identity::resolve_identity(db, explicit_name, None, None, None, None) {
             Ok(id) => {
                 let n = id.name.clone();
                 Ok((id, n))
