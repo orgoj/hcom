@@ -543,37 +543,10 @@ pub fn dispatch_codex_hook_native(hook_name: &str) -> i32 {
 // Settings management — hooks.json, config.toml, execpolicy
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    /// Launch-time override used while preparing one Codex child. A thread-local
-    /// scope avoids mutating the process environment while keeping the existing
-    /// hook-management helpers reusable for manual `hcom hooks` commands.
-    static CODEX_CONFIG_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const {
-        std::cell::RefCell::new(None)
-    };
-}
-
-fn with_codex_config_dir<T>(codex_home: &Path, operation: impl FnOnce() -> T) -> T {
-    struct Restore(Option<PathBuf>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            CODEX_CONFIG_DIR_OVERRIDE.with(|slot| {
-                slot.replace(self.0.take());
-            });
-        }
-    }
-
-    let previous = CODEX_CONFIG_DIR_OVERRIDE.with(|slot| slot.replace(Some(codex_home.into())));
-    let _restore = Restore(previous);
-    operation()
-}
-
 /// Resolve the Codex config directory.
 ///
 /// Priority: CODEX_HOME env var → tool_config_root()/.codex
 fn codex_config_dir() -> PathBuf {
-    if let Some(path) = CODEX_CONFIG_DIR_OVERRIDE.with(|slot| slot.borrow().clone()) {
-        return path;
-    }
     if let Ok(dir) = std::env::var("CODEX_HOME")
         && !dir.is_empty()
     {
@@ -584,17 +557,29 @@ fn codex_config_dir() -> PathBuf {
 
 /// Get path to Codex config.toml.
 pub fn get_codex_config_path() -> PathBuf {
-    codex_config_dir().join("config.toml")
+    codex_config_path_at(&codex_config_dir())
 }
 
 /// Get path to Codex hooks.json.
 pub fn get_codex_hooks_path() -> PathBuf {
-    codex_config_dir().join("hooks.json")
+    codex_hooks_path_at(&codex_config_dir())
 }
 
 /// Get path to Codex execpolicy rules directory.
 pub fn get_codex_rules_path() -> PathBuf {
-    codex_config_dir().join("rules")
+    codex_rules_path_at(&codex_config_dir())
+}
+
+fn codex_config_path_at(codex_home: &Path) -> PathBuf {
+    codex_home.join("config.toml")
+}
+
+fn codex_hooks_path_at(codex_home: &Path) -> PathBuf {
+    codex_home.join("hooks.json")
+}
+
+fn codex_rules_path_at(codex_home: &Path) -> PathBuf {
+    codex_home.join("rules")
 }
 
 /// Strip a Windows verbatim prefix and collapse `.`/`..` components.
@@ -1198,7 +1183,7 @@ fn test_hook_list_from_hooks_json(hooks_path: &Path) -> Result<Vec<CodexHookList
         .collect())
 }
 
-fn fetch_codex_hook_list(cwd: &Path) -> Result<Vec<CodexHookListEntry>, String> {
+fn fetch_codex_hook_list(cwd: &Path, codex_home: &Path) -> Result<Vec<CodexHookListEntry>, String> {
     #[cfg(test)]
     {
         let _ = cwd;
@@ -1209,14 +1194,14 @@ fn fetch_codex_hook_list(cwd: &Path) -> Result<Vec<CodexHookListEntry>, String> 
             let json: Value = serde_json::from_str(&value).map_err(|e| e.to_string())?;
             return parse_codex_hook_list_entries(&json);
         }
-        test_hook_list_from_hooks_json(&get_codex_hooks_path())
+        test_hook_list_from_hooks_json(&codex_hooks_path_at(codex_home))
     }
 
     #[cfg(not(test))]
     {
         let mut child = crate::terminal::executable_command("codex")
             .args(["app-server", "--listen", "stdio://"])
-            .env("CODEX_HOME", codex_config_dir())
+            .env("CODEX_HOME", codex_home)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1283,9 +1268,12 @@ fn fetch_codex_hook_list(cwd: &Path) -> Result<Vec<CodexHookListEntry>, String> 
     }
 }
 
-fn fetch_codex_hcom_hook_entries(cwd: &Path) -> Result<Vec<CodexHookTrustEntry>, String> {
-    let entries = fetch_codex_hook_list(cwd)?;
-    hcom_trust_entries_from_hook_list(&entries, &get_codex_hooks_path())
+fn fetch_codex_hcom_hook_entries(
+    cwd: &Path,
+    codex_home: &Path,
+) -> Result<Vec<CodexHookTrustEntry>, String> {
+    let entries = fetch_codex_hook_list(cwd, codex_home)?;
+    hcom_trust_entries_from_hook_list(&entries, &codex_hooks_path_at(codex_home))
 }
 
 #[cfg(not(test))]
@@ -1551,13 +1539,14 @@ fn write_hcom_hook_trust_state(
 fn write_hcom_trust_state_from_hook_list(
     hook_list: &[CodexHookListEntry],
     codex_cli_version: &str,
+    codex_home: &Path,
 ) -> Result<(), String> {
-    let hooks_path = get_codex_hooks_path();
+    let hooks_path = codex_hooks_path_at(codex_home);
     let entries = hcom_trust_entries_from_hook_list(hook_list, &hooks_path)?;
     let definition_hashes =
         hcom_hook_definition_hashes_from_hooks_path(&hooks_path).map_err(|e| e.to_string())?;
     write_hcom_hook_trust_state(
-        &get_codex_config_path(),
+        &codex_config_path_at(codex_home),
         &hooks_path,
         &entries,
         &HashSet::new(),
@@ -1572,7 +1561,10 @@ fn write_hcom_trust_state_from_hook_list(
 /// Exact trust state is always preferred; the invocation-wide bypass flag is a
 /// last resort and is only permitted when hcom can show that nothing but its own
 /// hooks would be unlocked by it.
-pub(crate) fn resolve_codex_hook_trust_state(launch_dir: &Path) -> CodexHookTrustState {
+pub(crate) fn resolve_codex_hook_trust_state_at(
+    launch_dir: &Path,
+    codex_home: &Path,
+) -> CodexHookTrustState {
     let codex_cli_version = match codex_hook_trust_version() {
         // Codex predates the trust gate — nothing is holding hcom's hooks back.
         Ok(None) => return CodexHookTrustState::Trusted,
@@ -1593,10 +1585,19 @@ pub(crate) fn resolve_codex_hook_trust_state(launch_dir: &Path) -> CodexHookTrus
         // This is the launch-time guardrail. Cheap status/verify paths only
         // inspect local metadata, but before opening Codex we ask Codex for
         // authoritative currentHash values and rewrite hcom's trust entries.
-        match fetch_codex_hook_list(launch_dir) {
+        match fetch_codex_hook_list(launch_dir, codex_home) {
             Ok(hook_list) => {
-                match write_hcom_trust_state_from_hook_list(&hook_list, &codex_cli_version) {
-                    Ok(()) if codex_hcom_hooks_trusted_locally_for_version(&codex_cli_version) => {
+                match write_hcom_trust_state_from_hook_list(
+                    &hook_list,
+                    &codex_cli_version,
+                    codex_home,
+                ) {
+                    Ok(())
+                        if codex_hcom_hooks_trusted_locally_for_version(
+                            &codex_cli_version,
+                            codex_home,
+                        ) =>
+                    {
                         return CodexHookTrustState::Trusted;
                     }
                     Ok(()) => log::log_warn(
@@ -1614,7 +1615,8 @@ pub(crate) fn resolve_codex_hook_trust_state(launch_dir: &Path) -> CodexHookTrus
                 // Self-heal did not land, but Codex just reported every hook it
                 // can see along with its trust status, so the bypass can be
                 // judged precisely instead of guessed at.
-                let foreign = foreign_hooks_unlocked_by_bypass(&hook_list, &get_codex_hooks_path());
+                let foreign =
+                    foreign_hooks_unlocked_by_bypass(&hook_list, &codex_hooks_path_at(codex_home));
                 return if foreign.is_empty() {
                     CodexHookTrustState::BypassSafeFromHooksList
                 } else {
@@ -1635,7 +1637,7 @@ pub(crate) fn resolve_codex_hook_trust_state(launch_dir: &Path) -> CodexHookTrus
                 // Worth its own step because a flaky or slow app-server is the
                 // ordinary failure here, and it must not turn every launch into
                 // a false alarm.
-                if codex_hcom_hooks_trusted_locally_for_version(&codex_cli_version) {
+                if codex_hcom_hooks_trusted_locally_for_version(&codex_cli_version, codex_home) {
                     log::log_warn(
                         "codex",
                         "codex.hook_list_unavailable_state_exact",
@@ -1658,7 +1660,7 @@ pub(crate) fn resolve_codex_hook_trust_state(launch_dir: &Path) -> CodexHookTrus
 
     // Blind mode: no authoritative inventory. Only bypass when a purely local
     // scan proves that nothing but hcom's own hooks could be in scope.
-    match scan_local_codex_hook_definitions(launch_dir) {
+    match scan_local_codex_hook_definitions(launch_dir, codex_home) {
         Ok(foreign) if foreign.is_empty() => CodexHookTrustState::BypassSafeFromLocalScan,
         Ok(foreign) => CodexHookTrustState::BypassUnsafe {
             reason: format!(
@@ -1670,13 +1672,6 @@ pub(crate) fn resolve_codex_hook_trust_state(launch_dir: &Path) -> CodexHookTrus
             reason: format!("local hook scan was inconclusive: {e}"),
         },
     }
-}
-
-pub(crate) fn resolve_codex_hook_trust_state_at(
-    launch_dir: &Path,
-    codex_home: &Path,
-) -> CodexHookTrustState {
-    with_codex_config_dir(codex_home, || resolve_codex_hook_trust_state(launch_dir))
 }
 
 /// Enumerate every Codex hook definition that could be in scope for a launch in
@@ -1694,9 +1689,11 @@ pub(crate) fn resolve_codex_hook_trust_state_at(
 /// hcom writes exactly one hooks file, so only handlers in that file with a
 /// command hcom installs are hcom's; everything found anywhere else is foreign.
 /// `Err` means the scan could not be completed and the caller must fail closed.
-fn scan_local_codex_hook_definitions(launch_dir: &Path) -> Result<Vec<String>, String> {
-    let codex_home = codex_config_dir();
-    let hcom_hooks_path = get_codex_hooks_path();
+fn scan_local_codex_hook_definitions(
+    launch_dir: &Path,
+    codex_home: &Path,
+) -> Result<Vec<String>, String> {
+    let hcom_hooks_path = codex_hooks_path_at(codex_home);
     let expected = expected_hcom_hook_commands();
     let mut foreign = Vec::new();
 
@@ -1707,14 +1704,14 @@ fn scan_local_codex_hook_definitions(launch_dir: &Path) -> Result<Vec<String>, S
         collect_foreign_hooks_from_config_toml(&user_config_path, config, &expected, &mut foreign)?;
         note_declared_plugins(&user_config_path, config, &mut foreign);
     }
-    note_possible_plugin_hooks(&codex_home, &mut foreign);
+    note_possible_plugin_hooks(codex_home, &mut foreign);
 
     let markers = codex_project_root_markers(user_config.as_ref())?;
     for dir in codex_project_layer_dirs(launch_dir, &markers)? {
         let dot_codex = dir.join(".codex");
         // Codex skips a project `.codex` that resolves to CODEX_HOME itself
         // (codex-rs/config/src/loader/mod.rs:1256-1259).
-        if paths_equivalent(&dot_codex, &codex_home) || !dot_codex.is_dir() {
+        if paths_equivalent(&dot_codex, codex_home) || !dot_codex.is_dir() {
             continue;
         }
         collect_foreign_hooks_from_hooks_json(
@@ -1913,8 +1910,11 @@ fn note_possible_plugin_hooks(codex_home: &Path, out: &mut Vec<String>) {
     }
 }
 
-fn codex_hcom_hooks_trusted_locally_for_version(codex_cli_version: &str) -> bool {
-    let hooks_path = get_codex_hooks_path();
+fn codex_hcom_hooks_trusted_locally_for_version(
+    codex_cli_version: &str,
+    codex_home: &Path,
+) -> bool {
+    let hooks_path = codex_hooks_path_at(codex_home);
     let hooks_content = match std::fs::read_to_string(&hooks_path) {
         Ok(content) => content,
         Err(_) => return false,
@@ -1937,7 +1937,7 @@ fn codex_hcom_hooks_trusted_locally_for_version(codex_cli_version: &str) -> bool
     let keys: HashSet<String> = entries.into_iter().map(|entry| entry.key).collect();
 
     codex_hcom_hook_keys_trusted_for_version(
-        &get_codex_config_path(),
+        &codex_config_path_at(codex_home),
         &keys,
         codex_cli_version,
         &definition_hashes,
@@ -2209,14 +2209,14 @@ fn codex_feature_enabled(config_path: &Path, feature_key: CodexHooksFeatureKey) 
 /// Codex warns if the deprecated key is present at all, even when `hooks` is
 /// also enabled, so treat that mixed state as not current.
 pub(crate) fn codex_current_feature_enabled() -> bool {
-    let config_path = get_codex_config_path();
-    let feature_key = detect_codex_hooks_feature_key();
-    codex_selected_feature_enabled(&config_path, feature_key)
-        && !codex_deprecated_feature_present(&config_path, feature_key)
+    codex_current_feature_enabled_at(&codex_config_dir())
 }
 
 pub(crate) fn codex_current_feature_enabled_at(codex_home: &Path) -> bool {
-    with_codex_config_dir(codex_home, codex_current_feature_enabled)
+    let config_path = codex_config_path_at(codex_home);
+    let feature_key = detect_codex_hooks_feature_key();
+    codex_selected_feature_enabled(&config_path, feature_key)
+        && !codex_deprecated_feature_present(&config_path, feature_key)
 }
 
 fn verify_hooks_json_at(hooks_path: &Path) -> Result<(), VerifyFailReason> {
@@ -2367,7 +2367,11 @@ fn build_codex_rules() -> String {
 
 /// Set up Codex execpolicy rules for auto-approval.
 pub fn setup_codex_execpolicy() -> bool {
-    let rules_dir = get_codex_rules_path();
+    setup_codex_execpolicy_at(&codex_config_dir())
+}
+
+fn setup_codex_execpolicy_at(codex_home: &Path) -> bool {
+    let rules_dir = codex_rules_path_at(codex_home);
     let rules_file = rules_dir.join("hcom.rules");
     let rule_content = build_codex_rules();
 
@@ -2383,7 +2387,11 @@ pub fn setup_codex_execpolicy() -> bool {
 
 /// Remove hcom execpolicy rule.
 pub fn remove_codex_execpolicy() -> bool {
-    let rules_file = get_codex_rules_path().join("hcom.rules");
+    remove_codex_execpolicy_at(&codex_config_dir())
+}
+
+fn remove_codex_execpolicy_at(codex_home: &Path) -> bool {
+    let rules_file = codex_rules_path_at(codex_home).join("hcom.rules");
     if rules_file.exists() {
         std::fs::remove_file(&rules_file).is_ok()
     } else {
@@ -2471,8 +2479,15 @@ pub enum SetupError {
 }
 
 pub fn try_setup_codex_hooks(include_permissions: bool) -> Result<(), SetupError> {
-    let config_path = get_codex_config_path();
-    let hooks_path = get_codex_hooks_path();
+    try_setup_codex_hooks_at(include_permissions, &codex_config_dir())
+}
+
+pub(crate) fn try_setup_codex_hooks_at(
+    include_permissions: bool,
+    codex_home: &Path,
+) -> Result<(), SetupError> {
+    let config_path = codex_config_path_at(codex_home);
+    let hooks_path = codex_hooks_path_at(codex_home);
     let feature_key = detect_codex_hooks_feature_key();
 
     ensure_codex_feature_enabled(&config_path, feature_key).map_err(|e| {
@@ -2526,7 +2541,7 @@ pub fn try_setup_codex_hooks(include_permissions: bool) -> Result<(), SetupError
             let definition_hashes =
                 hcom_hook_definition_hashes_from_hooks_json(&hooks_json, &hooks_path);
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            match fetch_codex_hcom_hook_entries(&cwd).and_then(|entries| {
+            match fetch_codex_hcom_hook_entries(&cwd, codex_home).and_then(|entries| {
                 let current_keys: HashSet<String> =
                     entries.iter().map(|entry| entry.key.clone()).collect();
                 let stale_keys: HashSet<String> = old_hcom_hook_keys
@@ -2557,9 +2572,9 @@ pub fn try_setup_codex_hooks(include_permissions: bool) -> Result<(), SetupError
     }
 
     let ep_ok = if include_permissions {
-        setup_codex_execpolicy()
+        setup_codex_execpolicy_at(codex_home)
     } else {
-        remove_codex_execpolicy()
+        remove_codex_execpolicy_at(codex_home)
     };
     if !ep_ok {
         log::log_warn(
@@ -2571,30 +2586,24 @@ pub fn try_setup_codex_hooks(include_permissions: bool) -> Result<(), SetupError
     Ok(())
 }
 
-pub(crate) fn try_setup_codex_hooks_at(
-    include_permissions: bool,
-    codex_home: &Path,
-) -> Result<(), SetupError> {
-    with_codex_config_dir(codex_home, || try_setup_codex_hooks(include_permissions))
-}
-
 pub fn setup_codex_hooks(include_permissions: bool) -> bool {
     try_setup_codex_hooks(include_permissions).is_ok()
 }
 
 pub fn verify_codex_hooks_installed(check_permissions: bool) -> bool {
-    verify_codex_hooks_inner(check_permissions).is_ok()
+    verify_codex_hooks_installed_at(check_permissions, &codex_config_dir())
 }
 
 pub(crate) fn verify_codex_hooks_installed_at(check_permissions: bool, codex_home: &Path) -> bool {
-    with_codex_config_dir(codex_home, || {
-        verify_codex_hooks_installed(check_permissions)
-    })
+    verify_codex_hooks_inner_at(check_permissions, codex_home).is_ok()
 }
 
-pub(crate) fn verify_codex_hooks_inner(check_permissions: bool) -> Result<(), VerifyFailReason> {
-    let config_path = get_codex_config_path();
-    let hooks_path = get_codex_hooks_path();
+fn verify_codex_hooks_inner_at(
+    check_permissions: bool,
+    codex_home: &Path,
+) -> Result<(), VerifyFailReason> {
+    let config_path = codex_config_path_at(codex_home);
+    let hooks_path = codex_hooks_path_at(codex_home);
 
     if !config_path.exists() {
         return Err(VerifyFailReason::ConfigPathMissing(config_path));
@@ -2608,7 +2617,7 @@ pub(crate) fn verify_codex_hooks_inner(check_permissions: bool) -> Result<(), Ve
     verify_hooks_json_at(&hooks_path)?;
     verify_hcom_hook_trust_state(&config_path, &hooks_path)?;
     if check_permissions {
-        let rules_file = get_codex_rules_path().join("hcom.rules");
+        let rules_file = codex_rules_path_at(codex_home).join("hcom.rules");
         if !rules_file.exists() {
             return Err(VerifyFailReason::PermissionsRulesMissing(rules_file));
         }

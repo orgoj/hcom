@@ -1297,6 +1297,12 @@ const BUILTIN_PRESETS: &[PresetDef] = &[
         platforms: &["Linux"],
     },
     PresetDef {
+        name: "ptyxis",
+        binary: Some("ptyxis"),
+        app_name: "",
+        platforms: &["Linux"],
+    },
+    PresetDef {
         name: "konsole",
         binary: Some("konsole"),
         app_name: "",

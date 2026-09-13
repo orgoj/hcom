@@ -520,7 +520,7 @@ pub enum HookResult {
     Block {
         /// Reason text (formatted messages for delivery).
         reason: String,
-        /// Delivery ack to commit after hook output is successfully written.
+        /// Delivery ack to commit after stdout is successfully written.
         delivery_ack: Option<DeliveryAck>,
     },
 
