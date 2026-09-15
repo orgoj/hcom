@@ -41,6 +41,12 @@ the project or from an external catalog that imports it.
 ones. In particular, a later `system_prompt` replaces rather than appends to the earlier text, and
 an explicit empty string clears it.
 
+For a long shared prompt, set top-level `"system_prompt_file": "SYSTEM_PROMPT.md"`. Relative paths
+resolve from the catalog's directory. The UTF-8 contents supply that catalog's default
+`system_prompt`; inline `defaults.system_prompt` overrides the file, including `""` to clear it.
+Missing, unreadable, or non-UTF-8 referenced files are load errors. Omitting the key preserves
+inline-only behavior.
+
 Relative `dir` values resolve from `$HOME` globally, from the directory containing
 `.hcom` for project catalogs (including when imported), and from the catalog directory for other
 additive/imported catalogs.
@@ -49,7 +55,7 @@ Keep paths in project catalogs relative to the project root. Do not store machin
 absolute paths in a versioned `.hcom/agents.json`; use absolute or `~`-based paths only in
 machine-local catalogs such as `~/.hcom/agents.json`.
 
-The fixed JSON `system_prompt` is followed by the current `SOUL.md` and a manifest of immediate
+The catalog `system_prompt` is followed by the current `SOUL.md` and a manifest of immediate
 `skills/*/SKILL.md` children. hcom rereads both on every clean launch/named resume, and referenced
 files resolve relative to their bundle or skill directory. For an external bundle,
 hcom grants only that directory when the CLI supports startup-time additional workspaces;
@@ -339,6 +345,8 @@ installed integrations own classification, lifecycle state, and resume metadata.
 `pre` runs inside the prepared window before hcom, and `env` variables are supplied to the launch.
 
 ## Schema summary
+
+Top-level `system_prompt_file` optionally references a UTF-8 file relative to the catalog.
 
 Agent and `defaults` fields:
 

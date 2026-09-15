@@ -62,6 +62,8 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   layer for a project agent whether hcom runs inside or outside that project.
   env and args merge; later scalar values replace earlier ones. In particular,
   system_prompt replaces rather than appends, and an explicit empty string clears it.
+  A top-level \"system_prompt_file\" reads a catalog-wide default from a UTF-8
+  file relative to that catalog. Inline defaults.system_prompt overrides it.
 
   Every catalog may use \"imports\" to reference all or selected agents from other
   catalogs. A project agent is addressable, by `hcom agent` and by `hcom send`,
@@ -69,7 +71,7 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   it - a selective import's \"agents\" list keeps the project's other agents
   private to that project.
   A sibling agents/<name>/SOUL.md also defines an agent and is appended to its
-  system instructions after the fixed JSON system_prompt. Bundle-local skills are
+  system instructions after the catalog system_prompt. Bundle-local skills are
   discovered from agents/<name>/skills/*/SKILL.md. AGENTS.md is not a fallback.
   A project agent ignores a
   same-named non-project entry but still inherits global defaults.
@@ -307,6 +309,7 @@ struct Catalog {
     #[serde(default)]
     #[allow(dead_code)]
     version: Option<u32>,
+    system_prompt_file: Option<String>,
     #[serde(default)]
     imports: Vec<CatalogImport>,
     #[serde(default)]
@@ -426,6 +429,24 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
     } else {
         Catalog::default()
     };
+
+    if let Some(raw) = catalog.system_prompt_file.as_deref() {
+        if raw.trim().is_empty() {
+            bail!("empty system_prompt_file in {}", path.display());
+        }
+        let catalog_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let prompt_path = PathBuf::from(expand_path(raw, catalog_dir));
+        let prompt = std::fs::read_to_string(&prompt_path).map_err(|e| {
+            anyhow::anyhow!(
+                "cannot read system prompt {} referenced by {}: {e}",
+                prompt_path.display(),
+                path.display()
+            )
+        })?;
+        if catalog.defaults.system_prompt.is_none() {
+            catalog.defaults.system_prompt = Some(prompt);
+        }
+    }
 
     for (owner, def) in std::iter::once(("defaults", &catalog.defaults)).chain(
         catalog

@@ -73,6 +73,12 @@ Keep paths in project catalogs relative to the project root. Do not store machin
 absolute paths in a versioned `.hcom/agents.json`; use absolute or `~`-based paths only in
 machine-local catalogs such as `~/.hcom/agents.json`.
 
+For a long catalog-wide prompt, set top-level `"system_prompt_file": "SYSTEM_PROMPT.md"`. Relative
+paths resolve from the directory containing that catalog, including imported and additive
+catalogs. The UTF-8 file content supplies that catalog's default `system_prompt`; an inline
+`defaults.system_prompt` in the same catalog overrides it, and `""` clears it. Missing, unreadable,
+or non-UTF-8 referenced files are load errors. Omitting the key preserves inline-only behavior.
+
 Global catalog `defaults` apply to every agent. Project defaults apply only to project agents and
 override global defaults field by field.
 
@@ -86,6 +92,7 @@ Global and project layouts are identical:
 ```text
 ~/.hcom/                         <project>/.hcom/
 ├── agents.json                 ├── agents.json
+├── SYSTEM_PROMPT.md            ├── SYSTEM_PROMPT.md
 └── agents/                     └── agents/
     └── reviewer/                   └── reviewer/
         ├── SOUL.md                     ├── SOUL.md
@@ -98,7 +105,7 @@ Global and project layouts are identical:
 also remains valid. Discovered directory names must contain only lowercase letters, numbers, and
 underscores. Bundle `AGENTS.md` files are not read as a fallback.
 
-The effective `agent_instructions` contains the fixed JSON `system_prompt`, then an `# Agent bundle
+The effective `agent_instructions` contains the catalog `system_prompt`, then an `# Agent bundle
 instructions` section with absolute bundle and `SOUL.md` paths and its current contents, then an
 `# Available agent skills` manifest. Empty sections are omitted. `prompt` remains the initial user
 message. hcom rereads `SOUL.md` and skills on every clean start and named-agent resume, so an
@@ -146,10 +153,10 @@ different CLIs without changing how they communicate:
 ```jsonc
 {
   "version": 1,
+  "system_prompt_file": "SYSTEM_PROMPT.md",
   "defaults": {
     "dir": ".",
-    "session": "example-project",
-    "system_prompt": "Read NOTES.md when resuming unfinished work. Consult relevant MEMORY/*.md files before related tasks. Keep portable project knowledge in the repository, not in bundle memory."
+    "session": "example-project"
   },
   "agents": {
     "project_main": {

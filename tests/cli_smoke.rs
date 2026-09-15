@@ -1442,6 +1442,7 @@ fn agent_help_lists_catalog_layers() {
     assert!(stdout.contains("agents.json"), "stdout={stdout}");
     assert!(stdout.contains(".hcom/agents.json"), "stdout={stdout}");
     assert!(stdout.contains("agents/<name>/SOUL.md"), "stdout={stdout}");
+    assert!(stdout.contains("system_prompt_file"), "stdout={stdout}");
     assert!(
         stdout.contains("agy and antigravity use --add-dir"),
         "stdout={stdout}"
@@ -2152,6 +2153,136 @@ fn agent_dry_run_renders_the_hcom_command_without_launching() {
     let (code, list, _stderr) = h.run(["list", "--json"]);
     assert_eq!(code, 0);
     assert_eq!(list.trim(), "[]", "dry-run must not create an instance");
+}
+
+#[test]
+fn agent_catalog_system_prompt_file_renders_and_reaches_spawn_script() {
+    let h = Hcom::new();
+    let prompt_path = h.path().join("SYSTEM_PROMPT.md");
+    std::fs::write(&prompt_path, "Shared instructions from Markdown.\n")
+        .expect("write system prompt");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"system_prompt_file":"SYSTEM_PROMPT.md",
+            "agents":{"solo":{"dir":"/tmp","cli":"codex",
+                "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("Shared instructions from Markdown."),
+        "stdout={stdout}"
+    );
+
+    let (code, stdout, stderr) = h.run(["agent", "solo"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let launch_dir = h.path().join(".tmp/launch");
+    let launch_files = std::fs::read_dir(&launch_dir)
+        .expect("read launch directory")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        launch_files.contains("Shared instructions from Markdown."),
+        "catalog prompt did not reach spawn script: {launch_files}"
+    );
+}
+
+#[test]
+fn agent_catalog_inline_system_prompt_overrides_file() {
+    let h = Hcom::new();
+    std::fs::write(h.path().join("SYSTEM_PROMPT.md"), "Instructions from file.")
+        .expect("write system prompt");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"system_prompt_file":"SYSTEM_PROMPT.md",
+            "defaults":{"system_prompt":"Inline instructions."},
+            "agents":{"solo":{"dir":"/tmp","cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "solo"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("Inline instructions."), "stdout={stdout}");
+    assert!(
+        !stdout.contains("Instructions from file."),
+        "stdout={stdout}"
+    );
+
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"system_prompt_file":"SYSTEM_PROMPT.md",
+            "defaults":{"system_prompt":""},
+            "agents":{"solo":{"dir":"/tmp","cli":"codex"}}}"#,
+    )
+    .expect("clear inline system prompt");
+    let (code, stdout, stderr) = h.run(["agent", "show", "solo"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(!stdout.contains("--hcom-system-prompt"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_catalog_imported_system_prompt_file_resolves_beside_source() {
+    let h = Hcom::new();
+    let source_dir = h.root_path().join("shared-catalog");
+    std::fs::create_dir_all(&source_dir).expect("create source catalog directory");
+    std::fs::write(
+        source_dir.join("SYSTEM_PROMPT.md"),
+        "Imported instructions.",
+    )
+    .expect("write imported system prompt");
+    let source_catalog = source_dir.join("agents.json");
+    std::fs::write(
+        &source_catalog,
+        r#"{"system_prompt_file":"SYSTEM_PROMPT.md","agents":{"shared":{"cli":"codex"}}}"#,
+    )
+    .expect("write imported catalog");
+    std::fs::write(
+        h.path().join("agents.json"),
+        serde_json::json!({"imports": [{"from": source_catalog, "agents": ["shared"]}]})
+            .to_string(),
+    )
+    .expect("write global catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "shared"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("Imported instructions."), "stdout={stdout}");
+}
+
+#[test]
+fn agent_catalog_system_prompt_file_reports_read_error() {
+    let h = Hcom::new();
+    let catalog_path = h.path().join("agents.json");
+    std::fs::write(
+        &catalog_path,
+        r#"{"system_prompt_file":"missing.md","agents":{"solo":{}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, _stdout, stderr) = h.run(["agent", "show", "solo"]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(
+        stderr.contains(&catalog_path.display().to_string()),
+        "stderr={stderr}"
+    );
+    assert!(stderr.contains("missing.md"), "stderr={stderr}");
+    assert!(
+        stderr.contains("cannot read system prompt"),
+        "stderr={stderr}"
+    );
+
+    std::fs::write(h.path().join("missing.md"), [0xff, 0xfe])
+        .expect("write non-UTF-8 system prompt");
+    let (code, _stdout, stderr) = h.run(["agent", "show", "solo"]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(
+        stderr.contains("cannot read system prompt"),
+        "stderr={stderr}"
+    );
+    assert!(stderr.contains("valid UTF-8"), "stderr={stderr}");
 }
 
 #[test]

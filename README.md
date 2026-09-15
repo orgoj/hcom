@@ -305,7 +305,7 @@ resulting command without launching anything.
 
 `hcom agent` launches recurring agents from JSON settings and editable bundles. A bundle at
 `~/.hcom/agents/<name>/SOUL.md` or an enclosing project `.hcom/agents/<name>/SOUL.md` defines an
-agent even without a JSON entry. Its contents follow the fixed `system_prompt`; immediate
+agent even without a JSON entry. Its contents follow the catalog `system_prompt`; immediate
 `skills/*/SKILL.md` children are advertised through one shared lazy-loading manifest. Both are
 reread on clean start and named resume. Bundle `AGENTS.md` files are not read as a fallback. For
 Antigravity, an external bundle is made writable with
@@ -349,6 +349,12 @@ imports apply before the importing catalog's local entries, and a catalog's `def
 the agents it brings in, whether by import or as the enclosing project of a nested `.hcom`. An agent defined only in a project
 catalog is addressable from inside that project, and from elsewhere only where a catalog in scope
 imports it; a project's other agents stay private to it.
+
+For a long shared prompt, set top-level `"system_prompt_file": "SYSTEM_PROMPT.md"`. The path is
+resolved relative to that catalog file and its UTF-8 contents act as the catalog's default
+`system_prompt`. An inline `defaults.system_prompt` in the same catalog overrides the file,
+including `""` to clear it. Missing, unreadable, or non-UTF-8 referenced files are load errors;
+omitting `system_prompt_file` preserves the existing inline-only behavior.
 
 Catalog `session`/`window` placement is honored when Herdr is the configured default, including
 nested launches and targeted-message autostart; a parent agent's Herdr location is not inherited.
