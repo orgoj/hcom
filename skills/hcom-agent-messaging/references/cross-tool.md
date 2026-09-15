@@ -28,6 +28,12 @@ Verified behavior when mixing different AI coding tools via hcom.
 - **Sandbox modes**: `workspace` (--full-auto + network), `untrusted` (--sandbox workspace-write), `danger-full-access` (--dangerously-bypass-approvals-and-sandbox), `none` (raw)
 - **Bootstrap injection**: Via `-c developer_instructions=<bootstrap>` at launch time
 - **Transcript path**: Derived from thread ID, searched via glob in `$CODEX_HOME/sessions/`
+- **Recommended TUI configuration**: Disable ambient animations and whimsy sparkles in `~/.codex/config.toml` so terminal screen scrapers and readiness gates reliably detect the prompt without particle noise:
+  ```toml
+  [tui]
+  whimsy = false
+  animations = false
+  ```
 
 ### Gemini CLI
 - **Hooks**: sessionstart, beforeagent, afteragent, beforetool, aftertool, notification, sessionend

@@ -38,6 +38,7 @@ hcom events --agent luna     # What has luna seen recently?
 | Message scope mismatch | Event `scope` is "mentions" but agent not in `mentions` array | Verify @mention matches agent name or tag |
 | Identity binding failed | Agent not in `instances` table | Check `HCOM_PROCESS_ID` env var propagation |
 | Parent identity changes after running another AI CLI | Outdated hcom allowed foreign child hooks to reuse inherited `HCOM_PROCESS_ID` | Upgrade hcom; current hooks reject the child and repair unambiguous Claude metadata automatically |
+| Codex prompt blocked by TUI animations / whimsy | `hcom term <name>` shows braille dots / `prompt_empty=false` with empty prompt | Disable in `~/.codex/config.toml`: `[tui] whimsy = false` and `animations = false` |
 
 ## Messages Leaking Between Workflows
 

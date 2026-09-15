@@ -250,6 +250,16 @@ hcom r <session_id>           # Resume a session started outside hcom
 hcom f <session_id>           # Fork a session in hcom
 ```
 
+#### Codex CLI configuration
+
+When using OpenAI Codex CLI (especially with GPT-6 / Astra models), decorative TUI particle animations ("whimsy" / sparkles) can interfere with terminal screen scrapers and prompt readiness detection. Disable them in `~/.codex/config.toml`:
+
+```toml
+[tui]
+whimsy = false
+animations = false
+```
+
 #### Claude Code headless and subagents
 
 Detached background processes in print mode stay alive. Manage through the TUI.
