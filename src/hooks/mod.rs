@@ -30,6 +30,22 @@ pub mod test_helpers {
     // next — the shared state is just "one set of env vars at a time."
     static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+    const TOOL_CONFIG_ENV_VARS: &[&str] = &[
+        "CURSOR_CONFIG_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "CODEX_HOME",
+        "GEMINI_CLI_HOME",
+        "KILO_CONFIG_DIR",
+        "KIMI_CODE_HOME",
+        "COPILOT_HOME",
+        "PI_CODING_AGENT_DIR",
+        "PI_CODING_AGENT_SESSION_DIR",
+        "PI_CONFIG_DIR",
+        "OMP_PROFILE",
+        "PI_PROFILE",
+    ];
+
     fn acquire_env_lock() -> MutexGuard<'static, ()> {
         TEST_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -165,6 +181,19 @@ pub mod test_helpers {
         }
     }
 
+    fn configure_isolated_test_env(hcom_dir: &std::path::Path, test_home: &std::path::Path) {
+        unsafe {
+            std::env::set_var("HCOM_DIR", hcom_dir);
+            std::env::set_var("HOME", test_home);
+            for key in TOOL_CONFIG_ENV_VARS {
+                std::env::remove_var(key);
+            }
+            std::env::set_var("HCOM_TEST_CODEX_CLI_VERSION", "codex-cli 0.129.0");
+        }
+        crate::config::Config::reset();
+        crate::config::Config::init();
+    }
+
     /// Create an isolated test env: tempdir with .hcom dir, env vars set.
     /// Returns (tempdir, hcom_dir, test_home, guard).
     pub fn isolated_test_env() -> (tempfile::TempDir, PathBuf, PathBuf, EnvGuard) {
@@ -176,14 +205,28 @@ pub mod test_helpers {
         // Claim this tempdir as a disposable root so Config trusts it (temp-tree
         // geography alone is not enough — see paths::test_roots).
         crate::paths::test_roots::register(&test_home);
-        unsafe {
-            std::env::set_var("HCOM_DIR", &hcom_dir);
-            std::env::set_var("HOME", &test_home);
-            std::env::set_var("HCOM_TEST_CODEX_CLI_VERSION", "codex-cli 0.129.0");
-        }
-        crate::config::Config::reset();
-        crate::config::Config::init();
+        configure_isolated_test_env(&hcom_dir, &test_home);
         (dir, hcom_dir, test_home, guard)
+    }
+
+    #[test]
+    fn isolated_test_env_clears_ambient_tool_config_paths() {
+        let guard = EnvGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let test_home = dir.path();
+        let hcom_dir = test_home.join(".hcom");
+
+        unsafe {
+            for key in TOOL_CONFIG_ENV_VARS {
+                std::env::set_var(key, format!("/live/{key}"));
+            }
+        }
+        configure_isolated_test_env(&hcom_dir, test_home);
+
+        for key in TOOL_CONFIG_ENV_VARS {
+            assert_eq!(std::env::var_os(key), None, "{key} leaked into test env");
+        }
+        drop(guard);
     }
 }
 
