@@ -27,9 +27,10 @@ cross-host hcom state are explicitly out of scope.
   cross-repository contract questions. Do not route normal implementation work
   through `agent_coach`.
 - Do not edit Orca from the hcom agent or copy Orca internals into hcom.
-- Land and release the Orca side first when hcom depends on a new Orca CLI or
-  RPC capability. The hcom implementation must retain an actionable version or
-  capability error for older Orca installations.
+- Once the Orca CLI contract is agreed, prepare the independent hcom adapter,
+  tests, and documentation in parallel with Orca implementation. Finalize and
+  release hcom only after verifying that contract against the installed Orca
+  runtime. Retain an actionable capability error for older Orca installations.
 
 ## Why Orca needs a dedicated adapter
 
@@ -116,7 +117,7 @@ contains almost all runtime support needed by hcom:
   exited. Runtime-owned handles can be re-linked to a restored PTY when Orca has
   authoritative matching state.
 
-The missing surface is the public CLI, not the runtime:
+At the initial review, the missing interactive-agent surface was the public CLI:
 
 - `src/cli/handlers/terminal.ts` exposes `--command`, `--shell`, `--title`, and
   `--focus`, but does not expose `launchAgent`, structured environment fields,
@@ -131,19 +132,21 @@ The missing surface is the public CLI, not the runtime:
   construct and own the agent command themselves, while hcom must retain its
   runner, environment, hook, and lifecycle authority.
 
-Static decision: **a small Orca CLI extension is required for a first-class
-integration; no new Orca runtime/RPC primitive is required.** Do not bypass the
+Static decision: **an Orca CLI extension is required for a first-class
+integration.** The later requirement to launch from unregistered local folders
+also required opt-in folder-workspace registration in Orca. Do not bypass the
 CLI by reading Orca runtime metadata and speaking its private socket protocol
 from hcom.
 
 ## Preconditions and runtime discovery gate
 
-Before writing production code, add an isolated CLI smoke or adapter-level
+Before finalizing production code, add an isolated CLI smoke or adapter-level
 fixture that confirms the remaining runtime-dependent behavior against the
 installed Orca CLI:
 
-1. Does `orca terminal create --worktree path:<cwd> --command <runner> --json`
-   create a terminal visible in the desktop UI when `<runner>` ultimately execs
+1. Does `orca terminal create` with `--worktree path:<cwd>`,
+   `--ensure-folder-workspace`, `--command <runner>`, and `--json` create a
+   terminal visible in the desktop UI when `<runner>` ultimately execs
    `hcom pty <tool>` rather than naming the agent CLI directly?
 2. Does the created terminal receive a stable `result.terminal.handle`?
 3. Does the hcom runner bind through existing hooks exactly like another
@@ -171,6 +174,7 @@ public shape:
 ```text
 orca terminal create
   --worktree path:<cwd>
+  --ensure-folder-workspace
   --command <wrapper-command>
   --interactive-agent <agent-kind>
   --title <title>
@@ -190,7 +194,13 @@ The final flag name belongs to Orca's design review, but its semantics must be:
 - advertise a machine-readable runtime/CLI capability so hcom can fail closed
   with an actionable upgrade message.
 
-Expected Orca files are limited primarily to:
+For an existing but unregistered local directory, `--ensure-folder-workspace`
+atomically reuses or registers a folder workspace. It requires
+`terminal.create-folder-workspace.v1` in addition to
+`terminal.create-interactive-agent.v1`. Git and manual registration are not
+required; registration persists after the terminal closes.
+
+The initial interactive-agent extension was expected to touch primarily:
 
 - `src/cli/specs/core.ts` for the flag/help contract;
 - `src/cli/handlers/terminal.ts` for validation and RPC mapping;
@@ -198,9 +208,9 @@ Expected Orca files are limited primarily to:
 - `src/shared/protocol-version.ts` only if capability negotiation requires a
   new identifier.
 
-The runtime RPC schema already accepts the required fields. Avoid changing
-`terminal.create`, `createTerminal`, or PTY ownership unless `orca_dev` finds a
-failing contract test that demonstrates a real gap.
+The runtime RPC schema already accepts the interactive-agent fields. Keep any
+runtime changes needed for folder-workspace registration scoped to that
+explicit option; do not change PTY ownership without a failing contract test.
 
 The hcom runner script already embeds the required `HCOM_*` environment in its
 platform-specific launch script. Do not add a public Orca `--env` flag for this
@@ -237,12 +247,15 @@ runtime that lacks the new optional field.
 
 ### 2. Workspace resolution
 
-- Use the canonical hcom launch cwd as `path:<absolute-cwd>`.
-- Ask Orca to resolve that path to an existing folder/worktree workspace.
-- Do not register repositories, create worktrees, or silently fall back to an
-  active Orca workspace.
-- When the path is not registered, surface Orca's structured error and tell the
-  user to add/import that folder in Orca.
+- Pass the canonical existing local hcom launch cwd as `path:<absolute-cwd>`
+  with `--ensure-folder-workspace`.
+- Require both `terminal.create-interactive-agent.v1` and
+  `terminal.create-folder-workspace.v1`.
+- Orca reuses a matching workspace or registers the directory as a folder
+  workspace. Git and manual registration are not required; hcom does not
+  create a worktree or fall back to the active Orca workspace.
+- Folder-workspace registration persists after terminal close. Surface Orca's
+  structured error if the path is invalid or registration fails.
 
 This preserves the project's catalog isolation and prevents an agent from being
 launched in whichever Orca workspace happens to be focused.
@@ -257,6 +270,7 @@ launched in whichever Orca workspace happens to be focused.
   ```text
   orca terminal create
     --worktree path:<canonical-cwd>
+    --ensure-folder-workspace
     --title <instance-name>
     --command <platform-specific-runner-command>
     --interactive-agent <agent-kind>
@@ -347,7 +361,7 @@ Update all user-facing surfaces in the same hcom change:
 
 - Orca executable resolution (`orca` and Linux `orca-ide`).
 - JSON success parsing and exact handle extraction.
-- JSON error, malformed response, empty handle, and incompatible capability.
+- JSON error, malformed response, empty handle, and either missing capability.
 - Explicit agent intent maps the hcom tool to Orca's supported TUI-agent value.
 - Unsupported hcom tools fail or deliberately omit the hint according to the
   agreed Orca contract; never mislabel one agent as another.
@@ -373,7 +387,7 @@ The fake must capture argv and return complete JSON fixtures. Cover:
 - successful handle capture followed by exact `hcom kill` cleanup;
 - failure after create closes the half-created terminal;
 - spaces/Unicode in cwd and agent name;
-- missing workspace and unreachable runtime diagnostics;
+- invalid workspace path and unreachable runtime diagnostics;
 - remote environment variables fail closed.
 
 Where per-CLI invocation values are involved, retain the repository-required
@@ -385,11 +399,13 @@ Orca-specific behavior.
 
 Run only after isolated tests pass:
 
-1. Start a local Orca runtime without focusing or revealing a test window.
-2. Import a disposable folder workspace.
-3. Launch one hcom-managed Codex agent with `terminal=orca`.
-4. Verify the terminal appears with the hcom instance title and the agent binds.
-5. Send an hcom message and verify normal hook delivery.
+1. Verify the installed Orca CLI and start its packaged local runtime without
+   focusing or revealing a test window.
+2. Create a disposable, unregistered non-Git directory.
+3. Launch one hcom-managed Codex agent with `terminal=orca` from that directory.
+4. Verify Orca registered exactly one folder workspace for the canonical path,
+   and that the terminal appears with the hcom instance title and agent binds.
+5. Send an hcom message and verify the agent's reply through normal delivery.
 6. Confirm Orca desktop and browser clients show the same terminal/session.
 7. Kill the agent through hcom and verify only its exact Orca terminal closes.
 8. Repeat with Claude if installed.
@@ -408,33 +424,32 @@ smokes excluded by local release policy.
    URLs and branch base before any code changes. Keep every change surgical,
    limited to the agreed CLI contract, and ready for an upstream pull request.
 3. Give `orca_dev` the static findings and proposed generic CLI contract above.
-4. Work directly with `orca_dev` to finalize the flag name and capability
-   identifier, then have it implement, test, commit, and release that minimal
-   CLI extension first.
-5. Run the runtime discovery gate against the released local Orca CLI.
-6. Add failing hcom unit and CLI smoke tests for the agreed contract.
-7. Implement the built-in preset, native adapter, JSON parsing, handle storage,
-   and exact close path.
-8. Complete the hcom user-facing documentation/help matrix.
-9. Run hcom verification required for a binary-affecting change:
+4. Work directly with `orca_dev` to finalize the flags and capability
+   identifiers. While it implements, tests, commits, and installs the Orca
+   extension, prepare hcom unit and CLI smoke tests, the native adapter, and
+   user-facing documentation for the agreed contract.
+5. Run the runtime discovery gate against the installed Orca CLI. Resolve any
+   contract differences before finalizing the hcom implementation.
+6. Complete the hcom user-facing documentation/help matrix.
+7. Run hcom verification required for a binary-affecting change:
    `cargo fmt --check`, `cargo clippy --bin hcom --all-targets`,
    `cargo test --bin hcom`, and focused `cargo test --test cli_smoke <filter>`.
-10. Inspect the full diff, remove `tmp/` artifacts, commit, build release, and
+8. Inspect the full diff, remove `tmp/` artifacts, commit, build release, and
    verify `hcom --version` according to local deployment rules.
-11. Run the real Orca acceptance sequence and record the supported Orca version
+9. Run the real Orca acceptance sequence and record the supported Orca version
     or capability in the release notes.
 
 ## Acceptance criteria
 
-- `terminal=orca` launches an hcom-managed agent into the exact registered Orca
-  workspace matching the canonical cwd.
+- `terminal=orca` launches an hcom-managed agent into the exact Orca workspace
+  matching the canonical cwd, registering an existing local folder if needed.
 - Launch never focuses a window unless explicitly supported in a later change.
 - The agent receives the same hcom identity, catalog context, instructions, and
   delivery behavior as another local terminal backend.
 - hcom stores the opaque Orca terminal handle and `hcom kill` closes only that
   terminal.
 - A failed second launch step does not leave an empty Orca terminal.
-- Missing CLI/runtime/workspace/capability errors are actionable.
+- Missing CLI/runtime/capability and invalid workspace errors are actionable.
 - Remote Orca selection is rejected, not silently attempted.
 - Runtime restart or stale handle never becomes false evidence of process exit.
 - No Orca orchestration Run, Task, or Dispatch is created for a normal hcom
