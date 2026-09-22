@@ -108,12 +108,20 @@ Any other AI tool without hooks can join by running `hcom start`. Any process ca
 
 ## Terminal
 
-Every agent runs in a real terminal you can see, scroll, and interrupt. Any emulator works for spawning. **kitty**, **wezterm**, **tmux**, **zellij**, **waveterm**, **cmux**, **herdr** also support closing panes from `hcom kill`.
+Every agent runs in a real terminal you can see, scroll, and interrupt. Any emulator works for spawning. **kitty**, **wezterm**, **tmux**, **zellij**, **waveterm**, **cmux**, **herdr**, and **Orca** also support closing panes from `hcom kill`.
 
 With the Herdr preset, hcom supplies Herdr's native agent identity hint on Unix/macOS and uses
 native descendant-process detection on Windows. Herdr remains responsible for agent state through
 its screen manifests or installed integrations; hcom only supplies lifecycle reports for tools
 Herdr does not recognize.
+
+With `terminal = "orca"`, hcom opens one unfocused terminal tab in the local
+Orca runtime, using the registered Orca workspace that matches the agent's
+canonical working directory. Start the Orca desktop app or local `orca serve`
+first. Remote Orca environments are intentionally rejected; normal hcom hooks,
+messages, identity, and lifecycle remain authoritative. The Orca runtime must
+advertise `terminal.create-interactive-agent.v1` (available in the locally
+verified Orca CLI 1.4.197).
 
 To configure a custom terminal open/close setup, tell an agent to run:
 

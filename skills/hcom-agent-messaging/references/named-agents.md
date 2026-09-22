@@ -338,6 +338,12 @@ default. Nested launches and targeted-message autostart use the catalog agent's 
 than the launching agent's inherited workspace and tab. Other non-multiplexer terminals ignore
 `session` with a warning.
 
+`terminal: orca` launches an unfocused tab in the local Orca runtime, bound to
+the registered folder workspace matching the agent's canonical directory.
+Orca is only the terminal UI; hcom retains messaging, identity, hooks, and
+lifecycle authority. Remote Orca selectors are not supported, and the local
+runtime must advertise `terminal.create-interactive-agent.v1`.
+
 For tools Herdr recognizes, hcom lets Herdr's native process detection, screen manifests, and
 installed integrations own classification, lifecycle state, and resume metadata. hcom uses
 `pane.report_agent` only as a fallback for tools outside Herdr's agent catalog.

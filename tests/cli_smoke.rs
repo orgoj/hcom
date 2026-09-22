@@ -3018,6 +3018,237 @@ fn agent_show_uses_configured_herdr_placement_instead_of_parent_placement() {
 }
 
 #[test]
+#[cfg(unix)]
+fn orca_kill_closes_the_exact_persisted_terminal_handle() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = Hcom::new();
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+
+    let fake_bin = h.root_path().join("fake-orca-bin");
+    std::fs::create_dir_all(&fake_bin).expect("create fake Orca bin");
+    let capture = h.root_path().join("orca-close-argv");
+    let fake_orca = fake_bin.join("orca");
+    std::fs::write(
+        &fake_orca,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$ORCA_CAPTURE_PATH\"\nprintf '%s\\n' '{\"id\":\"cli:terminal:close\",\"ok\":true,\"result\":{\"close\":{\"handle\":\"term:runtime:42\",\"tabId\":\"tab:1\",\"ptyKilled\":true}}}'\n",
+    )
+    .expect("write fake Orca CLI");
+    let mut permissions = std::fs::metadata(&fake_orca)
+        .expect("stat fake Orca CLI")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&fake_orca, permissions).expect("chmod fake Orca CLI");
+
+    let mut child = Command::new("sh")
+        .args(["-c", "sleep 60"])
+        .process_group(0)
+        .spawn()
+        .expect("spawn managed process group");
+    let pid = i64::from(child.id());
+    h.track_cleanup_pid(pid);
+    let reaper = std::thread::spawn(move || child.wait().expect("reap managed process"));
+
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO instances \
+         (name, status, status_time, created_at, tool, background, pid, \
+          terminal_preset_effective, launch_context) \
+         VALUES ('orca-agent', 'active', ?1, ?1, 'codex', 0, ?2, 'orca', ?3)",
+        rusqlite::params![
+            now,
+            pid,
+            r#"{"process_id":"proc-orca","pane_id":"term:runtime:42","terminal_id":"term:runtime:42","terminal_preset_effective":"orca"}"#
+        ],
+    )
+    .expect("insert Orca instance fixture");
+
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut path_entries = vec![fake_bin];
+    path_entries.extend(std::env::split_paths(&inherited_path));
+    let mut cmd = h.cmd();
+    cmd.env(
+        "PATH",
+        std::env::join_paths(path_entries).expect("join fake Orca PATH"),
+    )
+    .env("ORCA_CAPTURE_PATH", &capture)
+    .args(["kill", "orca-agent"]);
+    let output = cmd.output().expect("run hcom kill");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("closed orca pane"), "stdout={stdout}");
+    assert_eq!(
+        std::fs::read_to_string(capture).expect("read captured Orca argv"),
+        "terminal\nclose\n--terminal\nterm:runtime:42\n--json\n"
+    );
+    reaper.join().expect("join managed process reaper");
+}
+
+#[test]
+fn terminal_help_exposes_orca_preset() {
+    let h = Hcom::new();
+    let (code, stdout, stderr) = h.run(["config", "terminal", "--info"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("orca"), "stdout={stdout}");
+    assert!(stdout.contains("result.terminal.handle"), "stdout={stdout}");
+}
+
+#[test]
+#[cfg(unix)]
+fn orca_direct_launch_uses_local_workspace_and_structured_agent_intent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = Hcom::new();
+    let fake_bin = h.root_path().join("fake-orca-launch-bin");
+    std::fs::create_dir_all(&fake_bin).expect("create fake Orca launch bin");
+    let capture = h.root_path().join("orca-create-argv");
+    let fake_orca = fake_bin.join("orca");
+    std::fs::write(
+        &fake_orca,
+        r#"#!/bin/sh
+if [ "$1" = "status" ]; then
+  printf '%s\n' '{"id":"cli:status","ok":true,"result":{"runtime":{"reachable":true,"capabilities":["terminal.create-interactive-agent.v1"]}}}'
+  exit 0
+fi
+printf '%s\n' "$@" > "$ORCA_CAPTURE_PATH"
+printf '%s\n' '{"id":"request-launch","ok":true,"result":{"terminal":{"handle":"term:runtime:launch","worktreeId":"workspace:1","title":"orca-direct"}}}'
+"#,
+    )
+    .expect("write fake Orca launch CLI");
+    let fake_codex = fake_bin.join("codex");
+    std::fs::write(
+        &fake_codex,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.131.0'; exit 0; fi\nexit 0\n",
+    )
+    .expect("write fake Codex CLI");
+    for executable in [&fake_orca, &fake_codex] {
+        let mut permissions = std::fs::metadata(executable)
+            .expect("stat fake executable")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(executable, permissions).expect("chmod fake executable");
+    }
+    let launch_dir = h.workspace.join("project with space-žluťoučký");
+    std::fs::create_dir_all(&launch_dir).expect("create Unicode launch directory");
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut path_entries = vec![fake_bin];
+    path_entries.extend(std::env::split_paths(&inherited_path));
+    let mut cmd = h.cmd();
+    cmd.env(
+        "PATH",
+        std::env::join_paths(path_entries).expect("join fake launch PATH"),
+    )
+    .env("ORCA_CAPTURE_PATH", &capture)
+    .env("HCOM_SUBAGENT_TIMEOUT", "1")
+    .args([
+        "codex",
+        "--terminal",
+        "orca",
+        "--dir",
+        launch_dir.to_str().expect("UTF-8 launch dir"),
+        "--as",
+        "orca-direct",
+    ]);
+    let output = cmd.output().expect("run Orca direct launch");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        matches!(output.status.code(), Some(0..=2)),
+        "stdout={stdout} stderr={stderr}"
+    );
+    let captured = std::fs::read_to_string(&capture).expect("read captured create argv");
+    let argv: Vec<&str> = captured.lines().collect();
+    assert_eq!(&argv[..3], ["terminal", "create", "--worktree"]);
+    assert_eq!(
+        argv[3],
+        format!("path:{}", launch_dir.canonicalize().unwrap().display())
+    );
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair == ["--title", "orca-direct"])
+    );
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair == ["--interactive-agent", "codex"])
+    );
+    assert_eq!(argv.last().copied(), Some("--json"));
+}
+
+#[test]
+#[cfg(unix)]
+fn orca_invalid_create_envelope_closes_the_returned_handle() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = Hcom::new();
+    let fake_bin = h.root_path().join("fake-orca-cleanup-bin");
+    std::fs::create_dir_all(&fake_bin).expect("create fake Orca cleanup bin");
+    let capture = h.root_path().join("orca-cleanup-calls");
+    let fake_orca = fake_bin.join("orca");
+    std::fs::write(
+        &fake_orca,
+        r#"#!/bin/sh
+if [ "$1" = "status" ]; then
+  printf '%s\n' '{"id":"cli:status","ok":true,"result":{"runtime":{"reachable":true,"capabilities":["terminal.create-interactive-agent.v1"]}}}'
+  exit 0
+fi
+printf '%s\n' "$*" >> "$ORCA_CAPTURE_PATH"
+if [ "$1 $2" = "terminal create" ]; then
+  printf '%s\n' '{"id":"request-cleanup","ok":false,"result":{"terminal":{"handle":"term:cleanup:42","worktreeId":"workspace:1"}}}'
+  exit 0
+fi
+printf '%s\n' '{"id":"cli:terminal:close","ok":true,"result":{"close":{"handle":"term:cleanup:42","tabId":"tab:1","ptyKilled":true}}}'
+"#,
+    )
+    .expect("write fake Orca cleanup CLI");
+    let fake_codex = fake_bin.join("codex");
+    std::fs::write(
+        &fake_codex,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.131.0'; fi\nexit 0\n",
+    )
+    .expect("write fake Codex CLI");
+    for executable in [&fake_orca, &fake_codex] {
+        let mut permissions = std::fs::metadata(executable)
+            .expect("stat fake executable")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(executable, permissions).expect("chmod fake executable");
+    }
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut path_entries = vec![fake_bin];
+    path_entries.extend(std::env::split_paths(&inherited_path));
+    let mut cmd = h.cmd();
+    cmd.env(
+        "PATH",
+        std::env::join_paths(path_entries).expect("join fake cleanup PATH"),
+    )
+    .env("ORCA_CAPTURE_PATH", &capture)
+    .args(["codex", "--terminal", "orca", "--as", "orca-cleanup"]);
+    let output = cmd.output().expect("run invalid Orca launch");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("unexpected terminal-create response envelope"),
+        "stderr={stderr}"
+    );
+    let calls = std::fs::read_to_string(capture).expect("read Orca cleanup calls");
+    assert!(
+        calls
+            .lines()
+            .any(|line| line.starts_with("terminal create "))
+    );
+    assert!(
+        calls
+            .lines()
+            .any(|line| line == "terminal close --terminal term:cleanup:42 --json"),
+        "calls={calls}"
+    );
+}
+
+#[test]
 fn agent_session_uses_tmux_window_with_terminal_here() {
     let h = Hcom::new();
     std::fs::write(

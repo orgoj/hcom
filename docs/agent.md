@@ -475,6 +475,14 @@ For tmux, `session` selects or creates the tmux session and `window` selects the
 
 For Herdr-recognized tools, hcom identifies the outer PTY process to Herdr on Unix/macOS; on Windows, Herdr detects the tool in the descendant process tree. Herdr screen manifests and native integrations manage working, idle, blocked state and session-resume metadata. The hcom `pane.report_agent` fallback is reserved for tools Herdr does not recognize.
 
+For `terminal: orca`, hcom creates one unfocused tab in the local Orca runtime
+and selects the registered folder workspace matching the agent's canonical
+working directory. Orca is the terminal UI only: hcom still owns identity,
+hooks, delivery, and lifecycle. `session` and `window` are ignored with the
+normal non-multiplexer warning. Remote Orca selectors are rejected; start the
+desktop app or a local `orca serve` runtime before launching. The runtime must
+advertise `terminal.create-interactive-agent.v1`.
+
 ## Shell completions
 
 Generate shell completions for agent names and groups:

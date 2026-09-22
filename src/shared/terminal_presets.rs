@@ -257,6 +257,19 @@ pub static TERMINAL_PRESETS: LazyLock<Vec<(&'static str, TerminalPreset)>> = Laz
                 &["Darwin"],
             ),
         ),
+        (
+            "orca",
+            p(
+                Some("orca"),
+                Some("Orca"),
+                // Orca uses a native adapter in terminal.rs because creation
+                // returns a structured, runtime-scoped terminal handle.
+                argv(&["orca"]),
+                argv(&["orca", "terminal", "close", "--terminal", "{id}", "--json"]),
+                None,
+                DLW,
+            ),
+        ),
         // Tab utilities
         (
             "ttab",
@@ -667,7 +680,7 @@ mod tests {
 
     #[test]
     fn test_terminal_presets_count() {
-        assert_eq!(TERMINAL_PRESETS.len(), 30);
+        assert_eq!(TERMINAL_PRESETS.len(), 31);
     }
 
     #[test]

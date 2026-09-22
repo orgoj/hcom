@@ -1746,6 +1746,7 @@ pub fn terminal_help_text(show_current: bool) -> String {
         ("zellij", "panes"),
         ("waveterm", "blocks"),
         ("herdr", "panes"),
+        ("orca", "local terminal tabs"),
     ];
     const MANAGED_VARIANTS: &[(&str, &[&str])] = &[
         ("kitty", &["kitty-window", "kitty-tab", "kitty-split"]),
@@ -1947,6 +1948,9 @@ pub fn terminal_help_text(show_current: bool) -> String {
     lines.push(
         "                 (herdr `agent start` JSON is parsed for result.agent.pane_id)"
             .to_string(),
+    );
+    lines.push(
+        "                 (orca create JSON is parsed for result.terminal.handle)".to_string(),
     );
     lines.push("  {cwd}        = working directory the agent will start in".to_string());
     lines.push("  {instance_name} = hcom instance name (e.g. \"luna\")".to_string());
@@ -2489,6 +2493,17 @@ mod tests {
                 "missing {placeholder} placeholder docs",
             );
         }
+    }
+
+    #[test]
+    fn test_terminal_help_text_lists_orca_as_managed() {
+        let help = terminal_help_text(false);
+        let managed = help
+            .split("Other (opens window only):")
+            .next()
+            .expect("managed section should exist");
+        assert!(managed.contains("orca"));
+        assert!(help.contains("result.terminal.handle"));
     }
 
     #[test]
