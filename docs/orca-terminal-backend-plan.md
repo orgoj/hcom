@@ -16,6 +16,12 @@ cross-host hcom state are explicitly out of scope.
   implemented by a dedicated `orca_dev` agent.
 - Before implementation starts, ask `agent_coach` only to create and configure
   the `orca_dev` agent as the owner of that repository.
+- As its first repository task, `orca_dev` must fork the canonical Orca
+  repository, configure `origin` as its writable fork and `upstream` as the
+  canonical repository, and create a dedicated development branch from the
+  current upstream base. The branch must contain only the minimal changes
+  required by this integration and remain suitable for submission as an
+  upstream pull request.
 - After `orca_dev` exists, communicate and coordinate directly with it for the
   Orca proposal, implementation, verification, commit, release, and any later
   cross-repository contract questions. Do not route normal implementation work
@@ -396,21 +402,26 @@ smokes excluded by local release policy.
 
 1. Ask `agent_coach` to create and configure the dedicated `orca_dev` owner.
    This is the coach's only role in the implementation workflow.
-2. Give `orca_dev` the static findings and proposed generic CLI contract above.
-3. Work directly with `orca_dev` to finalize the flag name and capability
+2. Have `orca_dev` fork the canonical Orca repository, set its writable fork as
+   `origin` and the canonical repository as `upstream`, fetch the current
+   upstream base, and create a dedicated development branch. Verify the remote
+   URLs and branch base before any code changes. Keep every change surgical,
+   limited to the agreed CLI contract, and ready for an upstream pull request.
+3. Give `orca_dev` the static findings and proposed generic CLI contract above.
+4. Work directly with `orca_dev` to finalize the flag name and capability
    identifier, then have it implement, test, commit, and release that minimal
    CLI extension first.
-4. Run the runtime discovery gate against the released local Orca CLI.
-5. Add failing hcom unit and CLI smoke tests for the agreed contract.
-6. Implement the built-in preset, native adapter, JSON parsing, handle storage,
+5. Run the runtime discovery gate against the released local Orca CLI.
+6. Add failing hcom unit and CLI smoke tests for the agreed contract.
+7. Implement the built-in preset, native adapter, JSON parsing, handle storage,
    and exact close path.
-7. Complete the hcom user-facing documentation/help matrix.
-8. Run hcom verification required for a binary-affecting change:
+8. Complete the hcom user-facing documentation/help matrix.
+9. Run hcom verification required for a binary-affecting change:
    `cargo fmt --check`, `cargo clippy --bin hcom --all-targets`,
    `cargo test --bin hcom`, and focused `cargo test --test cli_smoke <filter>`.
-9. Inspect the full diff, remove `tmp/` artifacts, commit, build release, and
+10. Inspect the full diff, remove `tmp/` artifacts, commit, build release, and
    verify `hcom --version` according to local deployment rules.
-10. Run the real Orca acceptance sequence and record the supported Orca version
+11. Run the real Orca acceptance sequence and record the supported Orca version
     or capability in the release notes.
 
 ## Acceptance criteria
