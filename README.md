@@ -120,8 +120,10 @@ Orca runtime, using the registered Orca workspace that matches the agent's
 canonical working directory. Start the Orca desktop app or local `orca serve`
 first. Remote Orca environments are intentionally rejected; normal hcom hooks,
 messages, identity, and lifecycle remain authoritative. The Orca runtime must
-advertise `terminal.create-interactive-agent.v1` (available in the locally
-verified Orca CLI 1.4.197).
+advertise `terminal.create-interactive-agent.v1` and
+`terminal.create-folder-workspace.v1` (available in the locally verified Orca
+CLI 1.4.197). Unregistered local directories are added automatically as folder
+workspaces; Git repositories and manual Orca registration are not required.
 
 To configure a custom terminal open/close setup, tell an agent to run:
 

@@ -3110,7 +3110,7 @@ fn orca_direct_launch_uses_local_workspace_and_structured_agent_intent() {
         &fake_orca,
         r#"#!/bin/sh
 if [ "$1" = "status" ]; then
-  printf '%s\n' '{"id":"cli:status","ok":true,"result":{"runtime":{"reachable":true,"capabilities":["terminal.create-interactive-agent.v1"]}}}'
+  printf '%s\n' '{"id":"cli:status","ok":true,"result":{"runtime":{"reachable":true,"capabilities":["terminal.create-interactive-agent.v1","terminal.create-folder-workspace.v1"]}}}'
   exit 0
 fi
 printf '%s\n' "$@" > "$ORCA_CAPTURE_PATH"
@@ -3166,6 +3166,7 @@ printf '%s\n' '{"id":"request-launch","ok":true,"result":{"terminal":{"handle":"
         argv[3],
         format!("path:{}", launch_dir.canonicalize().unwrap().display())
     );
+    assert_eq!(argv[4], "--ensure-folder-workspace");
     assert!(
         argv.windows(2)
             .any(|pair| pair == ["--title", "orca-direct"])
@@ -3191,7 +3192,7 @@ fn orca_invalid_create_envelope_closes_the_returned_handle() {
         &fake_orca,
         r#"#!/bin/sh
 if [ "$1" = "status" ]; then
-  printf '%s\n' '{"id":"cli:status","ok":true,"result":{"runtime":{"reachable":true,"capabilities":["terminal.create-interactive-agent.v1"]}}}'
+  printf '%s\n' '{"id":"cli:status","ok":true,"result":{"runtime":{"reachable":true,"capabilities":["terminal.create-interactive-agent.v1","terminal.create-folder-workspace.v1"]}}}'
   exit 0
 fi
 printf '%s\n' "$*" >> "$ORCA_CAPTURE_PATH"

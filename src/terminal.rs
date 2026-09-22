@@ -32,6 +32,7 @@ pub enum KillResult {
 
 const TERMINAL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const ORCA_INTERACTIVE_AGENT_CAPABILITY: &str = "terminal.create-interactive-agent.v1";
+const ORCA_FOLDER_WORKSPACE_CAPABILITY: &str = "terminal.create-folder-workspace.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneCloseResult {
@@ -1999,8 +2000,15 @@ fn parse_orca_runtime_available(captured: &str) -> bool {
             .pointer("/result/runtime/capabilities")
             .and_then(|v| v.as_array())
             .is_some_and(|capabilities| {
-                capabilities.iter().any(|capability| {
-                    capability.as_str() == Some(ORCA_INTERACTIVE_AGENT_CAPABILITY)
+                [
+                    ORCA_INTERACTIVE_AGENT_CAPABILITY,
+                    ORCA_FOLDER_WORKSPACE_CAPABILITY,
+                ]
+                .into_iter()
+                .all(|required| {
+                    capabilities
+                        .iter()
+                        .any(|capability| capability.as_str() == Some(required))
                 })
             })
 }
@@ -2069,6 +2077,7 @@ fn orca_create_argv(
         "create".to_string(),
         "--worktree".to_string(),
         format!("path:{canonical_cwd}"),
+        "--ensure-folder-workspace".to_string(),
         "--command".to_string(),
         orca_runner_command(script, windows),
         "--title".to_string(),
@@ -2126,19 +2135,25 @@ fn launch_orca_terminal(
         .context(
             "Failed to run the Orca CLI; start the Orca desktop app or local `orca serve` runtime",
         )?;
-    validate_terminal_launch_output(&argv, &output, inside_ai_tool).map_err(|err| {
-        let message = err.to_string();
-        if message.contains("interactive-agent")
-            || message.contains("unknown option")
-            || message.contains("incompatible_runtime")
-        {
-            anyhow!(
-                "Installed Orca runtime lacks required capability {ORCA_INTERACTIVE_AGENT_CAPABILITY}; update Orca and retry: {message}"
-            )
-        } else {
-            anyhow!(message)
+    if !output.status.success()
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        && let Some(code) = value.pointer("/error/code").and_then(|v| v.as_str())
+    {
+        let detail = value
+            .pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .unwrap_or(code);
+        match code {
+            "incompatible_runtime" => bail!(
+                "Installed Orca runtime lacks required capabilities {ORCA_INTERACTIVE_AGENT_CAPABILITY} and {ORCA_FOLDER_WORKSPACE_CAPABILITY}; update Orca and retry: {detail}"
+            ),
+            "runtime_unavailable" => bail!(
+                "Local Orca runtime is unavailable; start the Orca desktop app or `orca serve`, then retry: {detail}"
+            ),
+            _ => bail!("Orca terminal creation failed ({code}): {detail}"),
         }
-    })?;
+    }
+    validate_terminal_launch_output(&argv, &output, inside_ai_tool)?;
     let captured = String::from_utf8(output.stdout)
         .context("Orca returned non-UTF-8 JSON while creating the terminal")?;
     let parsed = serde_json::from_str::<serde_json::Value>(captured.trim());
@@ -3366,8 +3381,8 @@ mod tests {
     #[test]
     fn orca_runtime_availability_requires_reachability_and_capability() {
         let available = format!(
-            r#"{{"ok":true,"result":{{"runtime":{{"reachable":true,"capabilities":["{}"]}}}}}}"#,
-            ORCA_INTERACTIVE_AGENT_CAPABILITY
+            r#"{{"ok":true,"result":{{"runtime":{{"reachable":true,"capabilities":["{}","{}"]}}}}}}"#,
+            ORCA_INTERACTIVE_AGENT_CAPABILITY, ORCA_FOLDER_WORKSPACE_CAPABILITY
         );
         assert!(parse_orca_runtime_available(&available));
         assert!(!parse_orca_runtime_available(
@@ -3375,6 +3390,12 @@ mod tests {
         ));
         assert!(!parse_orca_runtime_available(
             r#"{"ok":true,"result":{"runtime":{"reachable":true,"capabilities":[]}}}"#
+        ));
+        assert!(!parse_orca_runtime_available(
+            r#"{"ok":true,"result":{"runtime":{"reachable":true,"capabilities":["terminal.create-interactive-agent.v1"]}}}"#
+        ));
+        assert!(!parse_orca_runtime_available(
+            r#"{"ok":true,"result":{"runtime":{"reachable":true,"capabilities":["terminal.create-folder-workspace.v1"]}}}"#
         ));
         assert!(!parse_orca_runtime_available("not-json"));
     }
@@ -3418,6 +3439,7 @@ mod tests {
                 "create",
                 "--worktree",
                 "path:/tmp/project with space/žluťoučký",
+                "--ensure-folder-workspace",
                 "--command",
                 "bash '/tmp/runner with space.sh'",
                 "--title",
@@ -3441,7 +3463,7 @@ mod tests {
         );
         assert_eq!(argv[4], r"path:C:\project with space");
         assert_eq!(
-            argv[6],
+            argv[7],
             "powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\\runner with space.ps1'"
         );
         assert!(!argv.iter().any(|arg| arg == "--interactive-agent"));

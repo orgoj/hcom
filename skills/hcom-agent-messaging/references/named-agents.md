@@ -342,7 +342,10 @@ than the launching agent's inherited workspace and tab. Other non-multiplexer te
 the registered folder workspace matching the agent's canonical directory.
 Orca is only the terminal UI; hcom retains messaging, identity, hooks, and
 lifecycle authority. Remote Orca selectors are not supported, and the local
-runtime must advertise `terminal.create-interactive-agent.v1`.
+runtime must advertise `terminal.create-interactive-agent.v1` and
+`terminal.create-folder-workspace.v1`. Orca automatically registers an
+unrecognized local agent directory as a folder workspace without requiring
+Git or creating a worktree.
 
 For tools Herdr recognizes, hcom lets Herdr's native process detection, screen manifests, and
 installed integrations own classification, lifecycle state, and resume metadata. hcom uses

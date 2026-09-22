@@ -481,7 +481,10 @@ working directory. Orca is the terminal UI only: hcom still owns identity,
 hooks, delivery, and lifecycle. `session` and `window` are ignored with the
 normal non-multiplexer warning. Remote Orca selectors are rejected; start the
 desktop app or a local `orca serve` runtime before launching. The runtime must
-advertise `terminal.create-interactive-agent.v1`.
+advertise `terminal.create-interactive-agent.v1` and
+`terminal.create-folder-workspace.v1`. If the canonical agent directory is not
+registered yet, hcom asks Orca to add it automatically as a folder workspace;
+this does not create a Git worktree.
 
 ## Shell completions
 
