@@ -421,6 +421,22 @@ Legacy `skills_dir` and `--skills-dir` are unsupported. Move each skill to `agen
 
 Per-instance files are stored under `$HCOM_DIR/system-prompts/<tool>/<instance>/`. The fallback is an approximation: it is subordinate to genuine system/developer messages, though agents are instructed to prioritize it above ordinary task text. It is not emitted as a separate user task or meta-turn.
 
+### Open question: bundle and memory guidance
+
+A catalog-wide `system_prompt_file` applies to every agent that inherits its defaults, including
+JSON-only agents without a `SOUL.md` bundle. Do not assume that every agent has `NOTES.md` or
+`MEMORY/`: these are ordinary files, not hcom features. Deployments that use them should scope
+their reading and writing rules to the relevant agents. For agents with a bundle, the generated
+`# Agent bundle instructions` section already gives the resolved absolute bundle and `SOUL.md`
+paths; the shared prompt does not need path interpolation. Keep memory layout out of the universal
+`[HCOM SESSION]` bootstrap unless the product contract is deliberately changed.
+
+Antigravity needs separate verification before relying on bundle instructions across turns. Its
+initial SessionStart hook appends the catalog prompt and `SOUL.md` through the instruction fallback,
+but the recurring PreInvocation path currently re-emits only the hcom bootstrap. That context is
+ephemeral, so verify whether Antigravity retains the initial instructions and, if it does not,
+decide how to provide them on later turns.
+
 Use `hcom agent show <name> --cli <tool>` to inspect the exact effective command before launch.
 
 ## Starting, resuming, and messaging
