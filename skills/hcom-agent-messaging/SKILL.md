@@ -227,6 +227,23 @@ available, replace the row only when lifecycle context explicitly proves
 termination (`exit:*`) or launch failure (`launch_failed`); otherwise fail
 conservatively instead of risking a duplicate agent.
 
+### Message composition and verification patterns
+
+- **Task/Fix:** State the functional goal and constraints, then specify explicit
+  verification criteria such as a test command, expected exit code, or local commit hash.
+- **Report/Done:** Give the absolute path to the report or diff, a 1-2 sentence summary
+  of findings or metrics, and verification proof such as a passing test, diff check,
+  or commit hash.
+- **Review:** Give the absolute path to the proposal or diff, the core invariants to
+  preserve (for example, "without reindexing" or "preserve wire format"), and explicit
+  questions for the reviewer.
+- **Decision:** Lead with the verdict (for example, "GO with changes:" or "STOP:"),
+  followed by numbered mechanical points and a required edge-case test scenario.
+
+**Verifiability (Demonstrability):** Never report completion with a vague assertion
+such as "done," "fixed," or "should work." Provide reproducible evidence: a command
+output summary, passing test suite, or commit hash.
+
 ### intent system
 
 agents follow these rules from their bootstrap:
