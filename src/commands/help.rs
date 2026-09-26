@@ -471,6 +471,10 @@ const LISTEN_HELP: &[HelpEntry] = &[
 const RESET_HELP: &[HelpEntry] = &[
     ("reset", "Archive conversation, clear database"),
     (
+        "",
+        "On Unix, an open TUI reconnects after database replacement.",
+    ),
+    (
         "reset all",
         "Stop all + clear db + remove hooks + reset config",
     ),
@@ -539,6 +543,10 @@ const CONFIG_HELP: &[HelpEntry] = &[
     ("", "hcom config <key> --info for details"),
     ("", ""),
     ("", "Precedence: defaults < config.toml < env vars"),
+    (
+        "",
+        "An existing HCOM_DIR/env survives first-run config creation.",
+    ),
 ];
 
 // config help continued with dynamic config files hint

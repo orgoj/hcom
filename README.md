@@ -444,6 +444,8 @@ hcom hooks remove && rm -rf "$HCOM_DIR"
 Run `hcom config <key> --info` or `hcom run docs --config` for the full per-key reference.
 
 Edit `~/.hcom/env` to set external env vars passed to every launched agent.
+If this file exists before the first hcom run, creating `config.toml` preserves it.
+On Unix, an open TUI reconnects to the new database after `hcom reset`.
 
 </details>
 

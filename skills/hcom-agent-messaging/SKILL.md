@@ -339,6 +339,7 @@ place scripts in `~/.hcom/scripts/` as `.sh` or `.py`. run with `hcom run <name>
 |------|----------|
 | database | `~/.hcom/hcom.db` |
 | config | `~/.hcom/config.toml` |
+| agent env passthrough | `~/.hcom/env` (preserved if created before first run) |
 | logs | `~/.hcom/.tmp/logs/` |
 | user scripts | `~/.hcom/scripts/` |
 

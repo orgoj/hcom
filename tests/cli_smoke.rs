@@ -3097,6 +3097,21 @@ fn terminal_help_exposes_orca_preset() {
 }
 
 #[test]
+fn reset_and_config_help_describe_preserved_state() {
+    let h = Hcom::new();
+    let (code, stdout, stderr) = h.run(["reset", "--help"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("open TUI reconnects"), "stdout={stdout}");
+
+    let (code, stdout, stderr) = h.run(["config", "--help"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("existing HCOM_DIR/env survives"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
 #[cfg(unix)]
 fn orca_direct_launch_uses_local_workspace_and_structured_agent_intent() {
     use std::os::unix::fs::PermissionsExt;

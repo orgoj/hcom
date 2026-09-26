@@ -1465,10 +1465,13 @@ pub fn load_config_snapshot() -> ConfigSnapshot {
     ConfigSnapshot { core }
 }
 
-/// Write default config.toml + env file.
+/// Write default config.toml and create the env file unless it already exists.
 pub fn write_default_config() -> std::io::Result<()> {
     let config = HcomConfig::default();
     save_toml_config(&config, None)?;
+    if Config::get().hcom_dir.join("env").exists() {
+        return Ok(());
+    }
     save_env_file(&HashMap::new())
 }
 
@@ -1615,6 +1618,22 @@ mod tests {
     use crate::hooks::test_helpers::{EnvGuard, isolated_test_env};
     use serial_test::serial;
     use std::env;
+
+    #[test]
+    #[serial]
+    fn write_default_config_preserves_preseeded_env() {
+        let (_dir, hcom_dir, _home, _guard) = isolated_test_env();
+        let env_path = hcom_dir.join("env");
+        std::fs::write(&env_path, "ANTHROPIC_BASE_URL=http://127.0.0.1:1\n").unwrap();
+
+        write_default_config().unwrap();
+
+        assert!(hcom_dir.join("config.toml").exists());
+        assert_eq!(
+            std::fs::read_to_string(&env_path).unwrap(),
+            "ANTHROPIC_BASE_URL=http://127.0.0.1:1\n"
+        );
+    }
 
     /// Helper to set env var for test scope
     fn with_env<F>(key: &str, value: &str, f: F)
