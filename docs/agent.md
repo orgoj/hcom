@@ -96,6 +96,8 @@ Global and project layouts are identical:
 └── agents/                     └── agents/
     └── reviewer/                   └── reviewer/
         ├── SOUL.md                     ├── SOUL.md
+        ├── .claude/                    ├── .claude/
+        │   └── skills -> ../skills     │   └── skills -> ../skills
         └── skills/                     └── skills/
             └── review/                     └── review/
                 └── SKILL.md                    └── SKILL.md
@@ -106,11 +108,14 @@ also remains valid. Discovered directory names must contain only lowercase lette
 underscores. Bundle `AGENTS.md` files are not read as a fallback.
 
 The effective `agent_instructions` contains the catalog `system_prompt`, then an `# Agent bundle
-instructions` section with absolute bundle and `SOUL.md` paths and its current contents, then an
-`# Available agent skills` manifest. Empty sections are omitted. `prompt` remains the initial user
-message. hcom rereads `SOUL.md` and skills on every clean start and named-agent resume, so an
-agent may improve its bundle for its next launch. Relative references resolve from the bundle or
-skill directory named in the manifest.
+instructions` section with absolute bundle and `SOUL.md` paths and its current contents. For CLIs
+without native bundle skill loading, it also contains an `# Available agent skills` manifest.
+Claude loads bundle skills natively instead: at start, hcom creates `.claude/skills -> ../skills`
+when the path is absent and passes the bundle through `--add-dir`, including when it sits inside
+the working directory. An existing `.claude/skills` directory or symlink is left alone.
+Empty sections are omitted. `prompt` remains the initial user message. hcom rereads `SOUL.md` and
+skills on every clean start and named-agent resume, so an agent may improve its bundle for its next
+launch. Relative references in the manifest resolve from the bundle or skill directory named there.
 
 If a bundle is outside the working directory, hcom grants only that directory through the CLI's
 additional-workspace mechanism. Launch fails clearly when the CLI cannot make it writable at
@@ -387,7 +392,10 @@ The table produced by `hcom agent list` shows each agent's effective CLI and mod
 
 ## Private agent skills
 
-Private skills live under `<bundle>/skills/`. Each immediate child directory containing `SKILL.md` is listed in the common lazy-loading manifest; hcom does not register it through a CLI-specific skill system. User, project, and plugin skills remain available.
+Private skills live under `<bundle>/skills/`. Each immediate child directory containing `SKILL.md`
+is listed in the lazy-loading manifest for CLIs without native bundle skill loading. Claude discovers
+them through `<bundle>/.claude/skills` and `--add-dir`, so its prompt does not repeat that manifest.
+User, project, and plugin skills remain available.
 
 Use one child directory per skill:
 

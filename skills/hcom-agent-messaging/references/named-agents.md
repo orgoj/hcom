@@ -55,9 +55,12 @@ Keep paths in project catalogs relative to the project root. Do not store machin
 absolute paths in a versioned `.hcom/agents.json`; use absolute or `~`-based paths only in
 machine-local catalogs such as `~/.hcom/agents.json`.
 
-The catalog `system_prompt` is followed by the current `SOUL.md` and a manifest of immediate
-`skills/*/SKILL.md` children. hcom rereads both on every clean launch/named resume, and referenced
-files resolve relative to their bundle or skill directory. For an external bundle,
+The catalog `system_prompt` is followed by the current `SOUL.md` and, for CLIs without native
+bundle skill loading, a manifest of immediate `skills/*/SKILL.md` children. On Claude launches,
+hcom creates `<bundle>/.claude/skills -> ../skills` when absent and passes `--add-dir <bundle>`;
+Claude discovers those skills natively, so the prompt omits the manifest. hcom rereads both on
+every clean launch and named resume. References in the manifest resolve relative to their bundle
+or skill directory. For an external bundle,
 hcom grants only that directory when the CLI supports startup-time additional workspaces;
 otherwise launch fails clearly. Antigravity (`agy` or `antigravity`) uses its repeatable
 `--add-dir` option.

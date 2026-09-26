@@ -1442,6 +1442,10 @@ fn agent_help_lists_catalog_layers() {
     assert!(stdout.contains("agents.json"), "stdout={stdout}");
     assert!(stdout.contains(".hcom/agents.json"), "stdout={stdout}");
     assert!(stdout.contains("agents/<name>/SOUL.md"), "stdout={stdout}");
+    assert!(
+        stdout.contains(".claude/skills -> ../skills"),
+        "stdout={stdout}"
+    );
     assert!(stdout.contains("system_prompt_file"), "stdout={stdout}");
     assert!(
         stdout.contains("agy and antigravity use --add-dir"),
@@ -2153,6 +2157,56 @@ fn agent_dry_run_renders_the_hcom_command_without_launching() {
     let (code, list, _stderr) = h.run(["list", "--json"]);
     assert_eq!(code, 0);
     assert_eq!(list.trim(), "[]", "dry-run must not create an instance");
+}
+
+#[test]
+#[cfg(unix)]
+fn claude_agent_start_links_private_skills_without_prompt_manifest() {
+    let h = Hcom::new();
+    let workspace = h.root_path().join("workspace");
+    let bundle = h.path().join("agents/solo");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(bundle.join("skills/review")).unwrap();
+    std::fs::write(bundle.join("SOUL.md"), "Agent notes.").unwrap();
+    std::fs::write(
+        bundle.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review changes\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"agents":{{"solo":{{"dir":{},"cli":"claude","terminal_command":"sh -c true {{script}}"}}}}}}"#,
+            serde_json::to_string(&workspace).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let native_skills = bundle.join(".claude/skills");
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains(&format!("--add-dir {}", bundle.display())));
+    assert!(!stdout.contains("# Available agent skills"));
+    assert!(
+        !native_skills.exists(),
+        "dry-run must not change the bundle"
+    );
+    let (code, stdout, stderr) = h.run(["agent", "solo"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert_eq!(
+        std::fs::read_link(&native_skills).unwrap(),
+        std::path::Path::new("../skills")
+    );
+    assert_eq!(
+        std::fs::read_to_string(native_skills.join("review/SKILL.md")).unwrap(),
+        "---\nname: review\ndescription: Review changes\n---\n"
+    );
+    let (code, stdout, stderr) = h.run(["agent", "solo"]);
+    assert_eq!(code, 0, "repeated start: stdout={stdout} stderr={stderr}");
+    assert_eq!(
+        std::fs::read_link(&native_skills).unwrap(),
+        std::path::Path::new("../skills")
+    );
 }
 
 #[test]

@@ -7,7 +7,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::db::HcomDb;
@@ -73,6 +73,9 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   A sibling agents/<name>/SOUL.md also defines an agent and is appended to its
   system instructions after the catalog system_prompt. Bundle-local skills are
   discovered from agents/<name>/skills/*/SKILL.md. AGENTS.md is not a fallback.
+  Claude launches create .claude/skills -> ../skills if absent and pass the
+  bundle through --add-dir; Claude loads those skills natively, without a
+  duplicate skill manifest in the prompt. Existing .claude/skills is left alone.
   A project agent ignores a
   same-named non-project entry but still inherits global defaults.
   External bundles are granted through each CLI's additional-workspace mechanism;
@@ -1649,7 +1652,11 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         def.agent_dir.as_deref(),
         nonempty(def.instructions.clone()),
         nonempty(def.instructions_content),
-        &skills,
+        if selected_cli == "claude" {
+            &[]
+        } else {
+            &skills
+        },
     );
 
     let reasoning = nonempty(def.reasoning);
@@ -1712,6 +1719,13 @@ fn apply_bundle_access(eff: &mut Effective) {
     let Some(dir) = eff.agent_dir.clone() else {
         return;
     };
+    // Claude loads .claude/skills in --add-dir directories even when the bundle
+    // is already writable through the working directory. Pass it at every start
+    // so nested project bundles have their skills available immediately.
+    if eff.cli == "claude" {
+        eff.bundle_args.extend(["--add-dir".into(), dir]);
+        return;
+    }
     let workspace =
         std::fs::canonicalize(&eff.dir).unwrap_or_else(|_| normalize(Path::new(&eff.dir)));
     let bundle = std::fs::canonicalize(&dir).unwrap_or_else(|_| normalize(Path::new(&dir)));
@@ -1720,7 +1734,7 @@ fn apply_bundle_access(eff: &mut Effective) {
     }
 
     match eff.cli.as_str() {
-        "claude" | "codex" | "agy" | "antigravity" => {
+        "codex" | "agy" | "antigravity" => {
             eff.bundle_args.extend(["--add-dir".into(), dir]);
         }
         "gemini" => {
@@ -1749,6 +1763,70 @@ fn apply_bundle_access(eff: &mut Effective) {
                 eff.cli, dir
             ));
         }
+    }
+}
+
+fn ensure_claude_skill_link(eff: &Effective) -> Result<()> {
+    if eff.cli != "claude" {
+        return Ok(());
+    }
+    let Some(bundle) = eff.agent_dir.as_deref().map(Path::new) else {
+        return Ok(());
+    };
+
+    let skills = bundle.join("skills");
+    std::fs::create_dir_all(&skills)
+        .with_context(|| format!("cannot create agent skills directory {}", skills.display()))?;
+    let bundle_root = std::fs::canonicalize(bundle)?;
+    let skills_root = std::fs::canonicalize(&skills)?;
+    if !skills_root.starts_with(&bundle_root) {
+        bail!(
+            "agent skills directory {} escapes its bundle",
+            skills.display()
+        );
+    }
+
+    let claude_dir = bundle.join(".claude");
+    if std::fs::symlink_metadata(&claude_dir)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        bail!(
+            "Claude configuration directory {} is a symlink",
+            claude_dir.display()
+        );
+    }
+    std::fs::create_dir_all(&claude_dir)
+        .with_context(|| format!("cannot create Claude directory {}", claude_dir.display()))?;
+    let native_skills = claude_dir.join("skills");
+    match std::fs::symlink_metadata(&native_skills) {
+        Ok(metadata) if metadata.is_dir() || metadata.file_type().is_symlink() => return Ok(()),
+        Ok(_) => bail!(
+            "Claude skills path {} is not a directory",
+            native_skills.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("cannot inspect {}", native_skills.display()));
+        }
+    }
+
+    #[cfg(unix)]
+    let result = std::os::unix::fs::symlink("../skills", &native_skills);
+    #[cfg(windows)]
+    let result = std::os::windows::fs::symlink_dir("../skills", &native_skills);
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            match std::fs::symlink_metadata(&native_skills) {
+                Ok(metadata) if metadata.is_dir() || metadata.file_type().is_symlink() => Ok(()),
+                _ => Err(error).with_context(|| {
+                    format!("cannot link {} to ../skills", native_skills.display())
+                }),
+            }
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("cannot link {} to ../skills", native_skills.display())),
     }
 }
 
@@ -2243,6 +2321,9 @@ fn launch_named_with_roaming(
         }
     }
 
+    if !cli.dry_run {
+        ensure_claude_skill_link(&eff)?;
+    }
     launch(&eff, cli, eff.resume)
 }
 
@@ -3341,7 +3422,11 @@ mod tests {
         let prompt = eff.system_prompt.unwrap();
         assert!(prompt.starts_with("fixed\n\n# Agent bundle instructions\n\nBundle directory: `/work/.hcom/agents/reviewer`\nInstruction file: `/work/.hcom/agents/reviewer/SOUL.md`"));
         assert!(prompt.ends_with("learned"));
-        assert!(eff.bundle_args.is_empty(), "bundle is inside workspace");
+        assert_eq!(
+            eff.bundle_args,
+            ["--add-dir", "/work/.hcom/agents/reviewer"],
+            "Claude discovers nested bundle skills through --add-dir"
+        );
     }
 
     #[test]
@@ -3369,6 +3454,33 @@ mod tests {
         assert!(prompt.starts_with("# Available agent skills"));
         assert!(prompt.find("## alpha").unwrap() < prompt.find("## inspect").unwrap());
         assert!(prompt.contains(&skills[0].path));
+    }
+
+    #[test]
+    fn claude_uses_native_bundle_skills_while_codex_keeps_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("reviewer");
+        std::fs::create_dir_all(bundle.join("skills/review")).unwrap();
+        std::fs::write(
+            bundle.join("skills/review/SKILL.md"),
+            "---\nname: review\ndescription: Review changes\n---\n",
+        )
+        .unwrap();
+        for (cli, should_have_manifest) in [("claude", false), ("codex", true)] {
+            let mut def = def_from(&format!(r#"{{"cli":"{cli}","dir":"/work"}}"#));
+            def.agent_dir = Some(bundle.to_string_lossy().into_owned());
+            def.system_prompt = Some("fixed".into());
+            let eff = effective("reviewer", def, &Cli::default());
+            assert_eq!(eff.skills.len(), 1);
+            assert_eq!(
+                eff.system_prompt
+                    .as_deref()
+                    .unwrap()
+                    .contains("# Available agent skills"),
+                should_have_manifest,
+                "cli={cli}"
+            );
+        }
     }
 
     #[test]
@@ -4024,6 +4136,12 @@ mod tests {
             "-c".to_string(),
             "model_reasoning_effort=\"xhigh\"".to_string(),
         ]));
+
+        let mut claude = eff_of(r#"{"dir":"/w","cli":"claude"}"#, &[]);
+        claude.agent_dir = Some("/bundle".into());
+        apply_bundle_access(&mut claude);
+        let argv = hcom_argv(&claude, Some("here"), true);
+        assert!(argv.windows(2).any(|args| args == ["--add-dir", "/bundle"]));
     }
 
     #[test]

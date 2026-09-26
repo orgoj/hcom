@@ -326,8 +326,11 @@ resulting command without launching anything.
 `hcom agent` launches recurring agents from JSON settings and editable bundles. A bundle at
 `~/.hcom/agents/<name>/SOUL.md` or an enclosing project `.hcom/agents/<name>/SOUL.md` defines an
 agent even without a JSON entry. Its contents follow the catalog `system_prompt`; immediate
-`skills/*/SKILL.md` children are advertised through one shared lazy-loading manifest. Both are
-reread on clean start and named resume. Bundle `AGENTS.md` files are not read as a fallback. For
+`skills/*/SKILL.md` children are advertised through a lazy-loading manifest for CLIs without
+native bundle skill loading. Claude instead gets `<bundle>/.claude/skills` linked to `../skills`
+when absent and receives the bundle through `--add-dir`, so its skills load natively without a
+duplicate prompt manifest. Both instructions and skills are reread on clean start and named resume.
+Bundle `AGENTS.md` files are not read as a fallback. For
 Antigravity, an external bundle is made writable with
 `agy --add-dir`. An instance name is unique: launching one that already runs prints its status and
 exits. Use `--as` to run the same definition concurrently.
