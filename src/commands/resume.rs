@@ -3,7 +3,8 @@
 //!
 //! Loads a stopped instance's snapshot and relaunches with --resume session_id.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use rusqlite::OptionalExtension;
 use serde_json::json;
 use std::io::BufRead;
 
@@ -532,6 +533,18 @@ fn prepare_resume_plan_from_source(
     } else {
         None
     };
+    let mut launch_env = super::launch::catalog_launch_env()?.unwrap_or_default();
+    if !fork
+        && !is_adoption
+        && matches!(tool.as_str(), "agy" | "antigravity")
+        && !launch_env.contains_key(crate::commands::agent::DIPPY_POLICY_CWD)
+        && let Some(policy_cwd) = load_stopped_agy_policy_cwd(db, &display_name)?
+    {
+        launch_env.insert(
+            crate::commands::agent::DIPPY_POLICY_CWD.to_string(),
+            policy_cwd,
+        );
+    }
 
     Ok(PreparedResume {
         output: ResumeOutputContext {
@@ -556,7 +569,7 @@ fn prepare_resume_plan_from_source(
             initial_prompt: fork_initial_prompt,
             background: is_headless,
             cwd: Some(effective_cwd),
-            env: super::launch::catalog_launch_env()?,
+            env: (!launch_env.is_empty()).then_some(launch_env),
             launcher: Some(launcher_name),
             run_here: launch_flags.run_here,
             batch_id: launch_flags.batch_id.clone(),
@@ -1002,6 +1015,36 @@ fn load_stopped_snapshot(
         "No stopped snapshot found for '{name}'. Not a known hcom instance, \
          session UUID, or recognized thread name."
     )
+}
+
+/// Restore only the launch-time policy directory recorded for a tracked AGY
+/// instance. Historical and adopted sessions have no trusted catalog scope.
+fn load_stopped_agy_policy_cwd(db: &HcomDb, name: &str) -> Result<Option<String>> {
+    let raw = db
+        .conn()
+        .query_row(
+            "SELECT json_extract(data, '$.snapshot.dippy_policy_cwd') FROM events
+             WHERE type='life' AND instance=?
+               AND json_extract(data, '$.action')='stopped'
+             ORDER BY id DESC LIMIT 1",
+            rusqlite::params![name],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let path = std::path::Path::new(&raw);
+    if !path.is_absolute() {
+        bail!("stored AGY policy directory is not absolute: {raw}");
+    }
+    let canonical = std::fs::canonicalize(path)
+        .with_context(|| format!("stored AGY policy directory is unavailable: {raw}"))?;
+    if !canonical.is_dir() || canonical.to_str() != Some(raw.as_str()) {
+        bail!("stored AGY policy directory is no longer canonical: {raw}");
+    }
+    Ok(Some(raw))
 }
 
 /// Fail before a catalog launcher creates a terminal for an impossible resume.
@@ -3258,6 +3301,35 @@ mod tests {
             "forks bind a fresh session on first turn; must not inherit the parent's"
         );
         assert!(!fork.launch.explicit_identity);
+    }
+
+    #[test]
+    fn test_agy_stopped_policy_scope_requires_recorded_canonical_directory() {
+        let db = test_db();
+        let add_stop = |snapshot: serde_json::Value| {
+            db.conn()
+                .execute(
+                    "INSERT INTO events (timestamp, type, instance, data) \
+                     VALUES ('2026-01-01T00:00:00Z', 'life', 'knowledge', ?)",
+                    rusqlite::params![
+                        serde_json::json!({"action": "stopped", "snapshot": snapshot}).to_string()
+                    ],
+                )
+                .unwrap();
+        };
+        add_stop(serde_json::json!({"tool": "antigravity"}));
+        assert_eq!(load_stopped_agy_policy_cwd(&db, "knowledge").unwrap(), None);
+
+        add_stop(serde_json::json!({"dippy_policy_cwd": "relative/path"}));
+        assert!(load_stopped_agy_policy_cwd(&db, "knowledge").is_err());
+
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(directory.path()).unwrap();
+        add_stop(serde_json::json!({"dippy_policy_cwd": canonical}));
+        assert_eq!(
+            load_stopped_agy_policy_cwd(&db, "knowledge").unwrap(),
+            Some(canonical.to_string_lossy().into_owned())
+        );
     }
 
     #[test]

@@ -125,8 +125,9 @@ startup. Antigravity (`agy` or `antigravity`) receives the bundle through its re
 For catalog-launched Antigravity, hcom sets `DIPPY_POLICY_CWD` to the canonical catalog `dir`
 for that agent and passes it to the CLI process and its hooks. This launch scope is independent of
 a command-line `--dir` override, tool-call `Cwd`, and any bundle supplied with `--add-dir`.
-The value is recomputed on named resume and a CLI switch to Antigravity. Child launches do not
-inherit the parent's policy directory.
+The value is recomputed on named resume and a CLI switch to Antigravity. A direct tracked
+`hcom r <name>` restores the recorded launch scope; older snapshots without one do not receive
+the variable. Child launches do not inherit the parent's policy directory.
 The directory must exist at launch so hcom can canonicalize it.
 
 ## Example: project fleet with local memory

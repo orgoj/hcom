@@ -83,6 +83,7 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   agy and antigravity use --add-dir.
   Catalog-launched agy/antigravity also receive DIPPY_POLICY_CWD: the canonical
   catalog dir, independent of --dir overrides, tool Cwd and --add-dir bundles.
+  Tracked hcom r restores that scope from the stopped instance snapshot.
   Relative import paths resolve against the importing file. Relative \"dir\" resolves
   against $HOME globally, the parent of project .hcom (also when imported), or its
   file for other catalogs.

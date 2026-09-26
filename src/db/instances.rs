@@ -362,7 +362,10 @@ impl HcomDb {
         let mut stmt = self.conn.prepare_cached(
             "SELECT transcript_path, session_id, tool, directory, parent_name, tag,
                     wait_timeout, subagent_timeout, hints, pid, created_at, background,
-                    agent_id, launch_args, origin_device_id, background_log_file, last_event_id
+                    agent_id, launch_args, origin_device_id, background_log_file, last_event_id,
+                    CASE WHEN json_valid(launch_context)
+                         THEN json_extract(launch_context, '$.dippy_policy_cwd')
+                         ELSE NULL END
              FROM instances WHERE name = ?",
         )?;
 
@@ -385,6 +388,7 @@ impl HcomDb {
                 "origin_device_id": row.get::<_, String>(14).unwrap_or_default(),
                 "background_log_file": row.get::<_, String>(15).unwrap_or_default(),
                 "last_event_id": row.get::<_, i64>(16).unwrap_or(0),
+                "dippy_policy_cwd": row.get::<_, Option<String>>(17).unwrap_or(None),
             }))
         }) {
             Ok(snapshot) => Ok(Some(snapshot)),
@@ -1022,6 +1026,22 @@ mod tests {
             err.to_string().contains("instances"),
             "expected missing instances table error, got: {err:#}"
         );
+        cleanup_test_db(db_path);
+    }
+
+    #[test]
+    fn test_stopped_snapshot_keeps_agy_policy_directory() {
+        let (db, db_path) = setup_full_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, tool, created_at, launch_context) \
+                 VALUES ('knowledge', 'antigravity', 1, ?)",
+                params![r#"{"dippy_policy_cwd":"/home/michael/wiki"}"#],
+            )
+            .unwrap();
+
+        let snapshot = db.get_instance_snapshot("knowledge").unwrap().unwrap();
+        assert_eq!(snapshot["dippy_policy_cwd"], "/home/michael/wiki");
         cleanup_test_db(db_path);
     }
 

@@ -121,6 +121,7 @@ launch operation: `hcom send @audit_api --intent request -- "..."` starts `audit
 missing or stopped, then delivers the message. Do not add `hcom list`/`hcom agent` preflight logic.
 For catalog-launched Antigravity agents, hcom passes the canonical catalog directory as
 `DIPPY_POLICY_CWD` to the CLI and its hooks; extra `--add-dir` workspaces do not change it.
+Direct tracked `hcom r <name>` restores the scope from the stopped snapshot.
 Broadcasts do not auto-start catalog agents. Send briefly waits for an autostarted target to
 acknowledge the initial event. If the agent is still starting when that check expires, output says
 `Queued; delivery pending`; the durable message is delivered later and send still succeeds. See

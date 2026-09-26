@@ -2263,6 +2263,14 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
             if params.explicit_identity {
                 db.store_launch_context(&instance_name, r#"{"explicit_identity":true}"#)?;
             }
+            if matches!(normalized, LaunchTool::Antigravity)
+                && let Some(policy_cwd) = base_env.get(crate::commands::agent::DIPPY_POLICY_CWD)
+            {
+                db.store_launch_context(
+                    &instance_name,
+                    &json!({ "dippy_policy_cwd": policy_cwd }).to_string(),
+                )?;
+            }
             db.set_process_binding(&process_id, "", &instance_name)?;
             Ok(())
         })() {

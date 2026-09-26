@@ -2442,6 +2442,19 @@ fn agent_agy_policy_cwd_uses_canonical_launch_directory() {
     );
     assert!(!script.contains("/parent-policy"));
     assert!(!script.contains("DIPPY_POLICY_CWD=/wrong"));
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).unwrap();
+    let launch_context: String = conn
+        .query_row(
+            "SELECT launch_context FROM instances WHERE name='knowledge'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let launch_context: serde_json::Value = serde_json::from_str(&launch_context).unwrap();
+    assert_eq!(
+        launch_context["dippy_policy_cwd"].as_str(),
+        workspace.to_str()
+    );
     let hook = std::process::Command::new("bash")
         .args([
             "-c",
@@ -2476,8 +2489,9 @@ fn agent_agy_policy_cwd_uses_canonical_launch_directory() {
 }
 
 #[test]
-fn agent_agy_policy_cwd_survives_named_resume_and_cli_switch() {
+fn agent_agy_policy_cwd_survives_tracked_resume_and_cli_switch() {
     let h = Hcom::new();
+    h.set_launch_env("DIPPY_POLICY_CWD", "/ambient-policy");
     let workspace = h.root_path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(
@@ -2512,6 +2526,7 @@ fn agent_agy_policy_cwd_survives_named_resume_and_cli_switch() {
             "session_id": "agy-session",
             "launch_args": "[]",
             "directory": workspace,
+            "dippy_policy_cwd": workspace,
             "tag": "",
             "background": 0,
             "last_event_id": 0
@@ -2525,15 +2540,7 @@ fn agent_agy_policy_cwd_survives_named_resume_and_cli_switch() {
     .unwrap();
     drop(conn);
 
-    let (code, _stdout, stderr) = h.run([
-        "agent",
-        "knowledge",
-        "--cli",
-        "agy",
-        "--resume",
-        "--terminal",
-        "print",
-    ]);
+    let (code, _stdout, stderr) = h.run(["r", "knowledge", "--terminal", "print"]);
     assert_eq!(code, 0, "stderr={stderr}");
     let launch_dir = h.path().join(".tmp/launch");
     let resume_env = std::fs::read_dir(&launch_dir)
@@ -2542,11 +2549,12 @@ fn agent_agy_policy_cwd_survives_named_resume_and_cli_switch() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "env"))
         .map(|path| std::fs::read_to_string(path).unwrap())
         .find(|content| content.contains("DIPPY_POLICY_CWD"))
-        .expect("named resume launcher environment");
+        .expect("tracked resume launcher environment");
     assert!(
         resume_env.contains(&format!("DIPPY_POLICY_CWD={}", workspace.display())),
         "resume launcher has wrong policy cwd"
     );
+    assert!(!resume_env.contains("/ambient-policy"));
 
     let (code, _stdout, stderr) = h.run(["f", "knowledge", "--dry-run"]);
     assert_ne!(code, 0, "AGY fork is unsupported");
