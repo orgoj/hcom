@@ -1451,6 +1451,7 @@ fn agent_help_lists_catalog_layers() {
         stdout.contains("agy and antigravity use --add-dir"),
         "stdout={stdout}"
     );
+    assert!(stdout.contains("DIPPY_POLICY_CWD"), "stdout={stdout}");
     assert!(stdout.contains("--as <name>"), "stdout={stdout}");
     assert!(stdout.contains("@<group>"), "stdout={stdout}");
     assert!(stdout.contains("\"groups\""), "stdout={stdout}");
@@ -2372,6 +2373,184 @@ fn agent_agy_external_bundle_dry_run_adds_bundle_to_workspace() {
             "name={name} stdout={stdout}"
         );
     }
+}
+
+#[test]
+#[cfg(unix)]
+fn agent_agy_policy_cwd_uses_canonical_launch_directory() {
+    let h = Hcom::new();
+    h.set_launch_env("DIPPY_POLICY_CWD", "/parent-policy");
+    let workspace = h.root_path().join("workspace");
+    let alias = h.root_path().join("workspace-alias");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+    let bundle = h.path().join("agents/knowledge");
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("SOUL.md"), "Knowledge agent.").unwrap();
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"agents":{{"knowledge":{{"dir":{},"cli":"agy","env":{{"DIPPY_POLICY_CWD":"/wrong"}}}}}}}}"#,
+            serde_json::to_string(&alias).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = h.run(["agent", "knowledge", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains(&format!("DIPPY_POLICY_CWD={}", workspace.display())),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains(&format!("--add-dir {}", bundle.display())));
+    assert!(!stdout.contains("DIPPY_POLICY_CWD=/wrong"));
+    let other = h.root_path().join("other-workspace");
+    std::fs::create_dir_all(&other).unwrap();
+    let (code, stdout, stderr) = h.run([
+        "agent",
+        "knowledge",
+        "--dir",
+        other.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains(&format!("--dir {}", other.display())));
+    assert!(stdout.contains(&format!("DIPPY_POLICY_CWD={}", workspace.display())));
+
+    // The generated launcher script exports the value to AGY; AGY hook
+    // subprocesses inherit this process environment. A plain child launch
+    // cannot inherit the parent agent's policy scope.
+    let (code, _script, stderr) = h.run(["agent", "knowledge", "--terminal", "print"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let launch_dir = h.path().join(".tmp/launch");
+    let knowledge_env_path = std::fs::read_dir(&launch_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("antigravity_knowledge_") && name.ends_with(".env")
+                })
+        })
+        .expect("knowledge launcher environment file");
+    let script = std::fs::read_to_string(&knowledge_env_path).unwrap();
+    assert!(
+        script.contains(&format!("DIPPY_POLICY_CWD={}", workspace.display())),
+        "launcher env path={}",
+        knowledge_env_path.display()
+    );
+    assert!(!script.contains("/parent-policy"));
+    assert!(!script.contains("DIPPY_POLICY_CWD=/wrong"));
+    let hook = std::process::Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; sh -c 'printf %s \"$DIPPY_POLICY_CWD\"'",
+            "_",
+        ])
+        .arg(&knowledge_env_path)
+        .env_remove("DIPPY_POLICY_CWD")
+        .output()
+        .unwrap();
+    assert!(hook.status.success());
+    assert_eq!(hook.stdout, workspace.to_string_lossy().as_bytes());
+
+    let (code, _script, stderr) = h.run(["agy", "--terminal", "print"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let child_env_paths = std::fs::read_dir(&launch_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "env") && path != &knowledge_env_path
+        })
+        .collect::<Vec<_>>();
+    assert!(!child_env_paths.is_empty());
+    for path in child_env_paths {
+        let child_env = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !child_env.contains("DIPPY_POLICY_CWD"),
+            "path={}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn agent_agy_policy_cwd_survives_named_resume_and_cli_switch() {
+    let h = Hcom::new();
+    let workspace = h.root_path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"agents":{{"knowledge":{{"dir":{},"cli":"codex","env":{{"DIPPY_POLICY_CWD":"/wrong"}}}}}}}}"#,
+            serde_json::to_string(&workspace).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = h.run(["agent", "knowledge", "--cli", "agy", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains(&format!("DIPPY_POLICY_CWD={}", workspace.display())));
+    let (code, stdout, stderr) = h.run(["agent", "knowledge", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(!stdout.contains("DIPPY_POLICY_CWD"), "stdout={stdout}");
+
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).unwrap();
+    conn.execute(
+        "INSERT INTO instances (name, session_id, tool, directory, status, status_context, created_at) \
+         VALUES ('knowledge', 'agy-session', 'antigravity', ?1, 'inactive', 'exit:0', 1)",
+        rusqlite::params![workspace.to_string_lossy().as_ref()],
+    )
+    .unwrap();
+    let snapshot = serde_json::json!({
+        "action": "stopped",
+        "snapshot": {
+            "tool": "antigravity",
+            "session_id": "agy-session",
+            "launch_args": "[]",
+            "directory": workspace,
+            "tag": "",
+            "background": 0,
+            "last_event_id": 0
+        }
+    });
+    conn.execute(
+        "INSERT INTO events (timestamp, type, instance, data) \
+         VALUES ('2026-01-01T00:00:00Z', 'life', 'knowledge', ?1)",
+        rusqlite::params![snapshot.to_string()],
+    )
+    .unwrap();
+    drop(conn);
+
+    let (code, _stdout, stderr) = h.run([
+        "agent",
+        "knowledge",
+        "--cli",
+        "agy",
+        "--resume",
+        "--terminal",
+        "print",
+    ]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let launch_dir = h.path().join(".tmp/launch");
+    let resume_env = std::fs::read_dir(&launch_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "env"))
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .find(|content| content.contains("DIPPY_POLICY_CWD"))
+        .expect("named resume launcher environment");
+    assert!(
+        resume_env.contains(&format!("DIPPY_POLICY_CWD={}", workspace.display())),
+        "resume launcher has wrong policy cwd"
+    );
+
+    let (code, _stdout, stderr) = h.run(["f", "knowledge", "--dry-run"]);
+    assert_ne!(code, 0, "AGY fork is unsupported");
+    assert!(stderr.contains("fork"), "stderr={stderr}");
 }
 
 #[test]

@@ -18,7 +18,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::time::Instant;
 
-fn catalog_launch_env() -> Result<Option<HashMap<String, String>>> {
+pub(crate) fn catalog_launch_env() -> Result<Option<HashMap<String, String>>> {
     let Some(raw) = std::env::var_os(super::agent::CATALOG_LAUNCH_ENV) else {
         return Ok(None);
     };

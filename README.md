@@ -335,6 +335,12 @@ Antigravity, an external bundle is made writable with
 `agy --add-dir`. An instance name is unique: launching one that already runs prints its status and
 exits. Use `--as` to run the same definition concurrently.
 
+Catalog-launched Antigravity receives `DIPPY_POLICY_CWD` set to the canonical catalog agent
+directory. Its hooks inherit this stable policy scope even when `--dir` overrides the launch
+directory, a tool uses another `Cwd`, or `--add-dir` adds a bundle workspace.
+A named resume through `hcom agent <name> --resume` derives
+the value again from the catalog.
+
 ```bash
 hcom agent wdt_main                 # launch (or report that it already runs)
 hcom agent @wdt                     # launch every member of a catalog group

@@ -119,6 +119,8 @@ Use `--terminal tmux-split` only when the child should split the launching agent
 For agents defined in the effective `hcom agent` JSON catalog, a targeted send is also the normal
 launch operation: `hcom send @audit_api --intent request -- "..."` starts `audit_api` when it is
 missing or stopped, then delivers the message. Do not add `hcom list`/`hcom agent` preflight logic.
+For catalog-launched Antigravity agents, hcom passes the canonical catalog directory as
+`DIPPY_POLICY_CWD` to the CLI and its hooks; extra `--add-dir` workspaces do not change it.
 Broadcasts do not auto-start catalog agents. Send briefly waits for an autostarted target to
 acknowledge the initial event. If the agent is still starting when that check expires, output says
 `Queued; delivery pending`; the durable message is delivered later and send still succeeds. See

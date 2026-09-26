@@ -122,6 +122,13 @@ additional-workspace mechanism. Launch fails clearly when the CLI cannot make it
 startup. Antigravity (`agy` or `antigravity`) receives the bundle through its repeatable
 `--add-dir` option.
 
+For catalog-launched Antigravity, hcom sets `DIPPY_POLICY_CWD` to the canonical catalog `dir`
+for that agent and passes it to the CLI process and its hooks. This launch scope is independent of
+a command-line `--dir` override, tool-call `Cwd`, and any bundle supplied with `--add-dir`.
+The value is recomputed on named resume and a CLI switch to Antigravity. Child launches do not
+inherit the parent's policy directory.
+The directory must exist at launch so hcom can canonicalize it.
+
 ## Example: project fleet with local memory
 
 A machine catalog can keep general-purpose agents alongside selective imports from project

@@ -556,7 +556,7 @@ fn prepare_resume_plan_from_source(
             initial_prompt: fork_initial_prompt,
             background: is_headless,
             cwd: Some(effective_cwd),
-            env: None,
+            env: super::launch::catalog_launch_env()?,
             launcher: Some(launcher_name),
             run_here: launch_flags.run_here,
             batch_id: launch_flags.batch_id.clone(),

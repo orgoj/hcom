@@ -1973,10 +1973,16 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         &hcom_config,
         launch_env_regime(base_env_run_here, inside_ai_tool),
     );
+    // This scope belongs to a single catalog launch. Do not pass a parent's
+    // policy directory into a nested child or an unrelated resumed process.
+    base_env.remove(crate::commands::agent::DIPPY_POLICY_CWD);
     if let Some(ref caller_env) = params.env {
         for (key, value) in caller_env {
             insert_effective_env(&mut base_env, key.clone(), value.clone(), cfg!(windows));
         }
+    }
+    if !matches!(normalized, LaunchTool::Antigravity) {
+        base_env.remove(crate::commands::agent::DIPPY_POLICY_CWD);
     }
     base_env.remove(crate::commands::agent::CATALOG_LAUNCH_ENV);
     base_env.remove("HCOM_TERMINAL");

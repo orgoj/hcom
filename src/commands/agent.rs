@@ -19,6 +19,7 @@ const PROJECT_FILE: &str = "agents.json";
 const EXTRA_CATALOGS_ENV: &str = "HCOM_AGENT_CATALOGS";
 pub(crate) const CATALOG_LAUNCH_ENV: &str = "HCOM_CATALOG_LAUNCH_ENV";
 const DEFAULT_CLI: &str = "claude";
+pub(crate) const DIPPY_POLICY_CWD: &str = "DIPPY_POLICY_CWD";
 
 // ── CLI entry ───────────────────────────────────────────────────────────
 
@@ -80,6 +81,8 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   same-named non-project entry but still inherits global defaults.
   External bundles are granted through each CLI's additional-workspace mechanism;
   agy and antigravity use --add-dir.
+  Catalog-launched agy/antigravity also receive DIPPY_POLICY_CWD: the canonical
+  catalog dir, independent of --dir overrides, tool Cwd and --add-dir bundles.
   Relative import paths resolve against the importing file. Relative \"dir\" resolves
   against $HOME globally, the parent of project .hcom (also when imported), or its
   file for other catalogs.
@@ -1424,6 +1427,7 @@ struct Effective {
     description: Option<String>,
     cli: String,
     dir: String,
+    catalog_dir: Option<String>,
     skills: Vec<AgentSkill>,
     skill_warnings: Vec<String>,
     window: String,
@@ -1638,6 +1642,7 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         }
         def.args.extend(profile.args);
     }
+    let catalog_dir = nonempty(def.dir.clone());
     def.merge_from(&cli.def);
     let mut extra = std::mem::take(&mut def.args);
     extra.extend(cli.passthrough.iter().cloned());
@@ -1676,6 +1681,7 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| ".".to_string())
         }),
+        catalog_dir,
         skills,
         skill_warnings,
         window: nonempty(def.window).unwrap_or_else(|| name.to_string()),
@@ -1764,6 +1770,25 @@ fn apply_bundle_access(eff: &mut Effective) {
             ));
         }
     }
+}
+
+fn apply_agy_policy_cwd(eff: &mut Effective) -> Result<()> {
+    if !matches!(eff.cli.as_str(), "agy" | "antigravity") {
+        eff.env.remove(DIPPY_POLICY_CWD);
+        return Ok(());
+    }
+    let policy_dir = eff.catalog_dir.as_deref().unwrap_or(&eff.dir);
+    let workspace = std::fs::canonicalize(policy_dir)
+        .with_context(|| format!("cannot resolve AGY agent directory {policy_dir}"))?;
+    if !workspace.is_dir() {
+        bail!("AGY agent directory is not a directory: {policy_dir}");
+    }
+    let workspace = workspace
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("AGY agent directory is not valid UTF-8"))?;
+    eff.env
+        .insert(DIPPY_POLICY_CWD.to_string(), workspace.to_string());
+    Ok(())
 }
 
 fn ensure_claude_skill_link(eff: &Effective) -> Result<()> {
@@ -2543,6 +2568,9 @@ fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
         }
         eff
     };
+    let mut policy_eff = eff.clone();
+    apply_agy_policy_cwd(&mut policy_eff)?;
+    let eff = &policy_eff;
     let configured_terminal = configured_terminal();
     let (strategy, warnings) =
         choose_strategy(eff, tmux_bin().is_some(), configured_terminal.as_deref());
@@ -2885,6 +2913,7 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     };
     let instance_name = cli.as_name.as_deref().unwrap_or(&default_instance);
     let mut eff = effective(instance_name, def, &cli);
+    apply_agy_policy_cwd(&mut eff)?;
     let configured_terminal = configured_terminal();
     apply_herdr_placement(
         &mut eff,
