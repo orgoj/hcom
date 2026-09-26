@@ -397,6 +397,23 @@ is listed in the lazy-loading manifest for CLIs without native bundle skill load
 them through `<bundle>/.claude/skills` and `--add-dir`, so its prompt does not repeat that manifest.
 User, project, and plugin skills remain available.
 
+### Codex and Antigravity bundle compatibility (checked 2026-09-26 07:30 UTC)
+
+Checked with Codex CLI 0.157.1 and Antigravity CLI (`agy`) 1.2.11. Both CLIs support native
+`SKILL.md` skills, but neither discovers `<bundle>/skills/<skill>/SKILL.md` merely because hcom
+passes `--add-dir <bundle>`:
+
+| CLI | Native project skill location | What hcom currently does for bundle skills |
+|---|---|---|
+| Codex | `.agents/skills/<skill>/SKILL.md` in the working directory or an ancestor up to the repository root | Adds the bundle as a writable directory when external and lists its skills in the agent instructions |
+| Antigravity CLI | `<workspace-root>/.agents/skills/<skill>/SKILL.md` | Adds the external bundle to the workspace and lists its skills in the agent instructions |
+
+`--add-dir` is an access/workspace option, not a skill-directory option. A future switch to native
+loading needs a CLI-recognized skill location for each agent and an isolated launch check before
+removing the prompt manifest. Recheck this snapshot when either CLI changes. See the official
+[Codex skill locations](https://learn.chatgpt.com/docs/build-skills) and
+[Antigravity skill locations](https://antigravity.google/docs/skills).
+
 Use one child directory per skill:
 
 ```text
