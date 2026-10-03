@@ -1447,6 +1447,7 @@ fn agent_help_lists_catalog_layers() {
         "stdout={stdout}"
     );
     assert!(stdout.contains("system_prompt_file"), "stdout={stdout}");
+    assert!(stdout.contains("cli_overrides"), "stdout={stdout}");
     assert!(
         stdout.contains("agy and antigravity use --add-dir"),
         "stdout={stdout}"
@@ -1473,8 +1474,9 @@ fn agent_help_lists_catalog_layers() {
         "2. \"defaults\" in ~/.hcom/agents.json",
         "3. matching catalog \"defaults\"",
         "4. the named agent entry",
-        "5. the matching tools.<effective-cli> profile",
-        "6. command-line flags",
+        "5. global cli_overrides",
+        "6. the matching tools.<effective-cli> profile",
+        "7. command-line flags",
     ] {
         assert!(stdout.contains(layer), "missing {layer}: {stdout}");
     }
@@ -2135,6 +2137,149 @@ fn agent_unknown_name_explains_catalog_scope() {
 }
 
 #[test]
+fn agent_cli_overrides_apply_to_projects_and_select_target_profile() {
+    let h = Hcom::new();
+    let project = h.root_path().join("project/.hcom");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{
+        "cli_overrides":{"codex":"claude","claude":"gemini"},
+        "imports":[{"from":"../project/.hcom/agents.json"}],
+        "agents":{"global":{"cli":"codex"},"unchanged":{"cli":"gemini"}}
+    }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("agents.json"),
+        r#"{
+        "agents":{"solo":{"cli":"codex","groups":["review"],
+            "tools":{"codex":{"model":"source-model","args":["--source-flag"]},
+                     "claude":{"model":"target-model","args":["--target-flag"]}}}}
+    }"#,
+    )
+    .unwrap();
+    let catalog = project.join("agents.json");
+    let catalog = catalog.to_str().unwrap();
+    for args in [
+        vec!["agent", "solo", "--catalog", catalog, "--dry-run"],
+        vec!["agent", "solo", "--dry-run"],
+        vec!["agent", "@review", "--catalog", catalog, "--dry-run"],
+    ] {
+        let (code, stdout, stderr) = h.run(args);
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        assert!(stdout.contains("claude --as solo"), "stdout={stdout}");
+        assert!(stdout.contains("target-model"), "stdout={stdout}");
+        assert!(stdout.contains("--target-flag"), "stdout={stdout}");
+        assert!(!stdout.contains("source-model"), "stdout={stdout}");
+        assert!(!stdout.contains("--source-flag"), "stdout={stdout}");
+    }
+    let (code, stdout, stderr) = h.run([
+        "agent",
+        "solo",
+        "--catalog",
+        catalog,
+        "--cli",
+        "codex",
+        "--dry-run",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
+    assert!(stdout.contains("source-model"), "stdout={stdout}");
+    let (code, stdout, stderr) = h.run(["agent", "list", "--catalog", catalog, "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let entries: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let solo = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "solo")
+        .unwrap();
+    assert_eq!(solo["cli"], "claude");
+    assert_eq!(solo["model"], "target-model");
+    for (name, tool) in [("global", "claude"), ("unchanged", "gemini")] {
+        let (code, stdout, stderr) = h.run(["agent", name, "--dry-run"]);
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        assert!(
+            stdout.contains(&format!("{tool} --as {name}")),
+            "stdout={stdout}"
+        );
+    }
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"imports":[{"from":"../project/.hcom/agents.json"}]}"#,
+    )
+    .unwrap();
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_cli_overrides_support_aliases_and_default_cli() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{
+        "cli_overrides":{"agy":"claude","claude":"codex"},
+        "agents":{"alias":{"cli":"antigravity"},"default":{}}
+    }"#,
+    )
+    .unwrap();
+    for (name, tool) in [("alias", "claude"), ("default", "codex")] {
+        let (code, stdout, stderr) = h.run(["agent", name, "--dry-run"]);
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        assert!(
+            stdout.contains(&format!("{tool} --as {name}")),
+            "stdout={stdout}"
+        );
+    }
+    let (code, stdout, stderr) = h.run(["agent", "default", "--tool", "claude", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("claude --as default"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_cli_overrides_reject_invalid_tools_and_non_global_catalogs() {
+    let h = Hcom::new();
+    for overrides in [
+        r#"{"codex":"typo"}"#,
+        r#"{"typo":"claude"}"#,
+        r#"{"adhoc":"claude"}"#,
+        r#"{"codex":"adhoc"}"#,
+        r#"{"agy":"claude","antigravity":"codex"}"#,
+    ] {
+        std::fs::write(
+            h.path().join("agents.json"),
+            format!(r#"{{"cli_overrides":{overrides},"agents":{{"solo":{{}}}}}}"#),
+        )
+        .unwrap();
+        let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+        assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+        assert!(stderr.contains("cli_overrides"), "stderr={stderr}");
+    }
+    std::fs::write(h.path().join("agents.json"), "{}").unwrap();
+    let local = h.root_path().join("local.json");
+    std::fs::write(
+        &local,
+        r#"{"cli_overrides":{"codex":"claude"},"agents":{"solo":{}}}"#,
+    )
+    .unwrap();
+    let (code, stdout, stderr) = h.run([
+        "agent",
+        "solo",
+        "--catalog",
+        local.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("cli_overrides is only supported in the global catalog"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
 fn agent_dry_run_renders_the_hcom_command_without_launching() {
     let h = Hcom::new();
     std::fs::write(
@@ -2497,7 +2642,7 @@ fn agent_agy_policy_cwd_survives_tracked_resume_and_cli_switch() {
     std::fs::write(
         h.path().join("agents.json"),
         format!(
-            r#"{{"agents":{{"knowledge":{{"dir":{},"cli":"codex","env":{{"DIPPY_POLICY_CWD":"/wrong"}}}}}}}}"#,
+            r#"{{"cli_overrides":{{"codex":"claude"}},"agents":{{"knowledge":{{"dir":{},"cli":"codex","env":{{"DIPPY_POLICY_CWD":"/wrong"}}}}}}}}"#,
             serde_json::to_string(&workspace).unwrap()
         ),
     )
@@ -2509,6 +2654,7 @@ fn agent_agy_policy_cwd_survives_tracked_resume_and_cli_switch() {
     let (code, stdout, stderr) = h.run(["agent", "knowledge", "--dry-run"]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     assert!(!stdout.contains("DIPPY_POLICY_CWD"), "stdout={stdout}");
+    assert!(stdout.contains("claude --as knowledge"), "stdout={stdout}");
 
     let (code, _, stderr) = h.run(["list"]);
     assert_eq!(code, 0, "stderr={stderr}");
@@ -2896,6 +3042,16 @@ fn agent_continue_dry_run_builds_handoff_prompt_from_previous_session() {
     assert!(stdout.contains("Implement OAuth flow"), "stdout={stdout}");
     assert!(stdout.contains("Add unit tests"), "stdout={stdout}");
 
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"cli_overrides":{"codex":"claude"},"agents":{"solo":{"dir":"/tmp","cli":"codex","resume":true}}}"#,
+    ).unwrap();
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--restart", "--continue", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("claude --as solo"), "stdout={stdout}");
+    assert!(stdout.contains("Implement OAuth flow"), "stdout={stdout}");
+    assert!(stdout.contains("Previous tool: `codex`"), "stdout={stdout}");
+
     let (code, show_out, stderr) = h.run(["agent", "show", "solo", "--continue"]);
     assert_eq!(code, 0, "stdout={show_out} stderr={stderr}");
     assert!(
@@ -2921,6 +3077,51 @@ fn agent_continue_dry_run_builds_handoff_prompt_from_previous_session() {
         "stdout={stdout_last}"
     );
     assert!(stdout_last.contains("finish now"), "stdout={stdout_last}");
+}
+
+#[test]
+fn agent_cli_overrides_apply_to_message_autostart() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"cli_overrides":{"codex":"claude"},"agents":{"reviewer":{"dir":"/tmp","cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@reviewer",
+        "--intent",
+        "request",
+        "--",
+        "review this",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("Queued; delivery pending:"),
+        "stdout={stdout}"
+    );
+    assert!(!stdout.contains("Sent to:"), "stdout={stdout}");
+    assert!(stdout.contains("reviewer"), "stdout={stdout}");
+
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
+    assert_eq!(event["data"]["text"], "review this");
+
+    let (code, instances, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "instances={instances} stderr={stderr}");
+    let instances: serde_json::Value =
+        serde_json::from_str(&instances).expect("instance list JSON");
+    let reviewer = instances
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["name"] == "reviewer"))
+        .expect("autostarted reviewer instance");
+    assert_eq!(reviewer["unread_count"], 1);
+    assert_eq!(reviewer["tool"], "claude");
 }
 
 #[test]

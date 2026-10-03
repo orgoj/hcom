@@ -323,6 +323,14 @@ resulting command without launching anything.
 
 ### Named agents
 
+To temporarily replace a CLI across projects without editing their catalogs, add
+`"cli_overrides": {"codex": "claude"}` at the top level of `~/.hcom/agents.json`.
+This applies once to catalog launches and send autostart, before selecting `tools.claude`;
+explicit `--cli` bypasses it. Running agents keep their CLI. Use
+`hcom agent <name> --restart --continue` to replace one with a handoff summary.
+Keep CLI-specific models and arguments in `tools.<cli>`; shared fields still apply.
+Remove the mapping to restore project preferences. See [local CLI replacement](docs/agent.md#local-cli-replacement).
+
 `hcom agent` launches recurring agents from JSON settings and editable bundles. A bundle at
 `~/.hcom/agents/<name>/SOUL.md` or an enclosing project `.hcom/agents/<name>/SOUL.md` defines an
 agent even without a JSON entry. Its contents follow the catalog `system_prompt`; immediate
@@ -372,8 +380,8 @@ Catalog `env` is preserved during autostart, including an isolated policy such a
 `"DIPPY_CONFIG_ONLY": "/path/to/reviewer.dippy"`. Broadcasts never materialize roaming agents.
 
 The precedence chain is built-in defaults, global catalog `defaults`, each matching catalog's
-`defaults` and named entry, the matching `tools.<cli>` profile, then command-line flags. It is the
-same inside and outside a project. Later scalar values replace earlier ones: a project
+`defaults` and named entry, global `cli_overrides`, the matching `tools.<cli>` profile, then
+command-line flags. It is the same inside and outside a project. Later scalar values replace earlier ones: a project
 `system_prompt` replaces the global text rather than appending to it, and `""` clears it. Recursive
 imports apply before the importing catalog's local entries, and a catalog's `defaults` also cover
 the agents it brings in, whether by import or as the enclosing project of a nested `.hcom`. An agent defined only in a project

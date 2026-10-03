@@ -22,8 +22,9 @@ directory where the command runs:
 2. `defaults` in `~/.hcom/agents.json` (replace its path with `HCOM_AGENTS_FILE`)
 3. the matching catalog's `defaults`
 4. the named agent entry
-5. the matching `tools.<effective-cli>` profile
-6. command-line flags
+5. global `cli_overrides` maps the catalog CLI once (explicit `--cli` bypasses it)
+6. the matching `tools.<effective-cli>` profile
+7. command-line flags
 
 Steps 3-4 repeat for every matching imported, additive, or project catalog in catalog order.
 A catalog's `defaults` apply to every agent it defines and to every agent it brings in — by import,
@@ -69,6 +70,39 @@ Catalog-launched Antigravity receives `DIPPY_POLICY_CWD` with the canonical cata
 directory. Its hooks inherit this value regardless of `--dir`, tool-call `Cwd`, or additional bundle
 workspaces. A named resume recomputes it; nested child launches do not inherit it.
 Direct tracked `hcom r <name>` restores the stored scope; older snapshots without one do not.
+
+## Local CLI replacement
+
+When a CLI reaches its usage limit, add a top-level mapping to the global catalog
+`~/.hcom/agents.json` (or the file selected by `HCOM_AGENTS_FILE`):
+
+```json
+"cli_overrides": {
+  "codex": "claude"
+}
+```
+
+This maps the resolved catalog CLI once, before selecting the target `tools.<cli>` profile.
+It applies to project and global agents, group launches, and message autostart without changing
+project catalogs. `agent show`, dry-run, and listings show the effective CLI and model.
+Explicit `--cli` (or `--tool`) bypasses the mapping. Mappings do not chain: with both
+`codex -> claude` and `claude -> gemini`, a Codex agent uses Claude. Tool names and aliases
+are validated; `adhoc` is not a launchable target or source. Other catalogs cannot define a
+nonempty `cli_overrides` map. Remove the mapping to restore the catalog's choices.
+
+Shared `model`, `reasoning`, and `args` still apply. Keep CLI-specific values in `tools.codex`,
+`tools.claude`, etc.; the source CLI's profile is not applied after replacement. Without a target
+profile or shared settings, the target CLI uses its own defaults.
+
+Running agents keep their current CLI. To replace one and carry over context, use:
+
+```bash
+hcom agent reviewer --restart --continue
+```
+
+The mapping changes catalog launches only. Direct `hcom r` and `hcom f` continue using the saved
+tool; native sessions cannot be resumed in another CLI. Use `--continue` for a handoff summary
+when changing CLI, including for an agent configured with `resume: true`.
 
 ## Imports and additive client catalogs
 
@@ -311,8 +345,8 @@ Keep shared fields at the agent level and put CLI-specific `model`, `prompt`, `s
 }
 ```
 
-The effective CLI is the command-line `--cli` value, otherwise the agent's `cli`, otherwise
-`claude`. hcom then applies configuration in this order:
+The effective CLI is the command-line `--cli` value, otherwise the global `cli_overrides`
+replacement of the agent's `cli` (default `claude`). hcom then applies configuration in this order:
 
 1. Shared agent fields and top-level `args`.
 2. The matching `tools[effective_cli]` profile.

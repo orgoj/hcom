@@ -49,8 +49,9 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   2. \"defaults\" in ~/.hcom/{GLOBAL_FILE}          (override path: HCOM_AGENTS_FILE)
   3. matching catalog \"defaults\"
   4. the named agent entry
-  5. the matching tools.<effective-cli> profile
-  6. command-line flags
+  5. global cli_overrides maps the catalog CLI once (explicit --cli bypasses it)
+  6. the matching tools.<effective-cli> profile
+  7. command-line flags
 
   Steps 3-4 repeat for each matching imported, additive, or project catalog in
   catalog order. A catalog's \"defaults\" apply to every agent it defines and to
@@ -88,6 +89,14 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   against $HOME globally, the parent of project .hcom (also when imported), or its
   file for other catalogs.
   ~ and $VAR are expanded.
+
+Local CLI replacement:
+  Only the global catalog accepts top-level \"cli_overrides\": {{\"codex\": \"claude\"}}.
+  Applies to named launches, groups, and send autostart; running instances stay as they are.
+  Replacements do not chain. --cli/--tool wins; remove the mapping to restore catalog choices.
+  The target tools.<cli> profile supplies CLI-specific settings. Shared model/reasoning/args
+  still apply: move CLI-specific values into tools.<cli>. Direct hcom r/f use the saved tool.
+  Use --restart --continue to switch an existing agent with a handoff summary.
 
 Roaming agents:
   \"roaming\": true defines a project-local archetype without dir/session/window.
@@ -231,6 +240,8 @@ struct AgentDef {
     instructions: Option<String>,
     #[serde(skip)]
     instructions_content: Option<String>,
+    #[serde(skip)]
+    cli_overrides: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -317,6 +328,8 @@ struct Catalog {
     #[allow(dead_code)]
     version: Option<u32>,
     system_prompt_file: Option<String>,
+    #[serde(default)]
+    cli_overrides: BTreeMap<String, String>,
     #[serde(default)]
     imports: Vec<CatalogImport>,
     #[serde(default)]
@@ -436,6 +449,37 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
     } else {
         Catalog::default()
     };
+
+    if !catalog.cli_overrides.is_empty() && label != "global" {
+        bail!(
+            "cli_overrides is only supported in the global catalog: {}",
+            path.display()
+        );
+    }
+    let mut overrides = BTreeMap::new();
+    for (source, target) in &catalog.cli_overrides {
+        let parse = |name: &str| -> Result<crate::tool::Tool> {
+            let tool = name
+                .parse::<crate::tool::Tool>()
+                .map_err(|e| anyhow::anyhow!("invalid cli_overrides in {}: {e}", path.display()))?;
+            if tool == crate::tool::Tool::Adhoc {
+                bail!(
+                    "invalid cli_overrides in {}: adhoc is not a launchable CLI",
+                    path.display()
+                );
+            }
+            Ok(tool)
+        };
+        let source = parse(source)?.to_string();
+        let target = parse(target)?.to_string();
+        if overrides.insert(source.clone(), target).is_some() {
+            bail!(
+                "duplicate cli_overrides source '{source}' in {}",
+                path.display()
+            );
+        }
+    }
+    catalog.cli_overrides = overrides;
 
     if let Some(raw) = catalog.system_prompt_file.as_deref() {
         if raw.trim().is_empty() {
@@ -860,6 +904,7 @@ impl Catalogs {
         let mut def = AgentDef::default();
         for file in base_files.iter().filter(|file| file.label == "global") {
             def.merge_from(&file.catalog.defaults);
+            def.cli_overrides = file.catalog.cli_overrides.clone();
         }
         for file in files {
             let entry = file.catalog.agents.get(name);
@@ -1620,7 +1665,7 @@ fn single_line(text: &str) -> String {
 }
 
 fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
-    let selected_cli = cli
+    let mut selected_cli = cli
         .def
         .cli
         .as_deref()
@@ -1628,6 +1673,15 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or(DEFAULT_CLI)
         .to_string();
+    if cli.def.cli.is_none() {
+        let source = selected_cli
+            .parse::<crate::tool::Tool>()
+            .map(|tool| tool.to_string())
+            .unwrap_or_else(|_| selected_cli.clone());
+        if let Some(target) = def.cli_overrides.get(&source) {
+            selected_cli = target.clone();
+        }
+    }
     if let Some(profile) = def.tools.get(&selected_cli).cloned() {
         if profile.model.is_some() {
             def.model = profile.model;

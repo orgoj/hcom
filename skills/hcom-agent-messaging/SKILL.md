@@ -85,6 +85,10 @@ by exact match in `hcom agent list`. If neither matches, ask the user — do not
   previous tool session. “Persistent,” “recurring,” or “catalog agent” means the definition
   persists, not the tool session. Existing catalog `resume: true` is not permission to add it to
   another agent. `hcom r` resumes a stopped session; it is not how you address or launch an agent.
+- The global catalog's top-level `cli_overrides` can replace a configured CLI for named launches,
+  groups, and send autostart without editing project catalogs. Explicit `--cli` bypasses it.
+  Running agents and direct `hcom r/f` retain their tool; use `--restart --continue` for a CLI
+  switch with handoff. Keep CLI-specific settings in `tools.<cli>`; shared fields still apply.
 - When the user asks to launch a catalog group, use `hcom agent @<group>`. Catalog `groups` are
   launch-only and are independent of the runtime `tag` used for message routing.
 
