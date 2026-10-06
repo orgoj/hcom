@@ -68,6 +68,9 @@ by exact match in `hcom agent list`. If neither matches, ask the user — do not
 - Send the task directly with `hcom send @<name> --intent request -- "..."`. Targeted send resolves
   the catalog and automatically starts a missing or stopped configured agent, so no `hcom list` or
   `hcom agent` preflight is needed.
+- To start a catalog agent under an adhoc clone/alias name (e.g. to solve an independent issue in clean
+  context), use `hcom send @<catalog_name> --spawn-as <clone_name> -- "..."` (alias `--as`). If the clone
+  is already running, send delivers directly without relaunching.
 - Catalogs are scoped on purpose: an agent defined only in a project `.hcom/agents.json` is
   addressable from inside that project, and from elsewhere only where a catalog in scope imports
   it. A project's other agents are private to it. From outside, an out-of-scope name is

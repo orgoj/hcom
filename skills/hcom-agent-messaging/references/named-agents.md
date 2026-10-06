@@ -214,8 +214,17 @@ failed. `--as`, `--attach`, and `terminal: here` are invalid for group launches.
 The positional name selects the catalog definition; `--as <name>` selects the runtime identity.
 The alias is used for duplicate detection, routing, restart/attach behavior, resume history, and the
 default tmux window or Herdr tab. An explicit `window` remains unchanged. Address the instance by
-its alias, such as `hcom send @review_api -- "Review this"`. Targeted sends to catalog names only
-auto-start the canonical catalog instance; aliases must be launched explicitly.
+its alias, such as `hcom send @review_api -- "Review this"`.
+
+To autostart a catalog agent under an adhoc clone/alias name directly via send, use `--spawn-as <name>` (alias `--as <name>`):
+
+```bash
+hcom send @wdt_main --spawn-as review_api -- "Review this"
+# or with the alias:
+hcom send @wdt_main --as review_api -- "Review this"
+```
+
+If `review_api` is already running, send delivers directly without relaunching. If stopped or not yet running, it autostarts the catalog agent under that instance name. Targeted sends without `--spawn-as` only auto-start the canonical catalog instance.
 
 ## Roaming archetypes
 

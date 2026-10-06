@@ -100,6 +100,10 @@ pub struct SendArgs {
     #[arg(long)]
     pub thread: Option<String>,
 
+    /// Autostart a targeted catalog agent under this instance name if not already running
+    #[arg(long, visible_alias = "as")]
+    pub spawn_as: Option<String>,
+
     // ── Sender ──
     /// External sender identity
     #[arg(long)]
@@ -1026,7 +1030,7 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
     //   - Single "@name message" (with space) → entire text is message, @mention parsed by compute_scope
     //   - Non-@ args → message text (broadcast)
     //   - Pure @targets → explicit targets
-    let (effective_targets, compat_message) =
+    let (mut effective_targets, compat_message) =
         if !args.has_separator() && !args.stdin && args.file.is_none() && args.base64.is_none() {
             process_positionals(&args.positionals)
         } else {
@@ -1114,15 +1118,10 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         return 1;
     }
 
-    let targets_to_pass: Option<&[String]> =
-        if args.has_separator() || !effective_targets.is_empty() {
-            Some(&effective_targets)
-        } else {
-            None
-        };
-    let catalog_instances = if targets_to_pass.is_some_and(|targets| !targets.is_empty())
+    let mut catalog_instances = if !effective_targets.is_empty()
         || message.contains('@')
         || envelope.thread.is_some()
+        || args.spawn_as.is_some()
     {
         match super::agent::catalog_message_targets(db, &sender_identity) {
             Ok(targets) => targets,
@@ -1134,6 +1133,63 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
     } else {
         Vec::new()
     };
+
+    if let Some(ref spawn_name) = args.spawn_as {
+        if !crate::identity::is_valid_base_name(spawn_name) {
+            eprintln!("Error: {}", crate::identity::base_name_error(spawn_name));
+            return 1;
+        }
+        if effective_targets.len() != 1 {
+            eprintln!(
+                "Error: --spawn-as requires exactly one target agent (e.g. hcom send @agent --spawn-as clone_name)"
+            );
+            return 1;
+        }
+        let target = effective_targets[0].clone();
+        if !spawn_name.eq_ignore_ascii_case(&target) {
+            let deliverable = match deliverable_instances(db) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
+            let already_running = deliverable
+                .iter()
+                .any(|inst| inst.name.eq_ignore_ascii_case(spawn_name));
+
+            if already_running {
+                effective_targets = vec![spawn_name.clone()];
+            } else {
+                let target_route = catalog_instances.iter().find(|r| {
+                    r.alias.eq_ignore_ascii_case(&target)
+                        || r.instance.eq_ignore_ascii_case(&target)
+                });
+                let Some(target_route) = target_route else {
+                    eprintln!(
+                        "Error: Unknown catalog agent '@{target}'. --spawn-as requires a configured catalog agent."
+                    );
+                    return 1;
+                };
+                let clone_route = super::agent::CatalogRoute {
+                    alias: spawn_name.clone(),
+                    instance: spawn_name.clone(),
+                    tag: target_route.tag.clone(),
+                    launch_name: target_route.launch_name.clone(),
+                    launch_dir: target_route.launch_dir.clone(),
+                };
+                catalog_instances.push(clone_route);
+                effective_targets = vec![spawn_name.clone()];
+            }
+        }
+    }
+
+    let targets_to_pass: Option<&[String]> =
+        if args.has_separator() || !effective_targets.is_empty() {
+            Some(&effective_targets)
+        } else {
+            None
+        };
 
     let preview_has_envelope =
         envelope.intent.is_some() || envelope.reply_to.is_some() || envelope.thread.is_some();

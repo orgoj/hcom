@@ -520,7 +520,17 @@ hcom agent wdt_main --as wdt_backend
 hcom agent show wdt_main --as wdt_review # inspect the aliased command
 ```
 
-`wdt_main` remains the catalog key used to resolve configuration. The `--as` value becomes the runtime identity used by `hcom list`, messages, duplicate detection, `--restart`, `--attach`, and resume history. It is also the default tmux window or Herdr tab name; an explicit catalog or CLI `window` still takes precedence. Address an aliased instance directly, for example `hcom send @wdt_review -- "Review this"`. Catalog-driven message startup uses the canonical catalog name and does not invent or restart aliases.
+`wdt_main` remains the catalog key used to resolve configuration. The `--as` value becomes the runtime identity used by `hcom list`, messages, duplicate detection, `--restart`, `--attach`, and resume history. It is also the default tmux window or Herdr tab name; an explicit catalog or CLI `window` still takes precedence. Address an aliased instance directly, for example `hcom send @wdt_review -- "Review this"`. Catalog-driven message startup uses the canonical catalog name and does not invent or restart aliases unless requested via `--spawn-as`.
+
+To start a catalog agent under an adhoc clone/alias name directly via send, use `--spawn-as <name>` (alias `--as <name>`):
+
+```bash
+hcom send @wdt_main --spawn-as wdt_main_review --intent request -- "Review the current change"
+# or with the --as alias:
+hcom send @wdt_main --as wdt_main_review --intent request -- "Review the current change"
+```
+
+If `wdt_main_review` is already running, `hcom send` delivers directly to it without relaunching. If stopped or not yet running, it autostarts the catalog agent under that instance name and delivers the message once ready.
 
 To launch several named agents together, add `groups` to their catalog definitions and target the group with `@`:
 

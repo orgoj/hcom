@@ -231,6 +231,10 @@ const SEND_HELP: &[HelpEntry] = &[
         "",
         "A catalog agent with roaming=true materializes as <name>_<project> in the sender's Git/project root.",
     ),
+    (
+        "  --spawn-as <name>",
+        "Autostart targeted catalog agent under this instance name (alias: --as)",
+    ),
     ("", ""),
     ("Output:", ""),
     ("  --quiet", "Suppress feedback"),
@@ -277,6 +281,10 @@ const SEND_HELP: &[HelpEntry] = &[
     ("  hcom send @luna -- Hello there!", ""),
     (
         "  hcom send @luna @nova --intent request -- Can you help?",
+        "",
+    ),
+    (
+        "  hcom send @luna --spawn-as luna_fix -- Can you help with this bug?",
         "",
     ),
     ("  hcom send -- Broadcast message to everyone", ""),

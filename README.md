@@ -368,8 +368,9 @@ hcom agent edit                     # open the catalog in $EDITOR (creates a sta
 
 Targeted messages start missing or stopped catalog agents before delivery. The send waits briefly
 for that first event to be acknowledged; if startup is still settling, it succeeds with
-`Queued; delivery pending` and keeps the event durable for later delivery. Catalog precedence,
-imports, tool profiles, terminal placement, resume behavior, instruction transport, and bundle skills are
+`Queued; delivery pending` and keeps the event durable for later delivery. To start a catalog
+agent under a custom instance name (or message an existing clone), use `--spawn-as <name>` (alias `--as <name>`).
+Catalog precedence, imports, tool profiles, terminal placement, resume behavior, instruction transport, and bundle skills are
 documented in [Named agents](docs/agent.md).
 
 A catalog entry with `"roaming": true` is a project-local archetype. It omits `dir`, `session`,

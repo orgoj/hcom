@@ -3169,6 +3169,138 @@ fn targeted_send_starts_catalog_agent_and_reports_unacknowledged_message_pending
 }
 
 #[test]
+fn targeted_send_with_spawn_as_starts_catalog_agent_under_custom_instance_name() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@reviewer",
+        "--spawn-as",
+        "reviewer_fix",
+        "--intent",
+        "request",
+        "--",
+        "review this bug",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("Queued; delivery pending:"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("reviewer_fix"), "stdout={stdout}");
+
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
+    assert_eq!(event["data"]["text"], "review this bug");
+
+    let (code, instances, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "instances={instances} stderr={stderr}");
+    let instances: serde_json::Value =
+        serde_json::from_str(&instances).expect("instance list JSON");
+    let clone = instances
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["name"] == "reviewer_fix"))
+        .expect("autostarted reviewer_fix instance");
+    assert_eq!(clone["unread_count"], 1);
+
+    // Sending again with --as alias to the already running clone does not relaunch
+    let (code2, stdout2, stderr2) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@reviewer",
+        "--as",
+        "reviewer_fix",
+        "--",
+        "second message to clone",
+    ]);
+    assert_eq!(code2, 0, "stdout={stdout2} stderr={stderr2}");
+    assert!(stdout2.contains("reviewer_fix"), "stdout={stdout2}");
+}
+
+#[test]
+fn targeted_send_with_spawn_as_validates_target_and_name() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    // Invalid base name
+    let (code, _stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@reviewer",
+        "--spawn-as",
+        "Bad-Name!",
+        "--",
+        "msg",
+    ]);
+    assert_ne!(code, 0, "invalid name must fail");
+    assert!(stderr.contains("Invalid instance name"), "stderr={stderr}");
+
+    // Multiple targets with spawn-as
+    let (code, _stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@reviewer",
+        "@other",
+        "--spawn-as",
+        "clone_agent",
+        "--",
+        "msg",
+    ]);
+    assert_ne!(code, 0, "multiple targets must fail");
+    assert!(
+        stderr.contains("exactly one target agent"),
+        "stderr={stderr}"
+    );
+
+    // Broadcast with spawn-as
+    let (code, _stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "--spawn-as",
+        "clone_agent",
+        "--",
+        "msg",
+    ]);
+    assert_ne!(code, 0, "broadcast with spawn-as must fail");
+    assert!(
+        stderr.contains("exactly one target agent"),
+        "stderr={stderr}"
+    );
+
+    // Non-catalog target with spawn-as
+    let (code, _stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@nonexistent",
+        "--spawn-as",
+        "clone_agent",
+        "--",
+        "msg",
+    ]);
+    assert_ne!(code, 0, "nonexistent catalog agent must fail");
+    assert!(stderr.contains("Unknown catalog agent"), "stderr={stderr}");
+}
+
+#[test]
 fn targeted_send_materializes_roaming_agent_in_the_senders_git_root() {
     let h = Hcom::new();
     let project = h.root_path().join("weather-app");
