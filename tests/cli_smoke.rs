@@ -2306,6 +2306,41 @@ fn agent_dry_run_renders_the_hcom_command_without_launching() {
 }
 
 #[test]
+fn agent_dry_run_inherits_specified_env_vars() {
+    let h = Hcom::new();
+    let test_var = "CUSTOM_SSH_AUTH_SOCK";
+    let test_val = "/tmp/custom_ssh_agent.sock";
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"defaults":{{"cli":"claude","inherit_env":["{test_var}"]}},
+                "agents":{{"worker":{{"dir":"/tmp","cli":"codex"}}}}}}"#
+        ),
+    )
+    .expect("write catalog");
+
+    h.set_launch_env(test_var, test_val);
+
+    let (code, stdout, stderr) = h.run(["agent", "worker", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains(&format!("{test_var}={test_val}")),
+        "stdout={stdout}"
+    );
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "worker"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains(&format!("inherit_env: {test_var}")),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{test_var}={test_val}")),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
 #[cfg(unix)]
 fn claude_agent_start_links_private_skills_without_prompt_manifest() {
     let h = Hcom::new();

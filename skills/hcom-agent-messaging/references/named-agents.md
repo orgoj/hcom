@@ -38,9 +38,11 @@ same-named global/additive entry, but global `defaults` remain its lowest catalo
 Consequently, the same project agent inherits the same global defaults whether hcom runs inside
 the project or from an external catalog that imports it.
 
-`env`, `args`, `groups`, and tool-profile definitions merge; later scalar values replace earlier
+`env`, `inherit_env`, `args`, `groups`, and tool-profile definitions merge; later scalar values replace earlier
 ones. In particular, a later `system_prompt` replaces rather than appends to the earlier text, and
-an explicit empty string clears it.
+an explicit empty string clears it. Setting `inherit_env: ["VAR1", "VAR2"]` in catalog defaults or an
+agent entry copies those environment variables from the caller's environment if set, without hardcoding
+machine-specific values in shared catalogs.
 
 For a long shared prompt, set top-level `"system_prompt_file": "SYSTEM_PROMPT.md"`. Relative paths
 resolve from the catalog's directory. The UTF-8 contents supply that catalog's default

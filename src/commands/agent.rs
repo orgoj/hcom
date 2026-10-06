@@ -134,6 +134,7 @@ Flags:
                             Invocation-local instructions (catalog key: system_prompt)
   --pre <cmd>               Shell command run in the window before the agent
   --env K=V                 Extra environment variable (repeatable)
+  --inherit-env <var>       Inherit environment variable from caller (repeatable)
   --catalog <path>          Use this file instead of the project catalog
   --no-project              Ignore every enclosing project .hcom/{PROJECT_FILE}
   --attach                  Focus the window after launching (or when already running)
@@ -231,6 +232,8 @@ struct AgentDef {
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
+    inherit_env: Vec<String>,
+    #[serde(default)]
     args: Vec<String>,
     #[serde(default)]
     tools: BTreeMap<String, ToolDef>,
@@ -305,6 +308,11 @@ impl AgentDef {
         );
         for (k, v) in &over.env {
             self.env.insert(k.clone(), v.clone());
+        }
+        for var in &over.inherit_env {
+            if !self.inherit_env.contains(var) {
+                self.inherit_env.push(var.clone());
+            }
         }
         for group in &over.groups {
             if !self.groups.contains(group) {
@@ -1412,6 +1420,10 @@ fn parse_cli(argv: &[String]) -> Result<Cli> {
                 cli.def.env.insert(k.to_string(), v.to_string());
                 i += 2;
             }
+            "--inherit-env" => {
+                cli.def.inherit_env.push(value()?);
+                i += 2;
+            }
             "--catalog" => {
                 cli.catalog = Some(PathBuf::from(value()?));
                 i += 2;
@@ -1496,6 +1508,7 @@ struct Effective {
     continue_session: bool,
     continue_last: Option<usize>,
     env: BTreeMap<String, String>,
+    inherit_env: Vec<String>,
     extra: Vec<String>,
 }
 
@@ -1769,7 +1782,18 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
             .or(def.continue_session)
             .unwrap_or(false),
         continue_last: cli.continue_last,
-        env: def.env,
+        env: {
+            for key in &def.inherit_env {
+                if !def.env.contains_key(key)
+                    && let Ok(val) = std::env::var(key)
+                    && !val.is_empty()
+                {
+                    def.env.insert(key.clone(), val);
+                }
+            }
+            def.env
+        },
+        inherit_env: def.inherit_env,
         extra,
     };
     apply_bundle_access(&mut effective);
@@ -3064,6 +3088,9 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
                 .join(" ")
         );
     }
+    if !eff.inherit_env.is_empty() {
+        println!("inherit_env: {}", eff.inherit_env.join(", "));
+    }
     if !eff.extra.is_empty() {
         println!(
             "args:      {}",
@@ -4258,6 +4285,55 @@ mod tests {
             Some("wdt_main")
         );
         assert_eq!(closest("zzzzzzzzzz", names.iter()), None);
+    }
+
+    #[test]
+    fn inherit_env_copies_caller_vars_when_set() {
+        let test_key = "HCOM_TEST_INHERIT_VAR_1";
+        let test_key_missing = "HCOM_TEST_INHERIT_VAR_MISSING";
+        let test_key_override = "HCOM_TEST_INHERIT_VAR_OVERRIDE";
+        unsafe {
+            std::env::set_var(test_key, "inherited_val_1");
+            std::env::set_var(test_key_override, "parent_val");
+        }
+
+        let json = format!(
+            r#"{{"dir":"/w","inherit_env":["{test_key}","{test_key_missing}","{test_key_override}"],"env":{{"{test_key_override}":"explicit_val"}}}}"#
+        );
+        let eff = eff_of(&json, &[]);
+
+        assert_eq!(
+            eff.env.get(test_key).map(String::as_str),
+            Some("inherited_val_1")
+        );
+        assert_eq!(eff.env.get(test_key_missing), None);
+        assert_eq!(
+            eff.env.get(test_key_override).map(String::as_str),
+            Some("explicit_val")
+        );
+        assert_eq!(
+            eff.inherit_env,
+            vec![test_key, test_key_missing, test_key_override]
+        );
+
+        unsafe {
+            std::env::remove_var(test_key);
+            std::env::remove_var(test_key_override);
+        }
+    }
+
+    #[test]
+    fn inherit_env_merges_from_defaults() {
+        let mut def = AgentDef {
+            inherit_env: vec!["VAR_A".to_string(), "VAR_B".to_string()],
+            ..Default::default()
+        };
+        let over = AgentDef {
+            inherit_env: vec!["VAR_B".to_string(), "VAR_C".to_string()],
+            ..Default::default()
+        };
+        def.merge_from(&over);
+        assert_eq!(def.inherit_env, vec!["VAR_A", "VAR_B", "VAR_C"]);
     }
 
     #[test]
