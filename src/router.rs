@@ -41,6 +41,8 @@ const COMMANDS: &[&str] = &[
     "run",
     "agent",
     "update",
+    "completions",
+    "completion",
 ];
 
 fn is_command(name: &str) -> bool {
@@ -588,6 +590,25 @@ pub fn dispatch() -> anyhow::Result<()> {
                 "kill" => crate::commands::kill::run(args, &flags)?,
                 _ => unreachable!(),
             };
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
+        Action::Command { ref cmd, ref args }
+            if matches!(cmd.as_str(), "completions" | "completion") =>
+        {
+            let (_, _, help) = extract_global_flags_full(args);
+            if help {
+                crate::commands::help::print_command_help(cmd);
+                return Ok(());
+            }
+            let (stripped, _) = extract_global_flags(args);
+            let comp_args = if stripped.len() > 1 {
+                &stripped[1..]
+            } else {
+                &[][..]
+            };
+            let exit_code = crate::commands::completions::run(comp_args)?;
             if exit_code != 0 {
                 std::process::exit(exit_code);
             }

@@ -583,15 +583,18 @@ this does not create a Git worktree.
 
 ## Shell completions
 
-Generate shell completions for agent names and groups:
+Generate shell completions for the entire `hcom` CLI (all commands, agents, groups, and running instances):
 
 ```bash
-# Bash
-hcom agent completions bash > ~/.local/share/bash-completion/completions/hcom-agent
+# Bash (eval in ~/.bashrc or install into completions dir)
+eval "$(hcom completions bash)"
+# or: hcom completions bash > ~/.local/share/bash-completion/completions/hcom
 
 # Zsh
-hcom agent completions zsh > ~/.zsh/completions/_hcom_agent
+hcom completions zsh > ~/.zsh/completions/_hcom
 
 # Fish
-hcom agent completions fish > ~/.config/fish/completions/hcom-agent.fish
+hcom completions fish > ~/.config/fish/completions/hcom.fish
 ```
+
+To complete only agent names and catalog groups without other commands, `hcom agent completions bash|zsh|fish` remains available.

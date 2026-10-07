@@ -2890,6 +2890,41 @@ fn agent_zsh_completions_add_names_and_groups_separately() {
 }
 
 #[test]
+fn completions_command_generates_valid_scripts_for_all_shells() {
+    let h = Hcom::new();
+
+    // Bash
+    let (code, stdout, stderr) = h.run(["completions", "bash"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("_hcom()"), "stdout={stdout}");
+    assert!(stdout.contains("complete -F _hcom hcom"), "stdout={stdout}");
+    assert!(stdout.contains("agent"), "stdout={stdout}");
+    assert!(stdout.contains("kill"), "stdout={stdout}");
+
+    // Singular alias 'completion'
+    let (code, stdout_alias, stderr) = h.run(["completion", "bash"]);
+    assert_eq!(code, 0, "stdout={stdout_alias} stderr={stderr}");
+    assert_eq!(stdout, stdout_alias);
+
+    // Zsh
+    let (code, stdout, stderr) = h.run(["completions", "zsh"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("#compdef hcom"), "stdout={stdout}");
+    assert!(stdout.contains("compdef _hcom hcom"), "stdout={stdout}");
+
+    // Fish
+    let (code, stdout, stderr) = h.run(["completions", "fish"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("complete -c hcom"), "stdout={stdout}");
+
+    // Help
+    let (code, stdout, stderr) = h.run(["completions", "--help"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("Usage:"), "stdout={stdout}");
+    assert!(stdout.contains("hcom completions"), "stdout={stdout}");
+}
+
+#[test]
 fn agent_group_rejects_single_instance_flags_and_terminal_here() {
     let h = Hcom::new();
     std::fs::write(

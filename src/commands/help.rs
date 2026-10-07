@@ -1002,7 +1002,8 @@ Commands:\n\
   hooks        Add or remove hooks\n\
   status       Installation and diagnostics\n\
   term         View/inject into agent PTY screens\n\
-  update       Check and apply updates",
+  update       Check and apply updates\n\
+  completions  Generate shell completions (bash, zsh, fish)",
         env!("CARGO_PKG_VERSION"),
     )
 }
@@ -1072,6 +1073,9 @@ pub fn get_command_help(name: &str) -> String {
 
     if name == "agent" {
         return crate::commands::agent::help_text();
+    }
+    if name == "completions" || name == "completion" {
+        return crate::commands::completions::help_text().to_string();
     }
 
     // Tool launch commands use the template generator
@@ -1249,6 +1253,7 @@ mod tests {
             "agy",
             "antigravity",
             "kimi",
+            "completions",
         ];
         for cmd in commands {
             let help = get_command_help(cmd);

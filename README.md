@@ -407,6 +407,7 @@ hcom list                           # show all active agents
 hcom term [name]                    # view/inject into an agent's PTY screen
 hcom agent <name>                   # launch a named agent from the catalog
 hcom events --wait <filters>         # Block until match for scripting
+hcom completions [shell]            # generate shell completions (bash, zsh, fish)
 hcom update                         # update hcom version
 ```
 

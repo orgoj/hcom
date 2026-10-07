@@ -26,6 +26,7 @@ pub mod transcript;
 // Management
 pub mod agent;
 pub mod archive;
+pub mod completions;
 pub mod config;
 pub mod help;
 pub mod hooks;
