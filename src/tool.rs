@@ -66,6 +66,22 @@ impl Tool {
         Self::from_hook_name(name).is_some()
     }
 
+    /// True if the tool supports native invocation-local system instructions.
+    pub fn supports_system_prompt(&self) -> bool {
+        match self {
+            Tool::Claude
+            | Tool::Gemini
+            | Tool::Codex
+            | Tool::OpenCode
+            | Tool::Kilo
+            | Tool::Copilot
+            | Tool::Pi
+            | Tool::Omp
+            | Tool::Hermes => true,
+            Tool::Antigravity | Tool::Cursor | Tool::Kimi | Tool::Adhoc => false,
+        }
+    }
+
     // ── Hook-ops adapter ────────────────────────────────────────────────
     //
     // The four helpers below are the single source of truth for routing

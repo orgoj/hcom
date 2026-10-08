@@ -109,6 +109,11 @@ impl LaunchTool {
         }
     }
 
+    /// Whether this launch surface supports native invocation-local system instructions.
+    pub fn supports_system_prompt(&self) -> bool {
+        self.tool().supports_system_prompt()
+    }
+
     /// Integration spec for this launch surface (shared with the base `Tool`).
     pub fn spec(&self) -> &'static crate::integration_spec::IntegrationSpec {
         self.tool().spec()

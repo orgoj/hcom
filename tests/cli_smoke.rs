@@ -892,7 +892,14 @@ fn antigravity_e2e_hook_dispatch() {
         .expect("recurring Antigravity bootstrap");
     assert!(repeated_context.contains("[HCOM SESSION]"));
     assert!(repeated_context.contains(&format!("[hcom:{me}]")));
-    assert!(repeated_context.contains("RULE: SOUL INSTRUCTIONS FALLBACK"));
+    assert!(
+        !repeated_context.contains("RULE: SOUL INSTRUCTIONS FALLBACK"),
+        "recurring preinvocation hook must not repeat fallback instructions: {repeated_context}"
+    );
+    assert!(
+        !repeated_context.contains("## HCOM AGENT INSTRUCTIONS — SYSTEM-PROMPT FALLBACK"),
+        "recurring preinvocation hook must not repeat fallback header: {repeated_context}"
+    );
 
     // 2. Now pipe PreToolUse to gemini-beforetool.
     // Since the session is bound, it should resolve the instance and execute successfully.
@@ -987,6 +994,178 @@ fn antigravity_e2e_hook_dispatch() {
     let parsed: serde_json::Value =
         serde_json::from_str(after_stdout.trim()).expect("aftertool json");
     assert_eq!(parsed, serde_json::json!({}));
+}
+
+#[test]
+fn antigravity_agent_startup_emits_read_directive_and_recurring_turn_is_clean() {
+    let h = Hcom::new();
+    let transcript = tempfile::NamedTempFile::new().expect("temp transcript");
+    let transcript_path = transcript.path().to_string_lossy().to_string();
+
+    // 1. Setup catalog with an agent using cli = antigravity, another using claude,
+    // and bundles with SOUL.md.
+    let bundle_dir = h.path().join("agents/test_agy");
+    std::fs::create_dir_all(&bundle_dir).unwrap();
+    std::fs::write(bundle_dir.join("SOUL.md"), "RULE: SECRET AGY PROCEDURE").unwrap();
+
+    let claude_bundle_dir = h.path().join("agents/test_claude");
+    std::fs::create_dir_all(&claude_bundle_dir).unwrap();
+    std::fs::write(
+        claude_bundle_dir.join("SOUL.md"),
+        "RULE: SECRET CLAUDE PROCEDURE",
+    )
+    .unwrap();
+
+    let catalog = serde_json::json!({
+        "agents": {
+            "test_agy": {
+                "cli": "antigravity"
+            },
+            "test_claude": {
+                "cli": "claude"
+            }
+        }
+    });
+    std::fs::write(
+        h.path().join("agents.json"),
+        serde_json::to_string(&catalog).unwrap(),
+    )
+    .unwrap();
+
+    // Verify antigravity: startup read directive, NO inlined SOUL.md body
+    let (code, stdout, stderr) = h.run(["agent", "show", "test_agy"]);
+    assert_eq!(code, 0, "agent show stderr={stderr}");
+    assert!(
+        stdout.contains("At the start of every new session, before taking task action, read"),
+        "stdout missing startup read directive: {stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{}/SOUL.md", bundle_dir.display())),
+        "stdout missing SOUL.md path: {stdout}"
+    );
+    assert!(
+        !stdout.contains("RULE: SECRET AGY PROCEDURE"),
+        "stdout must not inline SOUL.md body for antigravity: {stdout}"
+    );
+
+    // Contrast with Claude: inlined body, NO startup read directive
+    let (c_code, c_stdout, c_stderr) = h.run(["agent", "show", "test_claude"]);
+    assert_eq!(c_code, 0, "stderr={c_stderr}");
+    assert!(
+        c_stdout.contains("RULE: SECRET CLAUDE PROCEDURE"),
+        "claude must inline SOUL.md: {c_stdout}"
+    );
+    assert!(
+        !c_stdout.contains("At the start of every new session, before taking task action, read"),
+        "claude must not emit read directive: {c_stdout}"
+    );
+
+    // 2. Start an instance and test PreInvocation turn 1 vs turn 2 in the same session
+    let mut start_cmd = h.cmd();
+    start_cmd.arg("start");
+    start_cmd.env("HCOM_PROCESS_ID", "pid-agy-soul-1");
+    let start_out = start_cmd.output().expect("failed to run hcom start");
+    let me = support::parse_hcom_marker(&String::from_utf8_lossy(&start_out.stdout))
+        .expect("no [hcom:NAME] marker");
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "UPDATE instances SET tool = 'antigravity' WHERE name = ?1",
+        [&me],
+    )
+    .expect("mark fixture as Antigravity");
+
+    let session_start_payload = serde_json::json!({
+        "conversationId": "sess-agy-soul-1",
+        "transcriptPath": transcript_path,
+    });
+
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let fallback_instruction = format!(
+        "# Agent bundle instructions\n\nInstruction file: `{}/SOUL.md`\n\nAt the start of every new session, before taking task action, read `{}/SOUL.md` completely in full to load your identity, rules, and procedures.",
+        bundle_dir.display(),
+        bundle_dir.display()
+    );
+
+    // Turn 1 (session start): receives fallback with read directive
+    let mut cmd = h.cmd();
+    cmd.args(["gemini-sessionstart"]);
+    cmd.env("ANTIGRAVITY_AGENT", "1");
+    cmd.env("HCOM_PROCESS_ID", "pid-agy-soul-1");
+    cmd.env("HCOM_AGENT_INSTRUCTIONS_FALLBACK", &fallback_instruction);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("failed to spawn sessionstart turn 1");
+    {
+        let mut stdin = child.stdin.take().expect("failed to open stdin");
+        stdin
+            .write_all(
+                serde_json::to_string(&session_start_payload)
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .unwrap();
+    }
+    let out = child
+        .wait_with_output()
+        .expect("failed to wait sessionstart turn 1");
+    assert_eq!(out.status.code().unwrap_or(-1), 0);
+    let first_stdout = String::from_utf8_lossy(&out.stdout);
+    let first: serde_json::Value = serde_json::from_str(first_stdout.trim()).expect("turn 1 json");
+    let first_context = first["injectSteps"][0]["ephemeralMessage"]
+        .as_str()
+        .expect("turn 1 bootstrap");
+    assert!(
+        first_context
+            .contains("At the start of every new session, before taking task action, read")
+    );
+    assert!(first_context.contains(&format!("{}/SOUL.md", bundle_dir.display())));
+    assert!(!first_context.contains("RULE: SECRET AGY PROCEDURE"));
+
+    // Turn 2 (recurring preinvocation in the SAME session): clean, omits fallback
+    let mut cmd = h.cmd();
+    cmd.args(["gemini-sessionstart"]);
+    cmd.env("ANTIGRAVITY_AGENT", "1");
+    cmd.env("HCOM_PROCESS_ID", "pid-agy-soul-1");
+    cmd.env("HCOM_AGENT_INSTRUCTIONS_FALLBACK", &fallback_instruction);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("failed to spawn sessionstart turn 2");
+    {
+        let mut stdin = child.stdin.take().expect("failed to open stdin");
+        stdin
+            .write_all(
+                serde_json::to_string(&session_start_payload)
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .unwrap();
+    }
+    let out = child
+        .wait_with_output()
+        .expect("failed to wait sessionstart turn 2");
+    assert_eq!(out.status.code().unwrap_or(-1), 0);
+    let repeated_stdout = String::from_utf8_lossy(&out.stdout);
+    let repeated: serde_json::Value =
+        serde_json::from_str(repeated_stdout.trim()).expect("turn 2 json");
+    let repeated_context = repeated["injectSteps"][0]["ephemeralMessage"]
+        .as_str()
+        .expect("turn 2 bootstrap");
+    assert!(repeated_context.contains("[HCOM SESSION]"));
+    assert!(repeated_context.contains(&format!("[hcom:{me}]")));
+    assert!(
+        !repeated_context.contains("## HCOM AGENT INSTRUCTIONS — SYSTEM-PROMPT FALLBACK"),
+        "turn 2 must not repeat fallback header: {repeated_context}"
+    );
+    assert!(
+        !repeated_context.contains("At the start of every new session"),
+        "turn 2 must not repeat startup read directive: {repeated_context}"
+    );
 }
 
 /// Pipe a JSON payload to a native cursor hook and return its parsed stdout.

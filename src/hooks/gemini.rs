@@ -275,7 +275,7 @@ fn handle_sessionstart(db: &HcomDb, ctx: &HcomContext, payload: &HookPayload) ->
         {
             let tag = inst.tag.as_deref().unwrap_or("");
             let hcom_config = crate::config::HcomConfig::load(None).unwrap_or_default();
-            let mut recurring = bootstrap::get_bootstrap(
+            let recurring = bootstrap::get_bootstrap(
                 db,
                 &ctx.hcom_dir,
                 &instance_name,
@@ -287,9 +287,6 @@ fn handle_sessionstart(db: &HcomDb, ctx: &HcomContext, payload: &HookPayload) ->
                 crate::relay::is_relay_enabled(&hcom_config),
                 ctx.background_name.as_deref(),
             );
-            if let Ok(instructions) = std::env::var("HCOM_AGENT_INSTRUCTIONS_FALLBACK") {
-                common::append_system_prompt_fallback(&mut recurring, &instructions);
-            }
             return HookResult::Allow {
                 additional_context: Some(recurring),
                 system_message: None,
@@ -3106,7 +3103,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_antigravity_recurring_preinvocation_retains_fallback_instructions() {
+    fn test_antigravity_recurring_preinvocation_omits_fallback_instructions() {
         let (_dir, db) = make_test_db();
         insert_test_instance(&db, "vago", "antigravity");
         db.set_process_binding("proc-vago", "sess-vago", "vago")
@@ -3177,13 +3174,14 @@ mod tests {
                 additional_context: Some(ctx),
                 ..
             } => {
+                assert!(ctx.contains("[HCOM SESSION]"));
                 assert!(
-                    ctx.contains("## HCOM AGENT INSTRUCTIONS — SYSTEM-PROMPT FALLBACK"),
-                    "context missing fallback header: {ctx}"
+                    !ctx.contains("## HCOM AGENT INSTRUCTIONS — SYSTEM-PROMPT FALLBACK"),
+                    "recurring context should not repeat fallback header: {ctx}"
                 );
                 assert!(
-                    ctx.contains("MANDATORY RULE FROM SOUL"),
-                    "context missing fallback instruction: {ctx}"
+                    !ctx.contains("MANDATORY RULE FROM SOUL"),
+                    "recurring context should not repeat fallback instruction: {ctx}"
                 );
             }
             other => panic!("expected Allow with context, got {other:?}"),

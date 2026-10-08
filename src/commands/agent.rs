@@ -1656,14 +1656,22 @@ fn build_agent_instructions(
     instruction_path: Option<String>,
     instruction_body: Option<String>,
     skills: &[AgentSkill],
+    supports_system_prompt: bool,
 ) -> Option<String> {
     let mut sections = Vec::new();
     if let Some(fixed) = fixed {
         sections.push(fixed);
     }
     if let (Some(dir), Some(path), Some(body)) = (bundle_dir, instruction_path, instruction_body) {
+        let body_section = if supports_system_prompt {
+            body
+        } else {
+            format!(
+                "At the start of every new session, before taking task action, read `{path}` completely in full to load your identity, rules, and procedures."
+            )
+        };
         sections.push(format!(
-            "# Agent bundle instructions\n\nBundle directory: `{dir}`\nInstruction file: `{path}`\n\nResolve relative paths mentioned by these instructions from the bundle directory.\nThe bundle is editable when the selected CLI supports the granted workspace access.\n\n{body}"
+            "# Agent bundle instructions\n\nBundle directory: `{dir}`\nInstruction file: `{path}`\n\nResolve relative paths mentioned by these instructions from the bundle directory.\nThe bundle is editable when the selected CLI supports the granted workspace access.\n\n{body_section}"
         ));
     }
     if !skills.is_empty() {
@@ -1733,6 +1741,10 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         .as_deref()
         .map(discover_agent_skills)
         .unwrap_or_default();
+    let supports_system_prompt = selected_cli
+        .parse::<crate::tool::Tool>()
+        .map(|tool| tool.supports_system_prompt())
+        .unwrap_or(false);
     let system_prompt = build_agent_instructions(
         nonempty(def.system_prompt),
         def.agent_dir.as_deref(),
@@ -1743,6 +1755,7 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         } else {
             &skills
         },
+        supports_system_prompt,
     );
 
     let reasoning = nonempty(def.reasoning);
@@ -3574,10 +3587,28 @@ mod tests {
         assert_eq!(skills[0].description, "Alpha fallback");
         assert_eq!(warnings.len(), 1);
 
-        let prompt = build_agent_instructions(None, None, None, None, &skills).unwrap();
+        let prompt = build_agent_instructions(None, None, None, None, &skills, true).unwrap();
         assert!(prompt.starts_with("# Available agent skills"));
         assert!(prompt.find("## alpha").unwrap() < prompt.find("## inspect").unwrap());
         assert!(prompt.contains(&skills[0].path));
+    }
+
+    #[test]
+    fn unsupported_system_prompt_emits_startup_read_directive_instead_of_inlined_body() {
+        let mut def = def_from(r#"{"cli":"antigravity","dir":"/work"}"#);
+        def.agent_dir = Some("/work/.hcom/agents/dippy".into());
+        def.instructions = Some("/work/.hcom/agents/dippy/SOUL.md".into());
+        def.instructions_content = Some("MANDATORY SOUL CONTENT".into());
+        let eff = effective("dippy", def, &Cli::default());
+        let prompt = eff.system_prompt.unwrap();
+        assert!(prompt.contains("Instruction file: `/work/.hcom/agents/dippy/SOUL.md`"));
+        assert!(prompt.contains(
+            "At the start of every new session, before taking task action, read `/work/.hcom/agents/dippy/SOUL.md` completely in full to load your identity, rules, and procedures."
+        ));
+        assert!(
+            !prompt.contains("MANDATORY SOUL CONTENT"),
+            "unsupported CLI must not inline instruction body"
+        );
     }
 
     #[test]
