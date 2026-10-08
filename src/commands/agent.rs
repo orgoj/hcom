@@ -549,7 +549,17 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
             let name = entry.file_name().to_string_lossy().into_owned();
             let dir = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path());
             let instructions = dir.join("SOUL.md");
-            if instructions.is_file() {
+            let instructions_declared = match std::fs::symlink_metadata(&instructions) {
+                Ok(_) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    bail!(
+                        "cannot inspect agent bundle instructions {}: {e}",
+                        instructions.display()
+                    );
+                }
+            };
+            if instructions_declared {
                 if !crate::identity::is_valid_base_name(&name) {
                     bail!("invalid agent bundle name '{}': {}", name, dir.display());
                 }
@@ -557,12 +567,15 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
             }
             if let Some(def) = catalog.agents.get_mut(&name) {
                 def.agent_dir = Some(dir.to_string_lossy().into_owned());
-                if instructions.is_file() {
+                if instructions_declared {
+                    let content = std::fs::read_to_string(&instructions).map_err(|e| {
+                        anyhow::anyhow!(
+                            "cannot read agent bundle instructions {}: {e}",
+                            instructions.display()
+                        )
+                    })?;
                     def.instructions = Some(instructions.to_string_lossy().into_owned());
-                    def.instructions_content =
-                        Some(std::fs::read_to_string(&instructions).map_err(|e| {
-                            anyhow::anyhow!("cannot read {}: {e}", instructions.display())
-                        })?);
+                    def.instructions_content = Some(content);
                 }
             }
         }
@@ -3701,6 +3714,49 @@ mod tests {
             error.contains("invalid agent bundle name 'Bad-Name'"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn bundle_discovery_rejects_unreadable_declared_soul_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("agents/broken");
+        std::fs::create_dir_all(&bundle).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(bundle.join("nonexistent.md"), bundle.join("SOUL.md")).unwrap();
+        #[cfg(windows)]
+        let _ = std::os::windows::fs::symlink_file(
+            bundle.join("nonexistent.md"),
+            bundle.join("SOUL.md"),
+        );
+
+        let error = load_catalog_file(&tmp.path().join("agents.json"), tmp.path(), "test".into())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("cannot read agent bundle instructions"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn bundle_discovery_allows_optional_bundle_without_soul_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("agents/declared");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("NOTES.md"), "# Notes").unwrap();
+
+        std::fs::write(
+            tmp.path().join("agents.json"),
+            r#"{"agents":{"declared":{"dir":"/work"}}}"#,
+        )
+        .unwrap();
+
+        let catalog_file =
+            load_catalog_file(&tmp.path().join("agents.json"), tmp.path(), "test".into()).unwrap();
+        let def = catalog_file.catalog.agents.get("declared").unwrap();
+        assert_eq!(def.instructions, None);
+        assert_eq!(def.instructions_content, None);
+        assert!(def.agent_dir.is_some());
     }
 
     #[test]

@@ -734,7 +734,7 @@ pub fn inject_bootstrap_once(
     Some(bootstrap_text)
 }
 
-fn append_system_prompt_fallback(bootstrap: &mut String, instructions: &str) {
+pub(crate) fn append_system_prompt_fallback(bootstrap: &mut String, instructions: &str) {
     if instructions.trim().is_empty() {
         return;
     }

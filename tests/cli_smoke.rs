@@ -806,6 +806,10 @@ fn antigravity_e2e_hook_dispatch() {
     cmd.args(["gemini-sessionstart"]);
     cmd.env("ANTIGRAVITY_AGENT", "1");
     cmd.env("HCOM_PROCESS_ID", "pid-agy-123");
+    cmd.env(
+        "HCOM_AGENT_INSTRUCTIONS_FALLBACK",
+        "RULE: SOUL INSTRUCTIONS FALLBACK",
+    );
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -838,6 +842,7 @@ fn antigravity_e2e_hook_dispatch() {
         .expect("initial Antigravity bootstrap");
     assert!(first_context.contains("[HCOM SESSION]"));
     assert!(first_context.contains(&format!("[hcom:{me}]")));
+    assert!(first_context.contains("RULE: SOUL INSTRUCTIONS FALLBACK"));
 
     // Verify session_id binding matches in the DB via hcom list --json
     let (code, stdout, stderr) = h.run(["list", &me, "--json"]);
@@ -851,6 +856,10 @@ fn antigravity_e2e_hook_dispatch() {
     cmd.args(["gemini-sessionstart"]);
     cmd.env("ANTIGRAVITY_AGENT", "1");
     cmd.env("HCOM_PROCESS_ID", "pid-agy-123");
+    cmd.env(
+        "HCOM_AGENT_INSTRUCTIONS_FALLBACK",
+        "RULE: SOUL INSTRUCTIONS FALLBACK",
+    );
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -883,6 +892,7 @@ fn antigravity_e2e_hook_dispatch() {
         .expect("recurring Antigravity bootstrap");
     assert!(repeated_context.contains("[HCOM SESSION]"));
     assert!(repeated_context.contains(&format!("[hcom:{me}]")));
+    assert!(repeated_context.contains("RULE: SOUL INSTRUCTIONS FALLBACK"));
 
     // 2. Now pipe PreToolUse to gemini-beforetool.
     // Since the session is bound, it should resolve the instance and execute successfully.
