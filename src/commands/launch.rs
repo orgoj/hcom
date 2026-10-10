@@ -209,6 +209,7 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
             args: merged_args,
             persisted_args: None,
             prior_session_id: None,
+            resume_cursor: None,
             tag,
             system_prompt,
             initial_prompt,
@@ -419,6 +420,8 @@ pub(crate) fn print_launch_preview(preview: LaunchPreview<'_>) {
             "cursor" | "cursor-agent" => preview.config.cursor_args.as_str(),
             "copilot" => preview.config.copilot_args.as_str(),
             "kimi" => preview.config.kimi_args.as_str(),
+            "qoder" | "qodercli" => preview.config.qoder_args.as_str(),
+            "grok" | "grok-build" => preview.config.grok_args.as_str(),
             _ => "",
         }
     } else {
@@ -577,12 +580,14 @@ pub(crate) fn merge_tool_args(
             append_config_args(&config.cursor_args, cli_args)
         }
         LaunchTool::Copilot => append_config_args(&config.copilot_args, cli_args),
+        LaunchTool::Grok => append_config_args(&config.grok_args, cli_args),
         LaunchTool::Pi => append_config_args(&config.pi_args, cli_args),
         LaunchTool::Omp => append_config_args(&config.omp_args, cli_args),
         LaunchTool::Hermes => append_config_args(&config.hermes_args, cli_args),
         LaunchTool::OpenCode => append_config_args(&config.opencode_args, cli_args),
         LaunchTool::Kilo => append_config_args(&config.kilo_args, cli_args),
         LaunchTool::Kimi => append_config_args(&config.kimi_args, cli_args),
+        LaunchTool::Qoder => append_config_args(&config.qoder_args, cli_args),
         LaunchTool::Antigravity => {
             // IntegrationSpec.launch.args_env is explicitly None: Antigravity
             // has no persisted *_args config to merge.
@@ -610,6 +615,8 @@ pub(crate) fn is_background_from_args(tool: &LaunchTool, args: &[String]) -> boo
         | LaunchTool::Cursor
         | LaunchTool::Kimi
         | LaunchTool::Copilot
+        | LaunchTool::Qoder
+        | LaunchTool::Grok
         | LaunchTool::Omp => false,
         LaunchTool::Hermes => false,
     }
@@ -1047,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_tool_args_applies_config_for_opencode_family_and_kimi() {
+    fn test_merge_tool_args_applies_config_for_opencode_family_kimi_and_qoder() {
         // These tools previously fell through to the `_` pass-through arm, which
         // silently dropped their `*_args` config at launch.
         let cli = s(&["--yolo"]);
@@ -1055,6 +1062,7 @@ mod tests {
             ("opencode", "opencode_args"),
             ("kilo", "kilo_args"),
             ("kimi", "kimi_args"),
+            ("qoder", "qoder_args"),
         ] {
             let mut config = HcomConfig::default();
             config.set_field(field, "--model from-config").unwrap();

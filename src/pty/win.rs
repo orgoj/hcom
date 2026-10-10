@@ -11,7 +11,7 @@
 
 use anyhow::{Context, Result};
 use std::io::{IsTerminal, Read, Write};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
@@ -23,10 +23,13 @@ use super::ProxyConfig;
 use super::inject::{InjectResult, InjectServer, QueryCommand};
 use super::screen::ScreenTracker;
 use super::shared;
+use super::stdout_queue::StdoutQueue;
+use super::trace::{self, Hop};
 
 use crate::db::HcomDb;
 use crate::delivery::{EXIT_WAS_KILLED, ScreenState};
-use crate::log::log_error;
+use crate::integration_spec::ConsoleInput;
+use crate::log::{log_error, log_warn};
 
 /// True if `path` is a `.cmd`/`.bat` script (case-insensitive), which
 /// `CreateProcessW` cannot execute directly — only `cmd.exe /c` can run those.
@@ -81,18 +84,26 @@ pub struct Proxy {
     last_tail: Arc<RwLock<Option<String>>>,
     /// Set when delivery initialization fails; `run()` maps it to a nonzero exit.
     launch_failed: Arc<AtomicBool>,
+    /// The child's SGR mouse tracking (`MouseTracking` as u8), published by
+    /// the reader thread, which owns the screen tracker, for the stdin thread.
+    mouse_tracking: Arc<AtomicU8>,
     /// Job object the child is assigned to (`KILL_ON_JOB_CLOSE`). Reaps the
     /// child's whole tree even if this proxy dies abnormally and `Drop` never
     /// runs. `None` if the child couldn't be assigned (falls back to the
     /// snapshot-based kill in `Drop`).
     _job: Option<job::KillOnDropJob>,
+    /// When the ConPTY child was spawned; the reader's startup trace measures
+    /// from here.
+    spawned_at: Instant,
 }
 
 impl Proxy {
     /// Spawn `command` under a ConPTY and prepare the proxy.
     pub fn spawn(command: &str, args: &[&str], config: ProxyConfig) -> Result<Self> {
+        let spawn_started = Instant::now();
         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
 
+        super::conpty::select();
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -135,30 +146,54 @@ impl Proxy {
             cmd.cwd(crate::shared::platform::child_process_path(&cwd));
         }
 
-        let child = pair
+        let mut child = pair
             .slave
             .spawn_command(cmd)
             .context("ConPTY spawn failed")?;
+        let spawned_at = Instant::now();
+        shared::log_spawned(
+            config.instance_name.as_deref(),
+            child.process_id(),
+            spawned_at.duration_since(spawn_started),
+            command,
+        );
+        // Install descendant cleanup immediately. Any later setup failure must
+        // still reap the spawned process tree.
+        let job = child.process_id().and_then(job::KillOnDropJob::assign);
         // The parent does not need the slave handle once the child holds it.
         drop(pair.slave);
 
         let writer = pair.master.take_writer().context("take_writer failed")?;
 
         // Persist PID so `hcom kill` can target the agent.
-        if let Some(ref instance_name) = config.instance_name
-            && let Ok(db) = HcomDb::open()
-            && let Some(pid) = child.process_id()
-        {
-            let _ = db.update_instance_pid(instance_name, pid);
+        if let Some(ref instance_name) = config.instance_name {
+            let persist_result = (|| -> Result<()> {
+                let pid = child
+                    .process_id()
+                    .context("ConPTY child has no process id")?;
+                let db = HcomDb::open()?;
+                // The child handle keeps this PID from being reused, so a missing
+                // identity only means no reuse protection for later cleanup.
+                db.update_instance_pid_with_identity(
+                    instance_name,
+                    pid,
+                    crate::sys::process::identity(pid).as_deref(),
+                )?;
 
-            // Capture minimal launch context early so kill can close the terminal pane.
-            // The start hook may later overwrite with richer context (git_branch, tty, env).
-            let _ = db.store_launch_context(instance_name, &shared::build_early_launch_context());
+                Ok(())
+            })();
+            if let Err(error) = persist_result {
+                // We still hold the child's handle, so its PID can't have been
+                // reused. Kill the tree, then the child itself, and reap it so
+                // nothing outlives the failed launch (matches the Unix path).
+                if let Some(pid) = child.process_id() {
+                    let _ = crate::sys::process::kill_group(pid);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.context("failed to persist ConPTY process"));
+            }
         }
-
-        // Tie the child to a kill-on-close job so its whole tree is reaped if we
-        // die abnormally (the explicit snapshot-kill in Drop covers clean exit).
-        let job = child.process_id().and_then(job::KillOnDropJob::assign);
 
         let initial_name = config.instance_name.clone().unwrap_or_default();
 
@@ -182,7 +217,9 @@ impl Proxy {
             pending_resize: Arc::new(RwLock::new(None)),
             last_tail: Arc::new(RwLock::new(None)),
             launch_failed: Arc::new(AtomicBool::new(false)),
+            mouse_tracking: Arc::new(AtomicU8::new(0)),
             _job: job,
+            spawned_at,
         })
     }
 
@@ -190,7 +227,18 @@ impl Proxy {
     pub fn run(&mut self) -> Result<i32> {
         // Put our console into raw + VT passthrough so the tool's TUI renders
         // and keystrokes flow through unbuffered. Restored on drop.
-        let _console = console::RawConsoleGuard::enable();
+        trace::note(
+            Hop::Mode,
+            &format!(
+                "tool={} input={:?} conpty={} size={}x{}",
+                self.config.target.name(),
+                self.config.target.console_input(),
+                super::conpty::selected(),
+                self.cols,
+                self.rows
+            ),
+        );
+        let _console = console::RawConsoleGuard::enable(self.config.target.console_input());
 
         let startup_time = Instant::now();
 
@@ -210,6 +258,19 @@ impl Proxy {
         self.spawn_stdin_thread();
         self.spawn_inject_thread(inject_server);
         self.spawn_resize_watcher();
+
+        // Terminal metadata may take 900ms to arrive. Collect it only after
+        // starting the IO threads: ConPTY stops capturing its startup cursor
+        // report after 1s, and a late reply can become literal prompt input.
+        // PID ownership was persisted in spawn(), so kill can still find the
+        // child during this wait. store_launch_context fills missing fields
+        // without overwriting richer context already captured by a start hook.
+        if let Some(ref instance_name) = self.config.instance_name {
+            let context = shared::build_early_launch_context();
+            if let Ok(db) = HcomDb::open() {
+                let _ = db.store_launch_context(instance_name, &context);
+            }
+        }
 
         // Poll rather than blocking solely in child.wait(): a definitive
         // delivery-init failure must terminate a long-lived child immediately.
@@ -244,10 +305,10 @@ impl Proxy {
         // the ordering below still matches the Unix proxy). The reader breaks
         // its loop on PTY EOF (Ok(0)), not on `running`, so the child having
         // exited is enough for it to wind down — no stop signal is needed first.
-        // It writes last_tail only at that EOF, and on Windows the ConPTY pipe
-        // can signal EOF after `child.wait()` already returned; without the join
-        // we could read last_tail while it is still None and emit a launch
-        // failure with an empty PTY tail. Joining first closes that race.
+        // It refreshes last_tail when launch output goes quiet and again at that
+        // EOF; the ConPTY pipe can signal EOF after `child.wait()` returned (or
+        // not until the pseudoconsole closes), so joining first lets a final
+        // EOF capture land before we read it.
         //
         // Bounded join: the ConPTY pipe only reaches EOF once *every* process
         // holding the slave handle exits. If the child spawned a grandchild that
@@ -328,6 +389,7 @@ impl Proxy {
         let launch_phase = self.launch_phase_active.clone();
         let target = self.config.target.clone();
         let instance = self.config.instance_name.clone();
+        let grok_acp = self.config.grok_acp.clone();
         let current_name = self.current_name.clone();
         let current_status = self.current_status.clone();
         let notify_port = self.notify_port.clone();
@@ -356,6 +418,7 @@ impl Proxy {
                         current_name.clone(),
                         current_status.clone(),
                         None,
+                        grok_acp.clone(),
                     ) {
                         Ok(shared::DeliveryStart::Started(h)) => {
                             *delivery_handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(h);
@@ -449,9 +512,10 @@ impl Proxy {
     /// changes.
     ///
     /// Returns the thread's `JoinHandle` so `run()` can join it after the child
-    /// exits and before reading `last_tail` — the reader writes `last_tail` only
-    /// at PTY EOF (`Ok(0)`), which on Windows can lag the child's exit, so the
-    /// join is what guarantees the launch-failure tail is populated.
+    /// exits and before reading `last_tail`. During the launch phase the reader
+    /// writes `last_tail` whenever output goes quiet, and again at PTY EOF;
+    /// ConPTY may not reach EOF until the pseudoconsole closes, so the quiet-
+    /// period capture is what usually supplies the launch-failure tail.
     ///
     /// Returns `Err` if the ConPTY reader can't be cloned (or the master mutex is
     /// poisoned): without a reader there is no screen tracking, no delivery
@@ -468,7 +532,7 @@ impl Proxy {
         let screen_state = self.screen_state.clone();
         let launch_phase = self.launch_phase_active.clone();
         let target = self.config.target.clone();
-        let ready_pattern = self.config.ready_pattern.clone();
+        let ready_patterns = self.config.ready_patterns.clone();
         let instance = self.config.instance_name.clone();
         let current_name = self.current_name.clone();
         let current_status = self.current_status.clone();
@@ -478,7 +542,10 @@ impl Proxy {
         let ready_signaled = self.ready_signaled.clone();
         let screen_snapshot = self.screen_snapshot.clone();
         let writer = self.writer.clone();
+        let mouse_tracking = self.mouse_tracking.clone();
         let (rows, cols) = (self.rows, self.cols);
+        let console_input = self.config.target.console_input();
+        let mut trace = shared::StartupTrace::new(self.spawned_at, instance.as_deref());
 
         // Producer: owns the ConPTY reader and blocks in read(), forwarding raw
         // chunks over a channel. This exists so the consumer loop below can wait
@@ -517,8 +584,8 @@ impl Proxy {
 
         Ok(thread::spawn(move || {
             let mut screen =
-                ScreenTracker::new_with_instance(rows, cols, &ready_pattern, instance.as_deref());
-            let mut stdout = std::io::stdout();
+                ScreenTracker::new_with_instance(rows, cols, &ready_patterns, instance.as_deref());
+            let stdout = StdoutQueue::spawn(std::io::stdout(), |b| trace::bytes(Hop::Stdout, b));
             let mut filter = shared::OutputModeFilter::default();
             let mut scratch: Vec<u8> = Vec::with_capacity(8192);
 
@@ -537,6 +604,10 @@ impl Proxy {
                 .unwrap_or(crate::shared::TitleMode::Combined);
             let title_enabled = title_mode != crate::shared::TitleMode::Off;
             filter.set_passthrough_titles(!title_enabled);
+            // A relay reading input records can't receive the terminal's
+            // cursor reports (see set_local_cursor_reports).
+            let local_cursor_reports = !headless && console_input == ConsoleInput::Records;
+            filter.set_local_cursor_reports(local_cursor_reports);
             let mut last_child = String::new();
 
             // `hcom term` snapshot refresh (see should_refresh_snapshot). Under
@@ -550,6 +621,11 @@ impl Proxy {
             const SNAPSHOT_DEBOUNCE: Duration = Duration::from_millis(120);
             let mut last_snapshot = Instant::now();
             let mut dirty = false;
+            // Launch-failure tail, captured once output goes quiet. ConPTY keeps
+            // the output pipe open after the child exits (until the pseudoconsole
+            // is closed), so waiting for EOF to capture it loses the race with
+            // run()'s bounded reader join — and with it the tool's error text.
+            let mut tail_stale = false;
             let refresh = |screen: &ScreenTracker| {
                 if let Ok(mut s) = screen_snapshot.write() {
                     *s = screen.get_screen_dump(target.name(), inject_port);
@@ -569,6 +645,12 @@ impl Proxy {
                             last_snapshot = Instant::now();
                             dirty = false;
                         }
+                        if tail_stale && launch_phase.load(Ordering::Acquire) {
+                            if let Ok(mut g) = last_tail.write() {
+                                *g = screen.visible_tail(8, 1000);
+                            }
+                            tail_stale = false;
+                        }
                         // Mirror the Unix poll loop's idle-path hooks (src/pty/mod.rs):
                         // without this, `update_delivery_state` on Windows only ever
                         // runs from the `Ok(data)` branch above, so once output goes
@@ -585,6 +667,9 @@ impl Proxy {
                                 &launch_phase,
                                 &publish,
                             );
+                        }
+                        if !ready_signaled.load(Ordering::Acquire) {
+                            trace.check_not_ready();
                         }
                         screen.check_debug_flag();
                         screen.check_periodic_dump(
@@ -606,6 +691,8 @@ impl Proxy {
                     }
                     Ok(data) => {
                         let data = data.as_slice();
+                        trace::bytes(Hop::Output, data);
+                        trace.on_output(data);
                         // A genuine keystroke / injected answer flagged a pending
                         // approval for clearing; the reader owns the tracker.
                         if approval_clear_requested.swap(false, Ordering::AcqRel) {
@@ -615,6 +702,7 @@ impl Proxy {
                         // frame so the screen model matches the new geometry.
                         if let Some((r, c)) = pending_resize.write().ok().and_then(|mut g| g.take())
                         {
+                            trace::note(Hop::Mode, &format!("resize {c}x{r}"));
                             screen.resize(r, c);
                         }
 
@@ -625,23 +713,42 @@ impl Proxy {
                         // which the child can't parse, and startup hangs.
                         scratch.clear();
                         filter.filter(data, &mut scratch);
-                        let _ = stdout.write_all(&scratch);
-                        let _ = stdout.flush();
-
-                        // Headless: no outer terminal saw the DSR query, so answer
-                        // it here (a canned cursor-at-1;1 report) to unblock the
-                        // child's console initialization. Interactive: the real
-                        // terminal already answered, so we never synthesize a
-                        // reply — the latch is simply left set and unread.
-                        if headless
-                            && filter.take_dsr()
-                            && let Ok(mut w) = writer.lock()
-                        {
-                            let _ = w.write_all(b"\x1b[1;1R");
-                            let _ = w.flush();
+                        let queries = filter.take_queries();
+                        let mut written = 0;
+                        for &(query, at) in &queries {
+                            let reply = if headless {
+                                // No outer terminal saw the ConPTY's startup
+                                // queries; answer them to unblock its console
+                                // initialization.
+                                Some(query.headless_reply().to_vec())
+                            } else if local_cursor_reports
+                                && query == shared::TerminalQuery::CursorPosition
+                            {
+                                // Answer once everything before the query is on
+                                // the console, so the cursor is where it asked.
+                                stdout.write(&scratch[written..at]);
+                                stdout.barrier();
+                                written = at;
+                                console::cursor_position_report()
+                            } else {
+                                // The real terminal answers.
+                                None
+                            };
+                            if let Some(reply) = reply
+                                && let Ok(mut w) = writer.lock()
+                            {
+                                trace::bytes(Hop::Input, &reply);
+                                let _ = w.write_all(&reply);
+                                let _ = w.flush();
+                                if query == shared::TerminalQuery::CursorPosition {
+                                    trace.on_dsr_answered();
+                                }
+                            }
                         }
+                        stdout.write(&scratch[written..]);
 
                         screen.process(data);
+                        mouse_tracking.store(screen.mouse_tracking() as u8, Ordering::Relaxed);
 
                         // Refresh the `hcom term` snapshot, throttled to ≤10Hz so
                         // heavy output doesn't spend the reader in screen dumps
@@ -658,6 +765,7 @@ impl Proxy {
                         } else {
                             dirty = true;
                         }
+                        tail_stale = true;
 
                         shared::update_delivery_state(
                             &screen_state,
@@ -706,8 +814,7 @@ impl Proxy {
                                 title_mode,
                                 child_opt,
                             );
-                            let _ = stdout.write_all(esc.as_bytes());
-                            let _ = stdout.flush();
+                            stdout.write(esc.as_bytes());
                             last_child.clear();
                             last_child.push_str(child);
                             last_name = name.clone();
@@ -715,6 +822,17 @@ impl Proxy {
                         }
                     }
                 }
+            }
+            // Get the child's last frame onto the console before run() moves on
+            // to exit and restores the console modes. Bounded below run()'s 2s
+            // join on this thread: past it, what's still queued is dropped
+            // rather than written raw after the restore.
+            if !stdout.finish(Duration::from_millis(1500)) {
+                log_warn(
+                    "native",
+                    "win.stdout",
+                    "console not draining at exit; dropped queued output",
+                );
             }
             // Do NOT store running=false here. Letting run() be the sole writer
             // ensures EXIT_WAS_KILLED is committed before the delivery thread
@@ -726,9 +844,15 @@ impl Proxy {
 
     /// Our stdin → PTY input. Intentionally detached and never joined.
     ///
-    /// The `running` check at the loop top only catches shutdown *between*
-    /// reads; a `stdin.read()` already blocked when the child exits cannot be
-    /// interrupted and outlives the child. This does not leak: `main` calls
+    /// A console stdin is read as input records and re-encoded (see
+    /// `console_input`); `std::io::stdin()` can't be used there, since on a
+    /// console it reports end-of-file for a read that ends in Ctrl+Z, which
+    /// used to stop all input for the rest of the session. A redirected stdin
+    /// is forwarded byte for byte.
+    ///
+    /// The `running` check only catches shutdown *between* reads; a pipe
+    /// `read()` already blocked when the child exits cannot be interrupted and
+    /// outlives the child. This does not leak: `main` calls
     /// `std::process::exit` immediately after `run` returns (and `Proxy::drop`),
     /// which terminates the process and reaps this thread even mid-read. The
     /// thread holds no lock across the blocking read, so it cannot wedge
@@ -743,43 +867,65 @@ impl Proxy {
         let current_status = self.current_status.clone();
         let instance = self.config.instance_name.clone();
         let approval_clear_requested = self.approval_clear_requested.clone();
+        let console_input = self.config.target.console_input();
+        let mouse_tracking = self.mouse_tracking.clone();
         thread::spawn(move || {
+            let forward = |bytes: &[u8]| {
+                trace::bytes(Hop::Input, bytes);
+                if let Ok(mut w) = writer.lock() {
+                    let _ = w.write_all(bytes);
+                    let _ = w.flush();
+                }
+                // A genuine keystroke answering a title-detected approval
+                // clears it immediately. Record the cleared edge against shared
+                // state; the reader thread owns the tracker, so request a
+                // tracker-clear via the atomic it consumes — but ONLY when an
+                // approval was actually standing. `clear_approval()` wipes the
+                // OSC scrape buffer, so requesting it on every keystroke would
+                // let a routine keypress race out an approval edge arriving in
+                // the same window.
+                let publish = |a: bool| {
+                    shared::publish_approval_status(a, instance.as_deref(), &current_status)
+                };
+                if shared::note_user_keystroke(&target, &screen_state, &publish) {
+                    approval_clear_requested.store(true, Ordering::Release);
+                }
+            };
+
+            if let Some(mut input) = console::InputReader::open(console_input, mouse_tracking) {
+                let mut out = Vec::new();
+                while running.load(Ordering::Acquire) {
+                    out.clear();
+                    // Bounded wait so the loop sees shutdown.
+                    if let Err(error) = input.read(100, &mut out) {
+                        log_error(
+                            "native",
+                            "win.stdin",
+                            &format!("console input read failed: {error}"),
+                        );
+                        break;
+                    }
+                    if !out.is_empty() {
+                        forward(&out);
+                    }
+                }
+                return;
+            }
+
             let mut stdin = std::io::stdin();
             let mut buf = [0u8; 4096];
-            loop {
-                if !running.load(Ordering::Acquire) {
-                    break;
-                }
+            while running.load(Ordering::Acquire) {
                 match stdin.read(&mut buf) {
                     Ok(0) => break,
-                    Ok(n) => {
-                        if let Ok(mut w) = writer.lock() {
-                            let _ = w.write_all(&buf[..n]);
-                            let _ = w.flush();
-                        }
-                        if n > 0 {
-                            // A genuine keystroke answering a title-detected
-                            // approval clears it immediately. Record the cleared
-                            // edge against shared state; the reader thread owns
-                            // the tracker, so request a tracker-clear via the
-                            // atomic it consumes — but ONLY when an approval was
-                            // actually standing. `clear_approval()` wipes the OSC
-                            // scrape buffer, so requesting it on every keystroke
-                            // would let a routine keypress race out an approval
-                            // edge arriving in the same window.
-                            let publish = |a: bool| {
-                                shared::publish_approval_status(
-                                    a,
-                                    instance.as_deref(),
-                                    &current_status,
-                                )
-                            };
-                            if shared::note_user_keystroke(&target, &screen_state, &publish) {
-                                approval_clear_requested.store(true, Ordering::Release);
-                            }
-                        }
+                    Err(error) => {
+                        log_error(
+                            "native",
+                            "win.stdin",
+                            &format!("stdin read failed: {error}"),
+                        );
+                        break;
                     }
-                    Err(_) => break,
+                    Ok(n) => forward(&buf[..n]),
                 }
             }
         });
@@ -814,6 +960,7 @@ impl Proxy {
                 while index < inject_server.client_count() {
                     let completed = match inject_server.read_client(index) {
                         Ok(InjectResult::Inject(text)) => {
+                            trace::bytes(Hop::Inject, text.as_bytes());
                             if let Ok(mut w) = writer.lock() {
                                 let _ = w.write_all(text.as_bytes());
                                 let _ = w.flush();
@@ -1161,13 +1308,213 @@ mod job {
     }
 }
 
-/// Windows console raw-mode + VT passthrough, restored on drop.
+/// Windows console raw mode + VT output, restored on drop, and the console
+/// input reader.
 mod console {
+    use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Console::{
-        CONSOLE_MODE, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+        CONSOLE_MODE, CONSOLE_SCREEN_BUFFER_INFO, ENABLE_ECHO_INPUT, ENABLE_EXTENDED_FLAGS,
+        ENABLE_LINE_INPUT, ENABLE_MOUSE_INPUT, ENABLE_PROCESSED_INPUT, ENABLE_QUICK_EDIT_MODE,
         ENABLE_VIRTUAL_TERMINAL_INPUT, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode,
-        GetStdHandle, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
+        GetConsoleScreenBufferInfo, GetStdHandle, INPUT_RECORD, KEY_EVENT, MOUSE_EVENT,
+        ReadConsoleInputW, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetConsoleMode,
     };
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    use super::super::console_input::{InputEncoder, KeyRecord, MouseRecord, MouseTracking};
+    use super::super::trace::{self, Hop};
+    use crate::integration_spec::ConsoleInput;
+
+    fn screen_info() -> Option<CONSOLE_SCREEN_BUFFER_INFO> {
+        // SAFETY: CONSOLE_SCREEN_BUFFER_INFO is plain data; the call fills it
+        // for our own stdout handle.
+        unsafe {
+            let mut info: CONSOLE_SCREEN_BUFFER_INFO = std::mem::zeroed();
+            (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &mut info) != 0)
+                .then_some(info)
+        }
+    }
+
+    /// `\x1b[<row>;<col>R` for our console's cursor, relative to the visible
+    /// window — what the terminal would reply to `\x1b[6n`.
+    pub fn cursor_position_report() -> Option<Vec<u8>> {
+        let info = screen_info()?;
+        let row = i32::from(info.dwCursorPosition.Y) - i32::from(info.srWindow.Top) + 1;
+        let col = i32::from(info.dwCursorPosition.X) - i32::from(info.srWindow.Left) + 1;
+        Some(format!("\x1b[{};{}R", row.max(1), col.max(1)).into_bytes())
+    }
+
+    /// Reads the console's input records and encodes them for the ConPTY (see
+    /// `console_input`).
+    pub struct InputReader {
+        handle: isize,
+        records: Vec<INPUT_RECORD>,
+        encoder: InputEncoder,
+        input: ConsoleInput,
+        /// The child's mouse tracking, from the reader thread.
+        mouse_tracking: Arc<AtomicU8>,
+        /// Vt mode: whether we turned console mouse input on for the child.
+        mouse_input: bool,
+        /// The mouse-input and QuickEdit bits before we changed them.
+        mouse_bits: CONSOLE_MODE,
+    }
+
+    impl InputReader {
+        /// `None` when stdin isn't a console.
+        pub fn open(input: ConsoleInput, mouse_tracking: Arc<AtomicU8>) -> Option<Self> {
+            // SAFETY: querying the mode of our own std handle.
+            let handle = unsafe { GetStdHandle(STD_INPUT_HANDLE) } as isize;
+            let mut mode: CONSOLE_MODE = 0;
+            // SAFETY: as above; `mode` is a valid out-pointer.
+            if unsafe { GetConsoleMode(handle as _, &mut mode) } == 0 {
+                return None;
+            }
+            Some(Self {
+                handle,
+                // SAFETY: INPUT_RECORD is plain data; all-zero is valid.
+                records: vec![unsafe { std::mem::zeroed() }; 128],
+                encoder: InputEncoder::new(input),
+                input,
+                mouse_tracking,
+                mouse_input: false,
+                mouse_bits: mode & (ENABLE_MOUSE_INPUT | ENABLE_QUICK_EDIT_MODE),
+            })
+        }
+
+        /// Vt mode: while the child tracks the mouse, take mouse input the
+        /// way a child run directly would (QuickEdit off, mouse input on). A
+        /// console host that parses the terminal's mouse reports into records
+        /// only delivers them in that mode; the encoder turns them back into
+        /// reports, unless reports already arrive as text. The mode stays
+        /// put until tracking ends: a host that sends text may need it too.
+        fn sync_mouse_input(&mut self, tracking: MouseTracking) {
+            let want = self.input == ConsoleInput::Vt && tracking != MouseTracking::Off;
+            if want == self.mouse_input {
+                return;
+            }
+            self.mouse_input = want;
+            let mut mode: CONSOLE_MODE = 0;
+            // SAFETY: our own console input handle; `mode` is a valid out-pointer.
+            if unsafe { GetConsoleMode(self.handle as _, &mut mode) } == 0 {
+                return;
+            }
+            let bits = ENABLE_MOUSE_INPUT | ENABLE_QUICK_EDIT_MODE;
+            let new = if want {
+                (mode & !bits) | ENABLE_MOUSE_INPUT | ENABLE_EXTENDED_FLAGS
+            } else {
+                (mode & !bits) | self.mouse_bits | ENABLE_EXTENDED_FLAGS
+            };
+            // SAFETY: as above.
+            unsafe { SetConsoleMode(self.handle as _, new) };
+            trace::note(
+                Hop::Mode,
+                &format!("stdin {mode:#06x} -> {new:#06x} (mouse tracking {tracking:?})"),
+            );
+        }
+
+        /// Wait up to `timeout_ms` for input and append its encoding to `out`.
+        pub fn read(&mut self, timeout_ms: u32, out: &mut Vec<u8>) -> std::io::Result<()> {
+            let tracking = MouseTracking::from_u8(self.mouse_tracking.load(Ordering::Relaxed));
+            self.sync_mouse_input(tracking);
+            // SAFETY: waiting on our own console input handle.
+            match unsafe { WaitForSingleObject(self.handle as _, timeout_ms) } {
+                WAIT_OBJECT_0 => {}
+                WAIT_TIMEOUT => return Ok(()),
+                _ => return Err(std::io::Error::last_os_error()),
+            }
+            let mut n = 0u32;
+            // SAFETY: `records` holds `len` writable records; `n` receives the
+            // count actually read.
+            let ok = unsafe {
+                ReadConsoleInputW(
+                    self.handle as _,
+                    self.records.as_mut_ptr(),
+                    self.records.len() as u32,
+                    &mut n,
+                )
+            };
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // Mouse positions are buffer coordinates; SGR reports are relative
+            // to the visible window. Looked up once per batch, if needed.
+            let mut window_origin = None;
+            for record in &self.records[..n as usize] {
+                // SAFETY: the union member read matches `EventType`.
+                unsafe {
+                    match u32::from(record.EventType) {
+                        KEY_EVENT => {
+                            let k = record.Event.KeyEvent;
+                            if trace::enabled() {
+                                trace::note(
+                                    Hop::Record,
+                                    &format!(
+                                        "key down={} vk={:#04x} scan={:#04x} ch={:#06x} ctrl={:#x} rep={}",
+                                        k.bKeyDown,
+                                        k.wVirtualKeyCode,
+                                        k.wVirtualScanCode,
+                                        k.uChar.UnicodeChar,
+                                        k.dwControlKeyState,
+                                        k.wRepeatCount
+                                    ),
+                                );
+                            }
+                            self.encoder.key(
+                                KeyRecord {
+                                    down: k.bKeyDown != 0,
+                                    repeat: k.wRepeatCount,
+                                    vk: k.wVirtualKeyCode,
+                                    scan: k.wVirtualScanCode,
+                                    ch: k.uChar.UnicodeChar,
+                                    ctrl: k.dwControlKeyState,
+                                },
+                                out,
+                            );
+                        }
+                        MOUSE_EVENT => {
+                            let m = record.Event.MouseEvent;
+                            if trace::enabled() {
+                                trace::note(
+                                    Hop::Record,
+                                    &format!(
+                                        "mouse x={} y={} buttons={:#x} ctrl={:#x} flags={:#x}",
+                                        m.dwMousePosition.X,
+                                        m.dwMousePosition.Y,
+                                        m.dwButtonState,
+                                        m.dwControlKeyState,
+                                        m.dwEventFlags
+                                    ),
+                                );
+                            }
+                            let (left, top) = *window_origin.get_or_insert_with(|| {
+                                screen_info().map_or((0, 0), |i| (i.srWindow.Left, i.srWindow.Top))
+                            });
+                            self.encoder.mouse(
+                                MouseRecord {
+                                    x: m.dwMousePosition.X.saturating_sub(left),
+                                    y: m.dwMousePosition.Y.saturating_sub(top),
+                                    buttons: m.dwButtonState,
+                                    ctrl: m.dwControlKeyState,
+                                    flags: m.dwEventFlags,
+                                },
+                                tracking,
+                                out,
+                            );
+                        }
+                        // Focus and buffer-size records: focus reporting is
+                        // kept off the outer terminal, and resizes are polled.
+                        other => {
+                            trace::note(Hop::Record, &format!("event type={other:#x}"));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
 
     pub struct RawConsoleGuard {
         stdin_handle: isize,
@@ -1178,10 +1525,12 @@ mod console {
     }
 
     impl RawConsoleGuard {
-        /// Best-effort: disable line input/echo on stdin, enable VT input, and
-        /// enable VT processing on stdout so the child's escape sequences render.
-        /// If the handles aren't consoles (piped), this is a no-op.
-        pub fn enable() -> Self {
+        /// Best-effort: disable line input, echo and Ctrl+C processing on
+        /// stdin, with VT input on only when the child reads VT (see
+        /// `console_input`), and enable VT processing on stdout so the child's
+        /// escape sequences render. If the handles aren't consoles (piped),
+        /// this is a no-op.
+        pub fn enable(input: ConsoleInput) -> Self {
             // SAFETY: GetStdHandle returns process-owned console handles; the
             // mode getters/setters only touch those handles.
             unsafe {
@@ -1192,15 +1541,39 @@ mod console {
                 let ok_in = GetConsoleMode(stdin_handle as _, &mut prev_in) != 0;
                 let ok_out = GetConsoleMode(stdout_handle as _, &mut prev_out) != 0;
                 if ok_in {
-                    let raw_in = (prev_in
-                        & !(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT))
-                        | ENABLE_VIRTUAL_TERMINAL_INPUT;
+                    let mut raw_in = prev_in
+                        & !(ENABLE_LINE_INPUT
+                            | ENABLE_ECHO_INPUT
+                            | ENABLE_PROCESSED_INPUT
+                            | ENABLE_VIRTUAL_TERMINAL_INPUT);
+                    match input {
+                        ConsoleInput::Vt => raw_in |= ENABLE_VIRTUAL_TERMINAL_INPUT,
+                        // Mouse input as crossterm sets it for a child run
+                        // directly. With QuickEdit left on, an outer ConPTY
+                        // older than ours (WezTerm's) never reports the mouse.
+                        ConsoleInput::Records => {
+                            raw_in = (raw_in & !ENABLE_QUICK_EDIT_MODE)
+                                | ENABLE_MOUSE_INPUT
+                                | ENABLE_EXTENDED_FLAGS;
+                        }
+                    }
                     SetConsoleMode(stdin_handle as _, raw_in);
+                    trace::note(
+                        Hop::Mode,
+                        &format!("stdin {prev_in:#06x} -> {raw_in:#06x} ({input:?})"),
+                    );
                 }
                 if ok_out {
                     SetConsoleMode(
                         stdout_handle as _,
                         prev_out | ENABLE_VIRTUAL_TERMINAL_PROCESSING,
+                    );
+                    trace::note(
+                        Hop::Mode,
+                        &format!(
+                            "stdout {prev_out:#06x} -> {:#06x}",
+                            prev_out | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+                        ),
                     );
                 }
                 RawConsoleGuard {
@@ -1221,7 +1594,15 @@ mod console {
             }
             // SAFETY: restoring the previously-read modes on the same handles.
             unsafe {
-                SetConsoleMode(self.stdin_handle as _, self.prev_in);
+                // QuickEdit only changes alongside ENABLE_EXTENDED_FLAGS, which
+                // the mode we read back may lack; without it the QuickEdit we
+                // turned off for Records input would stay off after we exit.
+                let prev_in = if self.prev_in & ENABLE_QUICK_EDIT_MODE != 0 {
+                    self.prev_in | ENABLE_EXTENDED_FLAGS
+                } else {
+                    self.prev_in
+                };
+                SetConsoleMode(self.stdin_handle as _, prev_in);
                 SetConsoleMode(self.stdout_handle as _, self.prev_out);
             }
         }

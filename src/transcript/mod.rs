@@ -10,6 +10,7 @@ pub mod codex;
 pub mod copilot;
 pub mod cursor;
 pub mod gemini;
+pub mod grok;
 pub mod kimi;
 pub mod opencode;
 pub mod pi;
@@ -17,11 +18,9 @@ pub mod shared;
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
-
 use crate::tool::Tool;
 
-pub use shared::{Exchange, ToolUse, format_exchanges, summarize_action};
+pub use shared::{Exchange, ToolUse, flag_hint, format_exchanges, summarize_action};
 
 pub(crate) use opencode::TranscriptSearchMatch;
 
@@ -40,6 +39,7 @@ pub enum TranscriptBackend {
     KimiWireJsonl,
     CopilotJsonl,
     PiJsonl,
+    GrokUpdatesJsonl,
 }
 
 /// Where `transcript search --all` discovers sessions for a tool.
@@ -50,6 +50,7 @@ pub enum TranscriptBackend {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TranscriptDiscovery {
     ClaudeProjects,
+    QoderProjects,
     GeminiTree,
     CodexSessions,
     OpenCodeDatabase,
@@ -59,6 +60,7 @@ enum TranscriptDiscovery {
     CopilotSessionState,
     PiSessions,
     OmpSessions,
+    GrokSessions,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -123,6 +125,17 @@ static TRANSCRIPT_PROFILES: &[TranscriptProfile] = &[
         tool: Tool::Copilot,
         backend: TranscriptBackend::CopilotJsonl,
         discovery: TranscriptDiscovery::CopilotSessionState,
+    },
+    TranscriptProfile {
+        // Qoder writes Claude-format JSONL under `<config dir>/projects/`.
+        tool: Tool::Qoder,
+        backend: TranscriptBackend::ClaudeJsonl,
+        discovery: TranscriptDiscovery::QoderProjects,
+    },
+    TranscriptProfile {
+        tool: Tool::Grok,
+        backend: TranscriptBackend::GrokUpdatesJsonl,
+        discovery: TranscriptDiscovery::GrokSessions,
     },
 ];
 
@@ -217,6 +230,9 @@ pub fn read(
             copilot::parse_copilot_jsonl(path, opts.last, opts.detailed)
         }
         TranscriptBackend::PiJsonl => pi::parse_pi_jsonl(path, opts.last, opts.detailed),
+        TranscriptBackend::GrokUpdatesJsonl => {
+            grok::parse_grok_updates_jsonl(path, opts.last, opts.detailed)
+        }
         TranscriptBackend::OpenCodeSqlite => {
             let sid = opts.session_id.as_deref().unwrap_or("");
             if sid.is_empty() {
@@ -255,12 +271,18 @@ pub fn detect_tool_from_path(path: &str) -> Option<Tool> {
     // being silently assigned a parser.
     if lower.contains("antigravity") || lower.contains("/agy/") || lower.contains("/agy-") {
         Some(Tool::Antigravity)
+    } else if file_name == "updates.jsonl" {
+        // Only Grok writes `updates.jsonl` (`$GROK_HOME/sessions/<cwd>/<id>/`,
+        // and GROK_HOME may be anywhere).
+        Some(Tool::Grok)
     } else if lower.contains("/agent-transcripts/") {
         Some(Tool::Cursor)
     } else if lower.contains("/.copilot/session-state/")
         || (lower.contains("/session-state/") && file_name == "events.jsonl")
     {
         Some(Tool::Copilot)
+    } else if lower.contains("/.qoder/") || under_custom_qoder_root(&lower) {
+        Some(Tool::Qoder)
     } else if lower.contains("/.omp/") {
         // Covers the default tree (`/.omp/agent/sessions/`) and named-profile
         // trees (`/.omp/profiles/<name>/agent/sessions/`). XDG and
@@ -352,6 +374,34 @@ fn env_or_default_dir(env_var: &str, default: PathBuf) -> PathBuf {
 pub(crate) fn claude_projects_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_default();
     env_or_default_dir("CLAUDE_CONFIG_DIR", home.join(".claude")).join("projects")
+}
+
+/// True for a transcript under a custom `QODER_CONFIG_DIR`. Such a path has no
+/// `.qoder` segment and would otherwise fall through to Claude's generic
+/// `/projects/` signature. A variable pointed at Claude's own `.claude` dir
+/// claims nothing: that tree is Claude's. `lower` is lowercased with `/`
+/// separators.
+fn under_custom_qoder_root(lower: &str) -> bool {
+    let Some(dir) = std::env::var("QODER_CONFIG_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+    else {
+        return false;
+    };
+    let root = dir.to_ascii_lowercase().replace('\\', "/");
+    let root = root.trim_end_matches('/');
+    if root.ends_with("/.claude") {
+        return false;
+    }
+    lower
+        .strip_prefix(root)
+        .is_some_and(|rest| rest.starts_with("/projects/"))
+}
+
+/// `<QODER_CONFIG_DIR or ~/.qoder>/projects`: where Qoder writes session JSONL.
+pub(crate) fn qoder_projects_dir() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_default();
+    env_or_default_dir("QODER_CONFIG_DIR", home.join(".qoder")).join("projects")
 }
 
 /// Active OMP profile from the environment. `OMP_PROFILE` is canonical and wins;
@@ -514,6 +564,9 @@ pub fn disk_search_roots(tool: Tool) -> Vec<PathBuf> {
         TranscriptDiscovery::ClaudeProjects => {
             vec![env_or_default_dir("CLAUDE_CONFIG_DIR", home.join(".claude")).join("projects")]
         }
+        TranscriptDiscovery::QoderProjects => {
+            vec![qoder_projects_dir()]
+        }
         TranscriptDiscovery::GeminiTree => {
             let root = std::env::var("GEMINI_CLI_HOME")
                 .ok()
@@ -535,6 +588,9 @@ pub fn disk_search_roots(tool: Tool) -> Vec<PathBuf> {
         }
         TranscriptDiscovery::PiSessions => pi_session_roots(),
         TranscriptDiscovery::OmpSessions => omp_session_roots(),
+        TranscriptDiscovery::GrokSessions => {
+            vec![crate::transcript::grok::grok_config_dir().join("sessions")]
+        }
         TranscriptDiscovery::OpenCodeDatabase | TranscriptDiscovery::KiloDatabase => Vec::new(),
     }
 }
@@ -567,61 +623,6 @@ pub(crate) fn search_database_sessions(
     }
 }
 
-// ── Public API for other commands (bundle) ──────────────────────────────
-
-/// Options for querying and formatting transcript exchanges.
-pub struct TranscriptQuery<'a> {
-    pub path: &'a str,
-    pub agent: &'a str,
-    pub last: usize,
-    pub detailed: bool,
-    pub session_id: Option<&'a str>,
-}
-
-/// Public wrapper for read (used by bundle prepare/cat).
-///
-/// Returns a JSON projection that intentionally drops tools/edits/errors/
-/// ended_on_error — bundle consumers only read user/action/files/timestamp.
-pub fn get_exchanges_pub(q: &TranscriptQuery) -> Result<Vec<Value>, String> {
-    let backend = backend_from_agent_or_path(q.agent, q.path)?;
-    let opts = ReadOptions {
-        last: q.last,
-        detailed: q.detailed,
-        session_id: q.session_id.map(|s| s.to_string()),
-        allow_codex_retry: true,
-    };
-    let exchanges = read(Path::new(q.path), backend, &opts)?;
-    Ok(exchanges
-        .iter()
-        .map(|ex| {
-            json!({
-                "position": ex.position,
-                "user": ex.user,
-                "action": ex.action,
-                "files": ex.files,
-                "timestamp": ex.timestamp,
-            })
-        })
-        .collect())
-}
-
-/// Public wrapper for format_exchanges (used by bundle cat).
-pub fn format_exchanges_pub(
-    q: &TranscriptQuery,
-    instance: &str,
-    full: bool,
-) -> Result<String, String> {
-    let backend = backend_from_agent_or_path(q.agent, q.path)?;
-    let opts = ReadOptions {
-        last: q.last,
-        detailed: q.detailed,
-        session_id: q.session_id.map(|s| s.to_string()),
-        allow_codex_retry: true,
-    };
-    let exchanges = read(Path::new(q.path), backend, &opts)?;
-    Ok(format_exchanges(&exchanges, instance, full, q.detailed))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,6 +636,10 @@ mod tests {
         assert_eq!(
             detect_tool_from_path("/h/.copilot/session-state/u/events.jsonl"),
             Some(Tool::Copilot)
+        );
+        assert_eq!(
+            detect_tool_from_path("/h/.qoder/projects/r/u.jsonl"),
+            Some(Tool::Qoder)
         );
         assert_eq!(
             detect_tool_from_path("/h/.pi/agent/sessions/r/u.jsonl"),
@@ -935,5 +940,73 @@ mod tests {
                 .iter()
                 .any(|r| r == &home.join(".omp").join("agent").join("sessions")),
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn custom_qoder_config_dir_is_not_mistaken_for_claude() {
+        let _guard = crate::hooks::test_helpers::EnvGuard::new();
+        let path = "/data/qoder-config/projects/-w/u.jsonl";
+        unsafe { std::env::remove_var("QODER_CONFIG_DIR") };
+        assert_eq!(detect_tool_from_path(path), Some(Tool::Claude));
+        unsafe { std::env::set_var("QODER_CONFIG_DIR", "/data/qoder-config/") };
+        assert_eq!(detect_tool_from_path(path), Some(Tool::Qoder));
+        // A misconfigured root never takes Claude's own tree.
+        unsafe { std::env::set_var("QODER_CONFIG_DIR", "/h/.claude") };
+        assert_eq!(
+            detect_tool_from_path("/h/.claude/projects/-w/u.jsonl"),
+            Some(Tool::Claude)
+        );
+        // A Qoder root nested under `.claude` is still Qoder's.
+        unsafe { std::env::set_var("QODER_CONFIG_DIR", "/h/.claude/qoder") };
+        assert_eq!(
+            detect_tool_from_path("/h/.claude/qoder/projects/-w/u.jsonl"),
+            Some(Tool::Qoder)
+        );
+        unsafe { std::env::set_var("QODER_CONFIG_DIR", "/data/qoder-config/") };
+        // Only its own `projects/` tree, not any path sharing the prefix.
+        assert_eq!(
+            detect_tool_from_path("/data/qoder-config-2/projects/-w/u.jsonl"),
+            Some(Tool::Claude)
+        );
+    }
+
+    /// Qoder writes Claude-format JSONL plus record types Claude lacks
+    /// (`workspace-directories`, `runtime-config`, `worktree-state`,
+    /// `active-leaf`, `attachment`, `file-history-snapshot`, `last-prompt`);
+    /// they must be skipped, not fail the parse. Shapes taken from qodercli 1.1.65.
+    #[test]
+    fn qoder_transcript_parses_with_claude_backend_and_skips_extra_records() {
+        let lines = [
+            r#"{"type":"workspace-directories","sessionId":"s1","directories":["/w"]}"#,
+            r#"{"type":"runtime-config","sessionId":"s1","model":"m","timestamp":1}"#,
+            r#"{"type":"worktree-state","sessionId":"s1","worktreeSession":null}"#,
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-10-03T19:58:59.472Z","message":{"role":"user","content":"Run echo hi, then say ok"},"permissionMode":"yolo","origin":{"kind":"human"},"parentUuid":null,"isSidechain":false,"cwd":"/w","sessionId":"s1"}"#,
+            r#"{"type":"attachment","attachment":{"type":"skill_listing","content":"- run: x"},"uuid":"a1","timestamp":"2026-10-03T19:58:59.500Z","parentUuid":"u1","isSidechain":false,"cwd":"/w","sessionId":"s1"}"#,
+            r#"{"type":"active-leaf","sessionId":"s1","leafUuid":"u1","explicit":false,"timestamp":2}"#,
+            r#"{"type":"assistant","uuid":"as1","timestamp":"2026-10-03T19:59:04.524Z","message":{"id":"c1","type":"message","role":"assistant","model":"m","stop_reason":"tool_use","content":[{"type":"tool_use","id":"call_1","name":"Bash","input":{"command":"echo hi","description":"say hi"}}]},"parentUuid":"u1","isSidechain":false,"cwd":"/w","sessionId":"s1"}"#,
+            r#"{"type":"user","uuid":"u2","timestamp":"2026-10-03T19:59:04.626Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"hi"}]},"sourceToolAssistantUUID":"as1","toolUseResult":{"stdout":"hi"},"parentUuid":"as1","isSidechain":false,"cwd":"/w","sessionId":"s1"}"#,
+            r#"{"type":"file-history-snapshot","messageId":"u1","snapshot":{"messageId":"u1","trackedFileBackups":{}},"isSnapshotUpdate":false}"#,
+            r#"{"type":"assistant","uuid":"as2","timestamp":"2026-10-03T19:59:13.954Z","message":{"id":"c2","type":"message","role":"assistant","model":"m","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]},"parentUuid":"u2","isSidechain":false,"cwd":"/w","sessionId":"s1"}"#,
+            r#"{"type":"last-prompt","sessionId":"s1","lastPrompt":"Run echo hi, then say ok"}"#,
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s1.jsonl");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        assert_eq!(
+            backend_for_tool(Tool::Qoder),
+            Some(TranscriptBackend::ClaudeJsonl)
+        );
+        let opts = ReadOptions {
+            last: 10,
+            detailed: true,
+            ..Default::default()
+        };
+        let exchanges = read(&path, TranscriptBackend::ClaudeJsonl, &opts).unwrap();
+        assert_eq!(exchanges.len(), 1);
+        assert_eq!(exchanges[0].user, "Run echo hi, then say ok");
+        assert!(exchanges[0].action.contains("ok"));
+        assert_eq!(exchanges[0].tools.len(), 1);
     }
 }

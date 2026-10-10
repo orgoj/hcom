@@ -2,7 +2,7 @@
 
 /// Cached hcom invocation prefix (computed once per process lifetime).
 static HCOM_PREFIX: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
-    if std::env::var("HCOM_DEV_ROOT").is_ok() {
+    if std::env::var("HCOM_DEV_ROOT").is_ok_and(|root| !root.is_empty()) {
         #[cfg(windows)]
         if let Ok(exe) = std::env::current_exe()
             && let Ok(resolved) = exe.canonicalize()
@@ -15,30 +15,92 @@ static HCOM_PREFIX: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(
 
     if let Ok(exe) = std::env::current_exe()
         && let Ok(resolved) = exe.canonicalize()
+        && is_uvx_ephemeral_exe(&resolved)
     {
-        let has_uv = resolved.components().any(|c| c.as_os_str() == "uv");
-        if has_uv {
-            return vec!["uvx".into(), "hcom".into()];
-        }
+        return vec!["uvx".into(), "hcom".into()];
     }
 
     vec!["hcom".into()]
 });
+
+/// True when `exe` lives in a disposable `uvx` environment, which won't be on
+/// PATH for later hook invocations. uv creates those venvs inside its cache
+/// (`<cache>/archive-v0/<id>/bin/hcom`), and the cache root carries a
+/// `CACHEDIR.TAG`. `uv tool install`, `uv venv`, pip, brew, etc. install
+/// outside a tagged cache, so plain `hcom` is right for them.
+fn is_uvx_ephemeral_exe(exe: &std::path::Path) -> bool {
+    let Some(env_root) = exe.parent().and_then(|bin| bin.parent()) else {
+        return false;
+    };
+    env_root.join("pyvenv.cfg").is_file()
+        && env_root
+            .ancestors()
+            .skip(1)
+            .any(|dir| dir.join("CACHEDIR.TAG").is_file())
+}
 
 /// Detect hcom invocation prefix based on execution context.
 pub(crate) fn get_hcom_prefix() -> Vec<String> {
     HCOM_PREFIX.clone()
 }
 
-/// Get the base directory for tool config files (e.g. .codex/, .gemini/).
-pub(crate) fn tool_config_root() -> std::path::PathBuf {
+/// Base directory for each tool's default config dir (`.claude/`, `.codex/`, ...)
+/// when the tool's own env override is unset. HCOM_DIR only isolates hcom state;
+/// it never relocates tool config.
+pub(crate) fn tool_home() -> std::path::PathBuf {
+    user_home().unwrap_or_default()
+}
+
+/// Fixtures explicitly scope cleanup so Windows platform-profile discovery
+/// cannot touch the developer's configuration despite HOME/CODEX_HOME overrides.
+pub(crate) fn hook_cleanup_allowed(path: &std::path::Path) -> bool {
+    let root = std::env::var_os("HCOM_TEST_ROOT").map(std::path::PathBuf::from);
+    let Some(root) = root else {
+        return true;
+    };
+    match (
+        crate::paths::resolve_deepest_existing(path),
+        crate::paths::resolve_deepest_existing(&root),
+    ) {
+        (Some(path), Some(root)) => path.starts_with(root),
+        _ => false,
+    }
+}
+
+/// Parent of a non-default HCOM_DIR. Older hcom versions installed tool hooks,
+/// plugins and config under `<this>/.<tool>/`; only legacy cleanup looks here.
+pub(crate) fn legacy_tool_config_root() -> Option<std::path::PathBuf> {
     let env: std::collections::HashMap<String, String> = std::env::vars().collect();
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let (hcom_dir, _) = crate::paths::resolve_hcom_dir_from_env(&env, &cwd);
-    hcom_dir
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_default())
+    let root = hcom_dir.parent()?.to_path_buf();
+    let canonical = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let root_canonical = canonical(&root);
+    let is_home = [user_home(), dirs::home_dir()]
+        .into_iter()
+        .flatten()
+        .any(|home| canonical(&home) == root_canonical);
+    (!is_home).then_some(root)
+}
+
+/// Every dir that may hold an hcom install for a tool, deduplicated: the
+/// default `~/<dirname>`, `$<env_var>`, and the legacy `<HCOM_DIR parent>/<dirname>`.
+pub(crate) fn tool_config_cleanup_dirs(dirname: &str, env_var: &str) -> Vec<std::path::PathBuf> {
+    let candidates = [
+        Some(tool_home().join(dirname)),
+        std::env::var(env_var)
+            .ok()
+            .filter(|dir| !dir.is_empty())
+            .map(std::path::PathBuf::from),
+        legacy_tool_config_root().map(|root| root.join(dirname)),
+    ];
+    let mut dirs = Vec::new();
+    for dir in candidates.into_iter().flatten() {
+        if hook_cleanup_allowed(&dir) && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
 }
 
 /// Build hcom command string for prompts, config, and hook commands.
@@ -53,7 +115,27 @@ pub(crate) fn gemini_family_config_dir() -> std::path::PathBuf {
     {
         return std::path::PathBuf::from(dir).join(".gemini");
     }
-    tool_config_root().join(".gemini")
+    tool_home().join(".gemini")
+}
+
+/// Every `.gemini` dir that may hold an hcom install: `~/.gemini`,
+/// `$GEMINI_CLI_HOME/.gemini`, and the legacy `<HCOM_DIR parent>/.gemini`.
+pub(crate) fn gemini_family_cleanup_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![tool_home().join(".gemini")];
+    for dir in [
+        Some(gemini_family_config_dir()),
+        legacy_tool_config_root().map(|r| r.join(".gemini")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs.into_iter()
+        .filter(|dir| hook_cleanup_allowed(dir))
+        .collect()
 }
 
 /// User home directory, honoring an explicit `HOME` override before falling back
@@ -147,12 +229,36 @@ pub(crate) fn opencode_family_db_path(tool: &str) -> Option<std::path::PathBuf> 
     Some(data_dir.join("opencode.db"))
 }
 
+// Records the name each `set_terminal_title` call would have written, so
+// tests can assert that a code path renames its pane. Under `cfg(test)` the
+// escape codes are recorded instead of written: a test run must not repaint
+// the developer's own terminal.
+#[cfg(test)]
+thread_local! {
+    static LAST_TERMINAL_TITLE: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Take and clear the name of the last `set_terminal_title` call on this thread.
+#[cfg(test)]
+pub(crate) fn take_last_terminal_title() -> Option<String> {
+    LAST_TERMINAL_TITLE.with(|cell| cell.borrow_mut().take())
+}
+
 /// Set terminal title via escape codes written to /dev/tty.
 pub(crate) fn set_terminal_title(instance_name: &str) {
-    let title = format!("hcom: {}", instance_name);
-    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
-        use std::io::Write;
-        let _ = write!(tty, "\x1b]1;{}\x07\x1b]2;{}\x07", title, title);
+    #[cfg(test)]
+    LAST_TERMINAL_TITLE.with(|cell| {
+        *cell.borrow_mut() = Some(instance_name.to_string());
+    });
+
+    #[cfg(not(test))]
+    {
+        let title = format!("hcom: {}", instance_name);
+        if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+            use std::io::Write;
+            let _ = write!(tty, "\x1b]1;{}\x07\x1b]2;{}\x07", title, title);
+        }
     }
 }
 
@@ -182,7 +288,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn tool_config_root_uses_home_when_hcom_dir_has_no_parent() {
+    fn legacy_tool_config_root_none_for_default_hcom_dir() {
         let _guard = EnvGuard::new();
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
@@ -190,21 +296,22 @@ mod tests {
 
         unsafe {
             std::env::set_var("HOME", &home);
-            std::env::set_var("HCOM_DIR", "/");
+            std::env::set_var("HCOM_DIR", home.join(".hcom"));
         }
+        assert_eq!(super::legacy_tool_config_root(), None);
 
-        assert_eq!(super::tool_config_root(), home);
+        unsafe { std::env::set_var("HCOM_DIR", "/") };
+        assert_eq!(super::legacy_tool_config_root(), None);
     }
 
     #[test]
     #[serial]
-    fn tool_config_root_uses_parent_of_resolved_hcom_dir() {
+    fn tool_home_ignores_project_local_hcom_dir() {
         let _guard = EnvGuard::new();
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("workspace");
         let home = temp.path().join("home");
         let sandbox = workspace.join(".sandbox");
-        std::fs::create_dir_all(&workspace).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&sandbox).unwrap();
 
@@ -215,11 +322,13 @@ mod tests {
             std::env::set_var("HCOM_DIR", ".sandbox/.hcom");
         }
 
-        let root = super::tool_config_root();
+        let tool_home = super::tool_home();
+        let legacy = super::legacy_tool_config_root();
         let expected = sandbox.canonicalize().unwrap();
 
         std::env::set_current_dir(prev_cwd).unwrap();
-        assert_eq!(root, expected);
+        assert_eq!(tool_home, home);
+        assert_eq!(legacy, Some(expected));
     }
 
     #[test]
@@ -398,5 +507,41 @@ mod tests {
             super::opencode_family_data_dir("opencode"),
             Some(home.join(".local/share/opencode"))
         );
+    }
+
+    /// Mirrors uv's on-disk layouts: every uv venv has `pyvenv.cfg` and its own
+    /// `CACHEDIR.TAG`; only uvx's ephemeral envs sit under the tagged cache root.
+    #[test]
+    fn uvx_ephemeral_detection_matches_uv_layouts() {
+        let temp = tempfile::tempdir().unwrap();
+        let venv = |root: std::path::PathBuf| {
+            std::fs::create_dir_all(root.join("bin")).unwrap();
+            std::fs::write(root.join("pyvenv.cfg"), "uv = 0.7.13\n").unwrap();
+            std::fs::write(root.join("CACHEDIR.TAG"), "").unwrap();
+            root.join("bin/hcom")
+        };
+
+        let cache = temp.path().join(".cache/uv");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("CACHEDIR.TAG"), "").unwrap();
+        let ephemeral = venv(cache.join("archive-v0/abc123"));
+        assert!(super::is_uvx_ephemeral_exe(&ephemeral));
+
+        let tool = venv(temp.path().join(".local/share/uv/tools/hcom"));
+        std::fs::write(tool.parent().unwrap().join("../uv-receipt.toml"), "").unwrap();
+        assert!(!super::is_uvx_ephemeral_exe(&tool));
+
+        let project_venv = venv(temp.path().join("project/.venv"));
+        assert!(!super::is_uvx_ephemeral_exe(&project_venv));
+
+        let cargo_target = temp.path().join("target");
+        std::fs::create_dir_all(cargo_target.join("debug")).unwrap();
+        std::fs::write(cargo_target.join("CACHEDIR.TAG"), "").unwrap();
+        assert!(!super::is_uvx_ephemeral_exe(
+            &cargo_target.join("debug/hcom")
+        ));
+        assert!(!super::is_uvx_ephemeral_exe(std::path::Path::new(
+            "/usr/local/bin/hcom"
+        )));
     }
 }

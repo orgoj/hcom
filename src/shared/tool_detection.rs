@@ -97,6 +97,22 @@ const KIMI_NATIVE: &[EnvPredicate] = &[
         condition: EnvMatch::Set,
     },
 ];
+// Qoder CLI sets QODER_CLI in its Bash tool. Its hook processes also receive
+// CLAUDE_PROJECT_DIR, which is deliberately not a Claude marker here.
+const QODER_NATIVE: &[EnvPredicate] = &[EnvPredicate {
+    var: "QODER_CLI",
+    condition: EnvMatch::Set,
+}];
+const GROK_NATIVE: &[EnvPredicate] = &[
+    EnvPredicate {
+        var: "GROK_SESSION_ID",
+        condition: EnvMatch::Set,
+    },
+    EnvPredicate {
+        var: "GROK_HOOK_EVENT",
+        condition: EnvMatch::Set,
+    },
+];
 const PI_NATIVE: &[EnvPredicate] = &[EnvPredicate {
     var: "HCOM_PI",
     condition: EnvMatch::Equals("1"),
@@ -124,6 +140,8 @@ hcom_tool_predicate!("kilo", HCOM_TOOL_KILO);
 hcom_tool_predicate!("cursor", HCOM_TOOL_CURSOR);
 hcom_tool_predicate!("kimi", HCOM_TOOL_KIMI);
 hcom_tool_predicate!("copilot", HCOM_TOOL_COPILOT);
+hcom_tool_predicate!("qoder", HCOM_TOOL_QODER);
+hcom_tool_predicate!("grok", HCOM_TOOL_GROK);
 hcom_tool_predicate!("pi", HCOM_TOOL_PI);
 hcom_tool_predicate!("omp", HCOM_TOOL_OMP);
 
@@ -142,7 +160,7 @@ pub static TOOL_DETECTION_RULES: &[ToolDetectionRule] = &[
     ToolDetectionRule {
         tool: Tool::Gemini,
         predicates: GEMINI_NATIVE,
-        clear_for_child: &["GEMINI_CLI", "GEMINI_SYSTEM_MD"],
+        clear_for_child: &["GEMINI_CLI", "GEMINI_SYSTEM_MD", "GEMINI_CLI_NO_RELAUNCH"],
     },
     ToolDetectionRule {
         tool: Tool::Codex,
@@ -159,7 +177,7 @@ pub static TOOL_DETECTION_RULES: &[ToolDetectionRule] = &[
     ToolDetectionRule {
         tool: Tool::OpenCode,
         predicates: OPENCODE_NATIVE,
-        clear_for_child: &["OPENCODE"],
+        clear_for_child: &["OPENCODE", "OPENCODE_PID"],
     },
     ToolDetectionRule {
         tool: Tool::Kilo,
@@ -175,6 +193,22 @@ pub static TOOL_DETECTION_RULES: &[ToolDetectionRule] = &[
         tool: Tool::Kimi,
         predicates: KIMI_NATIVE,
         clear_for_child: &["KIMI_CODE_CLI", "KIMI_SESSION_ID"],
+    },
+    ToolDetectionRule {
+        tool: Tool::Qoder,
+        predicates: QODER_NATIVE,
+        clear_for_child: &["QODER_CLI", "QODER_PID"],
+    },
+    ToolDetectionRule {
+        tool: Tool::Grok,
+        predicates: GROK_NATIVE,
+        clear_for_child: &[
+            "GROK_SESSION_ID",
+            "GROK_HOOK_EVENT",
+            "GROK_HOOK_NAME",
+            "GROK_AGENT",
+            "GROK_LEADER_SOCKET",
+        ],
     },
     ToolDetectionRule {
         tool: Tool::Pi,
@@ -229,6 +263,16 @@ pub static TOOL_DETECTION_RULES: &[ToolDetectionRule] = &[
     ToolDetectionRule {
         tool: Tool::Copilot,
         predicates: HCOM_TOOL_COPILOT,
+        clear_for_child: &["HCOM_TOOL"],
+    },
+    ToolDetectionRule {
+        tool: Tool::Qoder,
+        predicates: HCOM_TOOL_QODER,
+        clear_for_child: &["HCOM_TOOL"],
+    },
+    ToolDetectionRule {
+        tool: Tool::Grok,
+        predicates: HCOM_TOOL_GROK,
         clear_for_child: &["HCOM_TOOL"],
     },
     ToolDetectionRule {
@@ -313,6 +357,22 @@ mod tests {
             detect_tool(&env(&[("ANTIGRAVITY_AGENT", "1"), ("GEMINI_CLI", "1")])),
             Tool::Antigravity
         );
+    }
+
+    #[test]
+    fn qoder_is_detected_by_its_shell_marker_not_by_claude_look_alikes() {
+        assert_eq!(detect_tool(&env(&[("QODER_CLI", "1")])), Tool::Qoder);
+        assert_eq!(detect_tool(&env(&[("HCOM_TOOL", "qoder")])), Tool::Qoder);
+        // Qoder's hook processes carry CLAUDE_PROJECT_DIR; it is not a Claude marker.
+        assert_eq!(
+            detect_tool(&env(&[
+                ("CLAUDE_PROJECT_DIR", "/w"),
+                ("QODER_HOOK_SOURCE", "cli")
+            ])),
+            Tool::Adhoc
+        );
+        assert!(tool_marker_vars().contains(&"QODER_CLI"));
+        assert!(tool_marker_vars().contains(&"QODER_PID"));
     }
 
     #[test]

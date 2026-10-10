@@ -8,6 +8,7 @@
 //! `tool_result.tool_use_id`, else its current text) — never the whole body,
 //! because Claude resends the full history plus a large system prompt each turn.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -18,16 +19,10 @@ use super::real_tool::{
     FORK_PROOF, INBOUND_PROOF, INITIAL_PROOF, RESUME_PROOF, ScenarioIds, ToolCase, ToolMeta,
 };
 
-// Pinned at >= 2.1.198 (not just >= 2.1.196 for `prompt_id`): 2.1.198 is also
-// where Agent/Task calls started backgrounding by default
-// (tool_response.status="async_launched"), which hcom's hook routing must
-// handle. Pinning below 2.1.198 would let real-tool CI pass without ever
-// exercising either behavior.
 const CLAUDE_META: ToolMeta = ToolMeta {
     tool: "claude",
     binary: "claude",
-    pinned_version: "2.1.216",
-    install_command: "npm install --global @anthropic-ai/claude-code@2.1.216",
+    package: "@anthropic-ai/claude-code",
 };
 
 pub const MODEL: &str = "claude-sonnet-4-6";
@@ -69,6 +64,43 @@ pub fn claude_startup_gate(screen: &str) -> Option<ClaudeStartupGate> {
     } else {
         None
     }
+}
+
+/// Whether the trust dialog's cursor sits on the option that accepts. Claude
+/// draws the cursor as `❯`, or `>` on Windows consoles; `hcom term` prefixes
+/// each row with its number (`14:`).
+pub fn trust_accept_selected(screen: &str) -> bool {
+    screen
+        .lines()
+        .map(|line| {
+            let line = line.trim_start();
+            line.split_once(':')
+                .filter(|(row, _)| !row.is_empty() && row.bytes().all(|b| b.is_ascii_digit()))
+                .map_or(line, |(_, rest)| rest)
+                .trim_start()
+        })
+        .find(|line| line.starts_with(['❯', '>']))
+        .is_some_and(|line| line.to_lowercase().contains("yes"))
+}
+
+#[test]
+fn trust_accept_selected_follows_the_cursor() {
+    assert!(!trust_accept_selected(
+        "❯ No, exit\n  Yes, I trust this folder"
+    ));
+    assert!(trust_accept_selected(
+        "  No, exit\n❯ Yes, I trust this folder"
+    ));
+    // Windows console glyph, as `hcom term` prints it (row numbers included).
+    assert!(trust_accept_selected(
+        "   13:    No, exit\n   14:  > Yes, I trust this folder"
+    ));
+    assert!(!trust_accept_selected(
+        "   13:  > No, exit\n   14:    Yes, I trust this folder"
+    ));
+    assert!(trust_accept_selected(
+        "❯ 1. Yes, I trust this folder\n  2. No, exit"
+    ));
 }
 
 #[derive(Default)]
@@ -232,6 +264,30 @@ fn is_messages(path: &str) -> bool {
 #[derive(Clone)]
 pub struct ClaudeCase;
 
+/// Seed Claude's global state in an isolated `CLAUDE_CONFIG_DIR`: onboarding
+/// done (no theme picker) and workspace trust accepted for `trusted` dirs
+/// (subdirectories inherit it). Pass `&[]` to keep the trust dialog.
+pub fn seed_claude_state(claude_home: &Path, trusted: &[&Path]) {
+    let mut projects = serde_json::Map::new();
+    for dir in trusted {
+        // Claude keys projects by its resolved cwd; macOS temp dirs resolve
+        // through /private, so record both spellings.
+        let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        for path in [dir.to_path_buf(), canonical] {
+            let key = path.to_string_lossy().replace('\\', "/");
+            let key = key.strip_prefix("//?/").unwrap_or(&key).to_string();
+            projects.insert(key, json!({"hasTrustDialogAccepted": true}));
+        }
+    }
+    std::fs::create_dir_all(claude_home).expect("create Claude config dir");
+    std::fs::write(
+        claude_home.join(".claude.json"),
+        serde_json::to_vec(&json!({"hasCompletedOnboarding": true, "projects": projects}))
+            .expect("serialize Claude state"),
+    )
+    .expect("seed Claude state");
+}
+
 impl ToolCase for ClaudeCase {
     fn meta(&self) -> &ToolMeta {
         &CLAUDE_META
@@ -255,14 +311,10 @@ impl ToolCase for ClaudeCase {
         // Skip Claude's global first-run theme picker. On Windows, hcom's
         // synchronous launch can remain inside that picker until its readiness
         // timeout, after which the test no longer has an inject endpoint to
-        // drive it. Workspace trust is project-scoped and still starts fresh,
-        // so the tests continue to exercise the trust gate required for hooks.
-        std::fs::write(
-            h.claude_home.join(".claude.json"),
-            serde_json::to_vec(&json!({"hasCompletedOnboarding": true}))
-                .expect("serialize Claude onboarding state"),
-        )
-        .expect("seed Claude onboarding state");
+        // drive it. Also pre-trust the workspace: startup screens are not what
+        // the lifecycle tests, and each costs a delivery-start fallback. The
+        // approval test re-seeds without trust so the trust gate stays covered.
+        seed_claude_state(&h.claude_home, &[&h.workspace]);
 
         // Provider routing + isolated config must survive hcom's CI=1 clean-shell
         // launch rebuild, so they go through the `$HCOM_DIR/env` passthrough.
@@ -288,6 +340,9 @@ impl ToolCase for ClaudeCase {
             ("DISABLE_PROMPT_CACHING", "1"),
             ("ENABLE_TOOL_SEARCH", "false"),
             ("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE", "1"),
+            // Debug log lands in claude-home/debug/, inside the preserved
+            // failure dir, so a stalled tool call can be traced afterwards.
+            ("DEBUG", "1"),
         ]);
     }
 
@@ -310,12 +365,12 @@ impl ToolCase for ClaudeCase {
     }
 
     fn drive_startup(&self, h: &Hcom, name: &str) {
-        // Global onboarding is pre-seeded in prepare(), but the fresh workspace
-        // still surfaces its trust dialog, which hcom reports as
-        // `launch_blocked`. Accepting trust here is what lets Claude register
-        // hooks at all ("Skipping ... hook execution - workspace trust not
-        // accepted" otherwise). Keep the theme handling as a compatibility
-        // fallback for Claude versions that ignore the seeded state.
+        // Onboarding and trust are pre-seeded in prepare(), but the approval
+        // test re-seeds without trust, so its fresh workspace surfaces the trust
+        // dialog, which hcom reports as `launch_blocked`. Accepting trust here is
+        // what lets Claude register hooks at all ("Skipping ... hook execution -
+        // workspace trust not accepted" otherwise). Keep the theme handling as a
+        // compatibility fallback for Claude versions that ignore the seeded state.
         let deadline = Instant::now() + Duration::from_secs(90);
         let mut last_screen = String::new();
         let mut answers = ClaudeStartupAnswers::default();
@@ -328,6 +383,18 @@ impl ToolCase for ClaudeCase {
             // mode-agnostic, so it also serves the default-mode approval test.
             if screen_code == 0 && json.contains("\"prompt_empty\":true") && gate.is_none() {
                 return;
+            }
+            // Claude >= 2.1.2xx preselects "No, exit" on the trust dialog, so a
+            // bare Enter would quit. Move the cursor onto the accepting option
+            // first; the next frame re-checks before anything is submitted.
+            if gate == Some(ClaudeStartupGate::Trust) && !trust_accept_selected(&screen) {
+                let (code, stdout, stderr) = h.run(["term", "inject", name, "\u{1b}[B"]);
+                assert_eq!(
+                    code, 0,
+                    "drive_startup: moving to the trust option failed: stdout={stdout} stderr={stderr}"
+                );
+                std::thread::sleep(Duration::from_millis(800));
+                continue;
             }
             if let Some(gate) = gate.filter(|gate| answers.answer_once(*gate)) {
                 let what = gate.label();

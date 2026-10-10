@@ -17,7 +17,19 @@ pub struct Message {
     pub timestamp: Option<String>,
     pub delivered_to: Option<Vec<String>>,
     pub bundle_id: Option<String>,
-    pub relay: bool,
+    /// `<origin_id>:<SHORT>` for relay-imported messages, None for local ones.
+    pub relay_ref: Option<String>,
+}
+
+impl Message {
+    /// The id a reader passes to `hcom send --reply-to`: the origin reference
+    /// for relayed messages (the local id means nothing on the sender's
+    /// device), the local event id otherwise.
+    pub fn reply_id(&self) -> Option<String> {
+        self.relay_ref
+            .clone()
+            .or_else(|| self.event_id.map(|id| id.to_string()))
+    }
 }
 
 impl HcomDb {
@@ -190,10 +202,11 @@ impl HcomDb {
                     .get("bundle_id")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                let relay = json
-                    .get("_relay")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let relay_ref = json.get("_relay").and_then(|relay| {
+                    let id = relay.get("id")?.as_i64()?;
+                    let short = relay.get("short")?.as_str().filter(|s| !s.is_empty())?;
+                    Some(format!("{id}:{short}"))
+                });
 
                 messages.push(Message {
                     from,
@@ -205,7 +218,7 @@ impl HcomDb {
                     timestamp: Some(timestamp.clone()),
                     delivered_to,
                     bundle_id,
-                    relay,
+                    relay_ref,
                 });
             }
         }
@@ -524,6 +537,20 @@ impl HcomDb {
         data: &serde_json::Value,
         timestamp: Option<&str>,
     ) -> Result<i64> {
+        let event_id = self.insert_event_row(event_type, instance, data, timestamp)?;
+        self.after_event_logged(event_id, event_type, instance, data);
+        Ok(event_id)
+    }
+
+    /// Insert the event row only. Callers inside a write scope must run
+    /// [`Self::after_event_logged`] once their transaction commits.
+    pub(crate) fn insert_event_row(
+        &self,
+        event_type: &str,
+        instance: &str,
+        data: &serde_json::Value,
+        timestamp: Option<&str>,
+    ) -> Result<i64> {
         let ts = match timestamp {
             Some(t) => t.to_string(),
             None => chrono_now_iso(),
@@ -534,12 +561,43 @@ impl HcomDb {
             "INSERT INTO events (timestamp, type, instance, data) VALUES (?, ?, ?, ?)",
             params![ts, event_type, instance, data_str],
         )?;
-        let event_id = self.conn.last_insert_rowid();
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Side effects of a logged event: launch-waiter wakes and subscriptions.
+    pub(crate) fn after_event_logged(
+        &self,
+        event_id: i64,
+        event_type: &str,
+        instance: &str,
+        data: &serde_json::Value,
+    ) {
+        // Wake launch confirmations only for changes they can observe. The
+        // usual autocommit INSERT is visible before the listener re-queries.
+        // Writes inside an outer transaction remain covered by fallback polling.
+        let action = data.get("action").and_then(serde_json::Value::as_str);
+        let context = data.get("context").and_then(serde_json::Value::as_str);
+        if (event_type == "life"
+            && matches!(
+                action,
+                Some(
+                    "ready"
+                        | "launch_failed"
+                        | "launch_blocked"
+                        | "launch_blocked_cleared"
+                        | "stopped"
+                )
+            ))
+            || (event_type == "status" && context == Some("launch_failed"))
+        {
+            crate::notify::wake::wake_launch_waiters(
+                self,
+                data.get("batch_id").and_then(serde_json::Value::as_str),
+            );
+        }
 
         // Check event subscriptions inline.
         subscriptions::process_logged_event(self, event_id, event_type, instance, data);
-
-        Ok(event_id)
     }
 
     /// Diagnostic-only: `writer` field of the most recent "status" event
@@ -619,9 +677,8 @@ impl HcomDb {
             .unwrap_or(0)
     }
 
-    /// Log a status event to the events table
-    ///
-    /// Used by TranscriptWatcher to log tool:apply_patch, tool:shell, and prompt events.
+    /// Log a bare status event (test fixture for status-driven subscriptions).
+    #[cfg(test)]
     pub fn log_status_event(
         &self,
         instance: &str,

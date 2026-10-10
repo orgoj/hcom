@@ -646,25 +646,7 @@ fn antigravity_settings_path(gemini_dir: &Path) -> PathBuf {
 }
 
 fn antigravity_cleanup_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
-    let mut push_unique = |dir: PathBuf| {
-        if dir.is_absolute() && !dirs.contains(&dir) {
-            dirs.push(dir);
-        }
-    };
-    if let Some(home) = dirs::home_dir() {
-        push_unique(home.join(".gemini"));
-    }
-    if let Ok(dir) = std::env::var("GEMINI_CLI_HOME")
-        && !dir.is_empty()
-    {
-        // GEMINI_CLI_HOME is a raw prefix; gemini_family_config_dir() appends
-        // .gemini, so mirror that here.
-        let p = PathBuf::from(dir);
-        push_unique(p.join(".gemini"));
-    }
-    push_unique(crate::runtime_env::gemini_family_config_dir());
-    dirs
+    crate::runtime_env::gemini_family_cleanup_dirs()
 }
 
 /// Build the list of `command(...)` rules for safe hcom commands.
@@ -1144,10 +1126,6 @@ mod tests {
         assert!(!remove_antigravity_hooks());
     }
 
-    // Unix-only: redirects the home dir via $HOME, but on Windows
-    // `dirs::home_dir()` reads USERPROFILE and ignores it, so the home-based
-    // cleanup dir points outside the test's temp tree.
-    #[cfg(unix)]
     #[test]
     #[serial]
     fn test_remove_cleans_default_and_active_hcom_dir_local_paths() {

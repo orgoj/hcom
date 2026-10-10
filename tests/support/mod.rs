@@ -13,6 +13,7 @@
 pub mod claude_mock;
 pub mod codex_mock;
 pub mod mock_http;
+pub mod pins;
 pub mod real_tool;
 
 use rusqlite::OptionalExtension;
@@ -79,7 +80,7 @@ struct DiagContext {
 
 thread_local! {
     // Thread-local, not a process-wide `Mutex`: `cli_smoke.rs` runs ~20
-    // non-`#[ignore]` tests that each call `Hcom::new()`, and the Justfile's
+    // non-`#[ignore]` tests that each call `Hcom::new()`, and the justfile's
     // `step test` (unlike the three real-tool/relay steps) runs plain `cargo
     // test --locked` with the default multi-threaded runner — a shared slot
     // there would dump whichever fixture happened to be active on some other
@@ -185,6 +186,9 @@ fn apply_isolated_env_ctx(
         command.env("TMP", ctx.root_path.join("tmp"));
     }
     command.env("HCOM_DIR", &ctx.hcom_dir);
+    command.env("HCOM_TEST_ROOT", &ctx.root_path);
+    // Fixture DBs are disposable; skip SQLite's fsyncs (see HcomDb::open_connection).
+    command.env("HCOM_TEST_DB_NOSYNC", "1");
     command.env("TMPDIR", ctx.root_path.join("tmp"));
     command.env("XDG_CONFIG_HOME", ctx.root_path.join("xdg/config"));
     command.env("XDG_CACHE_HOME", ctx.root_path.join("xdg/cache"));
@@ -323,7 +327,16 @@ fn diagnostics_for(ctx: &DiagContext) -> String {
 impl Hcom {
     /// Build a fixture whose every writable path is below one temporary root.
     pub fn new() -> Self {
-        let root = tempfile::tempdir().expect("create temp dir");
+        // CI points HCOM_TEST_KEEP_DIR at a known path so a failed test's
+        // preserved root (see Drop) can be uploaded as an artifact; passing
+        // tests still clean up, leaving only failures behind.
+        let root = match std::env::var_os("HCOM_TEST_KEEP_DIR") {
+            Some(dir) => {
+                fs::create_dir_all(&dir).expect("create HCOM_TEST_KEEP_DIR");
+                tempfile::tempdir_in(dir).expect("create temp dir")
+            }
+            None => tempfile::tempdir().expect("create temp dir"),
+        };
         let home = root.path().join("home");
         let hcom_dir = root.path().join("hcom-state");
         let codex_home = root.path().join("codex-home");
@@ -462,6 +475,7 @@ impl Hcom {
     pub fn cmd(&self) -> Command {
         let mut command = Command::new(&self.bin);
         self.apply_isolated_env(&mut command);
+        command.current_dir(&self.workspace);
         command
     }
 
@@ -623,13 +637,14 @@ impl Hcom {
     /// model is a stable real id so Codex advertises its normal tool set; the
     /// mock supplies every turn so the id is never used for routing.
     ///
-    /// Deliberately omits `approval_policy`: approvals are hcom's job, driven by
-    /// the `--sandbox <mode>` launch flag (`get_sandbox_flags` →
-    /// `--sandbox workspace-write` / `-a untrusted` / bypass). Hand-writing the
-    /// policy here would bypass that translation and let a regression in it pass
-    /// unnoticed — so tests set the policy through the real hcom launch path.
+    /// Omits permission settings so each test chooses native Codex config or
+    /// flags through the real hcom launch path.
     pub fn prepare_codex_config(&self, mock_base_url: &str) {
         fs::create_dir_all(&self.codex_home).expect("create isolated Codex home");
+        // The migration notice marks gpt-5.5's upgrade as already seen. Without
+        // it Codex (>= 0.157) opens a "Try new model" modal at startup that
+        // swallows the first injected prompt. Recording it as seen keeps the
+        // model, and so the request shape the mock scripts against, unchanged.
         let config = format!(
             "model = \"gpt-5.5\"\n\
              model_provider = \"mock_local\"\n\
@@ -639,7 +654,10 @@ impl Hcom {
              base_url = \"{mock_base_url}\"\n\
              env_key = \"DUMMY_KEY\"\n\
              wire_api = \"responses\"\n\
-             requires_openai_auth = false\n"
+             requires_openai_auth = false\n\
+             \n\
+             [notice.model_migrations]\n\
+             \"gpt-5.5\" = \"gpt-6-sol\"\n"
         );
         fs::write(self.codex_home.join("config.toml"), config)
             .expect("write isolated Codex config.toml");
@@ -834,7 +852,9 @@ impl Drop for Hcom {
         // `kill all` is the clean teardown path, but a wedged binary must not
         // hang suite teardown: bound it, then fall through to the pid sweep
         // (which SIGKILLs by process group) regardless of how it ended.
-        if let Ok(mut child) = self.cmd().args(["kill", "all"]).spawn() {
+        if (!pids.is_empty() || self.hcom_dir.join(".tmp/launched_pids.json").exists())
+            && let Ok(mut child) = self.cmd().args(["kill", "all"]).spawn()
+        {
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
                 match child.try_wait() {
@@ -844,7 +864,7 @@ impl Drop for Hcom {
                         let _ = child.wait();
                         break;
                     }
-                    Ok(None) => std::thread::sleep(POLL_INTERVAL),
+                    Ok(None) => std::thread::sleep(Duration::from_millis(5)),
                     Err(_) => break,
                 }
             }
@@ -994,8 +1014,8 @@ fn run_command_bounded(mut command: Command, args: &[OsString]) -> (i32, String,
     let mut child = command
         .spawn()
         .unwrap_or_else(|error| panic!("spawn hcom binary for {args:?}: {error}"));
-    let stdout_buf = drain_stream(child.stdout.take());
-    let stderr_buf = drain_stream(child.stderr.take());
+    let (stdout_buf, stdout_done) = drain_stream(child.stdout.take());
+    let (stderr_buf, stderr_done) = drain_stream(child.stderr.take());
 
     let deadline = Instant::now() + RUN_TIMEOUT;
     let (code, timed_out) = loop {
@@ -1006,14 +1026,14 @@ fn run_command_bounded(mut command: Command, args: &[OsString]) -> (i32, String,
                 let _ = child.wait();
                 break (-1, true);
             }
-            Ok(None) => std::thread::sleep(POLL_INTERVAL),
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
             Err(error) => panic!("wait on hcom binary for {args:?}: {error}"),
         }
     };
     // Grace for the readers to drain bytes already buffered in the pipe. We
     // snapshot instead of joining: a detached grandchild can hold the write
     // end open, so a reader may never observe EOF.
-    std::thread::sleep(Duration::from_millis(200));
+    wait_for_pipe_readers(stdout_done, stderr_done);
     let stdout = String::from_utf8_lossy(&stdout_buf.lock().unwrap()).into_owned();
     let mut stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
     if timed_out {
@@ -1053,8 +1073,8 @@ fn run_command_bounded_safe(mut command: Command, args: &[OsString]) -> (i32, St
             );
         }
     };
-    let stdout_buf = drain_stream(child.stdout.take());
-    let stderr_buf = drain_stream(child.stderr.take());
+    let (stdout_buf, stdout_done) = drain_stream(child.stdout.take());
+    let (stderr_buf, stderr_done) = drain_stream(child.stderr.take());
 
     let deadline = Instant::now() + RUN_TIMEOUT;
     let (code, timed_out, wait_error) = loop {
@@ -1065,11 +1085,11 @@ fn run_command_bounded_safe(mut command: Command, args: &[OsString]) -> (i32, St
                 let _ = child.wait();
                 break (-1, true, None);
             }
-            Ok(None) => std::thread::sleep(POLL_INTERVAL),
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
             Err(error) => break (-1, false, Some(error.to_string())),
         }
     };
-    std::thread::sleep(Duration::from_millis(200));
+    wait_for_pipe_readers(stdout_done, stderr_done);
     let stdout = String::from_utf8_lossy(
         &stdout_buf
             .lock()
@@ -1102,8 +1122,11 @@ fn run_command_bounded_safe(mut command: Command, args: &[OsString]) -> (i32, St
 /// bytes arrive. The caller snapshots the buffer under its own deadline instead
 /// of joining, so a pipe the child never closes (a detached grandchild holds the
 /// write end) can't wedge the read. A leaked reader dies with the test process.
-fn drain_stream<R: Read + Send + 'static>(stream: Option<R>) -> Arc<Mutex<Vec<u8>>> {
+fn drain_stream<R: Read + Send + 'static>(
+    stream: Option<R>,
+) -> (Arc<Mutex<Vec<u8>>>, std::sync::mpsc::Receiver<()>) {
     let buffer = Arc::new(Mutex::new(Vec::new()));
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
     if let Some(mut stream) = stream {
         let sink = Arc::clone(&buffer);
         std::thread::spawn(move || {
@@ -1114,9 +1137,22 @@ fn drain_stream<R: Read + Send + 'static>(stream: Option<R>) -> Arc<Mutex<Vec<u8
                     Ok(n) => sink.lock().unwrap().extend_from_slice(&chunk[..n]),
                 }
             }
+            let _ = done_tx.send(());
         });
     }
-    buffer
+    (buffer, done_rx)
+}
+
+fn wait_for_pipe_readers(
+    stdout_done: std::sync::mpsc::Receiver<()>,
+    stderr_done: std::sync::mpsc::Receiver<()>,
+) {
+    // Normal commands finish as soon as both pipes reach EOF. Detached children
+    // may retain a pipe, so bound the total drain grace instead of joining.
+    let deadline = Instant::now() + Duration::from_millis(200);
+    for done in [stdout_done, stderr_done] {
+        let _ = done.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    }
 }
 
 fn poll_until<F>(timeout: Duration, mut predicate: F) -> bool
@@ -1279,8 +1315,8 @@ fn process_snapshot() -> String {
         Ok(child) => child,
         Err(error) => return format!("<process snapshot unavailable: {error}>\n"),
     };
-    let stdout_buf = drain_stream(child.stdout.take());
-    let _stderr_buf = drain_stream(child.stderr.take());
+    let (stdout_buf, stdout_done) = drain_stream(child.stdout.take());
+    let (_stderr_buf, stderr_done) = drain_stream(child.stderr.take());
     let deadline = Instant::now() + SNAPSHOT_TIMEOUT;
     loop {
         match child.try_wait() {
@@ -1293,10 +1329,11 @@ fn process_snapshot() -> String {
                     SNAPSHOT_TIMEOUT.as_secs()
                 );
             }
-            Ok(None) => std::thread::sleep(POLL_INTERVAL),
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
             Err(error) => return format!("<process snapshot wait failed: {error}>\n"),
         }
     }
+    wait_for_pipe_readers(stdout_done, stderr_done);
     let captured = stdout_buf
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

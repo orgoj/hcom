@@ -120,8 +120,8 @@ pub const CONFIG_KEYS: &[(&str, &str, &str)] = &[
         "string",
     ),
     (
-        "HCOM_CODEX_SANDBOX_MODE",
-        "Codex permission profile (workspace | untrusted | danger-full-access | none)",
+        "HCOM_QODER_ARGS",
+        "Default args for qodercli on launch",
         "string",
     ),
     (
@@ -151,7 +151,7 @@ pub const CONFIG_KEYS: &[(&str, &str, &str)] = &[
     ),
     (
         "HCOM_AUTO_TRUST_WORKSPACE",
-        "Auto-inject ephemeral workspace trust for gemini/codex/cursor at launch (true/false)",
+        "Auto-approve workspace trust at launch; may persist in tool config (true/false)",
         "boolean",
     ),
     (
@@ -208,38 +208,11 @@ const INSTANCE_KEYS: &[(&str, &str)] = &[
 
 /// Maps HCOM_ field name (lowercase, no prefix) to nested TOML dotted path.
 fn toml_path_for_key(field_name: &str) -> Option<&'static str> {
-    match field_name {
-        "terminal" => Some("terminal.active"),
-        "title_mode" => Some("terminal.title_mode"),
-        "herdr_autostart" => Some("terminal.herdr_autostart"),
-        "tag" => Some("launch.tag"),
-        "hints" => Some("launch.hints"),
-        "notes" => Some("launch.notes"),
-        "subagent_timeout" => Some("launch.subagent_timeout"),
-        "auto_subscribe" => Some("launch.auto_subscribe"),
-        "auto_trust_workspace" => Some("launch.auto_trust_workspace"),
-        "claude_args" => Some("launch.claude.args"),
-        "gemini_args" => Some("launch.gemini.args"),
-        "gemini_system_prompt" => Some("launch.gemini.system_prompt"),
-        "codex_args" => Some("launch.codex.args"),
-        "codex_sandbox_mode" => Some("launch.codex.sandbox_mode"),
-        "codex_system_prompt" => Some("launch.codex.system_prompt"),
-        "opencode_args" => Some("launch.opencode.args"),
-        "kilo_args" => Some("launch.kilo.args"),
-        "pi_args" => Some("launch.pi.args"),
-        "omp_args" => Some("launch.omp.args"),
-        "cursor_args" => Some("launch.cursor.args"),
-        "kimi_args" => Some("launch.kimi.args"),
-        "copilot_args" => Some("launch.copilot.args"),
-        "relay" => Some("relay.url"),
-        "relay_id" => Some("relay.id"),
-        "relay_token" => Some("relay.token"),
-        "relay_enabled" => Some("relay.enabled"),
-        "timeout" => Some("preferences.timeout"),
-        "auto_approve" => Some("preferences.auto_approve"),
-        "name_export" => Some("preferences.name_export"),
-        _ => None,
+    // relay_psk is set through `hcom relay`, not `hcom config`.
+    if field_name == "relay_psk" {
+        return None;
     }
+    crate::config::toml_path_for_field(field_name)
 }
 
 // ── Config File Operations ───────────────────────────────────────────────
@@ -368,20 +341,6 @@ fn config_set_at_path(path: &Path, key: &str, value: &str) -> Result<(), String>
     // Map HCOM_KEY to field name, then to nested TOML path
     let field_name = key.strip_prefix("HCOM_").unwrap_or(key).to_lowercase();
     validate_config_args(&field_name, value)?;
-
-    if field_name == "codex_sandbox_mode" && !value.is_empty() {
-        let normalized = if value == "full-auto" {
-            "danger-full-access"
-        } else {
-            value
-        };
-        if !crate::config::VALID_SANDBOX_MODES.contains(&normalized) {
-            return Err(format!(
-                "codex_sandbox_mode must be one of: {}. Got '{value}'",
-                crate::config::VALID_SANDBOX_MODES.join(", ")
-            ));
-        }
-    }
 
     if field_name == "title_mode"
         && !value.is_empty()
@@ -582,12 +541,12 @@ fn config_instance(
                 Ok(matched) => match db.get_instance_full(&matched) {
                     Ok(Some(inst)) => inst,
                     _ => {
-                        eprintln!("Error: Agent '{name}' not found");
+                        eprintln!("Error: {}", identity::describe_missing_agent(db, &name));
                         return 1;
                     }
                 },
                 Err(_) => {
-                    eprintln!("Error: Agent '{name}' not found");
+                    eprintln!("Error: {}", identity::describe_missing_agent(db, &name));
                     return 1;
                 }
             }
@@ -877,7 +836,7 @@ pub fn config_instance_get(
     let instance = db
         .get_instance_full(&name)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Agent '{}' not found", name))?;
+        .ok_or_else(|| identity::describe_missing_agent(db, instance_arg))?;
 
     Ok(match key {
         None => {
@@ -906,7 +865,7 @@ pub fn config_instance_set(
     let instance = db
         .get_instance_full(&name)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Agent '{}' not found", name))?;
+        .ok_or_else(|| identity::describe_missing_agent(db, instance_arg))?;
     let inst_name = &instance.name;
 
     match key {
@@ -1107,7 +1066,7 @@ pub fn cmd_config(db: &HcomDb, args: &ConfigArgs, ctx: Option<&CommandContext>) 
 
     let key_arg = &argv[0];
 
-    if key_arg == "dev_root" {
+    if normalize_key(key_arg) == "HCOM_DEV_ROOT" {
         return config_dev_root(
             db,
             argv.get(1).map(|s| s.as_str()),
@@ -1141,6 +1100,29 @@ pub fn cmd_config(db: &HcomDb, args: &ConfigArgs, ctx: Option<&CommandContext>) 
 
     if wants_info {
         return show_key_info(&key);
+    }
+
+    // Unknown keys would silently read as "(not set)" or be written to
+    // config.toml where nothing reads them. Reading an env-only setting that
+    // is actually set (e.g. HCOM_DIR) stays allowed.
+    let is_set_mode = argv.len() >= 2;
+    let env_readable = !is_set_mode && std::env::var(&key).is_ok();
+    if !CONFIG_KEYS.iter().any(|(k, _, _)| *k == key) && !env_readable {
+        let typed = key_arg.to_lowercase();
+        let short: Vec<String> = CONFIG_KEYS
+            .iter()
+            .map(|(k, _, _)| k.trim_start_matches("HCOM_").to_lowercase())
+            .chain(["dev_root".to_string()])
+            .collect();
+        eprintln!(
+            "Error: Unknown config key '{key_arg}'{}\nValid keys: {}",
+            crate::shared::suggest::did_you_mean(
+                typed.trim_start_matches("hcom_"),
+                short.iter().map(String::as_str)
+            ),
+            short.join(", ")
+        );
+        return 1;
     }
 
     // Set mode: config KEY VALUE
@@ -1279,7 +1261,7 @@ fn show_all_config(db: &HcomDb, ctx: Option<&CommandContext>, json_mode: bool) -
         }
         println!(
             "{}",
-            serde_json::to_string_pretty(&Value::Object(result)).unwrap_or_default()
+            serde_json::to_string(&Value::Object(result)).unwrap_or_default()
         );
     } else {
         println!("hcom configuration ({})\n", config_path().display());
@@ -1381,13 +1363,12 @@ Usage:
 
         "HCOM_TIMEOUT" => Some(
             "\
-HCOM_TIMEOUT - Advanced: idle timeout for headless/vanilla Claude (seconds)
+HCOM_TIMEOUT - Advanced: idle timeout for headless Claude (seconds)
 
 Default: 86400 (24 hours)
 
 This setting only applies to:
   - Headless Claude: hcom N claude -p
-  - Vanilla Claude: claude + hcom start
 
 Does NOT apply to:
   - Interactive PTY mode: hcom N claude (main path)
@@ -1452,7 +1433,7 @@ Merged with launch-time cli args (launch args win on conflict).",
             "\
 HCOM_GEMINI_ARGS - Default args passed to gemini on launch
 
-Example: hcom config gemini_args \"--model gemini-2.5-flash\"
+Example: hcom config gemini_args \"--model flash\"
 Clear:   hcom config gemini_args \"\"
 
 Merged with launch-time cli args (launch args win on conflict).",
@@ -1466,31 +1447,6 @@ Example: hcom config codex_args \"--search\"
 Clear:   hcom config codex_args \"\"
 
 Merged with launch-time cli args (launch args win on conflict).",
-        ),
-
-        "HCOM_CODEX_SANDBOX_MODE" => Some(
-            "\
-HCOM_CODEX_SANDBOX_MODE - Permission flags hcom injects when launching codex
-
-Default: workspace
-
-Codex's default sandbox blocks the writes and Unix sockets hcom needs,
-so hcom injects flags on every codex launch to reshape it. This knob
-picks which set.
-
-Values:
-  workspace          Codex auto-runs; asks only when the model judges
-                     necessary.
-  untrusted          Codex prompts before every command that isn't a
-                     known-safe read. Effectively read-only unless you
-                     approve writes case-by-case.
-  danger-full-access No sandbox, no approvals.
-  none               Inject nothing. Codex uses your own config; DB
-                     writes fail unless your config allows ~/.hcom.
-
-Usage:
-  hcom config codex_sandbox_mode untrusted
-  hcom config codex_sandbox_mode \"\"        # Reset to default",
         ),
 
         "HCOM_RELAY" => Some(
@@ -1527,7 +1483,7 @@ Only needed if your broker requires authentication.",
 HCOM_AUTO_APPROVE - Auto-approve safe hcom commands
 
 Purpose:
-  When enabled, Claude/Gemini/Codex/OpenCode/Kilo/Pi/OMP/Antigravity/Cursor/Kimi/Copilot auto-approve \"safe\" hcom commands
+  When enabled, Claude/Gemini/Codex/OpenCode/Kilo/Pi/OMP/Antigravity/Cursor/Kimi/Copilot/Qoder/Grok auto-approve \"safe\" hcom commands
   without requiring user confirmation.
 
 Usage:
@@ -1648,7 +1604,7 @@ Example:
   # hcom send \"@$HCOM_NAME completed task\"
 
 Notes:
-  - Only affects hcom-launched instances (hcom N claude/gemini/codex/opencode/kilo/pi/omp/agy/cursor/kimi/copilot)
+  - Only affects hcom-launched instances (hcom N claude/gemini/codex/opencode/kilo/pi/omp/agy/cursor/kimi/copilot/qoder)
   - Variable name must be a valid shell identifier
   - Works alongside HCOM_PROCESS_ID (always set) for identity",
         ),
@@ -1657,7 +1613,7 @@ Notes:
             "\
 HCOM_OPENCODE_ARGS - Default args passed to opencode on launch
 
-Example: hcom config opencode_args \"--model o3\"
+Example: hcom config opencode_args \"--agent plan\"
 Clear:   hcom config opencode_args \"\"
 
 Merged with launch-time cli args (launch args win on conflict).",
@@ -1677,8 +1633,18 @@ Prepended to launch-time cli args.",
             "\
 HCOM_COPILOT_ARGS - Default args passed to copilot on launch
 
-Example: hcom config copilot_args \"--model claude-haiku-4.5\"
+Example: hcom config copilot_args \"--model auto\"
 Clear:   hcom config copilot_args \"\"
+
+Prepended to launch-time cli args.",
+        ),
+
+        "HCOM_QODER_ARGS" => Some(
+            "\
+HCOM_QODER_ARGS - Default args passed to qodercli on launch
+
+Example: hcom config qoder_args \"--model Qwen3.8-Flash\"
+Clear:   hcom config qoder_args \"\"
 
 Prepended to launch-time cli args.",
         ),
@@ -1693,11 +1659,21 @@ Clear:   hcom config cursor_args \"\"
 Prepended to launch-time cli args.",
         ),
 
+        "HCOM_GROK_ARGS" => Some(
+            "\
+HCOM_GROK_ARGS - Default args passed to grok on launch
+
+Example: hcom config grok_args \"--always-approve\"
+Clear:   hcom config grok_args \"\"
+
+Prepended to launch-time cli args.",
+        ),
+
         "HCOM_KIMI_ARGS" => Some(
             "\
 HCOM_KIMI_ARGS - Default args passed to kimi on launch
 
-Example: hcom config kimi_args \"--model kimi-k2.6\"
+Example: hcom config kimi_args \"--yolo\"
 Clear:   hcom config kimi_args \"\"
 
 Prepended to launch-time cli args.",
@@ -2307,7 +2283,7 @@ fn update_auto_approve_permissions(value: &str) -> bool {
 
     if enabled {
         println!(
-            "Auto-approve enabled for safe hcom commands in Claude/Gemini/Codex/OpenCode/Kilo/Pi/OMP/Antigravity/Cursor/Kimi/Copilot"
+            "Auto-approve enabled for safe hcom commands in Claude/Gemini/Codex/OpenCode/Kilo/Pi/OMP/Antigravity/Cursor/Kimi/Copilot/Qoder/Grok"
         );
     } else {
         println!("Auto-approve disabled - safe hcom commands will require approval");
@@ -2323,6 +2299,20 @@ fn update_auto_approve_permissions(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_mapped_field_is_set_where_the_loader_reads_it() {
+        for (field, path) in crate::config::TOML_KEY_MAP {
+            if *field == "relay_psk" {
+                continue;
+            }
+            assert_eq!(
+                toml_path_for_key(field),
+                Some(*path),
+                "`hcom config {field}` must write {path}"
+            );
+        }
+    }
 
     #[test]
     fn test_normalize_key() {

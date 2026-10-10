@@ -4,6 +4,12 @@ Review date: 2026-10-03. Local baseline: `orgoj` at `4d9ab02`.
 Decision: record the review now; attempt an upstream merge later, after explicit
 authorization. No implementation or deployment is part of this review.
 
+Status 2026-10-10: upstream `main` through `bc1d059` (v0.7.28 plus fixes) is
+merged as `0.7.28-orgoj.1`, which covers recommendation 1 and the relay drain
+budget in recommendation 3 (`139235d`). `codex_sandbox_mode` is gone: Codex now
+runs under its native sandbox and approval configuration. The fork-specific
+ports below remain open.
+
 ## Remote snapshot
 
 All configured remotes were fetched with pruning. Upstream `main` is at

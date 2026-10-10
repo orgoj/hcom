@@ -3,20 +3,18 @@
 //! - `CommandContext` builder (`_build_ctx_for_command`)
 //! - Identity gating (`REQUIRE_IDENTITY`)
 //! - `set_hookless_command_status` — status for non-hook CLI commands
-//! - `maybe_deliver_pending_messages` — append unread for codex/adhoc
+//! - `maybe_deliver_pending_messages` — append unread to adhoc command output
 //! - `format_messages_human` — human-readable message formatting
 
 use crate::claude_actor;
 use crate::db::HcomDb;
 use crate::identity;
 use crate::instance_lifecycle as lifecycle;
-use crate::instances;
-#[cfg(test)]
-use crate::shared::SenderIdentity;
 use crate::shared::ansi::{BOLD, DIM, FG_CYAN, RESET};
 use crate::shared::{
     CommandContext, HcomError, ST_ACTIVE, ST_INACTIVE, SenderKind, status_fg, status_icon,
 };
+use crate::shared::{MAX_MESSAGES_PER_DELIVERY, SenderIdentity};
 
 /// Commands that should NOT trigger hookless status update.
 /// Handled internally or are lifecycle commands.
@@ -44,6 +42,7 @@ pub fn build_ctx_for_command(
         claude_actor::ensure_explicit_matches(db, actor, name)?;
     }
 
+    let had_verified_actor = verified_actor.is_some();
     let identity = if let Some(actor) = verified_actor {
         Some(actor)
     } else if let Some(name) = explicit_name {
@@ -65,11 +64,61 @@ pub fn build_ctx_for_command(
         identity::resolve_identity(db, None, None, None, process_id, codex_thread_id).ok()
     };
 
+    // Only an explicit --name can disagree with the shell's binding. A verified
+    // Claude actor is already the exact acting agent (and ensure_explicit_matches
+    // above hard-errors on conflict), so its process binding naming the parent
+    // row is not drift.
+    let identity_warning = match (&identity, explicit_name, had_verified_actor) {
+        (Some(resolved), Some(_), false) => drift_warning(db, resolved, process_id),
+        _ => None,
+    };
+
     Ok(CommandContext {
         explicit_name: explicit_name.map(|s| s.to_string()),
         identity,
         go,
+        identity_warning,
     })
+}
+
+/// Warn when an explicit `--name` names a different instance than the one this
+/// shell's process binding points at.
+///
+/// `--name` is what the agent knows itself to be, so on disagreement the binding
+/// is the stale side (session switch, resume, recovery). Hooks deliver by
+/// binding, so messages to the agent's name silently stop arriving until it
+/// reclaims the name.
+///
+/// Read-only: a plain binding lookup, never `resolve_identity`, whose Codex
+/// recovery path can rebind or retire rows.
+///
+/// Returns `None` when the shell is unbound, the two agree, or the named
+/// instance is a subagent of the bound row (subagents share the parent's shell).
+fn drift_warning(
+    db: &HcomDb,
+    resolved: &SenderIdentity,
+    process_id: Option<&str>,
+) -> Option<String> {
+    if !matches!(resolved.kind, SenderKind::Instance) {
+        return None;
+    }
+    let bound = db.get_process_binding(process_id?).ok()??;
+    if bound == resolved.name {
+        return None;
+    }
+    let parent = resolved
+        .instance_data
+        .as_ref()
+        .and_then(|d| d.get("parent_name"))
+        .and_then(|v| v.as_str());
+    if parent == Some(bound.as_str()) {
+        return None;
+    }
+    let name = &resolved.name;
+    Some(format!(
+        "[hcom] warning: --name '{name}' but this shell is bound to '{bound}'. \
+         If you are '{name}', run 'hcom start --as {name}'."
+    ))
 }
 
 /// Check identity gating for a CLI command.
@@ -124,8 +173,12 @@ pub fn check_identity_gate(
 /// Claude/Gemini main instances have PreToolUse hooks that set active:tool:*.
 /// These instance types need explicit status updates here:
 /// - Subagent: status is also updated directly for manual/non-hook invocations
-/// - Codex: has notify hook (turn-end) but no pre-tool hook
 /// - Adhoc: no hooks at all
+///
+/// Codex is not hookless: its PreToolUse hook already marks the shell call
+/// active, and an hcom call from a process that outlives the turn (a
+/// backgrounded command, memory consolidation) would mark it active with no
+/// Stop to follow.
 ///
 /// Status model:
 /// - Adhoc: inactive:tool:* (no hooks to reset, just records "this happened")
@@ -160,9 +213,8 @@ pub fn set_hookless_command_status(db: &HcomDb, cmd_name: &str, ctx: &CommandCon
 
     // Only set status for hookless instances:
     // - subagent (has parent_name)
-    // - codex
     // - adhoc
-    let is_hookless = has_parent || tool == "codex" || tool == "adhoc";
+    let is_hookless = has_parent || tool == "adhoc";
     if !is_hookless {
         return;
     }
@@ -176,88 +228,159 @@ pub fn set_hookless_command_status(db: &HcomDb, cmd_name: &str, ctx: &CommandCon
     lifecycle::set_status(db, &identity.name, status, &context, Default::default());
 }
 
-/// For hookless instances (codex/adhoc): append unread messages after command output.
+/// Set when the running command has taken over inline delivery for this
+/// invocation (send after persisting its message, listen once it reads the
+/// inbox), so the router's after-command delivery must not run.
+static COMMAND_OWNS_INLINE_DELIVERY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn claim_inline_delivery() {
+    COMMAND_OWNS_INLINE_DELIVERY.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The invoking instance, if the router delivers its messages inline after
+/// every hcom command.
 ///
-/// Codex and adhoc instances have no delivery hooks, so messages are delivered
-/// via CLI command output. Skips for --json output to preserve machine-readable format.
+/// Only adhoc instances: they have no hooks, so command output is their only
+/// delivery path while working. Hooked tools (including codex, via
+/// UserPromptSubmit/PostToolUse) get messages from their hooks instead.
+pub fn inline_receiver(ctx: &CommandContext) -> Option<&SenderIdentity> {
+    let identity = ctx.identity.as_ref()?;
+    let tool = identity.instance_data.as_ref()?.get("tool")?.as_str()?;
+    (matches!(identity.kind, SenderKind::Instance) && tool == "adhoc").then_some(identity)
+}
+
+/// One chronological prefix of an instance's unread messages, capped per delivery.
 ///
-/// Not display-only: also advances the instance cursor and updates delivery status.
-/// This is the hookless counterpart to hook-based delivery.
+/// A single cursor acknowledges everything up to the batch's last event, so the
+/// batch must be a prefix: capping per sender or per group would skip messages.
+pub struct InlineBatch {
+    pub messages: Vec<crate::db::Message>,
+    /// Unread messages left after this batch.
+    pub remaining: usize,
+    /// Event id of the last unread message when the batch was taken.
+    pub backlog_end: Option<i64>,
+}
+
+impl InlineBatch {
+    pub fn take(db: &HcomDb, name: &str) -> Option<Self> {
+        let mut messages = db.get_unread_messages(name);
+        if messages.is_empty() {
+            return None;
+        }
+        let remaining = messages.len().saturating_sub(MAX_MESSAGES_PER_DELIVERY);
+        let backlog_end = messages.last().and_then(|m| m.event_id);
+        messages.truncate(MAX_MESSAGES_PER_DELIVERY);
+        Some(Self {
+            messages,
+            remaining,
+            backlog_end,
+        })
+    }
+
+    /// Text line telling the reader more unread messages are waiting (empty if none).
+    pub fn remaining_note(&self, name: &str) -> String {
+        if self.remaining == 0 {
+            return String::new();
+        }
+        format!(
+            "[+{} more unread — run: hcom listen --name {name}]\n",
+            self.remaining
+        )
+    }
+
+    /// Note for messages that arrived after this batch was taken (empty if none,
+    /// or if the remaining note already covers them).
+    pub fn arrived_since_note(&self, db: &HcomDb, name: &str) -> String {
+        if self.remaining > 0 || db.get_unread_messages(name).is_empty() {
+            return String::new();
+        }
+        format!("[hcom] new message(s) arrived — run: hcom listen --name {name}\n")
+    }
+
+    /// Write `output` to stdout, then acknowledge the batch.
+    ///
+    /// Nothing is acknowledged if the write fails, so a retry after partial
+    /// output may duplicate messages but never skips them. The cursor only moves
+    /// forward, so a slow writer cannot rewind a newer concurrent delivery.
+    ///
+    /// `set_status` records the delivery in the receiver's status. Used when the
+    /// command's own status would not reflect it (router delivery, send --from).
+    pub fn emit(
+        &self,
+        db: &HcomDb,
+        name: &str,
+        output: &str,
+        set_status: bool,
+    ) -> Result<(), String> {
+        use std::io::Write;
+
+        let written = {
+            let mut stdout = std::io::stdout().lock();
+            stdout
+                .write_all(output.as_bytes())
+                .and_then(|_| stdout.flush())
+        };
+        if let Err(e) = written {
+            return Err(format!(
+                "incoming message output failed; unread messages retained: {e}"
+            ));
+        }
+
+        let last = self.messages.last();
+        if let Some(id) = last.and_then(|m| m.event_id) {
+            db.advance_instance_cursor(name, id)
+                .map_err(|e| format!("receive acknowledgment failed: {e}"))?;
+        }
+
+        if set_status {
+            let sender_display = identity::get_display_name(db, &self.messages[0].from);
+            lifecycle::set_status(
+                db,
+                name,
+                ST_INACTIVE,
+                &format!("deliver:{sender_display}"),
+                lifecycle::StatusUpdate {
+                    msg_ts: last.and_then(|m| m.timestamp.as_deref()).unwrap_or(""),
+                    ..Default::default()
+                },
+            );
+        }
+        Ok(())
+    }
+}
+
+/// For adhoc instances: append unread messages after command output.
 ///
-/// Returns formatted output string if messages were delivered, None otherwise.
+/// Skips for --json output to preserve machine-readable format, and when the
+/// command claimed delivery itself. Not display-only: advances the cursor
+/// (after a successful write) and updates delivery status.
+///
+/// Returns Ok(true) if messages were delivered, Err if writing them failed
+/// (they stay unread).
 pub fn maybe_deliver_pending_messages(
     db: &HcomDb,
     ctx: &CommandContext,
     has_json_flag: bool,
-) -> Option<String> {
-    if has_json_flag {
-        return None;
+) -> Result<bool, String> {
+    if has_json_flag || COMMAND_OWNS_INLINE_DELIVERY.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(false);
     }
-
-    let identity = ctx.identity.as_ref()?;
-    if !matches!(identity.kind, SenderKind::Instance) {
-        return None;
-    }
-
-    let instance_data = identity.instance_data.as_ref()?;
-    let tool = instance_data
-        .get("tool")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    if tool != "codex" && tool != "adhoc" {
-        return None;
-    }
-
-    // Get unread messages
-    let messages = db.get_unread_messages(&identity.name);
-    if messages.is_empty() {
-        return None;
-    }
-
-    // Advance cursor — update last_event_id on the instance
-    if let Some(last) = messages.last()
-        && let Some(id) = last.event_id
-    {
-        let mut updates = serde_json::Map::new();
-        updates.insert("last_event_id".into(), serde_json::json!(id));
-        instances::update_instance_position(db, &identity.name, &updates);
-    }
-
-    // Format with divider
-    let formatted = format_hook_messages_simple_from_msgs(db, &messages, &identity.name);
+    let Some(identity) = inline_receiver(ctx) else {
+        return Ok(false);
+    };
+    let Some(batch) = InlineBatch::take(db, &identity.name) else {
+        return Ok(false);
+    };
+    let formatted = format_hook_messages_simple_from_msgs(db, &batch.messages, &identity.name);
     let output = format!(
-        "\n{}\n[hcom]\n{}\n{}",
+        "\n{}\n[hcom]\n{}\n{}\n",
         "─".repeat(40),
         "─".repeat(40),
         formatted,
-    );
-
-    // Update status after delivery
-    let msg_ts = messages
-        .last()
-        .and_then(|m| m.timestamp.as_deref())
-        .unwrap_or("");
-    let sender_display = identity::get_display_name(db, &messages[0].from);
-    let context = format!("deliver:{sender_display}");
-
-    let status = if tool == "codex" {
-        ST_ACTIVE
-    } else {
-        ST_INACTIVE
-    };
-    lifecycle::set_status(
-        db,
-        &identity.name,
-        status,
-        &context,
-        lifecycle::StatusUpdate {
-            msg_ts,
-            ..Default::default()
-        },
-    );
-
-    Some(output)
+    ) + &batch.remaining_note(&identity.name);
+    batch.emit(db, &identity.name, &output, true)?;
+    Ok(true)
 }
 
 /// Format messages for human terminal display.
@@ -334,38 +457,38 @@ pub fn format_messages_human(
     }
 }
 
-/// Build message prefix from envelope fields.
-///
-/// Format: `[intent:thread #id]` or `[intent #id]` or `[thread:name #id]` or `[new message #id]`
+/// Build message prefix from envelope fields of a raw message event.
 fn build_message_prefix(
     intent: Option<&str>,
     thread: Option<&str>,
     event_id: Option<i64>,
     msg: &serde_json::Value,
 ) -> String {
-    // Build ID reference (local or remote)
-    let relay = msg.get("_relay");
-    let id_ref = if let Some(relay) = relay {
-        let short = relay.get("short").and_then(|v| v.as_str()).unwrap_or("");
-        let rid = relay.get("id").and_then(|v| v.as_i64());
-        if !short.is_empty() {
-            if let Some(id) = rid {
-                format!("#{id}:{short}")
+    // Relayed messages are referenced by origin id + device, local ones by event id.
+    let reply_id = match msg.get("_relay") {
+        Some(relay) => {
+            let short = relay.get("short").and_then(|v| v.as_str()).unwrap_or("");
+            if short.is_empty() {
+                event_id.map(|id| id.to_string())
             } else {
-                String::new()
+                relay
+                    .get("id")
+                    .and_then(|v| v.as_i64())
+                    .map(|id| format!("{id}:{short}"))
             }
-        } else if let Some(id) = event_id {
-            format!("#{id}")
-        } else {
-            String::new()
         }
-    } else if let Some(id) = event_id {
-        format!("#{id}")
-    } else {
-        String::new()
+        None => event_id.map(|id| id.to_string()),
     };
+    format_envelope_prefix(intent, thread, reply_id.as_deref())
+}
 
-    // Build prefix based on envelope fields
+/// Format: `[intent:thread #id]` or `[intent #id]` or `[thread:name #id]` or `[new message #id]`,
+/// where `id` is what `hcom send --reply-to` accepts.
+pub(crate) fn format_envelope_prefix(
+    intent: Option<&str>,
+    thread: Option<&str>,
+    reply_id: Option<&str>,
+) -> String {
     let prefix = match (intent, thread) {
         (Some(i), Some(t)) => format!("{i}:{t}"),
         (Some(i), None) => i.to_string(),
@@ -373,10 +496,9 @@ fn build_message_prefix(
         (None, None) => "new message".to_string(),
     };
 
-    if id_ref.is_empty() {
-        format!("[{prefix}]")
-    } else {
-        format!("[{prefix} {id_ref}]")
+    match reply_id {
+        Some(id) => format!("[{prefix} #{id}]"),
+        None => format!("[{prefix}]"),
     }
 }
 
@@ -472,11 +594,10 @@ fn format_hook_messages_simple_from_msgs(
 
     if messages.len() == 1 {
         let msg = &messages[0];
-        let prefix = build_message_prefix(
+        let prefix = format_envelope_prefix(
             msg.intent.as_deref(),
             msg.thread.as_deref(),
-            msg.event_id,
-            &serde_json::json!({}),
+            msg.reply_id().as_deref(),
         );
         let sender_display = identity::get_display_name(db, &msg.from);
 
@@ -497,11 +618,10 @@ fn format_hook_messages_simple_from_msgs(
         let parts: Vec<String> = messages
             .iter()
             .map(|msg| {
-                let prefix = build_message_prefix(
+                let prefix = format_envelope_prefix(
                     msg.intent.as_deref(),
                     msg.thread.as_deref(),
-                    msg.event_id,
-                    &serde_json::json!({}),
+                    msg.reply_id().as_deref(),
                 );
                 let sender_display = identity::get_display_name(db, &msg.from);
 
@@ -633,6 +753,7 @@ mod tests {
             explicit_name: None,
             identity: None,
             go: false,
+            identity_warning: None,
         };
         assert!(check_identity_gate("list", &ctx, false, false).is_ok());
     }
@@ -643,6 +764,7 @@ mod tests {
             explicit_name: Some("luna".to_string()),
             identity: None,
             go: false,
+            identity_warning: None,
         };
         assert!(check_identity_gate("send", &ctx, false, false).is_ok());
     }
@@ -653,6 +775,7 @@ mod tests {
             explicit_name: None,
             identity: None,
             go: false,
+            identity_warning: None,
         };
         assert!(check_identity_gate("send", &ctx, true, false).is_ok());
     }
@@ -663,6 +786,7 @@ mod tests {
             explicit_name: None,
             identity: None,
             go: false,
+            identity_warning: None,
         };
         let err = check_identity_gate("send", &ctx, false, false).unwrap_err();
         assert!(err.contains("identity not found"));
@@ -679,6 +803,7 @@ mod tests {
                 session_id: None,
             }),
             go: false,
+            identity_warning: None,
         };
         assert!(check_identity_gate("send", &ctx, false, false).is_ok());
     }
@@ -689,6 +814,7 @@ mod tests {
             explicit_name: None,
             identity: None,
             go: false,
+            identity_warning: None,
         };
         let err = check_identity_gate("listen", &ctx, false, true).unwrap_err();
         assert!(err.contains("start --as"));
@@ -709,6 +835,7 @@ mod tests {
                 session_id: None,
             }),
             go: false,
+            identity_warning: None,
         };
         // listen is in skip list — should not change status
         set_hookless_command_status(&db, "listen", &ctx);
@@ -718,9 +845,11 @@ mod tests {
     }
 
     #[test]
-    fn test_hookless_status_codex() {
+    fn test_hookless_status_codex_skipped() {
         let (db, _dir) = make_test_db();
         insert_instance(&db, "luna", "codex");
+        db.set_status("luna", crate::shared::ST_LISTENING, "")
+            .unwrap();
         let ctx = CommandContext {
             explicit_name: None,
             identity: Some(SenderIdentity {
@@ -730,11 +859,13 @@ mod tests {
                 session_id: None,
             }),
             go: false,
+            identity_warning: None,
         };
+        // A backgrounded `hcom send` after Stop must not mark it active:
+        // no later Stop would return it to listening (#151).
         set_hookless_command_status(&db, "send", &ctx);
         let data = db.get_instance_full("luna").unwrap().unwrap();
-        assert_eq!(data.status, ST_ACTIVE);
-        assert_eq!(data.status_context, "tool:send");
+        assert_eq!(data.status, crate::shared::ST_LISTENING);
     }
 
     #[test]
@@ -750,6 +881,7 @@ mod tests {
                 session_id: None,
             }),
             go: false,
+            identity_warning: None,
         };
         set_hookless_command_status(&db, "events", &ctx);
         let data = db.get_instance_full("luna").unwrap().unwrap();
@@ -770,6 +902,7 @@ mod tests {
                 session_id: None,
             }),
             go: false,
+            identity_warning: None,
         };
         set_hookless_command_status(&db, "send", &ctx);
         let data = db.get_instance_full("luna").unwrap().unwrap();
@@ -796,6 +929,7 @@ mod tests {
                 session_id: None,
             }),
             go: false,
+            identity_warning: None,
         };
         set_hookless_command_status(&db, "send", &ctx);
         let data = db.get_instance_full("sub1").unwrap().unwrap();
@@ -936,8 +1070,9 @@ mod tests {
                 session_id: None,
             }),
             go: false,
+            identity_warning: None,
         };
-        assert!(maybe_deliver_pending_messages(&db, &ctx, true).is_none());
+        assert_eq!(maybe_deliver_pending_messages(&db, &ctx, true), Ok(false));
     }
 
     #[test]
@@ -952,8 +1087,9 @@ mod tests {
                 session_id: None,
             }),
             go: false,
+            identity_warning: None,
         };
-        assert!(maybe_deliver_pending_messages(&db, &ctx, false).is_none());
+        assert_eq!(maybe_deliver_pending_messages(&db, &ctx, false), Ok(false));
     }
 
     #[test]
@@ -963,7 +1099,143 @@ mod tests {
             explicit_name: None,
             identity: None,
             go: false,
+            identity_warning: None,
         };
-        assert!(maybe_deliver_pending_messages(&db, &ctx, false).is_none());
+        assert_eq!(maybe_deliver_pending_messages(&db, &ctx, false), Ok(false));
+    }
+
+    #[test]
+    fn build_ctx_warns_when_explicit_name_disagrees_with_this_shell() {
+        let (db, _dir) = make_test_db();
+        insert_instance(&db, "riko", "claude");
+        insert_instance(&db, "voni", "claude");
+        insert_process_binding(&db, "pid-1", "voni");
+
+        let ctx =
+            build_ctx_for_command(&db, Some("send"), Some("riko"), false, Some("pid-1"), None)
+                .unwrap();
+
+        let warning = ctx
+            .identity_warning
+            .expect("a --name that disagrees with this shell must warn");
+        assert!(
+            warning.contains("riko"),
+            "warning names the sender: {warning}"
+        );
+        assert!(
+            warning.contains("voni"),
+            "warning names this shell: {warning}"
+        );
+    }
+
+    #[test]
+    fn build_ctx_is_quiet_when_explicit_name_matches_this_shell() {
+        let (db, _dir) = make_test_db();
+        insert_instance(&db, "voni", "claude");
+        insert_process_binding(&db, "pid-1", "voni");
+
+        let ctx =
+            build_ctx_for_command(&db, Some("send"), Some("voni"), false, Some("pid-1"), None)
+                .unwrap();
+        assert!(ctx.identity_warning.is_none());
+    }
+
+    #[test]
+    fn build_ctx_is_quiet_when_this_shell_has_no_identity() {
+        let (db, _dir) = make_test_db();
+        insert_instance(&db, "riko", "claude");
+
+        let ctx =
+            build_ctx_for_command(&db, Some("send"), Some("riko"), false, None, None).unwrap();
+        assert!(
+            ctx.identity_warning.is_none(),
+            "an unbound shell has nothing to disagree with"
+        );
+    }
+
+    #[test]
+    fn build_ctx_is_quiet_for_a_subagent_acting_under_its_own_row() {
+        let (db, _dir) = make_test_db();
+        insert_instance(&db, "voni", "claude");
+        let now = chrono::Utc::now().timestamp() as f64;
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, parent_name, agent_id, status, created_at, tool)
+                 VALUES ('voni_task_1', 'voni', 'a6d9caf', 'active', ?1, 'claude')",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        insert_process_binding(&db, "pid-1", "voni");
+
+        let ctx = build_ctx_for_command(
+            &db,
+            Some("send"),
+            Some("voni_task_1"),
+            false,
+            Some("pid-1"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            ctx.identity_warning.is_none(),
+            "a subagent legitimately differs from the parent row its shell resolves to"
+        );
+    }
+
+    #[test]
+    fn build_ctx_warns_for_a_subagent_of_another_parent() {
+        let (db, _dir) = make_test_db();
+        insert_instance(&db, "voni", "claude");
+        insert_instance(&db, "riko", "claude");
+        let now = chrono::Utc::now().timestamp() as f64;
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, parent_name, agent_id, status, created_at, tool)
+                 VALUES ('riko_task_1', 'riko', 'a6d9caf', 'active', ?1, 'claude')",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        insert_process_binding(&db, "pid-1", "voni");
+
+        let ctx = build_ctx_for_command(
+            &db,
+            Some("send"),
+            Some("riko_task_1"),
+            false,
+            Some("pid-1"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            ctx.identity_warning.is_some(),
+            "only the bound row's own subagents are exempt"
+        );
+    }
+
+    #[test]
+    fn build_ctx_skips_drift_check_without_explicit_name() {
+        let (db, _dir) = make_test_db();
+        insert_instance(&db, "voni", "claude");
+        insert_process_binding(&db, "pid-1", "voni");
+
+        let ctx =
+            build_ctx_for_command(&db, Some("send"), None, false, Some("pid-1"), None).unwrap();
+        assert!(ctx.identity_warning.is_none());
+    }
+
+    #[test]
+    fn drift_warning_text_has_no_stray_whitespace() {
+        let (db, _dir) = make_test_db();
+        insert_instance(&db, "riko", "claude");
+        insert_instance(&db, "voni", "claude");
+        insert_process_binding(&db, "pid-1", "voni");
+
+        let resolved = identity::resolve_from_name(&db, "riko").unwrap();
+        let warning = drift_warning(&db, &resolved, Some("pid-1")).unwrap();
+        assert!(warning.contains("hcom start --as riko"), "{warning}");
+        assert!(
+            !warning.contains("  "),
+            "the warning is printed to a terminal; it must not carry a run of spaces: {warning:?}"
+        );
     }
 }

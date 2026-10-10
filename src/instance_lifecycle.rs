@@ -499,7 +499,7 @@ fn extract_launch_failure_detail(data: &InstanceRow) -> Option<String> {
     }
 }
 
-fn read_launch_log_tail(path: &str) -> Option<String> {
+pub(crate) fn read_launch_log_tail(path: &str) -> Option<String> {
     let content = std::fs::read_to_string(path).ok()?;
     let mut lines: Vec<&str> = content
         .lines()
@@ -649,84 +649,109 @@ pub fn set_status(
     } = upd;
     let writer = std::panic::Location::caller();
 
-    let current_data = match db.get_instance_full(instance_name) {
-        Ok(data) => data,
-        Err(e) => {
-            eprintln!("[hcom] warn: set_status DB read failed for {instance_name}: {e}");
-            None
+    // Row update and status event commit together: one write lock and sync
+    // per hook instead of two. Wake and subscriptions run after commit so
+    // woken readers see both.
+    let committed = db.with_write_scope(|| {
+        let current_data = match db.get_instance_full(instance_name) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("[hcom] warn: set_status DB read failed for {instance_name}: {e}");
+                None
+            }
+        };
+        let now = now_epoch_i64();
+        let mut updates = serde_json::Map::new();
+        updates.insert("status".into(), serde_json::json!(status));
+        updates.insert("status_time".into(), serde_json::json!(now));
+        updates.insert("status_context".into(), serde_json::json!(context));
+        updates.insert("status_detail".into(), serde_json::json!(detail));
+
+        if status == ST_LISTENING {
+            updates.insert("last_stop".into(), serde_json::json!(now));
         }
-    };
-    let now = now_epoch_i64();
-    let mut updates = serde_json::Map::new();
-    updates.insert("status".into(), serde_json::json!(status));
-    updates.insert("status_time".into(), serde_json::json!(now));
-    updates.insert("status_context".into(), serde_json::json!(context));
-    updates.insert("status_detail".into(), serde_json::json!(detail));
 
-    if status == ST_LISTENING {
-        updates.insert("last_stop".into(), serde_json::json!(now));
-    }
+        let old_status = current_data.as_ref().map(|d| d.status.as_str());
+        let status_changed = old_status != Some(status);
+        let status_event_changed = current_data.as_ref().is_none_or(|d| {
+            d.status != status || d.status_context != context || d.status_detail != detail
+        });
 
-    let old_status = current_data.as_ref().map(|d| d.status.as_str());
-    let status_changed = old_status != Some(status);
-    let status_event_changed = current_data.as_ref().is_none_or(|d| {
-        d.status != status || d.status_context != context || d.status_detail != detail
+        crate::instances::update_instance_position(db, instance_name, &updates);
+
+        // The pi-family plugins (pi, and its fork omp) structurally double-write tool
+        // status: the extension's tool_call handler calls reportStatus (omp/pi-status)
+        // AND the Rust beforetool hook calls update_tool_status, both with the same
+        // tool:<name>+detail. Suppress the redundant unchanged event for this family so
+        // it doesn't emit duplicate status events (~30% of events for omp otherwise).
+        let is_pi_family = matches!(
+            current_data.as_ref().map(|d| d.tool.as_str()),
+            Some("pi") | Some("omp")
+        );
+        if is_pi_family && !status_event_changed && msg_ts.is_empty() {
+            return Ok((status_changed, None));
+        }
+
+        let position = current_data.as_ref().map(|d| d.last_event_id).unwrap_or(0);
+        let mut data = serde_json::json!({
+            "status": status,
+            "context": context,
+            "position": position,
+        });
+        if !detail.is_empty() {
+            data["detail"] = serde_json::json!(detail);
+        }
+        if !msg_ts.is_empty() {
+            data["msg_ts"] = serde_json::json!(msg_ts);
+        }
+        // old_* differs from the prior status event when set_gate_status() touched
+        // the row without logging (tui:* gate context churns silently).
+        data["old_status"] = serde_json::json!(old_status);
+        data["old_context"] =
+            serde_json::json!(current_data.as_ref().map(|d| d.status_context.as_str()));
+        data["old_detail"] =
+            serde_json::json!(current_data.as_ref().map(|d| d.status_detail.as_str()));
+        data["new_status"] = serde_json::json!(status);
+        data["new_context"] = serde_json::json!(context);
+        data["new_detail"] = serde_json::json!(detail);
+        data["writer"] = serde_json::json!(format!("{}:{}", writer.file(), writer.line()));
+        if let Some(session_id) = current_data.as_ref().and_then(|d| d.session_id.as_deref()) {
+            data["session"] = serde_json::json!(session_id);
+        }
+        if let Some(agent_id) = current_data.as_ref().and_then(|d| d.agent_id.as_deref()) {
+            data["agent_id"] = serde_json::json!(agent_id);
+        }
+        if !tool_name.is_empty() {
+            data["tool_name"] = serde_json::json!(tool_name);
+        }
+        if !tool_use_id.is_empty() {
+            data["tool_use_id"] = serde_json::json!(tool_use_id);
+        }
+        // Best-effort like the row update: a failed event must not roll it back.
+        let event = db
+            .insert_event_row("status", instance_name, &data, None)
+            .ok()
+            .map(|id| (id, data));
+        Ok((status_changed, event))
     });
 
-    crate::instances::update_instance_position(db, instance_name, &updates);
-
+    let (status_changed, event) = match committed {
+        Ok(v) => v,
+        Err(e) => {
+            crate::log::log_error(
+                "core",
+                "db.error",
+                &format!("set_status: {instance_name} - {e}"),
+            );
+            return;
+        }
+    };
     if status_changed {
         crate::notify::wake(db, instance_name, crate::notify::WakeKind::DELIVERY_LOOPS);
     }
-
-    // The pi-family plugins (pi, and its fork omp) structurally double-write tool
-    // status: the extension's tool_call handler calls reportStatus (omp/pi-status)
-    // AND the Rust beforetool hook calls update_tool_status, both with the same
-    // tool:<name>+detail. Suppress the redundant unchanged event for this family so
-    // it doesn't emit duplicate status events (~30% of events for omp otherwise).
-    let is_pi_family = matches!(
-        current_data.as_ref().map(|d| d.tool.as_str()),
-        Some("pi") | Some("omp")
-    );
-    if is_pi_family && !status_event_changed && msg_ts.is_empty() {
-        return;
+    if let Some((event_id, data)) = event {
+        db.after_event_logged(event_id, "status", instance_name, &data);
     }
-
-    let position = current_data.as_ref().map(|d| d.last_event_id).unwrap_or(0);
-    let mut data = serde_json::json!({
-        "status": status,
-        "context": context,
-        "position": position,
-    });
-    if !detail.is_empty() {
-        data["detail"] = serde_json::json!(detail);
-    }
-    if !msg_ts.is_empty() {
-        data["msg_ts"] = serde_json::json!(msg_ts);
-    }
-    // old_* differs from the prior status event when set_gate_status() touched
-    // the row without logging (tui:* gate context churns silently).
-    data["old_status"] = serde_json::json!(old_status);
-    data["old_context"] =
-        serde_json::json!(current_data.as_ref().map(|d| d.status_context.as_str()));
-    data["old_detail"] = serde_json::json!(current_data.as_ref().map(|d| d.status_detail.as_str()));
-    data["new_status"] = serde_json::json!(status);
-    data["new_context"] = serde_json::json!(context);
-    data["new_detail"] = serde_json::json!(detail);
-    data["writer"] = serde_json::json!(format!("{}:{}", writer.file(), writer.line()));
-    if let Some(session_id) = current_data.as_ref().and_then(|d| d.session_id.as_deref()) {
-        data["session"] = serde_json::json!(session_id);
-    }
-    if let Some(agent_id) = current_data.as_ref().and_then(|d| d.agent_id.as_deref()) {
-        data["agent_id"] = serde_json::json!(agent_id);
-    }
-    if !tool_name.is_empty() {
-        data["tool_name"] = serde_json::json!(tool_name);
-    }
-    if !tool_use_id.is_empty() {
-        data["tool_use_id"] = serde_json::json!(tool_use_id);
-    }
-    let _ = db.log_event("status", instance_name, &data);
 }
 
 /// Delete placeholder instances that have been launching too long.
@@ -754,6 +779,125 @@ pub fn cleanup_stale_placeholders(db: &HcomDb) -> i32 {
     deleted
 }
 
+/// Minimum spacing between opportunistic dead-process sweeps (see
+/// [`reap_dead_processes_throttled`]).
+const DEAD_PROCESS_SWEEP_INTERVAL_SECS: f64 = 30.0;
+const DEAD_PROCESS_SWEEP_KV: &str = "_dead_process_sweep_at";
+const ORPHAN_ENDPOINT_GRACE_SECS: f64 = 60.0;
+
+/// What a row's stored process identity says about its process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrackedProcess {
+    /// The recorded process incarnation is still running.
+    Alive,
+    /// It was gone and the row has been stopped (snapshot written, row deleted).
+    Reaped,
+    /// It was gone but the row couldn't be stopped.
+    ReapFailed(String),
+    /// Nothing to verify: remote, launching, or no stored identity.
+    Unverifiable,
+}
+
+/// Check `data`'s tracked process and stop the row if that process is
+/// verifiably gone (its PID is dead or now belongs to a different process
+/// incarnation). The stored status is deliberately ignored: several paths
+/// mark a live process `inactive` (soft-finalize, StopFailure), so only the
+/// identity can tell. Rows without a stored identity are left to the
+/// clock-based cleanup: plain liveness can't rule out PID reuse.
+pub fn reap_if_process_gone(db: &HcomDb, data: &InstanceRow) -> TrackedProcess {
+    if data.status == ST_LAUNCHING
+        || crate::instances::is_launching_placeholder(data)
+        || data.origin_device_id.is_some()
+    {
+        return TrackedProcess::Unverifiable;
+    }
+    let (Some(pid), Some(expected_identity)) = (
+        data.pid.and_then(|pid| u32::try_from(pid).ok()),
+        data.pid_identity(),
+    ) else {
+        return TrackedProcess::Unverifiable;
+    };
+    let current_identity = crate::sys::process::identity(pid);
+    let original_process_gone = match current_identity.as_deref() {
+        Some(current) => current != expected_identity,
+        None => !crate::sys::process::is_alive(pid),
+    };
+    if !original_process_gone {
+        return TrackedProcess::Alive;
+    }
+
+    crate::log::log_info(
+        "cleanup",
+        "process_identity_gone",
+        &format!(
+            "instance={} pid={} expected={} current={}",
+            data.name,
+            pid,
+            expected_identity,
+            current_identity.as_deref().unwrap_or("<gone>")
+        ),
+    );
+    // Guarded by the inspected incarnation: never signals, and loses to any
+    // concurrent rebind of the row to a new process.
+    use crate::hooks::common::StopOutcome;
+    match crate::hooks::common::stop_instance_if_pid_identity(
+        db,
+        &data.name,
+        "system",
+        "process_exit",
+        pid,
+        &expected_identity,
+    ) {
+        StopOutcome::Stopped => TrackedProcess::Reaped,
+        // Someone else stopped it, or a new process claimed the row meanwhile.
+        StopOutcome::AlreadyStopped => match db.get_instance_full(&data.name) {
+            Ok(None) => TrackedProcess::Reaped,
+            Ok(Some(current)) => reap_if_process_gone(db, &current),
+            Err(e) => TrackedProcess::ReapFailed(e.to_string()),
+        },
+        StopOutcome::RetryableError(e) => TrackedProcess::ReapFailed(e),
+    }
+}
+
+/// Stop every local instance whose tracked process is verifiably gone.
+/// Identity-only: no clock inference, so it is safe during wake grace.
+/// Returns the number stopped, or `None` if instances couldn't be listed.
+fn reap_dead_processes(db: &HcomDb) -> Option<i32> {
+    let instances = db.iter_instances_full().ok()?;
+    Some(
+        instances
+            .iter()
+            .filter(|data| reap_if_process_gone(db, data) == TrackedProcess::Reaped)
+            .count() as i32,
+    )
+}
+
+/// Stop dead-process rows (see [`reap_if_process_gone`]) at most once per interval across all hcom
+/// processes. Cheap enough for every CLI command: one KV read in the common
+/// case, and after a reboot or crash the first command clears the dead rows.
+pub fn reap_dead_processes_throttled(db: &HcomDb) -> i32 {
+    let now = crate::shared::time::now_epoch_f64();
+    let last = db
+        .kv_get(DEAD_PROCESS_SWEEP_KV)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    // A last-sweep time in the future means the clock moved backwards.
+    if last <= now && now - last < DEAD_PROCESS_SWEEP_INTERVAL_SECS {
+        return 0;
+    }
+    let Some(reaped) = reap_dead_processes(db) else {
+        // Enumeration failed: leave the stamp so the next command retries.
+        return 0;
+    };
+    let _ = db.prune_orphan_endpoints(ORPHAN_ENDPOINT_GRACE_SECS);
+    // Stamp only a completed sweep; an interrupted one is retried next time.
+    // Concurrent duplicate sweeps are harmless (every stop is guarded).
+    let _ = db.kv_set(DEAD_PROCESS_SWEEP_KV, Some(&now.to_string()));
+    reaped
+}
+
 /// Delete instances that have been inactive too long.
 /// Three tiers: exit contexts (1 min), stale (1 hr), other inactive (12 hr).
 pub fn cleanup_stale_instances(
@@ -763,36 +907,28 @@ pub fn cleanup_stale_instances(
 ) -> i32 {
     // Short-lived callers dominate this path (it runs from `hcom list`), and
     // they cannot detect a wake on their own — see is_in_wake_grace_shared.
-    if is_in_wake_grace_shared(db) {
-        return 0;
+    // Wake grace only suppresses clock-based inference below; a stored process
+    // identity mismatch is direct evidence that the original process is gone.
+    let in_wake_grace = is_in_wake_grace_shared(db);
+    if !in_wake_grace {
+        cleanup_stale_remote_instances(db);
     }
-
-    cleanup_stale_remote_instances(db);
 
     let mut deleted = 0;
 
     if let Ok(instances) = db.iter_instances_full() {
         for data in &instances {
-            if tracked_process_identity_is_gone(data) {
-                // Clear the stale PID before the normal stop path. If the
-                // numeric PID has already been reused, stop_instance must not
-                // signal or preserve the unrelated replacement process.
-                let cleared = db
-                    .conn()
-                    .execute(
-                        "UPDATE instances SET pid = NULL WHERE name = ?1 AND pid = ?2",
-                        rusqlite::params![data.name, data.pid],
-                    )
-                    .unwrap_or(0);
-                if cleared == 1 {
-                    crate::hooks::common::stop_instance(
-                        db,
-                        &data.name,
-                        "system",
-                        "exit:process_gone",
-                    );
+            // Direct evidence beats clock inference, even inside wake grace.
+            match reap_if_process_gone(db, data) {
+                TrackedProcess::Reaped => {
                     deleted += 1;
+                    continue;
                 }
+                TrackedProcess::ReapFailed(_) => continue,
+                TrackedProcess::Alive | TrackedProcess::Unverifiable => {}
+            }
+
+            if in_wake_grace {
                 continue;
             }
 
@@ -828,9 +964,10 @@ pub fn cleanup_stale_instances(
             // PID. Exit contexts are exempt: those record an end that was
             // observed, not inferred.
             //
-            // Tradeoff: a recycled PID can keep a dead row listed. That costs a
-            // stale line in `hcom list`; the opposite mistake costs a running
-            // agent.
+            // Rows with a stored pid_identity already had PID reuse ruled out
+            // above. For legacy rows without one, a recycled PID can keep a dead
+            // row listed. That costs a stale line in `hcom list`; the opposite
+            // mistake costs a running agent.
             if reason != "exit_cleanup"
                 && let Some(pid) = data.pid
                 && crate::sys::process::is_alive(pid as u32)
@@ -846,44 +983,23 @@ pub fn cleanup_stale_instances(
                 continue;
             }
 
-            if crate::hooks::common::stop_instance(db, &data.name, "system", reason)
-                == crate::hooks::common::StopOutcome::Stopped
+            let stop_outcome = if reason != "exit_cleanup"
+                && let Some(pid) = data.pid.and_then(|pid| u32::try_from(pid).ok())
+                && let Some(identity) = data.pid_identity()
             {
+                crate::hooks::common::stop_instance_if_pid_identity(
+                    db, &data.name, "system", reason, pid, &identity,
+                )
+            } else {
+                crate::hooks::common::stop_instance(db, &data.name, "system", reason)
+            };
+            if stop_outcome == crate::hooks::common::StopOutcome::Stopped {
                 deleted += 1;
             }
         }
     }
 
     deleted
-}
-
-/// A persisted process identity combines PID with the process incarnation's
-/// start time (and boot ID where available), so this remains safe across PID
-/// reuse and reboots. Older rows without that identity retain heartbeat-based
-/// cleanup behavior.
-fn tracked_process_identity_is_gone(data: &InstanceRow) -> bool {
-    if data.status == ST_INACTIVE || data.status == ST_LAUNCHING || data.origin_device_id.is_some()
-    {
-        return false;
-    }
-    let Some(pid) = data.pid.and_then(|pid| u32::try_from(pid).ok()) else {
-        return false;
-    };
-    let Some(expected) = data
-        .launch_context
-        .as_deref()
-        .and_then(|context| serde_json::from_str::<serde_json::Value>(context).ok())
-        .and_then(|context| {
-            context
-                .get("process_identity")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        })
-    else {
-        return false;
-    };
-
-    !crate::sys::process::has_identity(pid, &expected)
 }
 
 fn cleanup_stale_remote_instances(db: &HcomDb) {
@@ -1001,6 +1117,350 @@ mod tests {
 
         assert_eq!(deleted, 0, "a live process must never be unlinked");
         assert!(instance_exists(&db, "alive"));
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_cleanup_reaps_recycled_pid_before_stale_timeout() {
+        let _guard = wake_test_guard();
+        let (db, path) = setup_test_db();
+
+        let pid = std::process::id() as i64;
+        insert_stale_active(&db, "recycled", 1, 1, pid);
+        db.conn()
+            .execute(
+                "UPDATE instances
+                 SET launch_context = '{\"pid_identity\":\"different-process-incarnation\"}'
+                 WHERE name = 'recycled'",
+                [],
+            )
+            .unwrap();
+
+        let deleted = cleanup_stale_instances(&db, 3600, 3600);
+
+        assert_eq!(deleted, 1);
+        assert!(!instance_exists(&db, "recycled"));
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_cleanup_spares_launch_placeholder_with_dead_provisional_pid() {
+        let _guard = wake_test_guard();
+        let (db, path) = setup_test_db();
+        let now = now_epoch_i64();
+        db.conn()
+            .execute(
+                "INSERT INTO instances
+                    (name, tool, status, status_context, status_time, created_at, pid, launch_context)
+                 VALUES ('launching', 'codex', 'pending', 'new', ?, ?, ?, ?)",
+                rusqlite::params![
+                    now,
+                    now as f64,
+                    DEAD_PID,
+                    r#"{"pid_identity":"provisional-launcher"}"#
+                ],
+            )
+            .unwrap();
+
+        let deleted = cleanup_stale_instances(&db, 3600, 3600);
+
+        assert_eq!(deleted, 0);
+        assert!(
+            instance_exists(&db, "launching"),
+            "startup cleanup must not retire a launch placeholder before PTY binding"
+        );
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_cleanup_reaps_identity_mismatch_during_wake_grace() {
+        let _guard = wake_test_guard();
+        let (db, path) = setup_test_db();
+
+        let pid = std::process::id() as i64;
+        insert_stale_active(&db, "rebooted", 1, 1, pid);
+        db.conn()
+            .execute(
+                "UPDATE instances
+                 SET launch_context = '{\"pid_identity\":\"previous-boot-process\"}'
+                 WHERE name = 'rebooted'",
+                [],
+            )
+            .unwrap();
+        let grace_until = now_epoch_f64() + WAKE_GRACE_PERIOD;
+        db.kv_set("_wake_grace_until", Some(&grace_until.to_string()))
+            .unwrap();
+
+        let deleted = cleanup_stale_instances(&db, 3600, 3600);
+
+        assert_eq!(deleted, 1, "process identity is stronger than wake grace");
+        assert!(!instance_exists(&db, "rebooted"));
+        reset_wake_state_for_test();
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_cleanup_spares_matching_process_identity() {
+        let _guard = wake_test_guard();
+        let (db, path) = setup_test_db();
+
+        let pid = std::process::id();
+        insert_stale_active(&db, "same-process", 3700, 3700, pid as i64);
+        db.update_instance_pid("same-process", pid).unwrap();
+
+        let deleted = cleanup_stale_instances(&db, 3600, 3600);
+
+        assert_eq!(deleted, 0);
+        assert!(instance_exists(&db, "same-process"));
+        cleanup(path);
+    }
+
+    fn insert_with_identity(db: &HcomDb, name: &str, pid: u32, identity: &str) {
+        insert_stale_active(db, name, 0, 0, pid as i64);
+        db.update_instance_pid_with_identity(name, pid, Some(identity))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_throttled_sweep_reaps_once_per_interval() {
+        let _guard = wake_test_guard();
+        let (db, path) = setup_test_db();
+        let pid = std::process::id();
+
+        // Fresh heartbeat: only the identity mismatch can retire these rows.
+        insert_with_identity(&db, "first", pid, "previous-boot-process");
+        assert_eq!(reap_dead_processes_throttled(&db), 1);
+        assert!(!instance_exists(&db, "first"));
+
+        insert_with_identity(&db, "second", pid, "previous-boot-process");
+        assert_eq!(
+            reap_dead_processes_throttled(&db),
+            0,
+            "a sweep inside the interval must be skipped"
+        );
+        assert!(instance_exists(&db, "second"));
+
+        // A last-sweep stamp from the future (clock moved back) doesn't block.
+        db.kv_set(
+            DEAD_PROCESS_SWEEP_KV,
+            Some(&(now_epoch_f64() + 3600.0).to_string()),
+        )
+        .unwrap();
+        assert_eq!(reap_dead_processes_throttled(&db), 1);
+        assert!(!instance_exists(&db, "second"));
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_sweep_reaps_dead_process_marked_inactive() {
+        let _guard = wake_test_guard();
+        let (db, path) = setup_test_db();
+        let pid = std::process::id();
+        // StopFailure and soft-finalize mark a row inactive without stopping it.
+        insert_with_identity(&db, "failed", pid, "previous-boot-process");
+        db.set_status("failed", ST_INACTIVE, "failure:model_not_found")
+            .unwrap();
+        insert_stale_active(&db, "live", 0, 0, pid as i64);
+        db.update_instance_pid("live", pid).unwrap();
+        db.set_status("live", ST_INACTIVE, "exit:turn_end").unwrap();
+
+        assert_eq!(reap_dead_processes(&db), Some(1));
+        assert!(!instance_exists(&db, "failed"));
+        assert!(instance_exists(&db, "live"), "a live process is kept");
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_sweep_retires_virtual_children_with_dead_parent() {
+        let _guard = wake_test_guard();
+        let (db, path) = setup_test_db();
+        let pid = std::process::id();
+        let set_parent = |child: &str, column: &str, value: &str| {
+            db.conn()
+                .execute(
+                    &format!("UPDATE instances SET {column} = ? WHERE name = ?"),
+                    rusqlite::params![value, child],
+                )
+                .unwrap();
+        };
+
+        // Crashed root with a native subagent (no process of its own) and a
+        // session subagent: both ran inside the dead process.
+        insert_with_identity(&db, "root", pid, "previous-boot-process");
+        set_parent("root", "session_id", "root-session");
+        insert_stale_active(&db, "root_task_1", 0, 0, 0);
+        db.conn()
+            .execute(
+                "UPDATE instances SET pid = NULL WHERE name = 'root_task_1'",
+                [],
+            )
+            .unwrap();
+        set_parent("root_task_1", "parent_name", "root");
+        insert_stale_active(&db, "root_task_2", 0, 0, 0);
+        db.conn()
+            .execute(
+                "UPDATE instances SET pid = NULL WHERE name = 'root_task_2'",
+                [],
+            )
+            .unwrap();
+        set_parent("root_task_2", "parent_session_id", "root-session");
+
+        // A child with its own live process may outlive its parent.
+        insert_with_identity(&db, "other", pid, "previous-boot-process");
+        insert_stale_active(&db, "spawned", 0, 0, pid as i64);
+        db.update_instance_pid("spawned", pid).unwrap();
+        set_parent("spawned", "parent_name", "other");
+
+        assert_eq!(reap_dead_processes(&db), Some(1));
+        assert!(!instance_exists(&db, "root"));
+        assert!(!instance_exists(&db, "root_task_1"));
+        assert!(!instance_exists(&db, "root_task_2"));
+        assert!(
+            instance_exists(&db, "other"),
+            "deferred behind a live child"
+        );
+        assert!(instance_exists(&db, "spawned"));
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_sweep_leaves_rows_without_identity_to_clock_cleanup() {
+        let _guard = wake_test_guard();
+        let (db, path) = setup_test_db();
+        insert_stale_active(&db, "legacy", 0, 0, DEAD_PID);
+
+        assert_eq!(reap_dead_processes(&db), Some(0));
+        assert!(instance_exists(&db, "legacy"));
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_instance_pid_reused() {
+        let _guard = wake_test_guard();
+        let (db, path) = setup_test_db();
+        let pid = std::process::id();
+        let row = |name: &str| db.get_instance_full(name).unwrap().unwrap();
+
+        insert_stale_active(&db, "mine", 0, 0, pid as i64);
+        db.update_instance_pid("mine", pid).unwrap();
+        assert!(!row("mine").pid_reused(pid));
+
+        insert_with_identity(&db, "reused", pid, "previous-boot-process");
+        let reused = row("reused");
+        assert!(reused.pid_reused(pid));
+        // Decided from the snapshot: deleting the row doesn't change it.
+        db.delete_instance("reused").unwrap();
+        assert!(reused.pid_reused(pid));
+
+        // Gone is not reused: its group/pane may still need cleanup.
+        insert_with_identity(&db, "gone", DEAD_PID as u32, "exited-process");
+        assert!(!row("gone").pid_reused(DEAD_PID as u32));
+
+        // No stored identity: can't tell, behave as before identities existed.
+        insert_stale_active(&db, "legacy", 0, 0, pid as i64);
+        assert!(!row("legacy").pid_reused(pid));
+        cleanup(path);
+    }
+
+    /// A headless runner whose group leader died must still have its group
+    /// signalled on stop, or the children it left behind run on unowned.
+    #[cfg(unix)]
+    #[test]
+    fn test_stop_signals_group_of_dead_headless_leader() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        let _guard = wake_test_guard();
+        let (db, path) = setup_test_db();
+
+        let mut leader = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 & echo $!; exit 0"])
+            .stdout(std::process::Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let leader_pid = leader.id();
+        let mut line = String::new();
+        std::io::BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let child_pid: u32 = line.trim().parse().unwrap();
+        leader.wait().unwrap();
+        assert!(crate::sys::process::is_alive(child_pid));
+
+        insert_with_identity(&db, "runner", leader_pid, "exited-leader");
+        db.conn()
+            .execute(
+                "UPDATE instances SET background = 1 WHERE name = 'runner'",
+                [],
+            )
+            .unwrap();
+
+        crate::hooks::common::stop_instance(&db, "runner", "test", "killed");
+
+        // The orphaned child is reaped by PID 1; where that is slow (minimal
+        // containers) a terminated child lingers as a zombie, which kill(0)
+        // still reports. Count a zombie as gone.
+        let running = |pid: u32| {
+            crate::sys::process::is_alive(pid)
+                && std::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .output()
+                    .map(|o| {
+                        !String::from_utf8_lossy(&o.stdout)
+                            .trim_start()
+                            .starts_with('Z')
+                    })
+                    .unwrap_or(true)
+        };
+        let mut child_gone = false;
+        for _ in 0..30 {
+            if !running(child_pid) {
+                child_gone = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        if !child_gone {
+            unsafe { libc::kill(child_pid as i32, libc::SIGKILL) };
+        }
+        assert!(
+            child_gone,
+            "surviving child of a dead leader was not signalled"
+        );
+        cleanup(path);
+    }
+
+    /// A headless row whose PID now belongs to an unrelated process must be
+    /// stopped without signalling that process's group.
+    #[cfg(unix)]
+    #[test]
+    fn test_stop_does_not_signal_reused_headless_pid() {
+        use std::os::unix::process::CommandExt;
+        let _guard = wake_test_guard();
+        let (db, path) = setup_test_db();
+
+        let mut bystander = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = bystander.id();
+        insert_with_identity(&db, "ghost", pid, "previous-boot-process");
+        db.conn()
+            .execute(
+                "UPDATE instances SET background = 1 WHERE name = 'ghost'",
+                [],
+            )
+            .unwrap();
+
+        crate::hooks::common::stop_instance(&db, "ghost", "test", "killed");
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let still_running = bystander.try_wait().unwrap().is_none();
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+        assert!(still_running, "stop signalled a process it doesn't own");
+        assert!(!instance_exists(&db, "ghost"));
         cleanup(path);
     }
 
@@ -1709,7 +2169,7 @@ WARNING: proceeding, even though we could not update PATH: Operation not permitt
         assert!(
             row.launch_context
                 .as_deref()
-                .is_some_and(|context| context.contains("process_identity"))
+                .is_some_and(|context| context.contains("pid_identity"))
         );
         assert_eq!(cleanup_stale_instances(&db, 0, 0), 0);
         assert!(db.get_instance_full("alive").unwrap().is_some());
@@ -1730,7 +2190,7 @@ WARNING: proceeding, even though we could not update PATH: Operation not permitt
                 rusqlite::params![
                     now,
                     std::process::id() as i64,
-                    r#"{"process_identity":"different-incarnation"}"#
+                    r#"{"pid_identity":"different-incarnation"}"#
                 ],
             )
             .unwrap();

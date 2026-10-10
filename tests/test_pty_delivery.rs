@@ -5,7 +5,7 @@
 //!
 //! Requires:
 //! - tmux installed and available by default, or another terminal preset via HCOM_TEST_TERMINAL
-//! - Target tool CLI installed (claude/gemini/codex/opencode/kilo/pi/omp/antigravity/cursor/kimi/copilot)
+//! - Target tool CLI installed (claude/gemini/codex/opencode/kilo/pi/omp/antigravity/cursor/kimi/copilot/qoder)
 //!
 //! Phases (claude/gemini/codex/antigravity/cursor/copilot):
 //! 1. Launch tool via `hcom 1 <tool>` with HCOM_TERMINAL=<terminal>
@@ -65,32 +65,36 @@ macro_rules! logln {
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-/// Ready patterns — must match `IntegrationSpec.ready_pattern`. This test is
+/// Ready patterns — each must be one of `IntegrationSpec.ready_patterns` (the
+/// one visible under the args these tests launch with). This test is
 /// an integration test against the hcom binary so it can't import the crate;
 /// the patterns are short and rarely change, drift is caught by the test
 /// itself when the expected pattern fails to appear on screen.
-fn ready_pattern(tool: &str) -> &'static str {
+fn ready_patterns(tool: &str) -> &'static [&'static str] {
     match tool {
-        "claude" => "? for shortcuts",
-        "codex" => "\u{203a} ",
-        "gemini" => "Type your message",
-        "opencode" => "ctrl+p commands",
+        // Default mode shows "? for shortcuts"; other permission modes show
+        // "<mode> on (<binding> to cycle)" instead.
+        "claude" => &["? for shortcuts", "to cycle)"],
+        "codex" => &["\u{203a} ", "\u{bb} "],
+        "gemini" => &["Type your message"],
+        "opencode" => &["ctrl+p commands"],
         // Kilo is an OpenCode-family fork: same TUI footer.
-        "kilo" => "ctrl+p commands",
-        "pi" => "/ commands",
+        "kilo" => &["ctrl+p commands"],
+        "pi" => &["/ commands"],
         // OMP (Oh My Pi) has no reliable on-screen ready marker: its only chrome
         // candidates live in the preset/theme-configurable status line. Launch
         // readiness is proven by the hcom extension bind instead
-        // (`launch_ready_on_plugin_bind`), so the spec ready_pattern is empty and
+        // (`launch_ready_on_plugin_bind`), so the spec ready_patterns is empty and
         // is_ready() is always true — same handling as cursor here. See OMP spec.
-        "omp" => "",
-        "antigravity" => "? for shortcuts",
-        // Cursor has no stable ASCII ready footer (spec ready_pattern is empty,
+        "omp" => &[],
+        "antigravity" => &["? for shortcuts"],
+        // Cursor has no stable ASCII ready footer (spec ready_patterns is empty,
         // so is_ready() is always true); readiness is asserted via ready/
         // prompt_empty directly. has_ready_pattern() gates the pattern check off
         // for cursor so it isn't run vacuously against an empty needle.
-        "cursor" => "",
-        "copilot" => "/ commands",
+        "cursor" => &[],
+        "copilot" => &["/ commands"],
+        "qoder" => &["Type your message", "? for shortcuts"],
         _ => panic!("Unknown tool: {tool}"),
     }
 }
@@ -104,6 +108,7 @@ fn prompt_marker(tool: &str) -> &'static str {
         "antigravity" => ">",
         "cursor" => "→",
         "copilot" => "❯",
+        "qoder" => ">",
         _ => panic!("No prompt marker for {tool}"),
     }
 }
@@ -117,6 +122,7 @@ fn frame_marker(tool: &str) -> Option<&'static str> {
         "antigravity" => Some("─"),
         "cursor" => None,
         "copilot" => None,
+        "qoder" => Some("─"),
         _ => None,
     }
 }
@@ -133,6 +139,7 @@ fn gate_block_context(tool: &str) -> &'static str {
         // only warns on mismatch).
         "cursor" => "tui:prompt-has-text",
         "copilot" => "tui:prompt-has-text",
+        "qoder" => "tui:prompt-has-text",
         _ => panic!("No gate block context for {tool}"),
     }
 }
@@ -157,7 +164,7 @@ fn require_ready(tool: &str) -> bool {
 fn clean_prompt_delivery_timeout(tool: &str) -> Duration {
     match tool {
         // Turn-bounded delivery: agentStop/followup_message fires at end of a full model turn
-        "cursor" | "copilot" => Duration::from_secs(60),
+        "cursor" | "copilot" | "qoder" => Duration::from_secs(60),
         _ => Duration::from_secs(20),
     }
 }
@@ -453,17 +460,17 @@ fn validate_screen_schema(screen: &serde_json::Value) {
 }
 
 /// Returns true if this tool has an ASCII ready-pattern footer to match.
-/// Cursor signals readiness via prompt-empty instead (spec ready_pattern is
+/// Cursor signals readiness via prompt-empty instead (spec ready_patterns is
 /// empty), so there is no pattern to assert — callers check `ready`/`prompt_empty`
 /// directly rather than running a pattern match that would pass on `contains("")`.
 fn has_ready_pattern(tool: &str) -> bool {
-    !ready_pattern(tool).is_empty()
+    !ready_patterns(tool).is_empty()
 }
 
 fn validate_ready_pattern(screen: &serde_json::Value, tool: &str) {
-    let pattern = ready_pattern(tool);
+    let patterns = ready_patterns(tool);
     assert!(
-        !pattern.is_empty(),
+        !patterns.is_empty(),
         "validate_ready_pattern called for {tool}, which has no ready pattern; \
          guard the call with has_ready_pattern() so the check isn't vacuous"
     );
@@ -474,13 +481,13 @@ fn validate_ready_pattern(screen: &serde_json::Value, tool: &str) {
         .filter_map(|l| l.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    let present = screen_text.contains(pattern);
+    let present = patterns.iter().any(|p| screen_text.contains(p));
 
     if screen["ready"].as_bool().unwrap() && !present {
-        panic!("ready=true but ready pattern '{pattern}' not found in screen lines");
+        panic!("ready=true but no ready pattern of {patterns:?} found in screen lines");
     }
     if !screen["ready"].as_bool().unwrap() && present {
-        eprintln!("  WARN: ready=false but pattern '{pattern}' found in screen (transient?)");
+        eprintln!("  WARN: ready=false but a pattern of {patterns:?} is on screen (transient?)");
     }
 }
 
@@ -712,11 +719,13 @@ fn run_pty_test(tool: &str) {
 
     let model_flag = match tool {
         "claude" => " --model haiku",
-        "codex" => " --model gpt-5.4-mini",
+        "codex" => " --model gpt-6-luna",
         "gemini" => " --model gemini-2.5-flash-lite",
         // `auto` is the only model guaranteed to launch across cursor plan tiers
         // (named models error on free plans).
         "cursor" => " --model auto",
+        // qoder: Qwen3.8-Flash is the free model; the default one is paid.
+        "qoder" => " --model Qwen3.8-Flash",
         // copilot: no flag — its default model is probably cheap.
         _ => "",
     };
@@ -800,8 +809,8 @@ fn run_pty_test(tool: &str) {
         validate_ready_pattern(&screen, tool);
         logln!(
             log,
-            "  OK: Ready pattern '{}' consistent",
-            ready_pattern(tool)
+            "  OK: Ready patterns {:?} consistent",
+            ready_patterns(tool)
         );
     } else {
         logln!(
@@ -1233,8 +1242,8 @@ fn run_pty_test_plugin_family(tool: &str, read_hook: &str) {
                 validate_ready_pattern(&screen, tool);
                 logln!(
                     log,
-                    "  OK: Ready pattern '{}' consistent",
-                    ready_pattern(tool)
+                    "  OK: Ready patterns {:?} consistent",
+                    ready_patterns(tool)
                 );
             } else {
                 logln!(
@@ -1258,8 +1267,8 @@ fn run_pty_test_plugin_family(tool: &str, read_hook: &str) {
         validate_ready_pattern(&screen, tool);
         logln!(
             log,
-            "  OK: Ready pattern '{}' consistent",
-            ready_pattern(tool)
+            "  OK: Ready patterns {:?} consistent",
+            ready_patterns(tool)
         );
     }
     assert!(
@@ -1523,4 +1532,10 @@ fn test_pty_cursor() {
 #[ignore]
 fn test_pty_copilot() {
     run_pty_test("copilot");
+}
+
+#[test]
+#[ignore]
+fn test_pty_qoder() {
+    run_pty_test("qoder");
 }

@@ -9,11 +9,140 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 use support::{Hcom, parse_hcom_marker};
 
+#[cfg(windows)]
+#[test]
+fn windows_pty_answers_startup_queries_while_waiting_for_terminal_metadata() {
+    let h = Hcom::new();
+    let name = h.start();
+    let process_id = "cpr-startup-metadata";
+    let id_dir = h.hcom_dir.join(".tmp/terminal_ids");
+    std::fs::create_dir_all(&id_dir).unwrap();
+    let id_file = id_dir.join(process_id);
+    let log_file = h.hcom_dir.join(".tmp/logs/hcom.log");
+
+    // The terminal ID arrives only once the proxy has answered ConPTY's
+    // cursor query. Before the fix, metadata collection finished (and missed
+    // this ID) before the reader could answer; slow launches also leaked the
+    // expired cursor reply into the child's prompt.
+    let terminal = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if std::fs::read_to_string(&log_file)
+                .unwrap_or_default()
+                .contains("\"event\":\"startup.dsr_answered\"")
+            {
+                std::fs::write(id_file, "terminal-after-cpr").unwrap();
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    });
+    let output = h
+        .cmd()
+        .env("HCOM_INSTANCE_NAME", &name)
+        .env("HCOM_PROCESS_ID", process_id)
+        // Ignore pane IDs inherited from the terminal running this test.
+        .env("HCOM_LAUNCHED_PRESET", "cpr-test-without-pane")
+        .args([
+            "pty",
+            "codex",
+            "--hcom-tool-path",
+            "cmd.exe",
+            "/d",
+            "/c",
+            "echo CPR_CHILD_READY",
+        ])
+        .output()
+        .unwrap();
+    assert!(terminal.join().unwrap(), "proxy did not answer startup CPR");
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("CPR_CHILD_READY"));
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).unwrap();
+    let context: String = conn
+        .query_row(
+            "SELECT launch_context FROM instances WHERE name = ?1",
+            [&name],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let context: serde_json::Value = serde_json::from_str(&context).unwrap();
+    assert_eq!(context["terminal_id"], "terminal-after-cpr");
+}
+
+#[test]
+fn windows_hook_cleanup_preserves_foreign_hooks_and_stays_in_fixture() {
+    let h = Hcom::new();
+    for (tool, event, suffix, filename) in [
+        (
+            "claude",
+            "SessionStart",
+            "claude-sessionstart",
+            "settings.json",
+        ),
+        (
+            "cursor",
+            "sessionStart",
+            "cursor-sessionstart",
+            "hooks.json",
+        ),
+        ("codex", "SessionStart", "codex-sessionstart", "hooks.json"),
+    ] {
+        let dir = h.home.join(format!(".{tool}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let handlers = serde_json::json!([
+            {"type": "command", "command": format!("C:/dev/hcom.exe {suffix}")},
+            {"type": "command", "command": "user-hook"},
+            {"type": "command", "command": "echo \"hcom cursor-stop\""}
+        ]);
+        let hooks = if tool == "cursor" {
+            serde_json::json!({"hooks": {event: handlers}})
+        } else {
+            serde_json::json!({"hooks": {event: [{"hooks": handlers}]}})
+        };
+        let path = dir.join(filename);
+        std::fs::write(&path, hooks.to_string()).unwrap();
+        let mut command = h.cmd();
+        if tool == "codex" {
+            command.env("CODEX_HOME", &dir);
+        }
+        let output = command.args(["hooks", "remove", tool]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{tool}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let remaining = std::fs::read_to_string(path).unwrap();
+        assert!(!remaining.contains("hcom.exe"), "{tool}: {remaining}");
+        assert!(remaining.contains("user-hook"), "{tool}: {remaining}");
+        assert!(remaining.contains("echo"), "{tool}: {remaining}");
+    }
+
+    let outside = tempfile::tempdir().unwrap();
+    let sentinel = outside.path().join("hooks.json");
+    let original =
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"command":"hcom codex-sessionstart"}]}]}}"#;
+    std::fs::write(&sentinel, original).unwrap();
+    let output = h
+        .cmd()
+        .env("CODEX_HOME", outside.path())
+        .args(["hooks", "remove", "codex"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(std::fs::read_to_string(sentinel).unwrap(), original);
+}
+
 #[test]
 fn fixture_drop_terminates_registered_process_group() {
     #[cfg(unix)]
     let mut child = Command::new("sh")
-        .args(["-c", "sleep 60"])
+        .args(["-c", "exec sleep 60"])
         .process_group(0)
         .spawn()
         .expect("spawn cleanup test process group");
@@ -47,6 +176,70 @@ fn fixture_drop_terminates_registered_process_group() {
         !support::process_group_alive(pid),
         "fixture drop left process group {pid} alive"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn fixture_drop_terminates_orphan_without_instance_row() {
+    let h = Hcom::new();
+    // Only the pidfile owns this process; neither instance rows nor explicit
+    // fixture cleanup registration can discover it.
+    // Reap the descendant on group termination so zombie lifetime does not
+    // depend on the host init process. Killing only the shell still leaves it
+    // waiting for its live child, which the bounded exit check detects.
+    let ready_path = h.root_path().join("orphan-ready");
+    let mut child = Command::new("sh")
+        .args([
+            "-c",
+            r#"sleep 60 & descendant=$!; trap 'wait "$descendant"; exit 143' TERM; printf ready > "$1"; wait "$descendant""#,
+            "orphan-fixture",
+        ])
+        .arg(&ready_path)
+        .process_group(0)
+        .spawn()
+        .expect("spawn orphan process group");
+    let pid = i64::from(child.id());
+    let tmp = h.hcom_dir.join(".tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    std::fs::write(
+        tmp.join("launched_pids.json"),
+        serde_json::json!({pid.to_string(): {
+            "tool": "claude", "names": ["orphan"], "launched_at": 1.0
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    // Confirm the descendant exists without an unbounded pipe read. Register
+    // its group first so fixture cleanup also runs if readiness times out.
+    h.eventually("orphan descendant started", Duration::from_secs(3), || {
+        Ok(ready_path.exists().then_some(()))
+    });
+    drop(h);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if let Some(status) = child.try_wait().expect("poll orphan") {
+            assert!(
+                !status.success(),
+                "orphan must be terminated by fixture teardown"
+            );
+            break;
+        }
+        if Instant::now() >= deadline {
+            support::terminate_process_group(pid);
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("fixture teardown left orphan {pid} alive");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while support::process_group_alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if support::process_group_alive(pid) {
+        support::terminate_process_group(pid);
+        panic!("fixture teardown left orphan descendants in group {pid}");
+    }
 }
 
 #[test]
@@ -119,6 +312,19 @@ fn status_json_in_fresh_dir() {
         serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("status json: {e}\n{stdout}"));
     assert_eq!(v["hcom_dir"].as_str(), Some(h.path().to_str().unwrap()));
     assert_eq!(v["instances"]["total"], 0);
+}
+
+#[test]
+fn status_clean_logs_displays_path() {
+    let h = Hcom::new();
+    let (code, stdout, _stderr) = h.run(["status"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("logs:      ✓ ok"));
+    let log_path = h.path().join(".tmp/logs/hcom.log");
+    assert!(
+        stdout.contains(&log_path.display().to_string()),
+        "stdout should contain log path: {stdout}"
+    );
 }
 
 #[test]
@@ -379,6 +585,8 @@ fn start_send_events_roundtrip() {
     assert_eq!(delivered.len(), 1, "listen output={listen_out}");
     assert_eq!(delivered[0]["from"], sender.as_str());
     assert_eq!(delivered[0]["text"], "hello there");
+    let event_id = delivered[0]["event_id"].as_i64().expect("event_id");
+    assert_eq!(delivered[0]["reply_id"], event_id.to_string());
 
     let (c7, list_after_listen_out, _) = h.run(["list", "--json"]);
     assert_eq!(c7, 0);
@@ -725,9 +933,25 @@ fn bigboss_send_bypasses_identity_gate() {
 }
 
 #[test]
-fn config_unknown_key_is_not_set() {
+fn config_unknown_key_is_rejected() {
     let h = Hcom::new();
-    let (code, stdout, _stderr) = h.run(["config", "no_such_key"]);
+    let (code, _stdout, stderr) = h.run(["config", "no_such_key"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("Unknown config key 'no_such_key'"),
+        "stderr={stderr}"
+    );
+
+    // Setting a typo must not write it to config.toml either.
+    let (code, _stdout, stderr) = h.run(["config", "timout", "60"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("Did you mean: timeout?"), "stderr={stderr}");
+}
+
+#[test]
+fn config_known_unset_key_reports_not_set() {
+    let h = Hcom::new();
+    let (code, stdout, _stderr) = h.run(["config", "hints"]);
     assert_eq!(code, 0);
     assert!(stdout.contains("(not set)"), "stdout={stdout}");
 }
@@ -755,7 +979,7 @@ fn list_reconciles_a_reused_tracked_pid_without_signalling_it() {
         rusqlite::params![
             now,
             std::process::id() as i64,
-            r#"{"process_identity":"different-incarnation"}"#
+            r#"{"pid_identity":"different-incarnation"}"#
         ],
     )
     .expect("insert reused-pid fixture");
@@ -841,7 +1065,7 @@ fn antigravity_e2e_hook_dispatch() {
         .as_str()
         .expect("initial Antigravity bootstrap");
     assert!(first_context.contains("[HCOM SESSION]"));
-    assert!(first_context.contains(&format!("[hcom:{me}]")));
+    assert!(first_context.contains(&format!("--name {me}")));
     assert!(first_context.contains("RULE: SOUL INSTRUCTIONS FALLBACK"));
 
     // Verify session_id binding matches in the DB via hcom list --json
@@ -891,7 +1115,7 @@ fn antigravity_e2e_hook_dispatch() {
         .as_str()
         .expect("recurring Antigravity bootstrap");
     assert!(repeated_context.contains("[HCOM SESSION]"));
-    assert!(repeated_context.contains(&format!("[hcom:{me}]")));
+    assert!(repeated_context.contains(&format!("--name {me}")));
     assert!(
         !repeated_context.contains("RULE: SOUL INSTRUCTIONS FALLBACK"),
         "recurring preinvocation hook must not repeat fallback instructions: {repeated_context}"
@@ -943,11 +1167,11 @@ fn antigravity_e2e_hook_dispatch() {
     assert_eq!(parsed, serde_json::json!({ "decision": "allow" }));
 
     // 3. AfterTool cannot inject context for Antigravity, so it must not ack delivery.
+    // Send from bigboss: self-sends are never delivered, so they'd leave nothing pending.
     let (send_code, _, send_stderr) = h.run([
         "send",
         &format!("@{me}"),
-        "--name",
-        &me,
+        "-b",
         "--intent",
         "request",
         "--",
@@ -1157,7 +1381,7 @@ fn antigravity_agent_startup_emits_read_directive_and_recurring_turn_is_clean() 
         .as_str()
         .expect("turn 2 bootstrap");
     assert!(repeated_context.contains("[HCOM SESSION]"));
-    assert!(repeated_context.contains(&format!("[hcom:{me}]")));
+    assert!(repeated_context.contains(&format!("--name {me}")));
     assert!(
         !repeated_context.contains("## HCOM AGENT INSTRUCTIONS — SYSTEM-PROMPT FALLBACK"),
         "turn 2 must not repeat fallback header: {repeated_context}"
@@ -1442,6 +1666,220 @@ fn copilot_e2e_hook_dispatch() {
     );
 }
 
+/// Pipe a Qoder hook payload to `qoder-*` and return its stdout as JSON
+/// (`{}` when the hook wrote nothing, as no-op Qoder hooks do).
+fn run_qoder_hook(
+    h: &Hcom,
+    hook: &str,
+    process_id: &str,
+    payload: &serde_json::Value,
+) -> serde_json::Value {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut cmd = h.cmd();
+    cmd.arg(hook);
+    cmd.env("HCOM_PROCESS_ID", process_id);
+    cmd.stdin(Stdio::piped());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap_or_else(|e| panic!("spawn {hook}: {e}"));
+    {
+        let mut stdin = child.stdin.take().expect("open stdin");
+        stdin
+            .write_all(serde_json::to_string(payload).unwrap().as_bytes())
+            .unwrap();
+    }
+    let out = child
+        .wait_with_output()
+        .unwrap_or_else(|e| panic!("wait {hook}: {e}"));
+    assert_eq!(
+        out.status.code().unwrap_or(-1),
+        0,
+        "{hook} stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if stdout.trim().is_empty() {
+        return serde_json::json!({});
+    }
+    serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("{hook} json: {e}\nstdout={stdout}"))
+}
+
+/// End-to-end Qoder CLI hook lifecycle over JSON-on-stdin, with Qoder's
+/// Claude-shaped payloads and `hookSpecificOutput` replies.
+#[test]
+fn qoder_e2e_hook_dispatch() {
+    let h = Hcom::new();
+    let pid = "pid-qod-123";
+    let session_id = "sess-qod-1";
+    let transcript_path = "/home/u/.qoder/projects/p/sess-qod-1.jsonl";
+
+    let mut start_cmd = h.cmd();
+    start_cmd.arg("start");
+    start_cmd.env("HCOM_PROCESS_ID", pid);
+    start_cmd.env("QODER_CLI", "1");
+    let start_out = start_cmd.output().expect("failed to run hcom start");
+    let me = support::parse_hcom_marker(&String::from_utf8_lossy(&start_out.stdout))
+        .expect("no [hcom:NAME] marker");
+
+    // 1. UserPromptSubmit with no prior SessionStart (untrusted folder): binds
+    //    lazily and carries the bootstrap.
+    let first = run_qoder_hook(
+        &h,
+        "qoder-userpromptsubmit",
+        pid,
+        &serde_json::json!({
+            "session_id": session_id,
+            "transcript_path": transcript_path,
+            "cwd": "/tmp",
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "do a thing",
+        }),
+    );
+    assert_eq!(
+        first["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit",
+        "{first}"
+    );
+    let (code, stdout, stderr) = h.run(["list", &me, "--json"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("list json");
+    assert_eq!(v["session_id"].as_str(), Some(session_id));
+    assert_eq!(v["status"].as_str(), Some("active"));
+
+    // 2. PreToolUse records tool status and writes nothing.
+    let pre = run_qoder_hook(
+        &h,
+        "qoder-pretooluse",
+        pid,
+        &serde_json::json!({
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": { "command": "echo hello" },
+        }),
+    );
+    assert_eq!(pre, serde_json::json!({}));
+
+    // 3. A queued message is delivered by PostToolUse via additionalContext.
+    let (send_code, _, send_stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        &format!("@{me}"),
+        "--intent",
+        "request",
+        "--",
+        "ping",
+    ]);
+    assert_eq!(send_code, 0, "send stderr={send_stderr}");
+    let post = run_qoder_hook(
+        &h,
+        "qoder-posttooluse",
+        pid,
+        &serde_json::json!({
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": { "command": "echo hello" },
+            "tool_response": "hello",
+        }),
+    );
+    let injected = post["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_else(|| panic!("PostToolUse should inject additionalContext: {post}"));
+    assert!(injected.contains("ping"), "{injected:?}");
+    assert_eq!(post["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+
+    // 3b. A failed tool call delivers too, answering under its own event name.
+    let (send_code, _, send_stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        &format!("@{me}"),
+        "--intent",
+        "inform",
+        "--",
+        "after-failure",
+    ]);
+    assert_eq!(send_code, 0, "send stderr={send_stderr}");
+    let failed = run_qoder_hook(
+        &h,
+        "qoder-posttoolusefailure",
+        pid,
+        &serde_json::json!({
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": { "command": "false" },
+            "error": "Command exited with non-zero status code 1",
+        }),
+    );
+    assert_eq!(
+        failed["hookSpecificOutput"]["hookEventName"], "PostToolUseFailure",
+        "{failed}"
+    );
+    assert!(
+        failed["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or("")
+            .contains("after-failure"),
+        "{failed}"
+    );
+
+    // 4. A message queued during the turn blocks Stop with it as the reason.
+    let (send_code, _, send_stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        &format!("@{me}"),
+        "--intent",
+        "request",
+        "--",
+        "pong",
+    ]);
+    assert_eq!(send_code, 0, "send stderr={send_stderr}");
+    let stop = run_qoder_hook(
+        &h,
+        "qoder-stop",
+        pid,
+        &serde_json::json!({ "session_id": session_id, "stop_hook_active": false }),
+    );
+    assert_eq!(stop["decision"], "block", "{stop}");
+    assert!(stop["reason"].as_str().unwrap_or("").contains("pong"));
+
+    // 5. With nothing pending, Stop goes listening and writes nothing.
+    let stop = run_qoder_hook(
+        &h,
+        "qoder-stop",
+        pid,
+        &serde_json::json!({ "session_id": session_id, "stop_hook_active": true }),
+    );
+    assert_eq!(stop, serde_json::json!({}));
+    let (_, stdout, _) = h.run(["list", &me, "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("list json");
+    assert_eq!(v["status"].as_str(), Some("listening"));
+
+    // 6. SessionEnd for the bound session removes the instance; `clear` does not.
+    let _ = run_qoder_hook(
+        &h,
+        "qoder-sessionend",
+        pid,
+        &serde_json::json!({ "session_id": session_id, "reason": "clear" }),
+    );
+    let (code, _, _) = h.run(["list", &me, "--json"]);
+    assert_eq!(code, 0, "clear must not end the instance");
+    let _ = run_qoder_hook(
+        &h,
+        "qoder-sessionend",
+        pid,
+        &serde_json::json!({ "session_id": session_id, "reason": "other" }),
+    );
+    let (code, _, _) = h.run(["list", &me, "--json"]);
+    assert_ne!(
+        code, 0,
+        "SessionEnd for the bound session ends the instance"
+    );
+}
+
 /// Pipe argv to a native argv-style hook and return its parsed stdout.
 fn run_argv_hook(
     h: &Hcom,
@@ -1509,8 +1947,8 @@ fn pi_e2e_hook_dispatch() {
     assert!(
         start["bootstrap"]
             .as_str()
-            .is_some_and(|text| text.contains(&format!("[hcom:{me}]"))),
-        "pi-start should return bootstrap with the hcom marker: {start}"
+            .is_some_and(|text| text.contains(&format!("--name {me}"))),
+        "pi-start should return bootstrap with the agent identity: {start}"
     );
 
     let (code, stdout, stderr) = h.run(["list", &me, "--json"]);
@@ -3014,7 +3452,8 @@ fn kill_by_group_and_at_prefix() {
     let (code, stdout, stderr) = h.run(["kill", "workers"]);
     assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
     assert!(
-        stderr.contains("Agent 'workers' not found\nDid you mean @workers? Groups require @"),
+        stderr.contains("No agent named 'workers'")
+            && stderr.contains("\nDid you mean @workers? Groups require @"),
         "stderr={stderr}"
     );
 
@@ -3966,13 +4405,14 @@ printf '%s\n' '{"id":"request-launch","ok":true,"result":{"terminal":{"handle":"
 "#,
     )
     .expect("write fake Orca launch CLI");
-    let fake_codex = fake_bin.join("codex");
+    // Claude's per-run hooks need no CLI preflight, so a stub binary suffices.
+    let fake_claude = fake_bin.join("claude");
     std::fs::write(
-        &fake_codex,
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.131.0'; exit 0; fi\nexit 0\n",
+        &fake_claude,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '2.1.0 (Claude Code)'; exit 0; fi\nexit 0\n",
     )
-    .expect("write fake Codex CLI");
-    for executable in [&fake_orca, &fake_codex] {
+    .expect("write fake Claude CLI");
+    for executable in [&fake_orca, &fake_claude] {
         let mut permissions = std::fs::metadata(executable)
             .expect("stat fake executable")
             .permissions();
@@ -3992,7 +4432,7 @@ printf '%s\n' '{"id":"request-launch","ok":true,"result":{"terminal":{"handle":"
     .env("ORCA_CAPTURE_PATH", &capture)
     .env("HCOM_SUBAGENT_TIMEOUT", "1")
     .args([
-        "codex",
+        "claude",
         "--terminal",
         "orca",
         "--dir",
@@ -4021,7 +4461,7 @@ printf '%s\n' '{"id":"request-launch","ok":true,"result":{"terminal":{"handle":"
     );
     assert!(
         argv.windows(2)
-            .any(|pair| pair == ["--interactive-agent", "codex"])
+            .any(|pair| pair == ["--interactive-agent", "claude"])
     );
     assert_eq!(argv.last().copied(), Some("--json"));
 }
@@ -4052,13 +4492,13 @@ printf '%s\n' '{"id":"cli:terminal:close","ok":true,"result":{"close":{"handle":
 "#,
     )
     .expect("write fake Orca cleanup CLI");
-    let fake_codex = fake_bin.join("codex");
+    let fake_claude = fake_bin.join("claude");
     std::fs::write(
-        &fake_codex,
-        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.131.0'; fi\nexit 0\n",
+        &fake_claude,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo '2.1.0 (Claude Code)'; fi\nexit 0\n",
     )
-    .expect("write fake Codex CLI");
-    for executable in [&fake_orca, &fake_codex] {
+    .expect("write fake Claude CLI");
+    for executable in [&fake_orca, &fake_claude] {
         let mut permissions = std::fs::metadata(executable)
             .expect("stat fake executable")
             .permissions();
@@ -4074,7 +4514,7 @@ printf '%s\n' '{"id":"cli:terminal:close","ok":true,"result":{"close":{"handle":
         std::env::join_paths(path_entries).expect("join fake cleanup PATH"),
     )
     .env("ORCA_CAPTURE_PATH", &capture)
-    .args(["codex", "--terminal", "orca", "--as", "orca-cleanup"]);
+    .args(["claude", "--terminal", "orca", "--as", "orca-cleanup"]);
     let output = cmd.output().expect("run invalid Orca launch");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -4314,12 +4754,13 @@ fn run_events_wait_cli_oracle(timing: UnreadTiming, wait_secs: u64, expected_cod
 
     let send_ok = send_code.is_none_or(|c| c == 0);
     let pending = premature_exit.is_none();
-    // Composite oracle: first establish send_ok and pending mid-wait.
-    // In GREEN, pending=true implies cursor unchanged, preview_count <= 1 (no duplicate preview),
-    // and expected final code. Endpoint registration is diagnostic-only and not required.
-    // In RED, premature_exit is Some(ExitStatus(0)), failing immediately on pending=false.
+    // A timeout may legitimately finish before the mid-wait probe on a busy
+    // runner. Its final exit code and unchanged cursor still reject a false
+    // match. Success scenarios must remain pending until we insert the match.
+    let wait_state_ok = pending
+        || (expected_code == 1 && premature_exit.is_some_and(|status| status.code() == Some(1)));
     let oracle_passed = send_ok
-        && pending
+        && wait_state_ok
         && mid_wait_cursor == initial_cursor
         && preview_count <= 1
         && code == expected_code;
@@ -4338,4 +4779,224 @@ fn events_wait_cli_preexisting_unread_times_out_with_one() {
 #[test]
 fn events_wait_cli_arriving_unread_then_matching_status_exits_zero() {
     run_events_wait_cli_oracle(UnreadTiming::ArrivingAfterReadiness, 4, 0);
+}
+
+#[test]
+fn commands_on_stopped_agent_explain_when_and_how_to_resume() {
+    let h = Hcom::new();
+    let me = h.start();
+    let gone = h.start();
+    let (cs, _, es) = h.run(["stop", &gone]);
+    assert_eq!(cs, 0, "stop failed: {es}");
+
+    // kill/stop of an already-stopped agent is a no-op success, not "not found".
+    for cmd in ["kill", "stop"] {
+        let (code, stdout, stderr) = h.run([cmd, &gone]);
+        assert_eq!(code, 0, "{cmd}: stdout={stdout} stderr={stderr}");
+        assert!(
+            stdout.contains(&format!("'{gone}' stopped ")),
+            "{cmd}: stdout={stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("hcom r {gone}")),
+            "{cmd}: stdout={stdout}"
+        );
+    }
+
+    for args in [vec!["list", gone.as_str()], vec!["term", gone.as_str()]] {
+        let (code, _stdout, stderr) = h.run(args.clone());
+        assert_eq!(code, 1, "{args:?}");
+        assert!(
+            stderr.contains(&format!("'{gone}' stopped ")),
+            "{args:?}: stderr={stderr}"
+        );
+    }
+
+    let (code, _stdout, stderr) = h.run(["send", &format!("@{gone}"), "--name", &me, "--", "hi"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains(&format!("@{gone} stopped")) && stderr.contains(&format!("hcom r {gone}")),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
+fn unknown_agent_gets_typo_suggestion() {
+    let h = Hcom::new();
+    let me = h.start();
+    let typo: String = {
+        let mut c: Vec<char> = me.chars().collect();
+        c.swap(1, 2);
+        c.into_iter().collect()
+    };
+    if typo == me {
+        return; // name with repeated letters; swap is a no-op
+    }
+    let (code, _stdout, stderr) = h.run(["kill", &typo]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains(&format!("No agent named '{typo}'"))
+            && stderr.contains(&format!("Did you mean: {me}?")),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
+fn send_rejects_ambiguous_bare_word_and_self_target() {
+    let h = Hcom::new();
+    let me = h.start();
+    let other = h.start();
+
+    // A lone word without '@' or '--' must not silently broadcast.
+    let (code, _stdout, stderr) = h.run(["send", &other, "--name", &me]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains(&format!("Did you mean @{other}?")),
+        "stderr={stderr}"
+    );
+
+    let (code, _stdout, stderr) = h.run(["send", "hello", "--name", &me]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("hcom send -- hello"), "stderr={stderr}");
+
+    let (code, _stdout, stderr) = h.run(["send", &format!("@{me}"), "--name", &me, "--", "x"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("is you"), "stderr={stderr}");
+
+    // bigboss:DEVICE routes to bigboss, so it is also a self-only target.
+    let (code, _stdout, stderr) = h.run(["send", "-b", "@bigboss:ABCD", "--", "x"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("is you"), "stderr={stderr}");
+}
+
+#[test]
+fn unknown_command_and_tool_suggest_corrections() {
+    let h = Hcom::new();
+    let (code, _stdout, stderr) = h.run(["lst"]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("Did you mean: list?"), "stderr={stderr}");
+
+    let (code, _stdout, stderr) = h.run(["1", "claud"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("Unknown tool 'claud'") && stderr.contains("Did you mean: claude?"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
+fn send_warns_when_name_disagrees_with_the_shell_identity() {
+    let h = Hcom::new();
+    let sender = h.start_with_process_id("pid-sender");
+    let other = h.start_with_process_id("pid-other");
+
+    // pid-sender's shell is bound to `sender`, but it sends under `other` —
+    // exactly the shape of an identity that drifted after a rebind or recovery.
+    let (code, stdout, stderr) =
+        h.run_as_process("pid-sender", ["send", "--name", &other, "--", "hi"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains(&sender) && stderr.contains(&other),
+        "expected a drift warning naming both identities, got stderr={stderr}"
+    );
+}
+
+#[test]
+fn send_is_quiet_when_name_matches_the_shell_identity() {
+    let h = Hcom::new();
+    let sender = h.start_with_process_id("pid-sender");
+
+    let (code, stdout, stderr) =
+        h.run_as_process("pid-sender", ["send", "--name", &sender, "--", "hi"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        !stderr.contains("warning"),
+        "a matching --name must not warn, got stderr={stderr}"
+    );
+}
+
+#[test]
+fn send_with_from_skips_the_name_drift_warning() {
+    let h = Hcom::new();
+    let _sender = h.start_with_process_id("pid-sender");
+    let other = h.start_with_process_id("pid-other");
+
+    // With --from the sender is the external name, so --name disagreeing with
+    // the shell's binding says nothing about who is sending.
+    let (code, stdout, stderr) = h.run_as_process(
+        "pid-sender",
+        ["send", "--name", &other, "--from", "bigboss", "--", "hi"],
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        !stderr.contains("warning"),
+        "--from must suppress the drift warning, got stderr={stderr}"
+    );
+}
+
+#[test]
+fn from_in_message_text_does_not_suppress_the_name_drift_warning() {
+    let h = Hcom::new();
+    let sender = h.start_with_process_id("pid-sender");
+    let other = h.start_with_process_id("pid-other");
+
+    let (code, stdout, stderr) = h.run_as_process(
+        "pid-sender",
+        ["send", "--name", &other, "--", "use", "--from", "x"],
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains(&sender) && stderr.contains(&other),
+        "--from after -- is message text, got stderr={stderr}"
+    );
+}
+
+#[test]
+fn send_with_attached_from_skips_the_name_drift_warning() {
+    let h = Hcom::new();
+    let _sender = h.start_with_process_id("pid-sender");
+    let other = h.start_with_process_id("pid-other");
+
+    let (code, stdout, stderr) = h.run_as_process(
+        "pid-sender",
+        ["send", "--name", &other, "--from=bigboss", "--", "hi"],
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        !stderr.contains("warning"),
+        "--from=NAME must suppress the drift warning, got stderr={stderr}"
+    );
+}
+
+#[test]
+fn run_help_and_docs_flags_preserve_script_help() {
+    let h = Hcom::new();
+    let caller = h.start();
+    for args in [
+        vec!["run", "--help"],
+        vec!["run", "-h", "--name", &caller],
+        vec!["run", "docs", "--help", "--name", &caller],
+    ] {
+        let (code, stdout, stderr) = h.run(&args);
+        assert_eq!(code, 0, "{args:?}: {stderr}");
+        assert!(stdout.contains("hcom run <name>"), "{stdout}");
+        assert!(!stdout.contains("# Creating Custom Scripts"), "{stdout}");
+    }
+    let (code, stdout, stderr) = h.run(["run", "debate", "--help", "--name", &caller]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(
+        stdout.contains("Usage: hcom run debate [OPTIONS] TOPIC"),
+        "{stdout}"
+    );
+    let (code, stdout, stderr) = h.run(["run", "docs", "--scripts", "--name", &caller]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("# Creating Custom Scripts"), "{stdout}");
+    assert!(!stdout.contains("# CLI Reference"), "{stdout}");
+    let (code, stdout, stderr) = h.run(["run", "docs", "--scrpits", "--name", &caller]);
+    assert_eq!(code, 1);
+    assert!(stdout.is_empty(), "{stdout}");
+    assert!(
+        stderr.contains("Unknown docs option: --scrpits"),
+        "{stderr}"
+    );
 }

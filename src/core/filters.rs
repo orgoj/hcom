@@ -46,7 +46,23 @@ const MESSAGE_FLAGS: &[&str] = &[
 const LIFE_FLAGS: &[&str] = &["action"];
 
 /// File-write tool contexts for SQL filters.
-pub const FILE_WRITE_CONTEXTS: &str = "('tool:Write', 'tool:Edit', 'tool:NotebookEdit', 'tool:write_file', 'tool:replace', 'tool:apply_patch', 'tool:write', 'tool:edit', 'tool:write_to_file', 'tool:replace_file_content', 'tool:multi_replace_file_content', 'tool:StrReplace', 'tool:create')";
+pub const FILE_WRITE_CONTEXTS: &str = "('tool:Write', 'tool:Edit', 'tool:NotebookEdit', 'tool:write_file', 'tool:replace', 'tool:apply_patch', 'tool:write', 'tool:edit', 'tool:write_to_file', 'tool:replace_file_content', 'tool:multi_replace_file_content', 'tool:StrReplace', 'tool:create', 'tool:search_replace', 'tool:MultiEdit', 'tool:patch')";
+
+/// Whether `context` is listed in [`FILE_WRITE_CONTEXTS`].
+pub fn is_file_write_context(context: &str) -> bool {
+    FILE_WRITE_CONTEXTS.contains(&format!("'{context}'"))
+}
+
+/// SQL: `inner` event is within 30s of `outer`. The ISO-timestamp range lets
+/// SQLite walk `idx_timestamp` (callers write `+inner.type` so the planner does
+/// not pick the far less selective `idx_type`); ABS keeps the exact window.
+pub fn collision_window_sql(outer: &str, inner: &str) -> String {
+    format!(
+        "{inner}.timestamp >= strftime('%Y-%m-%dT%H:%M:%S', {outer}.timestamp, '-30 seconds') \
+         AND {inner}.timestamp < strftime('%Y-%m-%dT%H:%M:%S', {outer}.timestamp, '+31 seconds') \
+         AND ABS(strftime('%s', {outer}.timestamp) - strftime('%s', {inner}.timestamp)) < 30"
+    )
+}
 
 /// All file operation contexts.
 pub const FILE_OP_CONTEXTS: &[&str] = &[
@@ -65,10 +81,13 @@ pub const FILE_OP_CONTEXTS: &[&str] = &[
     "tool:multi_replace_file_content",
     "tool:StrReplace",
     "tool:create",
+    "tool:search_replace",
+    "tool:MultiEdit",
+    "tool:patch",
 ];
 
 /// Shell tool contexts.
-pub const SHELL_TOOL_CONTEXTS: &str = "('tool:Bash', 'tool:run_shell_command', 'tool:shell', 'tool:run_command', 'tool:Shell', 'tool:run_terminal_cmd', 'tool:execute_command', 'tool:shell_command', 'tool:bash', 'tool:powershell')";
+pub const SHELL_TOOL_CONTEXTS: &str = "('tool:Bash', 'tool:run_shell_command', 'tool:shell', 'tool:run_command', 'tool:Shell', 'tool:run_terminal_cmd', 'tool:execute_command', 'tool:shell_command', 'tool:bash', 'tool:powershell', 'tool:run_terminal_command')";
 
 /// Parsed filter values — multiple values per key (OR semantics).
 pub type FilterMap = HashMap<String, Vec<String>>;
@@ -437,13 +456,14 @@ pub fn build_sql_from_flags(filters: &FilterMap) -> Result<String, String> {
              AND events_v.status_detail != ''\n\
              AND EXISTS (\n\
              \x20   SELECT 1 FROM events_v e\n\
-             \x20   WHERE e.type = 'status' AND e.status_context IN {ctx}\n\
+             \x20   WHERE +e.type = 'status' AND e.status_context IN {ctx}\n\
              \x20   AND e.status_detail IS NOT NULL AND e.status_detail != ''\n\
              \x20   AND e.status_detail = events_v.status_detail\n\
              \x20   AND e.instance != events_v.instance\n\
-             \x20   AND ABS(strftime('%s', events_v.timestamp) - strftime('%s', e.timestamp)) < 30\n\
+             \x20   AND {window}\n\
              ))",
-            ctx = FILE_WRITE_CONTEXTS
+            ctx = FILE_WRITE_CONTEXTS,
+            window = collision_window_sql("events_v", "e"),
         );
         clauses.push(collision_sql);
     }
@@ -768,6 +788,16 @@ mod tests {
         let sql = build_sql_from_flags(&filters).unwrap();
         assert!(sql.contains("EXISTS"));
         assert!(sql.contains("ABS(strftime"));
+        assert!(sql.contains("+e.type = 'status'"));
+    }
+
+    #[test]
+    fn test_is_file_write_context() {
+        assert!(is_file_write_context("tool:Edit"));
+        assert!(is_file_write_context("tool:apply_patch"));
+        assert!(!is_file_write_context("tool:Bash"));
+        assert!(!is_file_write_context("tool:Edi"));
+        assert!(!is_file_write_context(""));
     }
 
     fn sql_context_list_contains(list: &str, operation: &str) -> bool {

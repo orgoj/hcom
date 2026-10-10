@@ -9,10 +9,24 @@
 
 use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::Write;
+use std::num::NonZeroU16;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::config::Config;
+
+fn new_parser(rows: u16, cols: u16) -> vt100::Parser {
+    vt100::Parser::new(
+        NonZeroU16::new(rows).unwrap_or(NonZeroU16::MIN),
+        NonZeroU16::new(cols).unwrap_or(NonZeroU16::MIN),
+        0,
+    )
+}
+
+fn screen_size(screen: &vt100::Screen) -> (u16, u16) {
+    let (rows, cols) = screen.size();
+    (rows.get(), cols.get())
+}
 
 /// Escape a string as a JSON string literal (with quotes).
 fn json_escape(s: &str) -> String {
@@ -127,6 +141,35 @@ fn trim_with_nbsp(s: &str) -> &str {
 const ANTIGRAVITY_ACCEPT_EDITS_STATUS: &str =
     "Accept-edits mode: file edits auto-approved (shift+tab to cycle)";
 
+/// Prompt glyph to inspect in PTY debug dumps for a rendered input row.
+///
+/// Codex can use either glyph depending on the active reasoning tier, so the
+/// dump must inspect the glyph actually present on the row rather than assuming
+/// the normal-effort prompt.
+fn debug_prompt_glyph(tool: &str, line: &str) -> Option<&'static str> {
+    use crate::tool::Tool;
+    use std::str::FromStr;
+
+    let line = line.trim_start();
+    match Tool::from_str(tool).ok()? {
+        Tool::Claude if line.contains('❯') => Some("❯"),
+        Tool::Codex if line == "»" || line.starts_with("» ") => Some("»"),
+        Tool::Codex if line == "›" || line.starts_with("› ") => Some("›"),
+        Tool::Gemini if line.contains("│ >") => Some(">"),
+        Tool::Antigravity if line.starts_with("> ") || line == ">" => Some(">"),
+        Tool::Cursor if line.contains('→') => Some("→"),
+        Tool::Copilot if line.contains('❯') => Some("❯"),
+        Tool::Qoder if line.starts_with("> ") || line == ">" => Some(">"),
+        _ => None,
+    }
+}
+
+/// A full-width `─` rule (Qoder's composer frame).
+fn is_dash_rule(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.chars().count() >= 3 && trimmed.chars().all(|c| c == '─')
+}
+
 /// Check if a line is a Gemini dash border (all ─ chars, at least 20 wide)
 fn is_dash_border(line: &str) -> bool {
     let trimmed = line.trim();
@@ -144,12 +187,14 @@ fn is_block_border(line: &str) -> bool {
 /// Screen tracker with vt100 emulation
 pub struct ScreenTracker {
     parser: vt100::Parser,
+    // Rewrites output sequences vt100 ignores (REP, HPA, CHT, CBT) before parsing.
+    vt_compat: super::vt_compat::VtCompat,
     // Current terminal dimensions, tracked independently of the parser so a
     // panicked parser can be rebuilt from scratch at the right size (see
     // `process`/`resize`).
     rows: u16,
     cols: u16,
-    ready_pattern: String,
+    ready_patterns: Vec<String>,
     waiting_approval: bool,
     // Last complete, sanitized OSC 0/2 title the wrapped tool set, cached for the
     // Combined title passthrough. Only ever holds a fully-terminated title (see
@@ -169,14 +214,34 @@ pub struct ScreenTracker {
     instance_name: Option<String>,
 }
 
+/// Codex (0.157+) draws its composer, ready pattern included, before startup
+/// finishes: input typed then is held as a draft ("Waiting for startup"), and a
+/// folder-trust screen can still take over the TUI. Its header reads
+/// `model: loading` until startup completes, and its onboarding screens, drawn
+/// over a composer whose ready-pattern row can survive underneath, end in an
+/// `enter continue · esc quit` footer. Either line means not ready.
+fn is_codex_startup_line(line: &str) -> bool {
+    is_codex_loading_header(line) || is_codex_onboarding_footer(line)
+}
+
+fn is_codex_loading_header(line: &str) -> bool {
+    line.contains("model:") && line.contains("loading") && line.contains("/model to change")
+}
+
+fn is_codex_onboarding_footer(line: &str) -> bool {
+    line.contains("enter continue") && line.contains("esc quit")
+}
+
 impl ScreenTracker {
     /// Create a new screen tracker with instance name (for debug logging)
     pub fn new_with_instance(
         rows: u16,
         cols: u16,
-        ready_pattern: &[u8],
+        ready_patterns: &[String],
         instance_name: Option<&str>,
     ) -> Self {
+        let rows = rows.max(1);
+        let cols = cols.max(1);
         let config = Config::get();
         let debug_flag_path = config.hcom_dir.join(".tmp").join("pty_debug_on");
         // Enable if runtime flag file exists
@@ -188,10 +253,11 @@ impl ScreenTracker {
         };
 
         let mut tracker = Self {
-            parser: vt100::Parser::new(rows, cols, 0),
+            parser: new_parser(rows, cols),
+            vt_compat: super::vt_compat::VtCompat::new(),
             rows,
             cols,
-            ready_pattern: String::from_utf8_lossy(ready_pattern).into_owned(),
+            ready_patterns: ready_patterns.to_vec(),
             waiting_approval: false,
             last_child_title: None,
             last_output: Instant::now(),
@@ -208,9 +274,9 @@ impl ScreenTracker {
 
         if tracker.debug_enabled {
             tracker.debug_log(&format!(
-                "PTY Debug log started for {}\nReady pattern: {:?}\nWill dump screen state every 5 seconds",
+                "PTY Debug log started for {}\nReady patterns: {:?}\nWill dump screen state every 5 seconds",
                 instance_name.unwrap_or("unknown"),
-                String::from_utf8_lossy(ready_pattern)
+                ready_patterns
             ));
         }
 
@@ -278,7 +344,7 @@ impl ScreenTracker {
         // keep using it — this drops the current screen contents, but the
         // next output chunk repopulates it.
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.parser.process(data);
+            self.vt_compat.feed(&mut self.parser, data);
         }))
         .is_err()
         {
@@ -290,7 +356,7 @@ impl ScreenTracker {
                     self.instance_name.as_deref().unwrap_or("unknown")
                 ),
             );
-            self.parser = vt100::Parser::new(self.rows, self.cols, 0);
+            self.parser = new_parser(self.rows, self.cols);
         }
 
         // Track output timing
@@ -300,12 +366,14 @@ impl ScreenTracker {
 
     /// Get terminal width in columns
     pub fn cols(&self) -> u16 {
-        let (_rows, cols) = self.parser.screen().size();
+        let (_rows, cols) = screen_size(self.parser.screen());
         cols
     }
 
     /// Resize the screen
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        let rows = NonZeroU16::new(rows).unwrap_or(NonZeroU16::MIN);
+        let cols = NonZeroU16::new(cols).unwrap_or(NonZeroU16::MIN);
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.parser.screen_mut().set_size(rows, cols);
         }))
@@ -321,8 +389,8 @@ impl ScreenTracker {
             );
             self.parser = vt100::Parser::new(rows, cols, 0);
         }
-        self.rows = rows;
-        self.cols = cols;
+        self.rows = rows.get();
+        self.cols = cols.get();
     }
 
     /// Clear approval state immediately when the user responds.
@@ -339,22 +407,37 @@ impl ScreenTracker {
     /// - Slash menu or other overlay is shown
     /// - Claude is in accept-edits mode (pattern hidden entirely)
     ///
-    /// Returns `true` if ready_pattern is currently visible on screen.
-    /// Always returns `true` if no ready_pattern configured (no gating by pattern).
+    /// Returns `true` if any ready pattern is currently visible on screen.
+    /// Always returns `true` if none are configured (no gating by pattern).
     pub fn is_ready(&self) -> bool {
-        if self.ready_pattern.is_empty() {
+        if self.ready_patterns.is_empty() {
             return true;
         }
 
         let screen = self.parser.screen();
-        let (_rows, cols) = screen.size();
+        let (_rows, cols) = screen_size(screen);
 
+        let mut pattern_visible = false;
         for line in screen.rows(0, cols) {
-            if line.contains(&self.ready_pattern) {
-                return true;
+            if is_codex_startup_line(&line) {
+                return false;
             }
+            pattern_visible |= self
+                .ready_patterns
+                .iter()
+                .any(|p| line.contains(p.as_str()));
         }
-        false
+        pattern_visible
+    }
+
+    /// Codex is still starting and nothing needs answering yet: its header
+    /// says `model: loading` and no onboarding screen has taken over. Startup
+    /// can sit here for seconds (the folder-trust lookup runs first), which must
+    /// not read as a launch that settled without becoming ready.
+    pub fn is_codex_startup_loading(&self) -> bool {
+        let lines = self.get_screen_lines();
+        lines.iter().any(|line| is_codex_loading_header(line))
+            && !lines.iter().any(|line| is_codex_onboarding_footer(line))
     }
 
     /// Check if the latest complete OSC terminal title requires action.
@@ -367,6 +450,23 @@ impl ScreenTracker {
     /// to hcom's `{icon} name [tool]` label.
     pub fn child_title(&self) -> Option<&str> {
         self.last_child_title.as_deref()
+    }
+
+    /// The SGR mouse reports the child has asked for (see `console_input`).
+    #[cfg(any(windows, test))]
+    pub(super) fn mouse_tracking(&self) -> super::console_input::MouseTracking {
+        use super::console_input::MouseTracking;
+        let screen = self.parser.screen();
+        if screen.mouse_protocol_encoding() != vt100::MouseProtocolEncoding::Sgr {
+            return MouseTracking::Off;
+        }
+        match screen.mouse_protocol_mode() {
+            vt100::MouseProtocolMode::None => MouseTracking::Off,
+            vt100::MouseProtocolMode::Press => MouseTracking::Press,
+            vt100::MouseProtocolMode::PressRelease => MouseTracking::PressRelease,
+            vt100::MouseProtocolMode::ButtonMotion => MouseTracking::ButtonMotion,
+            vt100::MouseProtocolMode::AnyMotion => MouseTracking::AnyMotion,
+        }
     }
 
     /// Codex approval fallback for blocker dialogs visible on screen.
@@ -400,13 +500,25 @@ impl ScreenTracker {
     }
 
     /// Antigravity-specific approval detection: the agy TUI renders permission
-    /// prompts as plain text in the prompt area ("Requesting permission for: …"
-    /// with a "1. Yes / 4. No" menu). No OSC9 fires, so scrape the screen.
-    /// Requires both the marker and either the question or the control footer
-    /// to avoid flipping on stray occurrences of the marker in scrollback.
+    /// prompts as plain text in the prompt area ("Requesting permission for: …",
+    /// a per-kind question such as "Run this command?", a "1. Yes … 4. No" menu
+    /// and a navigation footer). No OSC9 fires, so scrape the screen. Requires
+    /// two of marker, exact question line and dialog footer, so a stray marker
+    /// or question in input, agent output or scrollback can't flip status to
+    /// blocked.
     pub fn is_antigravity_approval_visible(&self) -> bool {
+        /// Question lines agy 1.2.x renders under the marker, by permission kind.
+        const QUESTIONS: &[&str] = &[
+            "Do you want to proceed?",
+            "Run this command?",
+            "Allow calling this tool?",
+            "Allow creation of this file?",
+            "Allow access to this file?",
+            "Allow administrator elevation?",
+            "Allow remote debugging?",
+        ];
         let screen = self.parser.screen();
-        let (_rows, cols) = screen.size();
+        let (_rows, cols) = screen_size(screen);
         let mut has_marker = false;
         let mut has_question = false;
         let mut has_footer = false;
@@ -414,14 +526,16 @@ impl ScreenTracker {
             if line.contains("Requesting permission for:") {
                 has_marker = true;
             }
-            if line.contains("Do you want to proceed?") {
+            if QUESTIONS.contains(&line.trim()) {
                 has_question = true;
             }
-            if line.contains("tab Amend") && line.contains("edit command") {
+            if line.contains("tab Amend") || line.contains("\u{2191}/\u{2193} Navigate") {
                 has_footer = true;
             }
         }
-        has_marker && (has_question || has_footer)
+        // A long command can push the marker off the top of a short pane; the
+        // exact question line plus the dialog footer is the dialog on its own.
+        (has_marker && (has_question || has_footer)) || (has_question && has_footer)
     }
 
     /// Cursor-specific approval detection: cursor renders a shell-command
@@ -432,7 +546,7 @@ impl ScreenTracker {
     /// (File edits auto-apply by default and don't prompt — verified live.)
     pub fn is_cursor_approval_visible(&self) -> bool {
         let screen = self.parser.screen();
-        let (_rows, cols) = screen.size();
+        let (_rows, cols) = screen_size(screen);
         let mut has_question = false;
         let mut has_footer = false;
         for line in screen.rows(0, cols) {
@@ -479,7 +593,7 @@ impl ScreenTracker {
     /// stays tight rather than eager.
     pub fn is_claude_subagent_nav_visible(&self) -> bool {
         let screen = self.parser.screen();
-        let (rows, cols) = screen.size();
+        let (rows, cols) = screen_size(screen);
         // The navigator is pinned to the bottom; restrict the scan there so
         // scrollback that happens to contain these phrases can't trip the gate.
         const TAIL_ROWS: u16 = 12;
@@ -545,7 +659,7 @@ impl ScreenTracker {
     /// Returns `None` if the prompt glyph can't be located on the row.
     fn is_dim_after_prompt(&self, row: u16, prompt_char: &str) -> Option<bool> {
         let screen = self.parser.screen();
-        let (_, cols) = screen.size();
+        let (_, cols) = screen_size(screen);
 
         // Find the column where prompt char is located
         let mut prompt_col: Option<u16> = None;
@@ -585,6 +699,37 @@ impl ScreenTracker {
         Some(dim_count > 0 && non_dim_count == 0)
     }
 
+    /// Render the non-whitespace cells after a prompt as char:style pairs for
+    /// debug logs. D means dim and - means normal intensity.
+    fn debug_cell_attrs_after_prompt(&self, row: u16, prompt_char: &str) -> Option<String> {
+        let screen = self.parser.screen();
+        let (_, cols) = screen_size(screen);
+        let mut found_prompt = false;
+        let mut attrs = String::new();
+
+        for col in 0..cols {
+            let cell = screen.cell(row, col)?;
+            let contents = cell.contents();
+            if !found_prompt {
+                if contents == prompt_char {
+                    found_prompt = true;
+                }
+                continue;
+            }
+            if contents.is_empty() || contents.chars().all(char::is_whitespace) {
+                continue;
+            }
+            let dim_marker = if cell.dim() { "D" } else { "-" };
+            attrs.push_str(&format!(
+                "{}:{} ",
+                contents.chars().next().unwrap_or('?'),
+                dim_marker
+            ));
+        }
+
+        found_prompt.then_some(attrs)
+    }
+
     /// Check if prompt is empty (tool-specific)
     pub fn is_prompt_empty(&self, tool: &str) -> bool {
         match self.get_input_box_text(tool) {
@@ -611,6 +756,10 @@ impl ScreenTracker {
             Ok(Tool::Kimi) => self.get_kimi_input_text(),
             Ok(Tool::Copilot) => self.get_copilot_input_text(),
             Ok(Tool::Hermes) => None,
+            Ok(Tool::Qoder) => self.get_qoder_input_text(),
+            // Grok: prompt-empty gate uses generic scrape when available; no
+            // tool-specific VT100 input parser yet.
+            Ok(Tool::Grok) => None,
             Ok(Tool::Adhoc) => None,
             Err(_) => None,
         }
@@ -619,7 +768,7 @@ impl ScreenTracker {
     /// Get all screen lines as strings
     fn get_screen_lines(&self) -> Vec<String> {
         let screen = self.parser.screen();
-        let (_rows, cols) = screen.size();
+        let (_rows, cols) = screen_size(screen);
         screen.rows(0, cols).collect()
     }
 
@@ -722,7 +871,7 @@ impl ScreenTracker {
     ///   -> false (protected).
     fn is_claude_placeholder_or_suggestion(&self, row: u16, prompt_char: char, text: &str) -> bool {
         let screen = self.parser.screen();
-        let (_, cols) = screen.size();
+        let (_, cols) = screen_size(screen);
 
         // 1. Explicit placeholder text patterns
         let trimmed_lower = text.trim().to_lowercase();
@@ -998,37 +1147,50 @@ impl ScreenTracker {
 
     /// Extract Codex input text.
     ///
-    /// Codex uses `›` (U+203A) as prompt character. Placeholder text is rendered
-    /// with dim attribute, real user input is not dim.
+    /// Codex uses `›` (U+203A) as its normal prompt character and `»` (U+00BB)
+    /// at Ultra reasoning effort. Placeholder text is rendered with dim
+    /// attribute, real user input is not dim.
     ///
     /// Uses vt100's cell-level dim attribute to distinguish placeholder from
     /// real input, avoiding race conditions where ready pattern is still visible
     /// during PTY injection.
     fn get_codex_input_text(&self) -> Option<String> {
         let lines = self.get_screen_lines();
+        // The startup composer's placeholder reads as an empty prompt, but
+        // input there is held as a draft and an onboarding screen can still
+        // take over. Unknown input keeps both launch readiness and delivery
+        // waiting until startup is done.
+        if lines.iter().any(|line| is_codex_startup_line(line)) {
+            return None;
+        }
 
-        // Search bottom-to-top for › prompt character
-        // › (U+203A, SINGLE RIGHT-POINTING ANGLE QUOTATION MARK) = 3 bytes UTF-8 + 1 space = 4 bytes total
+        // Submitted history can contain `›` above a live `»` composer.
+        // Search bottom-to-top so the live prompt wins.
         for (row_idx, line) in lines.iter().enumerate().rev() {
             let trimmed = line.trim_start();
-            if let Some(text) = trimmed.strip_prefix("› ") {
-                let text = trim_with_nbsp(text);
+            let (prompt_char, text) = if let Some(text) = trimmed.strip_prefix("› ") {
+                ("›", text)
+            } else if let Some(text) = trimmed.strip_prefix("» ") {
+                ("»", text)
+            } else {
+                continue;
+            };
+            let text = trim_with_nbsp(text);
 
-                if text.is_empty() {
-                    return Some(String::new());
-                }
+            if text.is_empty() {
+                return Some(String::new());
+            }
 
-                // Dim text = placeholder, not real input
-                match self.is_dim_after_prompt(row_idx as u16, "›") {
-                    Some(true) => return Some(String::new()),
-                    Some(false) => return Some(text.to_string()),
-                    None => {
-                        // Can't locate prompt glyph, fall back to ready-pattern logic
-                        if self.is_ready() {
-                            return Some(String::new());
-                        }
-                        return Some(text.to_string());
+            // Dim text = placeholder, not real input.
+            match self.is_dim_after_prompt(row_idx as u16, prompt_char) {
+                Some(true) => return Some(String::new()),
+                Some(false) => return Some(text.to_string()),
+                None => {
+                    // Can't locate prompt glyph, fall back to ready-pattern logic.
+                    if self.is_ready() {
+                        return Some(String::new());
                     }
+                    return Some(text.to_string());
                 }
             }
         }
@@ -1058,7 +1220,7 @@ impl ScreenTracker {
             }
 
             let screen = self.parser.screen();
-            let (_, cols) = screen.size();
+            let (_, cols) = screen_size(screen);
             let prompt_col = (0..cols).find(|&col| {
                 screen
                     .cell(row_idx as u16, col)
@@ -1120,17 +1282,89 @@ impl ScreenTracker {
 
     /// Extract GitHub Copilot CLI input text.
     ///
-    /// Copilot uses `❯` as the prompt glyph and has no dim placeholder in the
-    /// empty state: an empty prompt is just a bare `❯` line.
+    /// Copilot has shipped both a `❯` box with `─` borders and a `┃` box
+    /// with half-block borders. Anchor to the bottom border near the footer so
+    /// prompt-looking text in the transcript cannot be mistaken for input.
     fn get_copilot_input_text(&self) -> Option<String> {
         let lines = self.get_screen_lines();
-        for line in lines.iter().rev() {
-            let trimmed = line.trim_start();
-            if let Some(text) = trimmed.strip_prefix('❯') {
-                return Some(trim_with_nbsp(text.trim_start()).to_string());
+        for bottom in (0..lines.len()).rev().take(4) {
+            let border = lines[bottom].trim();
+            let prompt = if border.starts_with('╹') && border.contains('▀') {
+                '┃'
+            } else if border.chars().count() >= 3 && border.chars().all(|c| c == '─') {
+                '❯'
+            } else {
+                continue;
+            };
+
+            for top in (bottom.saturating_sub(12)..bottom).rev() {
+                let upper = lines[top].trim();
+                let matching_top = if prompt == '┃' {
+                    upper.starts_with('╻') && upper.contains('▄')
+                } else {
+                    upper.chars().count() >= 3 && upper.chars().all(|c| c == '─')
+                };
+                if !matching_top {
+                    continue;
+                }
+                let Some(first) = lines[top + 1].trim_start().strip_prefix(prompt) else {
+                    break;
+                };
+                let mut text = vec![trim_with_nbsp(first).to_string()];
+                for line in &lines[top + 2..bottom] {
+                    let continuation = line.trim_start();
+                    let continuation = continuation.strip_prefix(prompt).unwrap_or(continuation);
+                    text.push(trim_with_nbsp(continuation).to_string());
+                }
+                return Some(text.join("\n").trim().to_string());
             }
         }
         None
+    }
+
+    /// Extract Qoder CLI input text.
+    ///
+    /// Qoder draws the composer between two `─` rules with a one-line status
+    /// footer (`<model> Model · ctx … · <cwd>`) directly below the bottom rule:
+    ///
+    /// ```text
+    ///  Shift+Tab to Accept Edits                 1 MCP server · 21 skills
+    /// ────────────────────────────────────────────────────────────────────
+    ///  >   Type your message or @path/to/file
+    /// ────────────────────────────────────────────────────────────────────
+    ///  Qwen3.8-Flash Model · ctx ░░░░░░░░░░ 0% · /path/to/cwd
+    /// ```
+    ///
+    /// A submitted prompt is echoed in the scrollback with the same ` > ` prefix,
+    /// so anchor to the last non-empty row (the status footer), require the rule
+    /// directly above it, and read the rows between that rule and the one above.
+    /// No framed composer (an approval or trust prompt, a menu) is `None`, which
+    /// callers treat as "not safe to inject".
+    fn get_qoder_input_text(&self) -> Option<String> {
+        const PLACEHOLDER: &str = "Type your message or @path/to/file";
+        let lines = self.get_screen_lines();
+        let status = lines.iter().rposition(|line| !line.trim().is_empty())?;
+        let bottom = status.checked_sub(1)?;
+        if !is_dash_rule(&lines[bottom]) || is_dash_rule(&lines[status]) {
+            return None;
+        }
+        let top = (bottom.saturating_sub(12)..bottom)
+            .rev()
+            .find(|&row| is_dash_rule(&lines[row]))?;
+        let first = lines.get(top + 1)?.trim_start().strip_prefix('>')?;
+        if top + 1 >= bottom {
+            return None;
+        }
+        let mut text = vec![trim_with_nbsp(first).to_string()];
+        for line in &lines[top + 2..bottom] {
+            text.push(trim_with_nbsp(line).to_string());
+        }
+        let text = text.join("\n").trim().to_string();
+        Some(if text == PLACEHOLDER {
+            String::new()
+        } else {
+            text
+        })
     }
 
     /// Check and perform periodic dump if 5 seconds elapsed
@@ -1158,7 +1392,7 @@ impl ScreenTracker {
         self.debug_counter += 1;
 
         let screen = self.parser.screen();
-        let (rows, cols) = screen.size();
+        let (rows, cols) = screen_size(screen);
         let cursor = screen.cursor_position();
 
         let mut output = String::new();
@@ -1167,7 +1401,7 @@ impl ScreenTracker {
             self.debug_counter, label
         ));
         output.push_str(&format!("Tool: {}\n", tool));
-        output.push_str(&format!("Ready pattern: {:?}\n", self.ready_pattern));
+        output.push_str(&format!("Ready patterns: {:?}\n", self.ready_patterns));
         output.push_str(&format!("Inject port: {}\n", inject_port));
         output.push_str(&format!("Screen size: {}x{}\n", rows, cols));
         output.push_str(&format!("Cursor: ({}, {})\n", cursor.0, cursor.1));
@@ -1185,57 +1419,12 @@ impl ScreenTracker {
             if !trimmed.is_empty() {
                 output.push_str(&format!("  {:3}: {}\n", i, trimmed));
 
-                // For Claude prompt lines, show cell attributes to verify dim detection
-                use crate::tool::Tool;
-                use std::str::FromStr;
-
-                let prompt_char = match Tool::from_str(tool) {
-                    Ok(Tool::Claude) => Some("❯"),
-                    Ok(Tool::Codex) => Some("›"),
-                    Ok(Tool::Gemini) => Some(">"),
-                    Ok(Tool::Antigravity) => Some(">"),
-                    Ok(Tool::Cursor) => Some("→"),
-                    Ok(Tool::Copilot) => Some("❯"),
-                    _ => None,
-                };
-                if let Some(pc) = prompt_char {
-                    let should_dump = match (Tool::from_str(tool), pc) {
-                        (Ok(Tool::Gemini), ">") => trimmed.contains("│ >"),
-                        (Ok(Tool::Antigravity), ">") => trimmed.starts_with("> "),
-                        _ => trimmed.contains(pc),
-                    };
-                    if should_dump {
-                        let row = i as u16;
-                        let prompt_marker = if matches!(Tool::from_str(tool), Ok(Tool::Antigravity))
-                        {
-                            "> "
-                        } else {
-                            pc
-                        };
-                        let mut attrs_info = format!("       Cell attrs: [{}] ", prompt_marker);
-                        let mut found_prompt = false;
-                        for col in 0..cols {
-                            if let Some(cell) = screen.cell(row, col) {
-                                let contents = cell.contents();
-                                if contents == pc || (prompt_marker == "> " && contents == ">") {
-                                    found_prompt = true;
-                                    continue;
-                                }
-                                if found_prompt
-                                    && !contents.is_empty()
-                                    && !contents.chars().all(|c| c.is_whitespace())
-                                {
-                                    let dim_marker = if cell.dim() { "D" } else { "-" };
-                                    attrs_info.push_str(&format!(
-                                        "{}:{} ",
-                                        contents.chars().next().unwrap_or('?'),
-                                        dim_marker
-                                    ));
-                                }
-                            }
-                        }
-                        output.push_str(&format!("{}\n", attrs_info));
-                    }
+                // Show the parser's cell attributes for input rows so styling
+                // loss can be distinguished from a display-only terminal bug.
+                if let Some(pc) = debug_prompt_glyph(tool, trimmed)
+                    && let Some(attrs) = self.debug_cell_attrs_after_prompt(i as u16, pc)
+                {
+                    output.push_str(&format!("       Cell attrs: [{}] {}\n", pc, attrs));
                 }
             }
         }
@@ -1264,7 +1453,7 @@ impl ScreenTracker {
     /// Get screen state as JSON for TCP query responses.
     pub fn get_screen_dump(&self, tool: &str, _inject_port: u16) -> String {
         let screen = self.parser.screen();
-        let (rows, cols) = screen.size();
+        let (rows, cols) = screen_size(screen);
         let cursor = screen.cursor_position();
 
         let lines: Vec<String> = self
@@ -1308,11 +1497,26 @@ mod tests {
 
     /// Helper: create tracker without debug/config dependencies
     fn make_tracker(rows: u16, cols: u16, ready_pattern: &str) -> ScreenTracker {
+        let patterns: &[&str] = if ready_pattern.is_empty() {
+            &[]
+        } else {
+            &[ready_pattern]
+        };
+        make_tracker_with(rows, cols, patterns)
+    }
+
+    /// Tracker using a tool's real `ready_patterns` from its IntegrationSpec.
+    fn make_tool_tracker(rows: u16, cols: u16, tool: crate::tool::Tool) -> ScreenTracker {
+        make_tracker_with(rows, cols, tool.ready_patterns())
+    }
+
+    fn make_tracker_with(rows: u16, cols: u16, ready_patterns: &[&str]) -> ScreenTracker {
         ScreenTracker {
-            parser: vt100::Parser::new(rows, cols, 0),
+            parser: new_parser(rows, cols),
+            vt_compat: crate::pty::vt_compat::VtCompat::new(),
             rows,
             cols,
-            ready_pattern: ready_pattern.to_string(),
+            ready_patterns: ready_patterns.iter().map(|p| p.to_string()).collect(),
             waiting_approval: false,
             last_child_title: None,
             last_output: Instant::now(),
@@ -1326,6 +1530,24 @@ mod tests {
             debug_flag_path: std::path::PathBuf::new(),
             instance_name: None,
         }
+    }
+
+    #[test]
+    fn mouse_tracking_follows_the_childs_sgr_requests() {
+        use crate::pty::console_input::MouseTracking;
+        let mut t = make_tracker(24, 80, "");
+        assert_eq!(t.mouse_tracking(), MouseTracking::Off);
+        // Tracking without SGR encoding can't be reported as SGR.
+        t.process(b"\x1b[?1000h");
+        assert_eq!(t.mouse_tracking(), MouseTracking::Off);
+        t.process(b"\x1b[?1006h");
+        assert_eq!(t.mouse_tracking(), MouseTracking::PressRelease);
+        t.process(b"\x1b[?1002h");
+        assert_eq!(t.mouse_tracking(), MouseTracking::ButtonMotion);
+        t.process(b"\x1b[?1003h");
+        assert_eq!(t.mouse_tracking(), MouseTracking::AnyMotion);
+        t.process(b"\x1b[?1003l");
+        assert_eq!(t.mouse_tracking(), MouseTracking::Off);
     }
 
     #[test]
@@ -1379,8 +1601,10 @@ mod tests {
         // panic used to unwind straight through `process`/`resize` and kill
         // the PTY wrapper (hcom issue #73, observed as repeated
         // `stopped by pty: closed` on real Codex sessions). It must now be
-        // contained: the tracker rebuilds its parser and stays usable.
+        // fixed by the dependency without requiring a parser reset.
         let mut t = make_tracker(3, 10, "");
+
+        t.process(b"keep");
 
         // Wide CJK char printed so it spans the last two columns (8, 9).
         t.process(b"\x1b[1;9H");
@@ -1393,9 +1617,52 @@ mod tests {
         // Erase-in-line on that orphaned wide cell is what panicked upstream.
         t.process(b"\x1b[1;9H\x1b[K");
 
-        // Tracker must have survived and still be fully usable.
+        // A reset would silently erase this unrelated text. Check preservation,
+        // not merely survival through the tracker's panic containment.
         assert_eq!(t.cols(), 9);
+        assert!(t.parser.screen().contents().contains("keep"));
         t.process(b"still alive\r\n");
+    }
+
+    #[test]
+    fn height_resize_preserves_bottom_prompt_and_dim_attributes() {
+        let mut t = make_tracker(4, 20, "");
+        t.process(b"\x1b[3;1Habove\x1b[4;1H\x1b[2mprompt\x1b[0m");
+
+        t.resize(2, 20);
+
+        let screen = t.parser.screen();
+        assert_eq!(screen_size(screen), (2, 20));
+        assert_eq!(screen.cursor_position(), (1, 6));
+        assert_eq!(screen.contents(), "above\nprompt");
+        assert!(screen.cell(1, 0).unwrap().dim());
+
+        t.resize(4, 20);
+        let screen = t.parser.screen();
+        assert_eq!(screen.cursor_position(), (3, 6));
+        assert_eq!(screen.cell(3, 0).unwrap().contents(), "p");
+        assert!(screen.cell(3, 0).unwrap().dim());
+    }
+
+    #[test]
+    fn resize_resets_the_previous_scroll_region() {
+        let mut t = make_tracker(4, 20, "");
+        t.process(b"\x1b[2;3r");
+        t.resize(5, 20);
+        t.process(b"\x1b[2;1H\x1b[99B");
+        assert_eq!(t.parser.screen().cursor_position(), (4, 0));
+    }
+
+    #[test]
+    fn tiny_and_zero_size_resizes_remain_usable() {
+        let mut t = make_tracker(3, 10, "");
+        for (rows, cols) in [(1, 1), (0, 0), (2, 1), (1, 2), (3, 10)] {
+            t.resize(rows, cols);
+            t.process("\x1b[H中\x1b[2J\x1b[Hx".as_bytes());
+            assert_eq!(screen_size(t.parser.screen()), (rows.max(1), cols.max(1)));
+            assert_eq!((t.rows, t.cols), (rows.max(1), cols.max(1)));
+            assert_eq!(t.parser.screen().cell(0, 0).unwrap().contents(), "x");
+        }
     }
 
     // ---- is_ready ----
@@ -1405,6 +1672,35 @@ mod tests {
         let mut t = make_tracker(24, 80, "? for shortcuts");
         t.process(b"Some output\r\n? for shortcuts\r\n");
         assert!(t.is_ready());
+    }
+
+    #[test]
+    fn claude_is_ready_in_every_permission_mode_footer() {
+        for footer in [
+            "  \u{23F8} manual mode on \u{00B7} ? for shortcuts \u{00B7} \u{2190} for agents",
+            "  \u{23F5}\u{23F5} accept edits on (shift+tab to cycle) \u{00B7} \u{2190} for agents",
+            "  \u{23F8} plan mode on (shift+tab to cycle)",
+            "  \u{23F5}\u{23F5} auto mode on (shift+tab to cycle)",
+            "  \u{23F5}\u{23F5} don't ask on (shift+tab to cycle)",
+            "  \u{23F5}\u{23F5} bypass permissions on (shift+tab to cycle)",
+            "  \u{23F5}\u{23F5} accept edits on (meta+m to cycle)",
+        ] {
+            let mut t = make_tool_tracker(24, 80, crate::tool::Tool::Claude);
+            t.process(format!("\u{276F} \r\n{footer}\r\n").as_bytes());
+            assert!(t.is_ready(), "footer not ready: {footer}");
+        }
+    }
+
+    #[test]
+    fn claude_trust_dialog_is_not_ready() {
+        let mut t = make_tool_tracker(24, 80, crate::tool::Tool::Claude);
+        t.process(
+            "Quick safety check: Is this a project you created or one you trust?\r\n\
+             \u{276F} 1. Yes, I trust this folder\r\n  2. No, exit\r\n\
+             Enter to confirm \u{00B7} Esc to cancel\r\n"
+                .as_bytes(),
+        );
+        assert!(!t.is_ready());
     }
 
     #[test]
@@ -1518,6 +1814,49 @@ mod tests {
             b"Requesting permission for: rm -rf /tmp/x\r\n  1. Yes\r\n  2. No\r\n  tab Amend . e edit command\r\n",
         );
         assert!(t.is_antigravity_approval_visible());
+    }
+
+    #[test]
+    fn antigravity_detects_run_command_dialog() {
+        // agy 1.2.16 run_command prompt, as rendered in a 69-column pane.
+        let mut t = make_tracker(21, 69, "");
+        t.process(
+            "Requesting permission for:\r\n   env | grep -E x\r\n\r\nRun this command?\r\n> 1. Yes, run command\r\n  4. No, cancel\r\n".as_bytes(),
+        );
+        assert!(t.is_antigravity_approval_visible());
+
+        let mut t = make_tracker(21, 69, "");
+        t.process(
+            "Requesting permission for:\r\n  ls\r\n  \u{2191}/\u{2193} Navigate \u{b7} tab Amend \u{b7} ctrl+g edit/expand command\r\n".as_bytes(),
+        );
+        assert!(t.is_antigravity_approval_visible());
+    }
+
+    #[test]
+    fn antigravity_detects_dialog_with_marker_scrolled_off() {
+        let mut t = make_tracker(6, 69, "");
+        t.process(
+            "Run this command?\r\n> 1. Yes, run command\r\n  4. No, cancel\r\n\r\n  \u{2191}/\u{2193} Navigate \u{b7} tab Amend \u{b7} ctrl+g edit/expand command\r\nesc to cancel".as_bytes(),
+        );
+        assert!(t.is_antigravity_approval_visible());
+    }
+
+    #[test]
+    fn antigravity_question_in_chatter_does_not_trigger() {
+        let mut t = make_tracker(24, 80, "");
+        t.process(b"Requesting permission for: x was mentioned. Run this command? maybe\r\n");
+        assert!(!t.is_antigravity_approval_visible());
+    }
+
+    #[test]
+    fn rep_and_hpa_keep_tracker_in_sync_with_terminal() {
+        // agy draws runs with REP and positions with HPA; vt100 ignores both, so
+        // without normalization the relative moves that follow land elsewhere.
+        let mut t = make_tool_tracker(4, 30, crate::tool::Tool::Antigravity);
+        t.process("\u{2500}\x1b[29b\r\n> \x1b[20`label\x1b[16`x\x1b[3D<\r\n".as_bytes());
+        let lines = t.get_screen_lines();
+        assert_eq!(lines[0], "\u{2500}".repeat(30));
+        assert_eq!(lines[1], ">            < x   label");
     }
 
     // ---- Cursor approval detection ----
@@ -1725,6 +2064,72 @@ mod tests {
     }
 
     #[test]
+    fn codex_ultra_dim_placeholder_wins_over_submitted_history() {
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process("› submitted prompt\r\n» \x1b[2mAsk Codex to do anything\x1b[0m\r\n".as_bytes());
+
+        assert_eq!(t.get_codex_input_text(), Some(String::new()));
+        assert!(t.is_prompt_empty("codex"));
+    }
+
+    #[test]
+    fn codex_ultra_prompt_satisfies_ready_pattern() {
+        let mut t = make_tool_tracker(24, 80, crate::tool::Tool::Codex);
+        t.process("» \x1b[2mAsk Codex to do anything\x1b[0m\r\n".as_bytes());
+
+        assert!(t.is_ready());
+        assert!(t.is_prompt_empty("codex"));
+    }
+
+    #[test]
+    fn codex_ultra_non_dim_draft_wins_over_submitted_history() {
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process("› submitted prompt\r\n» Summarize recent commits\r\n".as_bytes());
+
+        assert_eq!(
+            t.get_codex_input_text(),
+            Some("Summarize recent commits".to_string())
+        );
+        assert!(!t.is_prompt_empty("codex"));
+    }
+
+    #[test]
+    fn codex_not_ready_while_startup_header_is_loading() {
+        let header = |model: &str| {
+            format!(
+                "\u{2502} model:     {model}   /model to change \u{2502}\r\n\
+                 \u{203a} \x1b[2mAsk Codex to do anything\x1b[0m\r\n  ? for shortcuts\r\n"
+            )
+        };
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process(header("loading").as_bytes());
+        assert!(!t.is_ready(), "composer drawn during startup is not ready");
+        assert!(t.is_codex_startup_loading());
+        assert_eq!(
+            t.get_codex_input_text(),
+            None,
+            "a startup draft is not an empty prompt"
+        );
+
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process(header("GPT-5.5 default").as_bytes());
+        assert!(t.is_ready());
+        assert_eq!(t.get_codex_input_text(), Some(String::new()));
+
+        // A folder-trust screen over the composer, stale ready row included.
+        t.process(
+            "\u{203a} 1. Open restricted\r\n  2. Quit\r\n  enter continue \u{b7} esc quit\r\n"
+                .as_bytes(),
+        );
+        assert!(!t.is_ready(), "onboarding screen is not ready");
+        assert!(
+            !t.is_codex_startup_loading(),
+            "a screen awaiting an answer is not loading"
+        );
+        assert_eq!(t.get_codex_input_text(), None);
+    }
+
+    #[test]
     fn codex_no_prompt_no_ready() {
         let t = make_tracker(24, 80, "? for shortcuts");
         assert_eq!(t.get_codex_input_text(), None);
@@ -1761,7 +2166,85 @@ mod tests {
         );
     }
 
+    #[test]
+    fn codex_debug_attrs_cover_both_prompt_glyphs() {
+        let mut normal = make_tracker(24, 80, "? for shortcuts");
+        normal.process("› compare A » B\r\n".as_bytes());
+        let normal_line = normal.get_screen_lines()[0].clone();
+        assert_eq!(debug_prompt_glyph("codex", &normal_line), Some("›"));
+        let normal_attrs = normal.debug_cell_attrs_after_prompt(0, "›").unwrap();
+        assert!(normal_attrs.contains("c:-"));
+
+        let mut ultra = make_tracker(24, 80, "? for shortcuts");
+        ultra.process("» \x1b[2mcompare A › B\x1b[0m\r\n".as_bytes());
+        let ultra_line = ultra.get_screen_lines()[0].clone();
+        assert_eq!(debug_prompt_glyph("codex", &ultra_line), Some("»"));
+        let ultra_attrs = ultra.debug_cell_attrs_after_prompt(0, "»").unwrap();
+        assert!(ultra_attrs.contains("c:D"));
+    }
+
+    #[test]
+    fn codex_debug_dump_writes_ultra_prompt_attrs() {
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.debug_enabled = true;
+        t.debug_file = Some(log.reopen().unwrap());
+        t.process("» \x1b[2mAsk Codex to do anything\x1b[0m\r\n".as_bytes());
+
+        t.dump_screen("codex", 0, "test");
+
+        let output = std::fs::read_to_string(log.path()).unwrap();
+        assert!(output.contains("Cell attrs: [»] A:D"));
+    }
+
     // ---- Cursor input extraction ----
+
+    #[test]
+    fn copilot_extracts_current_framed_prompt() {
+        let mut t = make_tracker(24, 80, "/ commands");
+        let mut lines = vec![""; 19];
+        lines.extend_from_slice(&[
+            " ~/Dev/project                                      Session: 0 AIC used",
+            "────────────────────────────────────────────────────────────────────────────────",
+            "❯ hello copilot",
+            "────────────────────────────────────────────────────────────────────────────────",
+            " ← open sidebar · / commands · ? help                              Auto",
+        ]);
+        render_rows(&mut t, &lines);
+        assert_eq!(t.get_copilot_input_text().as_deref(), Some("hello copilot"));
+        assert!(!t.is_prompt_empty("copilot"));
+    }
+
+    #[test]
+    fn copilot_extracts_half_block_prompt() {
+        let mut t = make_tracker(24, 80, "/ commands");
+        let mut lines = vec![""; 20];
+        lines.extend_from_slice(&[
+            "╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄",
+            "┃",
+            "╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            " @ files · # issues               / commands                     Auto",
+        ]);
+        render_rows(&mut t, &lines);
+        assert_eq!(t.get_copilot_input_text().as_deref(), Some(""));
+        assert!(t.is_prompt_empty("copilot"));
+    }
+
+    #[test]
+    fn copilot_ignores_prompt_glyph_in_transcript() {
+        let mut t = make_tracker(24, 80, "/ commands");
+        let mut lines = vec![""; 18];
+        lines.extend_from_slice(&[
+            "❯ Thought for 4s … ┃",
+            "╻▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄",
+            "┃ actual draft",
+            "╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            " @ files · # issues               / commands                     Auto",
+            "",
+        ]);
+        render_rows(&mut t, &lines);
+        assert_eq!(t.get_copilot_input_text().as_deref(), Some("actual draft"));
+    }
 
     #[test]
     fn cursor_extracts_non_dim_text_after_prompt() {
@@ -1886,6 +2369,149 @@ mod tests {
         t.process(format!("{}\r\n", bottom).as_bytes());
         // Ready pattern visible in prompt text → empty
         assert_eq!(t.get_gemini_input_text(), Some(String::new()));
+    }
+
+    // ---- Qoder input extraction ----
+    // Fixtures are bottom-of-screen captures from qodercli 1.1.65 (140 columns,
+    // narrowed to 80 here).
+
+    const QODER_RULE: &str =
+        "────────────────────────────────────────────────────────────────────────────────";
+
+    fn qoder_screen(rows: &[&str]) -> ScreenTracker {
+        let mut t = make_tool_tracker(30, 80, crate::tool::Tool::Qoder);
+        let mut lines = vec![""; 30 - rows.len()];
+        lines.extend_from_slice(rows);
+        render_rows(&mut t, &lines);
+        t
+    }
+
+    const QODER_STATUS: &str = " Qwen3.8-Flash Model · ctx ░░░░░░░░░░ 0% · /work/dir";
+
+    #[test]
+    fn qoder_idle_placeholder_is_empty_and_ready() {
+        let t = qoder_screen(&[
+            "                                                              ? for shortcuts",
+            QODER_RULE,
+            " Shift+Tab to Accept Edits                       1 MCP server · 21 skills",
+            QODER_RULE,
+            " >   Type your message or @path/to/file",
+            QODER_RULE,
+            QODER_STATUS,
+        ]);
+        assert_eq!(t.get_qoder_input_text().as_deref(), Some(""));
+        assert!(t.is_prompt_empty("qoder"));
+        assert!(t.is_ready());
+    }
+
+    #[test]
+    fn qoder_banner_in_place_of_hint_is_still_ready_and_empty() {
+        let t = qoder_screen(&[
+            "                    Credits exhausted. Use /usage for details or /upgrade for more.",
+            QODER_RULE,
+            " Shift+Tab to Accept Edits                       1 MCP server · 21 skills",
+            QODER_RULE,
+            " >   Type your message or @path/to/file",
+            QODER_RULE,
+            QODER_STATUS,
+        ]);
+        assert!(t.is_prompt_empty("qoder"));
+        // The composer placeholder is the second ready marker.
+        assert!(t.is_ready());
+    }
+
+    #[test]
+    fn qoder_extracts_typed_text() {
+        let t = qoder_screen(&[
+            QODER_RULE,
+            " > Run the shell command: sleep 4 && echo done   then reply with the word ok",
+            QODER_RULE,
+            QODER_STATUS,
+        ]);
+        assert_eq!(
+            t.get_qoder_input_text().as_deref(),
+            Some("Run the shell command: sleep 4 && echo done   then reply with the word ok")
+        );
+        assert!(!t.is_prompt_empty("qoder"));
+    }
+
+    #[test]
+    fn qoder_extracts_wrapped_multiline_input() {
+        let t = qoder_screen(&[
+            QODER_RULE,
+            " > first line of a long draft",
+            "   second line",
+            QODER_RULE,
+            QODER_STATUS,
+        ]);
+        assert_eq!(
+            t.get_qoder_input_text().as_deref(),
+            Some("first line of a long draft\nsecond line")
+        );
+    }
+
+    #[test]
+    fn qoder_ignores_submitted_prompt_echo_in_scrollback() {
+        // The submitted prompt stays in the scrollback with the same ` > `
+        // prefix; the live composer below it is empty.
+        let t = qoder_screen(&[
+            " > Reply with the single word ok and nothing else",
+            " Thinking",
+            " ▪ ok",
+            "                                                              ? for shortcuts",
+            QODER_RULE,
+            " Shift+Tab to Accept Edits                       1 MCP server · 21 skills",
+            QODER_RULE,
+            " >   Type your message or @path/to/file",
+            QODER_RULE,
+            QODER_STATUS,
+        ]);
+        assert_eq!(t.get_qoder_input_text().as_deref(), Some(""));
+    }
+
+    #[test]
+    fn qoder_busy_screen_keeps_the_composer_visible_and_empty() {
+        let t = qoder_screen(&[
+            " ▪ Bash(sleep 4 && echo done)",
+            "   └ Running…",
+            " ⠼ Generating... (esc to cancel, 13s)                         ? for shortcuts",
+            QODER_RULE,
+            " Shift+Tab to Accept Edits                       1 MCP server · 21 skills",
+            QODER_RULE,
+            " >   Type your message or @path/to/file",
+            QODER_RULE,
+            QODER_STATUS,
+        ]);
+        assert!(t.is_prompt_empty("qoder"));
+    }
+
+    #[test]
+    fn qoder_approval_prompt_is_not_an_empty_composer() {
+        let t = qoder_screen(&[
+            " Permission Required",
+            QODER_RULE,
+            " Tool: Bash",
+            " Sleep 4 seconds then print done",
+            " Command: sleep 4 && echo done",
+            " Allow this command to run?",
+            "  ❯ 1. Allow once",
+            "    2. Always allow this exact command for future sessions [local]",
+            "    3. Reject and type something",
+            "    4. No",
+        ]);
+        assert_eq!(t.get_qoder_input_text(), None);
+        assert!(!t.is_prompt_empty("qoder"));
+    }
+
+    #[test]
+    fn qoder_trust_prompt_is_not_an_empty_composer() {
+        let t = qoder_screen(&[
+            " Do you trust the files in this folder?",
+            "  ❯ 1. Trust folder",
+            "    2. Exit",
+        ]);
+        assert_eq!(t.get_qoder_input_text(), None);
+        assert!(!t.is_prompt_empty("qoder"));
     }
 
     // ---- Kimi input extraction ----

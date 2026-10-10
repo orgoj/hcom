@@ -64,6 +64,34 @@ fn format_close_command(argv: &[String]) -> String {
         .join(" ")
 }
 
+/// `format_close_command`, with the env vars the command needs set first, in
+/// the shell syntax the retry hint is printed for.
+fn format_command_with_env(env: &[(&str, &str)], argv: &[String]) -> String {
+    let command = format_close_command(argv);
+    if env.is_empty() {
+        return command;
+    }
+    #[cfg(windows)]
+    let assignments = env
+        .iter()
+        .map(|(key, value)| format!("$env:{key}={}; ", ps_quote(value)))
+        .collect::<String>();
+    #[cfg(not(windows))]
+    let assignments = env
+        .iter()
+        .map(|(key, value)| format!("{key}={} ", crate::tools::args_common::shell_quote(value)))
+        .collect::<String>();
+    format!("{assignments}{command}")
+}
+
+/// True if `argv` runs the herdr CLI (`herdr`, `herdr.exe` or a full path).
+fn is_herdr_argv(argv: &[String]) -> bool {
+    argv.first()
+        .and_then(|bin| std::path::Path::new(bin).file_stem())
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("herdr"))
+}
+
 /// Terminal info resolved for an instance.
 #[derive(Debug, Clone, Default)]
 pub struct TerminalInfo {
@@ -73,6 +101,8 @@ pub struct TerminalInfo {
     pub kitty_listen_on: String,
     pub terminal_id: String,
     pub zellij_session_name: String,
+    /// The pane's `HERDR_SOCKET_PATH`: which herdr server (session) owns it.
+    pub herdr_socket_path: String,
 }
 
 /// Result from launch_terminal.
@@ -171,6 +201,13 @@ pub(crate) const TERMINAL_COLOR_VARS: &[&str] = &[
     "CLICOLOR_FORCE",
     "FORCE_COLOR",
 ];
+
+/// The color overrides among [`TERMINAL_COLOR_VARS`], also kept off the
+/// terminal launcher itself: `wezterm cli split-pane` copies its caller's env
+/// into the new pane, so a parent's `NO_COLOR` would reach the child anyway.
+/// `TERM`/`COLORTERM` stay, since launchers like tmux need a usable `TERM`.
+const TERMINAL_COLOR_OVERRIDE_VARS: &[&str] =
+    &["NO_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "FORCE_COLOR"];
 
 /// Detect terminal preset from inherited environment variables.
 /// Used for same-terminal PTY launches (run_here=True) to enable close-on-kill.
@@ -483,6 +520,42 @@ pub(crate) fn which_candidates(dir: &Path, name: &str) -> Vec<std::path::PathBuf
     }
 }
 
+/// Per-user bin dirs searched after PATH, in order.
+///
+/// Tool-specific dirs are where each official installer puts its binary.
+/// `~/.local/bin` is the default for Codex, Copilot, Qoder, agy, OMP, Cursor, Pi and
+/// Claude's native installer; `~/.bun/bin` is where `bun install -g` links
+/// npm-published CLIs (pi, omp, opencode, gemini, ...).
+fn fallback_bin_dirs(home: &Path, name: &str) -> Vec<std::path::PathBuf> {
+    const LOCAL: &[&str] = &[".local", "bin"];
+    const BUN: &[&str] = &[".bun", "bin"];
+    let dirs: &[&[&str]] = match name {
+        // Native installer (~/.local/bin) before the legacy ~/.claude/bin copy.
+        "claude" => &[&[".claude", "local"], LOCAL, &[".claude", "bin"], BUN],
+        "opencode" => &[&[".opencode", "bin"], LOCAL, BUN],
+        "kilo" => &[&[".kilo", "bin"], LOCAL, BUN],
+        "grok" => &[&[".grok", "bin"], LOCAL, BUN],
+        "kimi" => &[&[".kimi-code", "bin"], LOCAL, BUN],
+        "pi" => &[&[".pi", "agent", "bin"], LOCAL, BUN],
+        _ => &[LOCAL, BUN],
+    };
+    dirs.iter()
+        .map(|parts| {
+            parts
+                .iter()
+                .fold(home.to_path_buf(), |p, part| p.join(part))
+        })
+        .collect()
+}
+
+fn which_in_fallback_dirs(home: &Path, name: &str) -> Option<String> {
+    fallback_bin_dirs(home, name)
+        .iter()
+        .flat_map(|dir| which_candidates(dir, name))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.to_string_lossy().to_string())
+}
+
 /// Simple `which` implementation — find binary in PATH.
 pub fn which_bin(name: &str) -> Option<String> {
     // `split_paths` uses the platform separator (`;` on Windows, `:` elsewhere),
@@ -499,25 +572,10 @@ pub fn which_bin(name: &str) -> Option<String> {
         }
     }
 
-    // Fallback: well-known install locations not always in PATH
-    if let Ok(home) = std::env::var("HOME") {
-        let home = Path::new(&home);
-        let fallbacks: &[std::path::PathBuf] = match name {
-            "claude" => &[
-                home.join(".claude").join("local").join("claude"),
-                home.join(".local").join("bin").join("claude"),
-                home.join(".claude").join("bin").join("claude"),
-            ],
-            "opencode" => &[home.join(".opencode").join("bin").join("opencode")],
-            "kilo" => &[home.join(".kilo").join("bin").join("kilo")],
-            "cursor-agent" => &[home.join(".local").join("bin").join("cursor-agent")],
-            _ => &[],
-        };
-        for fallback in fallbacks {
-            if fallback.exists() && fallback.is_file() {
-                return Some(fallback.to_string_lossy().to_string());
-            }
-        }
+    // Fallback: install locations that are often missing from PATH (GUI or
+    // hook-spawned shells, or the user never added them).
+    if let Some(found) = dirs::home_dir().and_then(|home| which_in_fallback_dirs(&home, name)) {
+        return Some(found);
     }
 
     #[cfg(windows)]
@@ -844,6 +902,93 @@ fn splice_kitten_to_socket(argv: &mut Vec<String>, kitty_socket: &str) {
     }
 }
 
+/// Target the launcher's WezTerm tab and, for splits, choose placement.
+///
+/// The launcher env strips `$WEZTERM_PANE`, and without it `wezterm cli`
+/// falls back to whichever pane is focused, so agents would land in an
+/// unrelated tab. Pin `--pane-id` explicitly.
+///
+/// WezTerm has no layout engine (unlike kitty's `--type=window`), so for
+/// `split-pane` split the largest pane in the launcher's tab along its longer
+/// axis. Repeated launches then tile into an even grid instead of each new
+/// pane halving the same space. User-supplied target/direction flags win.
+fn splice_wezterm_target(
+    argv: &mut Vec<String>,
+    launcher_pane: &str,
+    list_panes: impl FnOnce() -> Option<String>,
+) {
+    let is_wezterm = argv
+        .first()
+        .and_then(|a| Path::new(a).file_stem())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("wezterm"));
+    if !is_wezterm || argv.get(1).map(String::as_str) != Some("cli") {
+        return;
+    }
+    let sep = argv.iter().position(|a| a == "--").unwrap_or(argv.len());
+    let has_flag = |flags: &[&str]| argv[..sep].iter().any(|a| flags.contains(&a.as_str()));
+    match argv.get(2).map(String::as_str) {
+        Some("spawn") if !has_flag(&["--pane-id", "--window-id", "--new-window"]) => {
+            argv.splice(3..3, ["--pane-id".to_string(), launcher_pane.to_string()]);
+        }
+        Some("split-pane") if !has_flag(&["--pane-id"]) => {
+            let directed = has_flag(&[
+                "--top-level",
+                "--left",
+                "--right",
+                "--top",
+                "--bottom",
+                "--horizontal",
+            ]);
+            let (pane, dir) = if directed {
+                (launcher_pane.to_string(), None)
+            } else {
+                list_panes()
+                    .and_then(|json| pick_wezterm_split(&json, launcher_pane))
+                    .map(|(pane, dir)| (pane, Some(dir)))
+                    .unwrap_or_else(|| (launcher_pane.to_string(), Some("--right")))
+            };
+            let mut args = vec!["--pane-id".to_string(), pane];
+            args.extend(dir.map(String::from));
+            argv.splice(3..3, args);
+        }
+        _ => {}
+    }
+}
+
+fn wezterm_list_panes() -> Option<String> {
+    let out = Command::new("wezterm")
+        .args(["cli", "list", "--format", "json"])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// From `wezterm cli list --format json`, pick the largest pane in the
+/// launcher's tab and the split direction along its longer side.
+fn pick_wezterm_split(json: &str, launcher_pane: &str) -> Option<(String, &'static str)> {
+    let panes: Vec<serde_json::Value> = serde_json::from_str(json).ok()?;
+    let pane_id = |p: &serde_json::Value| p["pane_id"].as_u64().map(|id| id.to_string());
+    let tab = panes
+        .iter()
+        .find(|p| pane_id(p).as_deref() == Some(launcher_pane))?["tab_id"]
+        .as_u64()?;
+    let dim = |p: &serde_json::Value, k: &str| p["size"][k].as_u64().unwrap_or(0);
+    let target = panes
+        .iter()
+        .filter(|p| p["tab_id"].as_u64() == Some(tab))
+        .max_by_key(|p| dim(p, "cols") * dim(p, "rows"))?;
+    let (pw, ph) = (dim(target, "pixel_width"), dim(target, "pixel_height"));
+    // Cells are roughly twice as tall as wide when pixel size is unknown.
+    let wide = if pw > 0 && ph > 0 {
+        pw >= ph
+    } else {
+        dim(target, "cols") >= dim(target, "rows") * 2
+    };
+    Some((pane_id(target)?, if wide { "--right" } else { "--bottom" }))
+}
+
 /// Get terminal presets for current platform with availability status.
 pub fn get_available_presets() -> Vec<(String, bool)> {
     let mut result = vec![("default".to_string(), true)];
@@ -990,6 +1135,12 @@ pub fn create_bash_script(
     // Unset tool markers and identity vars to prevent inheritance
     writeln!(f, "unset {}", tool_marker_vars().join(" "))?;
     writeln!(f, "unset {}", HCOM_IDENTITY_VARS.join(" "))?;
+    if let Some(tool) = tool_id.and_then(|id| id.parse::<crate::tool::Tool>().ok()) {
+        let vars = tool.spec().instance_state_env;
+        if !vars.is_empty() {
+            writeln!(f, "unset {}", vars.join(" "))?;
+        }
+    }
 
     // Discover paths for minimal environments (kitty splits, etc.)
     let mut paths_to_add: Vec<String> = Vec::new();
@@ -1069,6 +1220,14 @@ pub fn create_bash_script(
         }
     }
 
+    if background {
+        // Startup timeline marker for the background log; hcom.log carries the
+        // rest (startup.* events). macOS date has no sub-second format.
+        writeln!(
+            f,
+            "echo \"[hcom runner] starting PTY wrapper $(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+        )?;
+    }
     writeln!(f, "{}", final_command)?;
 
     if opens_new_window {
@@ -1077,7 +1236,7 @@ pub fn create_bash_script(
         // covered automatically) plus the non-identity per-launch vars exported
         // above that aren't in that list.
         let mut leftover_vars: Vec<&str> = HCOM_IDENTITY_VARS.to_vec();
-        leftover_vars.extend(["HCOM_TAG", "HCOM_CODEX_SANDBOX_MODE"]);
+        leftover_vars.push("HCOM_TAG");
         writeln!(f, "unset {}", leftover_vars.join(" "))?;
         writeln!(f, "rm -f {}", shell_quote(&script_file.to_string_lossy()))?;
         writeln!(f, "exec \"${{SHELL:-/bin/bash}}\" -l")?;
@@ -1161,9 +1320,14 @@ pub fn create_powershell_script(
 
     // Scrub inherited tool markers and identity vars so the child can't inherit
     // them (PowerShell ignores Env: entries that don't exist).
+    let instance_state_env = tool_id
+        .and_then(|id| id.parse::<crate::tool::Tool>().ok())
+        .map(|tool| tool.spec().instance_state_env)
+        .unwrap_or(&[]);
     let scrub: Vec<String> = tool_marker_vars()
         .iter()
         .chain(HCOM_IDENTITY_VARS.iter())
+        .chain(instance_state_env.iter())
         .map(|v| format!("Env:{v}"))
         .collect();
     writeln!(
@@ -1236,7 +1400,7 @@ pub fn create_powershell_script(
         // Clear hcom state from the interactive shell left open after the tool
         // exits (window persists via `powershell -NoExit`).
         let mut leftover_vars: Vec<&str> = HCOM_IDENTITY_VARS.to_vec();
-        leftover_vars.extend(["HCOM_TAG", "HCOM_CODEX_SANDBOX_MODE"]);
+        leftover_vars.push("HCOM_TAG");
         let leftover: Vec<String> = leftover_vars.iter().map(|v| format!("Env:{v}")).collect();
         writeln!(
             f,
@@ -1272,20 +1436,25 @@ fn get_launcher_env_from<I>(vars: I) -> HashMap<String, String>
 where
     I: IntoIterator<Item = (String, String)>,
 {
-    let mut strip: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for v in tool_marker_vars() {
-        strip.insert(v);
-    }
-    for v in HCOM_IDENTITY_VARS {
-        strip.insert(v);
-    }
-    for v in TERMINAL_CONTEXT_VARS {
-        strip.insert(v);
-    }
-    strip.insert("HCOM_LAUNCHED_PRESET");
+    // Windows env names are case-insensitive: `no_color` is `NO_COLOR`.
+    let norm = |k: &str| {
+        if cfg!(windows) {
+            k.to_ascii_uppercase()
+        } else {
+            k.to_string()
+        }
+    };
+    let strip: std::collections::HashSet<String> = tool_marker_vars()
+        .iter()
+        .chain(HCOM_IDENTITY_VARS)
+        .chain(TERMINAL_CONTEXT_VARS)
+        .chain(TERMINAL_COLOR_OVERRIDE_VARS)
+        .chain(&["HCOM_LAUNCHED_PRESET"])
+        .map(|v| norm(v))
+        .collect();
 
     vars.into_iter()
-        .filter(|(k, _)| !strip.contains(k.as_str()))
+        .filter(|(k, _)| !strip.contains(&norm(k)))
         .collect()
 }
 
@@ -2804,6 +2973,12 @@ pub fn launch_terminal(
                 ["--match".to_string(), format!("window_id:{wid}")],
             );
         }
+        if (terminal_mode == "wezterm-tab" || terminal_mode == "wezterm-split")
+            && let Ok(pane) = std::env::var("WEZTERM_PANE")
+            && !pane.is_empty()
+        {
+            splice_wezterm_target(&mut argv, &pane, wezterm_list_panes);
+        }
         Some(argv)
     } else {
         // Custom command template string (HCOM_TERMINAL / config custom command).
@@ -2988,15 +3163,16 @@ fn build_full_env(config_env: &HashMap<String, String>) -> HashMap<String, Strin
 ///
 /// Must run before SIGTERM because terminal CLIs match panes by PID/pane_id.
 /// Non-fatal: caller should always proceed with SIGTERM regardless.
-pub fn close_terminal_pane(
-    pid: u32,
-    preset_name: &str,
-    pane_id: &str,
-    process_id: &str,
-    kitty_listen_on: &str,
-    terminal_id: &str,
-    zellij_session_name: &str,
-) -> PaneCloseResult {
+pub fn close_terminal_pane(pid: u32, info: &TerminalInfo) -> PaneCloseResult {
+    let TerminalInfo {
+        preset_name,
+        pane_id,
+        process_id,
+        kitty_listen_on,
+        terminal_id,
+        zellij_session_name,
+        herdr_socket_path,
+    } = info;
     let failed_without_command = || PaneCloseResult {
         closed: false,
         retry_command: None,
@@ -3094,7 +3270,16 @@ pub fn close_terminal_pane(
     if argv.is_empty() {
         return failed_without_command();
     }
-    let retry_command = format_close_command(&argv);
+    // The herdr CLI talks to the server named by `HERDR_SOCKET_PATH`, falling
+    // back to the default session's. Point it at the server that owns the
+    // pane: the same pane id exists in every session, so the killer's own
+    // environment would close another session's pane.
+    let close_env: Vec<(&str, &str)> = if is_herdr_argv(&argv) && !herdr_socket_path.is_empty() {
+        vec![("HERDR_SOCKET_PATH", herdr_socket_path.as_str())]
+    } else {
+        Vec::new()
+    };
+    let retry_command = format_command_with_env(&close_env, &argv);
     let failed = || PaneCloseResult {
         closed: false,
         retry_command: Some(retry_command.clone()),
@@ -3103,6 +3288,7 @@ pub fn close_terminal_pane(
     // Run the close command directly (no shell) so it works on Windows too.
     let mut child = match Command::new(&argv[0])
         .args(&argv[1..])
+        .envs(close_env.iter().copied())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
@@ -3187,25 +3373,13 @@ fn zellij_terminal_pane_exists(session_name: &str, pane_id: &str) -> Option<bool
 }
 
 /// Close terminal pane (if applicable) then SIGTERM the process group.
-pub fn kill_process(
-    pid: u32,
-    preset_name: &str,
-    pane_id: &str,
-    process_id: &str,
-    kitty_listen_on: &str,
-    terminal_id: &str,
-    zellij_session_name: &str,
-) -> (KillResult, bool, Option<String>) {
-    let pane_close = if !preset_name.is_empty() {
-        close_terminal_pane(
-            pid,
-            preset_name,
-            pane_id,
-            process_id,
-            kitty_listen_on,
-            terminal_id,
-            zellij_session_name,
-        )
+pub fn kill_process(pid: u32, terminal: &TerminalInfo) -> (KillResult, bool, Option<String>) {
+    // Closing the pane can take the whole process tree with it (wezterm and
+    // ConPTY on Windows do this synchronously), so liveness must be sampled
+    // before the close to tell "we killed it" apart from "it was already gone".
+    let was_alive = crate::sys::process::is_alive(pid);
+    let pane_close = if !terminal.preset_name.is_empty() {
+        close_terminal_pane(pid, terminal)
     } else {
         PaneCloseResult {
             closed: false,
@@ -3223,8 +3397,19 @@ pub fn kill_process(
         #[cfg(unix)]
         GroupSignal::Other => KillResult::AlreadyDead,
     };
+    let kill_result = attribute_pane_close_kill(kill_result, was_alive, pane_close.closed);
 
     (kill_result, pane_close.closed, pane_close.retry_command)
+}
+
+/// A process that was alive until we closed its pane was killed by us, even
+/// though the follow-up group signal then finds nothing left to signal.
+fn attribute_pane_close_kill(result: KillResult, was_alive: bool, pane_closed: bool) -> KillResult {
+    if result == KillResult::AlreadyDead && was_alive && pane_closed {
+        KillResult::Sent
+    } else {
+        result
+    }
 }
 
 /// Resolve terminal info from the canonical preset fields plus launch_context metadata.
@@ -3284,6 +3469,10 @@ pub fn resolve_terminal_info(
             .to_string();
         info.zellij_session_name = lc_env
             .and_then(|e| e.get("ZELLIJ_SESSION_NAME").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .to_string();
+        info.herdr_socket_path = lc_env
+            .and_then(|e| e.get("HERDR_SOCKET_PATH").and_then(|v| v.as_str()))
             .unwrap_or("")
             .to_string();
     }
@@ -3664,6 +3853,26 @@ mod tests {
     }
 
     #[test]
+    fn test_launcher_env_strips_color_overrides_keeps_term() {
+        let env = get_launcher_env_from(vec![
+            ("NO_COLOR".into(), "1".into()),
+            ("FORCE_COLOR".into(), "0".into()),
+            ("TERM".into(), "xterm-256color".into()),
+            ("COLORTERM".into(), "truecolor".into()),
+        ]);
+        assert!(!env.contains_key("NO_COLOR"));
+        assert!(!env.contains_key("FORCE_COLOR"));
+        assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
+        assert_eq!(env.get("COLORTERM").map(String::as_str), Some("truecolor"));
+    }
+
+    #[test]
+    fn test_launcher_env_strip_folds_case_on_windows_only() {
+        let env = get_launcher_env_from(vec![("no_color".into(), "1".into())]);
+        assert_eq!(env.contains_key("no_color"), !cfg!(windows));
+    }
+
+    #[test]
     fn test_launcher_env_keeps_herdr_socket_path() {
         // The herdr preset's CLI resolves its socket from env; see the comment
         // on TERMINAL_CONTEXT_VARS for why HERDR_* is not stripped.
@@ -3779,6 +3988,28 @@ mod tests {
                 "$env:ZED = 'z'".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn native_claude_scripts_strip_parent_session_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = HashMap::new();
+        let bash = tmp.path().join("launch.sh");
+        create_bash_script(&bash, &env, None, "true", true, Some("claude"), false).unwrap();
+        let ps = tmp.path().join("launch.ps1");
+        create_powershell_script(&ps, &env, None, "true", true, Some("claude"), false).unwrap();
+        for var in crate::integration_spec::CLAUDE.instance_state_env {
+            assert!(
+                std::fs::read_to_string(&bash)
+                    .unwrap()
+                    .lines()
+                    .any(|line| line.starts_with("unset ")
+                        && line.split_whitespace().any(|word| word == *var))
+            );
+            assert!(std::fs::read_to_string(&ps).unwrap().lines().any(|line| {
+                line.starts_with("Remove-Item ") && line.contains(&format!("Env:{var}"))
+            }));
+        }
     }
 
     #[test]
@@ -4127,6 +4358,89 @@ mod tests {
                 "ls".to_string(),
             ]
         );
+    }
+
+    fn wez_pane(pane: u64, tab: u64, cols: u64, rows: u64) -> String {
+        format!(
+            r#"{{"pane_id":{pane},"tab_id":{tab},"size":{{"cols":{cols},"rows":{rows},"pixel_width":0,"pixel_height":0}}}}"#
+        )
+    }
+
+    #[test]
+    fn test_attribute_pane_close_kill() {
+        use KillResult::*;
+        // Pane close took a live process down before the group signal.
+        assert_eq!(attribute_pane_close_kill(AlreadyDead, true, true), Sent);
+        // Genuinely dead before kill started, pane still lingering.
+        assert_eq!(
+            attribute_pane_close_kill(AlreadyDead, false, true),
+            AlreadyDead
+        );
+        // No pane closed: nothing to attribute the death to.
+        assert_eq!(
+            attribute_pane_close_kill(AlreadyDead, true, false),
+            AlreadyDead
+        );
+        assert_eq!(attribute_pane_close_kill(Sent, true, true), Sent);
+        assert_eq!(
+            attribute_pane_close_kill(PermissionDenied, true, true),
+            PermissionDenied
+        );
+    }
+
+    #[test]
+    fn test_pick_wezterm_split_largest_pane_in_launcher_tab() {
+        let json = format!(
+            "[{},{},{},{}]",
+            wez_pane(1, 0, 400, 100), // other tab, biggest overall
+            wez_pane(5, 7, 90, 50),
+            wez_pane(6, 7, 100, 25),
+            wez_pane(8, 7, 100, 25),
+        );
+        // 90x50 cells is taller than wide in pixels → split below.
+        assert_eq!(
+            pick_wezterm_split(&json, "6"),
+            Some(("5".to_string(), "--bottom"))
+        );
+        let json = format!("[{}]", wez_pane(5, 7, 200, 50));
+        assert_eq!(
+            pick_wezterm_split(&json, "5"),
+            Some(("5".to_string(), "--right"))
+        );
+        assert_eq!(pick_wezterm_split(&json, "99"), None);
+    }
+
+    #[test]
+    fn test_splice_wezterm_target() {
+        let base = |sub: &str, extra: &[&str]| -> Vec<String> {
+            let mut v = vec!["wezterm", "cli", sub];
+            v.extend(extra);
+            v.extend(["--", "bash", "s.sh"]);
+            v.into_iter().map(String::from).collect()
+        };
+        let json = format!("[{},{}]", wez_pane(3, 1, 200, 50), wez_pane(4, 1, 50, 50));
+
+        let mut argv = base("split-pane", &[]);
+        splice_wezterm_target(&mut argv, "4", || Some(json.clone()));
+        assert_eq!(argv, base("split-pane", &["--pane-id", "3", "--right"]));
+
+        // List failure: split the launcher pane.
+        let mut argv = base("split-pane", &[]);
+        splice_wezterm_target(&mut argv, "4", || None);
+        assert_eq!(argv, base("split-pane", &["--pane-id", "4", "--right"]));
+
+        // User direction kept, launcher pinned, no listing.
+        let mut argv = base("split-pane", &["--bottom"]);
+        splice_wezterm_target(&mut argv, "4", || panic!("should not list"));
+        assert_eq!(argv, base("split-pane", &["--pane-id", "4", "--bottom"]));
+
+        let mut argv = base("spawn", &[]);
+        splice_wezterm_target(&mut argv, "4", || panic!("should not list"));
+        assert_eq!(argv, base("spawn", &["--pane-id", "4"]));
+
+        let mut argv = base("spawn", &["--new-window"]);
+        splice_wezterm_target(&mut argv, "4", || None);
+        assert_eq!(argv, base("spawn", &["--new-window"]));
     }
 
     #[test]
@@ -4718,6 +5032,65 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_terminal_info_reads_herdr_socket_from_env_snapshot() {
+        let info = resolve_terminal_info(
+            Some("herdr"),
+            Some(r#"{"pane_id":"w1:p1","env":{"HERDR_SOCKET_PATH":"/run/herdr/work.sock"}}"#),
+        );
+        assert_eq!(info.pane_id, "w1:p1");
+        assert_eq!(info.herdr_socket_path, "/run/herdr/work.sock");
+    }
+
+    #[test]
+    fn test_is_herdr_argv_matches_bare_name_and_paths() {
+        let is = |bin: &str| is_herdr_argv(&[bin.to_string(), "pane".to_string()]);
+        assert!(is("herdr"));
+        assert!(is("herdr.exe"));
+        // Backslashes only separate path components on Windows.
+        #[cfg(windows)]
+        assert!(is(r"C:\Users\x\.herdr\bin\herdr.exe"));
+        assert!(is("/usr/local/bin/herdr"));
+        assert!(!is("zellij"));
+        assert!(!is("herdr-wrapper"));
+        assert!(!is_herdr_argv(&[]));
+    }
+
+    #[test]
+    fn test_format_command_with_env_without_env_is_the_plain_command() {
+        let argv = argv(&["herdr", "pane", "close", "w1:p1"]);
+        assert_eq!(
+            format_command_with_env(&[], &argv),
+            "herdr pane close w1:p1"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_format_command_with_env_sets_powershell_env_first() {
+        let command = format_command_with_env(
+            &[("HERDR_SOCKET_PATH", r"C:\Users\O'Brien\herdr.sock")],
+            &argv(&["herdr", "pane", "close", "w1:p1"]),
+        );
+        assert_eq!(
+            command,
+            r"$env:HERDR_SOCKET_PATH='C:\Users\O''Brien\herdr.sock'; herdr pane close w1:p1"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_format_command_with_env_prefixes_posix_assignment() {
+        let command = format_command_with_env(
+            &[("HERDR_SOCKET_PATH", "/tmp/my herdr.sock")],
+            &argv(&["herdr", "pane", "close", "w1:p1"]),
+        );
+        assert_eq!(
+            command,
+            "HERDR_SOCKET_PATH='/tmp/my herdr.sock' herdr pane close w1:p1"
+        );
+    }
+
+    #[test]
     fn test_zellij_close_argv_session_splice() {
         // Reproduce the close_terminal_pane splice: --session <name> after zellij.
         let mut a = substitute_close_argv(
@@ -4767,14 +5140,6 @@ mod tests {
                 "id:13"
             ]
         );
-    }
-
-    #[test]
-    fn test_sandbox_flags_in_get_sandbox_flags() {
-        use crate::tools::codex_preprocessing::get_sandbox_flags;
-        let flags = get_sandbox_flags("workspace");
-        assert!(flags.contains(&"--sandbox".to_string()));
-        assert!(flags.contains(&"workspace-write".to_string()));
     }
 
     #[test]
@@ -4932,6 +5297,46 @@ mod tests {
             Some(p) => assert_eq!(r, p),
             None => assert_eq!(r, "/bin/bash"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn which_fallback_finds_user_bin_installs() {
+        let home = tempfile::tempdir().unwrap();
+        let install = |parts: &[&str], name: &str| {
+            let dir = parts
+                .iter()
+                .fold(home.path().to_path_buf(), |p, part| p.join(part));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join(name), "").unwrap();
+            dir.join(name).to_string_lossy().to_string()
+        };
+        assert_eq!(which_in_fallback_dirs(home.path(), "omp"), None);
+
+        // `bun install -g` links into ~/.bun/bin.
+        let bun_omp = install(&[".bun", "bin"], "omp");
+        assert_eq!(which_in_fallback_dirs(home.path(), "omp"), Some(bun_omp));
+        // ~/.local/bin (native installer) wins over the bun link.
+        let local_omp = install(&[".local", "bin"], "omp");
+        assert_eq!(which_in_fallback_dirs(home.path(), "omp"), Some(local_omp));
+
+        // A tool's own installer dir comes before the shared ones.
+        install(&[".local", "bin"], "grok");
+        let grok = install(&[".grok", "bin"], "grok");
+        assert_eq!(which_in_fallback_dirs(home.path(), "grok"), Some(grok));
+        let kimi = install(&[".kimi-code", "bin"], "kimi");
+        assert_eq!(which_in_fallback_dirs(home.path(), "kimi"), Some(kimi));
+        let pi = install(&[".pi", "agent", "bin"], "pi");
+        assert_eq!(which_in_fallback_dirs(home.path(), "pi"), Some(pi));
+
+        // Claude: ~/.local/bin (native installer) wins over legacy ~/.claude/bin.
+        install(&[".claude", "bin"], "claude");
+        let claude = install(&[".local", "bin"], "claude");
+        assert_eq!(which_in_fallback_dirs(home.path(), "claude"), Some(claude));
+
+        // Directories are not binaries.
+        std::fs::create_dir_all(home.path().join(".bun").join("bin").join("gemini")).unwrap();
+        assert_eq!(which_in_fallback_dirs(home.path(), "gemini"), None);
     }
 
     // Finding 17: built-in preset platform capability, checked against the

@@ -2,6 +2,7 @@
 
 #[path = "delivery/antigravity.rs"]
 mod antigravity;
+pub(crate) mod grok;
 
 use std::io::Write;
 use std::net::TcpStream;
@@ -914,8 +915,8 @@ pub(crate) fn gate_block_detail(reason: &str) -> &'static str {
 
 /// Build PTY wake text for tools whose delivery path is not human-visible.
 ///
-/// Claude and Codex inject the plain `<hcom>` trigger because their hooks already
-/// print the full message in the TUI. Gemini, Antigravity, and OpenCode bootstrap
+/// Claude and Codex inject the plain `<hcom>` trigger because their hooks show
+/// the full message in the TUI. Gemini, Antigravity, and OpenCode bootstrap
 /// need a human-visible prompt line, but it must stay prompt-safe: metadata only,
 /// no message body, no `@` autocomplete triggers, and no wrapping. If the compact
 /// preview will not fit the current input width, use the same minimal trigger.
@@ -1092,6 +1093,10 @@ impl ToolConfig {
     pub fn copilot() -> Self {
         Self::for_tool(crate::tool::Tool::Copilot)
     }
+    #[cfg(test)]
+    pub fn qoder() -> Self {
+        Self::for_tool(crate::tool::Tool::Qoder)
+    }
 }
 
 /// Gate evaluation result
@@ -1103,6 +1108,8 @@ pub struct GateResult {
 /// Shared state for delivery thread
 pub struct DeliveryState {
     pub screen: Arc<std::sync::RwLock<ScreenState>>,
+    /// Grok's native ACP transport; set for every hcom-launched Grok.
+    pub grok_acp: Option<grok::Launch>,
     /// True while the launch outcome is still Pending. Cleared once any
     /// terminal outcome (ready/failed/blocked) fires, so the PTY proxy can
     /// stop computing launch-only signals (e.g. `visible_tail`).
@@ -1204,6 +1211,10 @@ pub struct ScreenState {
     /// set. Only ever true for Claude (see `ScreenTracker::is_claude_subagent_nav_visible`
     /// / `is_claude_session_switcher_visible`).
     pub nav_overlay: bool,
+    /// Codex is still starting with nothing to answer (see
+    /// `ScreenTracker::is_codex_startup_loading`); the launch-blocked heuristic
+    /// waits it out rather than reading a quiet loading screen as settled.
+    pub startup_loading: bool,
 }
 
 impl Default for ScreenState {
@@ -1220,6 +1231,7 @@ impl Default for ScreenState {
             last_prompt_submit: None,
             approval_scrape_latched: false,
             nav_overlay: false,
+            startup_loading: false,
         }
     }
 }
@@ -1229,6 +1241,15 @@ impl Default for ScreenState {
 /// hook's `status=active` update. Tuned from PTY test traces where the gap was
 /// about 1s; round up for headroom.
 pub(crate) const SUBMIT_SETTLE_COOLDOWN_MS: u64 = 1500;
+
+/// Pause between seeing the injected text in the composer and pressing Enter.
+///
+/// Qoder (1.1.65) submits the text twice (`<hcom><hcom>`) when Enter follows it
+/// within a few tens of milliseconds as a separate write. A 100ms gap is enough
+/// (measured); this leaves a margin. Other tools take Enter at once.
+pub(crate) fn pre_enter_settle(tool: &str) -> Option<Duration> {
+    (tool == "qoder").then(|| Duration::from_millis(250))
+}
 
 /// How long screen output must be quiet before a negative approval scrape is
 /// trusted to clear the latched signal. Redraw bursts (cursor's approval prompt
@@ -1416,11 +1437,11 @@ fn launch_ready_observed(
         return true;
     }
     if config.launch_ready_on_plugin_bind {
-        // Authoritative readiness for plugin-driven tools (OMP): the extension's
+        // Authoritative readiness for plugin-driven tools (Pi, OMP): the extension's
         // bind (a kind='plugin' notify endpoint) proves both TUI construction
         // and extension load. It deliberately REPLACES on-screen scraping rather
-        // than OR-ing with it — OMP's visible chrome is theme/preset dependent
-        // (status-line presets omit the pi glyph), and a syntactically broken /
+        // than OR-ing with it — their visible chrome is configurable (Pi's
+        // header, OMP's status-line presets), and a syntactically broken /
         // non-running extension could still render default chrome and be falsely
         // declared ready. Requiring the bind makes a dead extension block.
         return db.has_notify_endpoint_kind(name, "plugin");
@@ -1576,6 +1597,9 @@ fn maybe_emit_launch_blocked(
     }
 
     let screen = state.screen.read().unwrap();
+    if screen.startup_loading {
+        return;
+    }
     let tail_text = screen.visible_tail.as_deref().unwrap_or("");
     // Gemini's animated startup banner keeps emitting output for ~60s, defeating
     // the settle heuristic. Its trust prompt is distinctive — fire immediately
@@ -1908,7 +1932,23 @@ pub fn run_delivery_loop(
     // After that, the plugin takes over (messages.transform for active, promptAsync for idle).
     use crate::tool::Tool;
     use std::str::FromStr;
-    if matches!(
+    if let Some(launch) = state.grok_acp.as_ref() {
+        grok::run(
+            launch,
+            &running,
+            db,
+            notify,
+            state,
+            &process_id,
+            &mut current_name,
+            config,
+            &shared_name,
+            &shared_status,
+            &title_wake,
+            &mut host_label,
+            &mut launch_outcome,
+        );
+    } else if matches!(
         Tool::from_str(&config.tool),
         Ok(Tool::OpenCode | Tool::Kilo | Tool::Pi | Tool::Omp)
     ) {
@@ -1994,11 +2034,14 @@ pub fn run_delivery_loop(
 
             // Heartbeat + port re-registration
             refresh_liveness(db, &current_name);
-            if let Err(e) = db.register_notify_port(&current_name, notify.port()) {
-                log_warn("native", "delivery.register_notify_fail", &format!("{}", e));
-            }
-            if let Err(e) = db.register_inject_port(&current_name, state.inject_port) {
-                log_warn("native", "delivery.register_inject_fail", &format!("{}", e));
+            if let Err(e) =
+                db.refresh_pty_endpoints(&current_name, notify.port(), state.inject_port)
+            {
+                log_warn(
+                    "native",
+                    "delivery.register_endpoints_fail",
+                    &format!("{}", e),
+                );
             }
         }
     } else {
@@ -2015,6 +2058,7 @@ pub fn run_delivery_loop(
         // Gate block tracking for TUI status updates
         let mut block_since: Option<Instant> = None;
         let mut last_block_context: String = String::new();
+        let mut endpoints_name = String::new();
 
         // Status tracking for terminal title updates
         let mut current_status = ST_LISTENING.to_string();
@@ -2048,10 +2092,29 @@ pub fn run_delivery_loop(
                     // Recheck launch readiness promptly while the TUI is still
                     // painting its initial screen. Some tools can start the
                     // delivery loop just before their input prompt appears.
-                    let idle_wait = if matches!(
-                        launch_outcome,
-                        LaunchOutcome::Pending | LaunchOutcome::Blocked
-                    ) {
+                    // Session switches create a new identity before it has endpoints.
+                    if endpoints_name != current_name {
+                        match db.refresh_pty_endpoints(
+                            &current_name,
+                            notify.port(),
+                            state.inject_port,
+                        ) {
+                            Ok(()) => endpoints_name = current_name.clone(),
+                            Err(e) => log_warn(
+                                "native",
+                                "delivery.register_endpoints_fail",
+                                &format!("{e}"),
+                            ),
+                        }
+                    }
+                    // SessionEnd can wake us before SessionStart binds the new name.
+                    let unbound = !process_id.is_empty()
+                        && matches!(db.get_process_binding(&process_id), Ok(None));
+                    let idle_wait = if unbound
+                        || matches!(
+                            launch_outcome,
+                            LaunchOutcome::Pending | LaunchOutcome::Blocked
+                        ) {
                         RETRY_DELAY
                     } else {
                         IDLE_WAIT
@@ -2087,11 +2150,14 @@ pub fn run_delivery_loop(
                     // Heartbeat (also re-asserts tcp_mode=true) + wake state.
                     refresh_liveness(db, &current_name);
                     // Re-register endpoints (self-heals after DB reset/instance recreation)
-                    if let Err(e) = db.register_notify_port(&current_name, notify.port()) {
-                        log_warn("native", "delivery.register_notify_fail", &format!("{}", e));
-                    }
-                    if let Err(e) = db.register_inject_port(&current_name, state.inject_port) {
-                        log_warn("native", "delivery.register_inject_fail", &format!("{}", e));
+                    if let Err(e) =
+                        db.refresh_pty_endpoints(&current_name, notify.port(), state.inject_port)
+                    {
+                        log_warn(
+                            "native",
+                            "delivery.register_endpoints_fail",
+                            &format!("{}", e),
+                        );
                     }
 
                     // Check for pending messages
@@ -2159,7 +2225,7 @@ pub fn run_delivery_loop(
                             continue;
                         }
 
-                        // Claude/Codex hooks show full delivery in the TUI, so
+                        // Claude/Codex hooks show the full delivery in the TUI, so
                         // they only need a trigger. Gemini-style paths use a
                         // compact, prompt-safe preview for human visibility.
                         use crate::tool::Tool;
@@ -2170,8 +2236,8 @@ pub fn run_delivery_loop(
                         let input_box_width = (cols as usize).saturating_sub(15).max(10);
                         let text = match parsed_tool {
                             Some(Tool::Claude) | Some(Tool::Codex) | Some(Tool::Cursor)
-                            | Some(Tool::Kimi) | Some(Tool::Copilot) | Some(Tool::Pi)
-                            | Some(Tool::Omp) => "<hcom>".to_string(),
+                            | Some(Tool::Kimi) | Some(Tool::Copilot) | Some(Tool::Qoder)
+                            | Some(Tool::Pi) | Some(Tool::Omp) => "<hcom>".to_string(),
                             _ => build_wake_inject_text(db, &current_name, input_box_width),
                         };
 
@@ -2228,7 +2294,10 @@ pub fn run_delivery_loop(
                             let screen = state.screen.read().unwrap();
                             screen.approval
                         };
-                        if !approval_showing && gate.reason == "not_idle" {
+                        // Codex Stop/Interrupt hooks own idle status; quiet
+                        // terminal output can still mean active work.
+                        if config.tool != "codex" && !approval_showing && gate.reason == "not_idle"
+                        {
                             // Stability-based recovery: if status stuck "active" but output stable 10s,
                             // or stale PTY approval was left behind after the PTY cleared,
                             // flip back to listening.
@@ -2385,6 +2454,10 @@ pub fn run_delivery_loop(
                                 "delivery.text_rendered",
                                 "Injected text exclusively owns the input box",
                             );
+
+                            if let Some(settle) = pre_enter_settle(&config.tool) {
+                                std::thread::sleep(settle);
+                            }
 
                             // Re-check all submit hazards from one fresh snapshot.
                             // The prompt can change between render detection and Enter.
@@ -2780,11 +2853,14 @@ pub fn run_delivery_loop(
 
                     db.reconnect_if_stale();
                     refresh_liveness(db, &current_name);
-                    if let Err(e) = db.register_notify_port(&current_name, notify.port()) {
-                        log_warn("native", "delivery.register_notify_fail", &format!("{}", e));
-                    }
-                    if let Err(e) = db.register_inject_port(&current_name, state.inject_port) {
-                        log_warn("native", "delivery.register_inject_fail", &format!("{}", e));
+                    if let Err(e) =
+                        db.refresh_pty_endpoints(&current_name, notify.port(), state.inject_port)
+                    {
+                        log_warn(
+                            "native",
+                            "delivery.register_endpoints_fail",
+                            &format!("{}", e),
+                        );
                     }
 
                     let current_cursor = db.get_cursor(&current_name);
@@ -2848,7 +2924,11 @@ pub fn run_delivery_loop(
 }
 
 /// True when this delivery thread's process_id still owns `current_name`.
-fn instance_owns_process_binding(db: &HcomDb, process_id: &str, current_name: &str) -> bool {
+pub(crate) fn instance_owns_process_binding(
+    db: &HcomDb,
+    process_id: &str,
+    current_name: &str,
+) -> bool {
     if process_id.is_empty() {
         return true;
     }
@@ -2860,38 +2940,45 @@ fn instance_owns_process_binding(db: &HcomDb, process_id: &str, current_name: &s
 }
 
 /// Hard PTY exit cleanup: inactive status, life event, delete instance row.
+///
+/// Publishes through the same atomic delete gate as `stop_instance`, so a
+/// concurrent `hcom kill` and this cleanup produce exactly one stopped event.
 pub(crate) fn cleanup_deleted_instance(db: &mut HcomDb, current_name: &str) {
-    let snapshot = match db.get_instance_snapshot(current_name) {
-        Ok(Some(snap)) => Some(snap),
-        Ok(None) => {
-            log_info(
-                "native",
-                "delivery.cleanup_skipped",
-                &format!(
-                    "Skipping PTY stop event for {} because the instance row is already gone",
-                    current_name
-                ),
-            );
-            return;
-        }
+    let skip = |why: &str| {
+        log_info(
+            "native",
+            "delivery.cleanup_skipped",
+            &format!("Skipping PTY stop event for {current_name} because {why}"),
+        );
+    };
+    let inst = match db.get_instance_full(current_name) {
+        Ok(Some(inst)) => inst,
+        Ok(None) => return skip("the instance row is already gone"),
         Err(e) => {
             log_error(
                 "native",
                 "delivery.cleanup",
-                &format!("DB error getting instance snapshot: {}", e),
+                &format!("DB error loading instance {current_name}: {e}"),
             );
-            None
+            return;
         }
     };
+    let snapshot = db.get_instance_snapshot(current_name).ok().flatten();
 
-    let was_killed = EXIT_WAS_KILLED.load(std::sync::atomic::Ordering::Acquire)
-        || matches!(db.get_status(current_name), Ok(Some((_, context))) if context == "exit:killed");
+    // `hcom kill` records exit:killed + its initiator before signalling.
+    let kill_recorded = inst.status_context == "exit:killed";
+    let was_killed = kill_recorded || EXIT_WAS_KILLED.load(std::sync::atomic::Ordering::Acquire);
     let (exit_context, exit_reason) = if was_killed {
         ("exit:killed", "killed")
     } else {
         ("exit:closed", "closed")
     };
-    if let Err(e) = db.set_status(current_name, "inactive", exit_context) {
+    let by = if kill_recorded && !inst.status_detail.is_empty() {
+        inst.status_detail.clone()
+    } else {
+        "pty".to_string()
+    };
+    if !kill_recorded && let Err(e) = db.set_status(current_name, "inactive", exit_context) {
         log_warn(
             "native",
             "delivery.set_status_fail",
@@ -2899,25 +2986,31 @@ pub(crate) fn cleanup_deleted_instance(db: &mut HcomDb, current_name: &str) {
         );
     }
 
-    if let Err(e) = db.delete_notify_endpoints(current_name) {
-        log_warn(
-            "native",
-            "delivery.cleanup_endpoints_fail",
-            &format!("{}", e),
-        );
-    }
     if let Err(e) = db.cleanup_subscriptions(current_name) {
         log_warn("native", "delivery.cleanup_subs_fail", &format!("{}", e));
     }
-    if let Err(e) = db.log_life_event(current_name, "stopped", "pty", exit_reason, snapshot) {
-        log_warn(
+    let mut event_data = serde_json::json!({
+        "action": "stopped",
+        "by": by,
+        "reason": exit_reason,
+    });
+    if let Some(snapshot) = snapshot {
+        event_data["snapshot"] = snapshot;
+    }
+    match db.finalize_instance_stop(
+        current_name,
+        inst.created_at,
+        inst.session_id.as_deref(),
+        inst.agent_id.as_deref(),
+        &event_data,
+    ) {
+        Ok(true) => {}
+        Ok(false) => skip("another stop finalized it first"),
+        Err(e) => log_warn(
             "native",
             "delivery.life_event_fail",
-            &format!("Failed to log life event: {}", e),
-        );
-    }
-    if let Err(e) = db.delete_instance(current_name) {
-        eprintln!("[hcom] warn: delete_instance failed for {current_name}: {e}");
+            &format!("Failed to finalize stop for {current_name}: {e}"),
+        ),
     }
 }
 
@@ -2966,6 +3059,7 @@ mod tests {
     /// Helper: create DeliveryState with given screen state
     fn make_state(screen: ScreenState, cooldown_ms: u64) -> DeliveryState {
         DeliveryState {
+            grok_acp: None,
             screen: Arc::new(std::sync::RwLock::new(screen)),
             launch_phase_active: Arc::new(AtomicBool::new(true)),
             inject_port: 0,
@@ -2987,6 +3081,7 @@ mod tests {
             last_prompt_submit: None,
             approval_scrape_latched: false,
             nav_overlay: false,
+            startup_loading: false,
         }
     }
 
@@ -3081,7 +3176,7 @@ mod tests {
     }
 
     #[test]
-    fn pty_cleanup_keeps_killed_reason_recorded_by_kill() {
+    fn pty_cleanup_keeps_kill_reason_and_initiator_with_single_stop_event() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let mut db = HcomDb::open_raw(&db_path).unwrap();
@@ -3095,21 +3190,26 @@ mod tests {
             .unwrap();
         // `hcom kill` records the reason before signalling; the PTY cleanup
         // can then win the race without having seen the signal itself.
-        db.set_status("kiro", ST_INACTIVE, "exit:killed").unwrap();
+        db.mark_killed("kiro", "samu").unwrap();
 
         cleanup_deleted_instance(&mut db, "kiro");
+        // The kill path's own finalize loses the gate and logs nothing.
+        crate::hooks::common::stop_instance(&db, "kiro", "samu", "killed");
 
-        let reason: String = db
+        let stops: Vec<(String, String)> = db
             .conn()
-            .query_row(
-                "SELECT json_extract(data, '$.reason') FROM events
+            .prepare(
+                "SELECT json_extract(data, '$.by'), json_extract(data, '$.reason') FROM events
                  WHERE type = 'life' AND instance = 'kiro'
                    AND json_extract(data, '$.action') = 'stopped'",
-                [],
-                |row| row.get(0),
             )
-            .unwrap();
-        assert_eq!(reason, "killed");
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(stops, vec![("samu".to_string(), "killed".to_string())]);
+        assert!(db.get_instance_full("kiro").unwrap().is_none());
     }
 
     #[test]
@@ -3345,6 +3445,14 @@ mod tests {
     }
 
     #[test]
+    fn only_qoder_waits_before_enter() {
+        assert_eq!(pre_enter_settle("qoder"), Some(Duration::from_millis(250)));
+        for tool in ["claude", "codex", "copilot", "kimi", "adhoc"] {
+            assert_eq!(pre_enter_settle(tool), None, "{tool}");
+        }
+    }
+
+    #[test]
     fn gate_blocks_during_submit_settle_window() {
         let config = ToolConfig::codex();
         let mut screen = safe_screen();
@@ -3492,13 +3600,20 @@ mod tests {
     }
 
     #[test]
-    fn omp_launch_ready_requires_plugin_bind_not_screen() {
-        // OMP readiness is bind-driven: a rendered/ready screen must NOT be
+    fn pi_family_launch_ready_requires_plugin_bind_not_screen() {
+        // Pi/OMP readiness is bind-driven: a rendered/ready screen must NOT be
         // enough, and a kind='plugin' notify endpoint must flip it ready even
         // with no on-screen marker.
+        for tool in [crate::tool::Tool::Pi, crate::tool::Tool::Omp] {
+            assert_plugin_bind_readiness(tool);
+        }
+    }
+
+    fn assert_plugin_bind_readiness(tool: crate::tool::Tool) {
         let (_dir, db) = open_ready_test_db();
-        let config = ToolConfig::for_tool(crate::tool::Tool::Omp);
-        assert!(config.launch_ready_on_plugin_bind);
+        let config = ToolConfig::for_tool(tool);
+        assert!(config.launch_ready_on_plugin_bind, "{tool:?}");
+        assert!(tool.ready_patterns().is_empty(), "{tool:?}");
 
         let mut screen = safe_screen();
         screen.ready = true; // empty pattern => is_ready() always true
@@ -3645,6 +3760,16 @@ mod tests {
         assert!(copilot.require_prompt_empty);
         assert!(copilot.block_on_user_activity);
         assert!(copilot.block_on_approval);
+
+        // Qoder: same gates as Copilot. Its composer stays on screen while busy,
+        // so the ready markers only prove the TUI is up; idle comes from hooks.
+        let qoder = ToolConfig::qoder();
+        assert!(qoder.require_idle);
+        assert!(qoder.require_ready_prompt);
+        assert!(qoder.require_prompt_empty);
+        assert!(qoder.block_on_user_activity);
+        assert!(qoder.block_on_approval);
+        assert!(qoder.launch_requires_ready);
     }
 
     #[test]

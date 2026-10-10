@@ -236,6 +236,21 @@ fn attribute_disk_match(
     owner
 }
 
+/// Explain an empty range result against the exchanges that do exist.
+fn range_miss_message(
+    exchanges: &[Exchange],
+    range_start: Option<usize>,
+    range_end: Option<usize>,
+) -> Option<String> {
+    let start = range_start?;
+    let end = range_end.unwrap_or(start);
+    let last = exchanges.iter().map(|e| e.position).max()?;
+    Some(format!(
+        "No exchanges in range {start}-{end}; this transcript has 1-{last} (e.g. --last 5 or {}-{last})",
+        last.saturating_sub(4).max(1)
+    ))
+}
+
 /// Build an appropriate error message when transcript resolution fails.
 /// Uses resolve_display_name_or_stopped (which handles exact base and tag-name
 /// resolution) to check if the instance exists without a transcript.
@@ -261,7 +276,7 @@ fn no_transcript_error(
             "No model transcript is registered for {display_name}.\nView transport messages with: {command}"
         )
     } else {
-        format!("Agent '{display_name}' not found")
+        crate::identity::describe_missing_agent(db, name)
     }
 }
 
@@ -287,7 +302,7 @@ fn resolve_remote_instance_name(db: &HcomDb, base_name: &str) -> Option<String> 
 }
 
 /// Get exchanges from a transcript file using the shared transcript module.
-fn get_exchanges(
+pub(crate) fn get_exchanges(
     path: &str,
     agent: &str,
     last: usize,
@@ -901,7 +916,7 @@ fn cmd_transcript_timeline(db: &HcomDb, args: &TranscriptTimelineArgs) -> i32 {
     if json_mode {
         println!(
             "{}",
-            serde_json::to_string_pretty(&all_entries).unwrap_or_default()
+            serde_json::to_string(&all_entries).unwrap_or_default()
         );
         return 0;
     }
@@ -1111,6 +1126,14 @@ pub fn cmd_transcript(db: &HcomDb, args: &TranscriptArgs, ctx: Option<&CommandCo
         exchanges.iter().collect()
     };
 
+    // Checked before output-mode branching so --json callers see the same error.
+    if filtered.is_empty()
+        && let Some(msg) = range_miss_message(&exchanges, range_start, range_end)
+    {
+        eprintln!("Error: {msg}");
+        return 1;
+    }
+
     if json_mode {
         let json_output: Vec<Value> = filtered
             .iter()
@@ -1150,7 +1173,7 @@ pub fn cmd_transcript(db: &HcomDb, args: &TranscriptArgs, ctx: Option<&CommandCo
             .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&json_output).unwrap_or_default()
+            serde_json::to_string(&json_output).unwrap_or_default()
         );
         return 0;
     }
@@ -1173,8 +1196,10 @@ pub fn cmd_transcript(db: &HcomDb, args: &TranscriptArgs, ctx: Option<&CommandCo
     );
 
     let owned: Vec<Exchange> = filtered.into_iter().cloned().collect();
-    let formatted = format_exchanges(&owned, &instance_name, full_mode, detailed);
-    println!("{formatted}");
+    println!("{}", format_exchanges(&owned, full_mode, detailed));
+    if let Some(hint) = transcript::flag_hint(full_mode, detailed) {
+        println!("{hint}");
+    }
 
     0
 }
@@ -1321,6 +1346,12 @@ fn render_instance_transcript_impl(
         exchanges.iter().collect()
     };
 
+    if filtered.is_empty()
+        && let Some(msg) = range_miss_message(&exchanges, range_start, range_end)
+    {
+        return Err(msg);
+    }
+
     if opts.json_mode {
         let json_output: Vec<Value> = filtered
             .iter()
@@ -1358,7 +1389,7 @@ fn render_instance_transcript_impl(
                 obj
             })
             .collect();
-        return serde_json::to_string_pretty(&json_output).map_err(|e| e.to_string());
+        return serde_json::to_string(&json_output).map_err(|e| e.to_string());
     }
 
     if filtered.is_empty() {
@@ -1368,7 +1399,11 @@ fn render_instance_transcript_impl(
     let first_pos = filtered.first().map(|e| e.position).unwrap_or(1);
     let last_pos = filtered.last().map(|e| e.position).unwrap_or(1);
     let owned: Vec<Exchange> = filtered.into_iter().cloned().collect();
-    let formatted = format_exchanges(&owned, &instance_name, opts.full_mode, opts.detailed);
+    let mut formatted = format_exchanges(&owned, opts.full_mode, opts.detailed);
+    if let Some(hint) = transcript::flag_hint(opts.full_mode, opts.detailed) {
+        formatted.push('\n');
+        formatted.push_str(hint);
+    }
     Ok(format!(
         "Recent conversation ({} exchanges, {}-{} of {}) - @{}:\n\n{}",
         owned.len(),
@@ -1380,6 +1415,39 @@ fn render_instance_transcript_impl(
     ))
 }
 
+/// Transcript `(path, tool, session_id)` for an exact agent name: the live row,
+/// else the agent's last stopped snapshot. A live row without a transcript is
+/// authoritative (None) rather than falling back to an older session.
+pub(crate) fn exact_instance_transcript(
+    db: &HcomDb,
+    name: &str,
+) -> Option<(String, String, Option<String>)> {
+    match db.get_instance_full(name) {
+        Ok(Some(instance)) if !instance.transcript_path.is_empty() => {
+            return Some((instance.transcript_path, instance.tool, instance.session_id));
+        }
+        Ok(Some(_)) | Err(_) => return None,
+        Ok(None) => {}
+    }
+
+    let (path, tool, sid) = db
+        .conn()
+        .query_row(
+            "SELECT json_extract(data, '$.snapshot.transcript_path'), json_extract(data, '$.snapshot.tool'), json_extract(data, '$.snapshot.session_id') FROM events WHERE type = 'life' AND instance = ? AND json_extract(data, '$.action') = 'stopped' ORDER BY id DESC LIMIT 1",
+            rusqlite::params![name],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .ok()?;
+    let tool = tool.unwrap_or_else(|| detect_agent_type(&path).to_string());
+    Some((path, tool, sid))
+}
+
 /// Resolve instance name to (name, transcript_path, agent_type, session_id).
 pub(crate) fn resolve_instance_transcript(
     db: &HcomDb,
@@ -1389,29 +1457,8 @@ pub(crate) fn resolve_instance_transcript(
     // transcript. Only infer a prefix when no exact identity exists; otherwise
     // a transcript-bearing longer name can disclose the wrong conversation.
     if let Some(exact_name) = crate::identity::resolve_display_name_or_stopped(db, name) {
-        match db.get_instance_full(&exact_name) {
-            Ok(Some(instance)) if !instance.transcript_path.is_empty() => {
-                return Some((
-                    exact_name,
-                    instance.transcript_path,
-                    instance.tool,
-                    instance.session_id,
-                ));
-            }
-            Ok(Some(_)) | Err(_) => return None,
-            Ok(None) => {}
-        }
-
-        if let Ok((path, sid)) = db.conn().query_row(
-            "SELECT json_extract(data, '$.snapshot.transcript_path'), json_extract(data, '$.snapshot.session_id') FROM events WHERE type = 'life' AND instance = ? AND json_extract(data, '$.action') = 'stopped' ORDER BY id DESC LIMIT 1",
-            rusqlite::params![&exact_name],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-        ) {
-            let agent = detect_agent_type(&path).to_string();
-            return Some((exact_name, path, agent, sid));
-        }
-
-        return None;
+        return exact_instance_transcript(db, &exact_name)
+            .map(|(path, tool, sid)| (exact_name, path, tool, sid));
     }
 
     // Prefix match (literal matching; only an unambiguous single match returns immediately)
@@ -1627,6 +1674,10 @@ View transport messages with: hcom events --remote-fetch --device ABCD --partici
             detect_agent_type("/home/user/.copilot/session-state/abc/events.jsonl"),
             "copilot"
         );
+        assert_eq!(
+            detect_agent_type("/home/user/.qoder/projects/-home-user-proj/abc.jsonl"),
+            "qoder"
+        );
     }
 
     #[test]
@@ -1655,6 +1706,14 @@ View transport messages with: hcom events --remote-fetch --device ABCD --partici
             (
                 "/home/user/.copilot/session-state/abc/events.jsonl",
                 "copilot",
+            ),
+            (
+                "/home/user/.qoder/projects/-home-user-proj/abc.jsonl",
+                "qoder",
+            ),
+            (
+                "/home/user/.grok/sessions/%2Fhome%2Fuser%2Fproj/019f-uuid/updates.jsonl",
+                "grok",
             ),
             ("/home/user/.pi/agent/sessions/x/20260603_abc.jsonl", "pi"),
             ("/home/user/.omp/agent/sessions/x/20260603_abc.jsonl", "omp"),

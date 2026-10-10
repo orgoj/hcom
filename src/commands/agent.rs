@@ -714,13 +714,29 @@ fn find_project_hcom_dirs(start: &Path) -> Vec<PathBuf> {
     let mut dir = Some(start);
     while let Some(d) = dir {
         let candidate = normalize(&d.join(PROJECT_DIR));
-        if candidate.is_dir() && candidate != global {
+        if candidate.is_dir() && candidate != global && !outside_test_tree(&candidate) {
             found.push(candidate);
         }
         dir = d.parent();
     }
     found.reverse();
     found
+}
+
+/// Unit tests run from the repository checkout, whose ancestors can reach the
+/// developer's real `~/.hcom`. Only catalogs inside the temp tree are in scope
+/// there, so a test can never route to (or autostart) a real agent.
+#[cfg(test)]
+fn outside_test_tree(dir: &Path) -> bool {
+    let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap_or_else(|_| std::env::temp_dir());
+    !std::fs::canonicalize(dir)
+        .unwrap_or_else(|_| dir.to_path_buf())
+        .starts_with(temp)
+}
+
+#[cfg(not(test))]
+fn outside_test_tree(_dir: &Path) -> bool {
+    false
 }
 
 /// Root a project catalog's relative paths resolve against.

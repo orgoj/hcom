@@ -56,6 +56,7 @@ pub const HCOM_IDENTITY_VARS: &[&str] = &[
     "HCOM_LAUNCHED_BY",
     "HCOM_LAUNCH_BATCH_ID",
     "HCOM_LAUNCH_EVENT_ID",
+    "HCOM_LAUNCH_START_EVENT_ID",
     // Invocation-local instruction transports must not leak into nested launches.
     "HCOM_AGENT_INSTRUCTIONS_FALLBACK",
     "HERMES_EPHEMERAL_SYSTEM_PROMPT",

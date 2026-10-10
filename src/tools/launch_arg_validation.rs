@@ -13,6 +13,29 @@ pub(crate) enum RejectedArgKind {
     RootSubcommand,
 }
 
+pub(crate) const GROK_REJECTED_ARGS: &[RejectedArg] = &[
+    RejectedArg {
+        token: "-p",
+        reason: "exits after one prompt; not a persistent hcom agent",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "--single",
+        reason: "exits after one prompt; not a persistent hcom agent",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "--prompt-file",
+        reason: "one-shot prompt from a file; not a persistent hcom agent",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "--prompt-json",
+        reason: "one-shot JSON prompt; not a persistent hcom agent",
+        kind: RejectedArgKind::Flag,
+    },
+];
+
 pub(crate) const KIMI_REJECTED_ARGS: &[RejectedArg] = &[
     RejectedArg {
         token: "-p",
@@ -22,6 +45,49 @@ pub(crate) const KIMI_REJECTED_ARGS: &[RejectedArg] = &[
     RejectedArg {
         token: "--prompt",
         reason: "runs one prompt non-interactively and exits",
+        kind: RejectedArgKind::Flag,
+    },
+];
+
+pub(crate) const QODER_REJECTED_ARGS: &[RejectedArg] = &[
+    RejectedArg {
+        token: "-p",
+        reason: "runs one prompt non-interactively and exits",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "--print",
+        reason: "runs one prompt non-interactively and exits",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "--acp",
+        reason: "starts an ACP server instead of the interactive TUI",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "--remote",
+        reason: "creates a cloud session and exits",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "--remote-control",
+        reason: "starts a headless remote-control worker",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "--list-sessions",
+        reason: "lists sessions and exits",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "--delete-session",
+        reason: "deletes a session and exits",
+        kind: RejectedArgKind::Flag,
+    },
+    RejectedArg {
+        token: "--list-models",
+        reason: "lists models instead of starting an interactive agent",
         kind: RejectedArgKind::Flag,
     },
 ];
@@ -217,6 +283,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn qoder_rejects_modes_without_an_interactive_agent() {
+        for flag in [
+            "--remote",
+            "--remote=task",
+            "--remote-control",
+            "--list-sessions",
+            "--delete-session",
+            "--list-models",
+        ] {
+            assert_eq!(
+                validate_rejected_args(
+                    "Qoder",
+                    "hcom qoder",
+                    &[flag.to_string()],
+                    QODER_REJECTED_ARGS
+                )
+                .len(),
+                1,
+                "{flag}"
+            );
+        }
+    }
+
+    #[test]
     fn long_flags_match_equals_form() {
         let errors = validate_rejected_args(
             "Kimi",
@@ -232,6 +322,7 @@ mod tests {
     fn benign_flags_pass() {
         for (tool, invocation, rejected) in [
             ("Kimi", "hcom kimi", KIMI_REJECTED_ARGS),
+            ("Qoder", "hcom qoder", QODER_REJECTED_ARGS),
             ("OpenCode", "hcom opencode", OPENCODE_REJECTED_ARGS),
             ("Kilo", "hcom kilo", KILO_REJECTED_ARGS),
             ("Pi", "hcom pi", PI_REJECTED_ARGS),

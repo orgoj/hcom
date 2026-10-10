@@ -125,14 +125,17 @@ pub fn handle_device_gone(db: &HcomDb, device_id: &str) {
     safe_kv_set(db, &format!("relay_uuid_short_{}", device_id), None);
     let prefix = super::device_id_prefix(device_id);
     let label = short_id.as_deref().unwrap_or(prefix);
-    emit_device_event(
+    // The leave is fully applied above, so waiters can be woken as soon as it is logged.
+    if emit_device_event(
         db,
         super::ACTION_DEVICE_LEAVE,
         label,
         prefix,
         &format!("device {} left the relay", label),
         false,
-    );
+    ) {
+        crate::notify::wake_all(db);
+    }
     log::log_info("relay", "relay.device_gone", &format!("device={}", prefix));
 }
 
@@ -189,12 +192,13 @@ pub fn handle_state_message(
 ) -> bool {
     let t0 = std::time::Instant::now();
 
+    let watermark = state_ts_watermark(db, device_id);
     let opened = match open_envelope_for_handler(
         ctx,
         device_id,
         payload,
         ReplayPolicy::State {
-            min_accepted_ts: state_ts_watermark(db, device_id),
+            min_accepted_ts: watermark,
         },
     ) {
         Some(p) => p,
@@ -234,8 +238,36 @@ pub fn handle_state_message(
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0);
 
+    // A snapshot sealed in the same second as the newest one applied passes the watermark
+    // (equal timestamps must, so a broker can re-deliver that same snapshot). If it also ends
+    // below the events already imported and announces no newer reset than the one already
+    // applied, it is an earlier snapshot arriving out of order, for example a stale retained
+    // copy after a broker restart. Skip it before the peer's state or events are applied, so
+    // it can neither roll that state back nor trip the id-regression reset in
+    // import_remote_events. A snapshot announcing a newer reset is a new database generation
+    // and always reaches the reset handling below, whatever second it was sealed in.
+    let cached_reset = cached_reset_ts(db, device_id);
+    if watermark == Some(opened.ts_secs)
+        && reset_ts <= cached_reset
+        && ends_below_cursor(db, device_id, &events)
+    {
+        log::log_info(
+            "relay",
+            "relay.stale_snapshot",
+            &format!(
+                "device={} ts={}",
+                super::device_id_prefix(device_id),
+                opened.ts_secs
+            ),
+        );
+        return false;
+    }
+
     // Check short_id collision (two different devices with same short_id)
     let cached_device = safe_kv_get(db, &format!("relay_short_{}", short_id));
+    // A join or reconnect is logged here, before the peer's instances, capabilities and sync
+    // time are applied below, so it is woken for at the END of this handler, not now.
+    let mut lifecycle_logged = false;
     if let Some(ref cached) = cached_device {
         if cached != device_id {
             log::log_warn(
@@ -257,7 +289,7 @@ pub fn handle_state_message(
         let now = crate::shared::time::now_epoch_f64();
         if last_sync > 0.0 && (now - last_sync) > super::DEVICE_STALE_SECS {
             let prefix = super::device_id_prefix(device_id);
-            emit_device_event(
+            lifecycle_logged = emit_device_event(
                 db,
                 super::ACTION_DEVICE_JOIN,
                 &short_id,
@@ -269,7 +301,7 @@ pub fn handle_state_message(
     } else {
         safe_kv_set(db, &format!("relay_short_{}", short_id), Some(device_id));
         let prefix = super::device_id_prefix(device_id);
-        emit_device_event(
+        lifecycle_logged = emit_device_event(
             db,
             super::ACTION_DEVICE_JOIN,
             &short_id,
@@ -295,10 +327,6 @@ pub fn handle_state_message(
     }
 
     // Check for device reset — clean old data before importing
-    let cached_reset: f64 = safe_kv_get(db, &format!("relay_reset_{}", device_id))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.0);
-
     if reset_ts > cached_reset {
         if let Err(e) = db.conn().execute(
             "DELETE FROM instances WHERE origin_device_id = ?",
@@ -326,6 +354,7 @@ pub fn handle_state_message(
             Some(&reset_ts.to_string()),
         );
         safe_kv_set(db, &format!("relay_events_{}", device_id), Some("0"));
+        super::backfill::clear_gaps(db, device_id);
         log::log_info("relay", "relay.reset", &format!("device={}", short_id));
     }
 
@@ -369,33 +398,35 @@ pub fn handle_state_message(
         .cloned()
         .unwrap_or_default();
 
-    let mut seen_instances = std::collections::HashSet::new();
+    // Instance upserts and removals commit together (one sync, not one per row).
+    let instances_applied = db.with_write_scope(|| {
+        let mut seen_instances = std::collections::HashSet::new();
 
-    for (name, inst) in &instances {
-        let status_time = inst
-            .get("status_time")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let status_time_i64 = status_time as i64;
+        for (name, inst) in &instances {
+            let status_time = inst
+                .get("status_time")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let status_time_i64 = status_time as i64;
 
-        // Local reset wins: ignore remote snapshots older than our reset so
-        // cleared instances don't reappear from broker-retained state.
-        if local_reset_ts > 0.0 && status_time < local_reset_ts {
-            continue;
-        }
+            // Local reset wins: ignore remote snapshots older than our reset so
+            // cleared instances don't reappear from broker-retained state.
+            if local_reset_ts > 0.0 && status_time < local_reset_ts {
+                continue;
+            }
 
-        let namespaced = super::add_device_suffix(name, &short_id);
-        seen_instances.insert(namespaced.clone());
+            let namespaced = super::add_device_suffix(name, &short_id);
+            seen_instances.insert(namespaced.clone());
 
-        let parent = inst
-            .get("parent")
-            .and_then(|v| v.as_str())
-            .map(|p| super::add_device_suffix(p, &short_id));
+            let parent = inst
+                .get("parent")
+                .and_then(|v| v.as_str())
+                .map(|p| super::add_device_suffix(p, &short_id));
 
-        let now = crate::shared::time::now_epoch_f64();
+            let now = crate::shared::time::now_epoch_f64();
 
-        let _ = db.conn().execute(
-            "INSERT INTO instances (
+            db.conn().execute(
+                "INSERT INTO instances (
                 name, origin_device_id, status, status_context, status_detail, status_time,
                 parent_name, directory, transcript_path, created_at,
                 session_id, parent_session_id, agent_id, wait_timeout, last_stop, tcp_mode,
@@ -411,68 +442,71 @@ pub fn handle_state_message(
                 agent_id = excluded.agent_id, wait_timeout = excluded.wait_timeout,
                 last_stop = excluded.last_stop, tcp_mode = excluded.tcp_mode,
                 tag = excluded.tag, tool = excluded.tool, background = excluded.background",
-            params![
-                namespaced,
-                device_id,
-                inst.get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown"),
-                inst.get("context").and_then(|v| v.as_str()).unwrap_or(""),
-                inst.get("detail").and_then(|v| v.as_str()).unwrap_or(""),
-                status_time_i64,
-                parent,
-                inst.get("directory").and_then(|v| v.as_str()),
-                inst.get("transcript").and_then(|v| v.as_str()),
-                now,
-                Option::<String>::None,
-                Option::<String>::None,
-                Option::<String>::None,
-                inst.get("wait_timeout")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(86400),
-                inst.get("last_stop")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0),
-                inst.get("tcp_mode")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                inst.get("tag").and_then(|v| v.as_str()),
-                inst.get("tool")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("claude"),
-                inst.get("background")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-            ],
-        );
-    }
-
-    // Remove stale instances (no longer in remote state)
-    let current_remote: Vec<String> = db
-        .conn()
-        .prepare("SELECT name FROM instances WHERE origin_device_id = ?")
-        .ok()
-        .map(|mut stmt| {
-            stmt.query_map(params![device_id], |row| row.get::<_, String>(0))
-                .ok()
-                .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default()
-        })
-        .unwrap_or_default();
-
-    for name in &current_remote {
-        if !seen_instances.contains(name) {
-            let _ = db
-                .conn()
-                .execute("DELETE FROM instances WHERE name = ?", params![name]);
+                params![
+                    namespaced,
+                    device_id,
+                    inst.get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown"),
+                    inst.get("context").and_then(|v| v.as_str()).unwrap_or(""),
+                    inst.get("detail").and_then(|v| v.as_str()).unwrap_or(""),
+                    status_time_i64,
+                    parent,
+                    inst.get("directory").and_then(|v| v.as_str()),
+                    inst.get("transcript").and_then(|v| v.as_str()),
+                    now,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    inst.get("wait_timeout")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(86400),
+                    inst.get("last_stop")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0),
+                    inst.get("tcp_mode")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    inst.get("tag").and_then(|v| v.as_str()),
+                    inst.get("tool")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("claude"),
+                    inst.get("background")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                ],
+            )?;
         }
+
+        // Remove stale instances (no longer in remote state)
+        let mut stmt = db
+            .conn()
+            .prepare("SELECT name FROM instances WHERE origin_device_id = ?")?;
+        let current_remote = stmt
+            .query_map(params![device_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        for name in &current_remote {
+            if !seen_instances.contains(name) {
+                db.conn()
+                    .execute("DELETE FROM instances WHERE name = ?", params![name])?;
+            }
+        }
+        Ok(())
+    });
+    if let Err(e) = instances_applied {
+        log::log_warn(
+            "relay",
+            "relay.instances_err",
+            &format!("device={} error={}", short_id, e),
+        );
     }
 
     // Handle control events in the events payload
     let should_push = super::control::handle_control_events(db, &events, &own_short_id, device_id);
 
     // Import remote events with dedup
-    import_remote_events(
+    let imported_new_events = import_remote_events(
         db,
         device_id,
         &short_id,
@@ -518,10 +552,49 @@ pub fn handle_state_message(
         ],
     );
 
-    // Wake local TCP instances so they see new messages immediately.
-    crate::notify::wake_all(db);
+    // A retained state snapshot arrives on every peer heartbeat. Waking every
+    // local endpoint for a snapshot whose event cursor did not advance turns
+    // relay liveness traffic into a permanent TCP fan-out storm on large
+    // registries. Wake only when the snapshot actually changed local work. A join or
+    // reconnect logged above counts as local work, and waking for it HERE, after the peer's
+    // state is applied, means a waiter that acts on it finds the peer synced.
+    if should_push || imported_new_events || lifecycle_logged {
+        crate::notify::wake_all(db);
+    }
 
     should_push
+}
+
+/// The reset generation already applied for a peer (0.0 when none has been seen).
+fn cached_reset_ts(db: &HcomDb, device_id: &str) -> f64 {
+    safe_kv_get(db, &format!("relay_reset_{}", device_id))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0)
+}
+
+/// The imported-event cursor for a peer (0 before first contact or after a reset).
+fn event_cursor(db: &HcomDb, device_id: &str) -> i64 {
+    safe_kv_get(db, &format!("relay_events_{}", device_id))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The highest event id a snapshot carries, control events excepted (0 when it carries none).
+fn remote_max_event_id(events: &[Value]) -> i64 {
+    events
+        .iter()
+        .filter(|e| e.get("type").and_then(|v| v.as_str()) != Some("control"))
+        .filter_map(|e| e.get("id").and_then(|v| v.as_i64()))
+        .max()
+        .unwrap_or(0)
+}
+
+/// True when a snapshot's events end below what was already imported from that peer: the
+/// condition import_remote_events treats as a recreated peer database.
+fn ends_below_cursor(db: &HcomDb, device_id: &str, events: &[Value]) -> bool {
+    let cursor = event_cursor(db, device_id);
+    let remote_max_id = remote_max_event_id(events);
+    cursor > 0 && remote_max_id > 0 && remote_max_id < cursor
 }
 
 /// Import remote events with cursor-based dedup.
@@ -532,19 +605,12 @@ fn import_remote_events(
     events: &[Value],
     local_reset_ts: f64,
     own_short_id: &str,
-) {
-    let mut last_event_id: i64 = safe_kv_get(db, &format!("relay_events_{}", device_id))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+) -> bool {
+    let mut last_event_id = event_cursor(db, device_id);
 
     // Detect ID regression (remote DB recreated without proper reset event)
     if !events.is_empty() && last_event_id > 0 {
-        let remote_max_id: i64 = events
-            .iter()
-            .filter(|e| e.get("type").and_then(|v| v.as_str()) != Some("control"))
-            .filter_map(|e| e.get("id").and_then(|v| v.as_i64()))
-            .max()
-            .unwrap_or(0);
+        let remote_max_id = remote_max_event_id(events);
 
         if remote_max_id > 0 && remote_max_id < last_event_id {
             // Cursor regression: remote DB was recreated/reset. Drop cached
@@ -568,134 +634,236 @@ fn import_remote_events(
             );
             last_event_id = 0;
             safe_kv_set(db, &format!("relay_events_{}", device_id), Some("0"));
+            super::backfill::clear_gaps(db, device_id);
         }
     }
 
-    let mut max_event_id = last_event_id;
-
-    for event in events {
-        // Skip control events (handled separately)
-        if event.get("type").and_then(|v| v.as_str()) == Some("control") {
-            continue;
+    // Gap detection. A snapshot carries a contiguous run of the peer's
+    // own-origin events (its retained tail plus anything new). When that run
+    // starts above our cursor, the events in between were published while we
+    // were not listening, and the cursor is about to jump over them. Record the
+    // range so the worker can fetch it. A cursor of 0 is a first contact or a
+    // reset, which deliberately starts from the tail.
+    if last_event_id > 0 {
+        let oldest_carried = events
+            .iter()
+            .filter(|e| e.get("type").and_then(|v| v.as_str()) != Some("control"))
+            .filter(|e| e.get("instance").and_then(|v| v.as_str()) != Some("_device"))
+            .filter_map(|e| e.get("id").and_then(|v| v.as_i64()))
+            .min();
+        if let Some(oldest) = oldest_carried
+            && oldest > last_event_id + 1
+        {
+            super::backfill::record_gap(db, device_id, short_id, last_event_id, oldest);
         }
-        // Skip _device events
-        if event.get("instance").and_then(|v| v.as_str()) == Some("_device") {
-            continue;
-        }
+    }
 
-        let event_id = match event.get("id").and_then(|v| v.as_i64()) {
-            Some(id) => id,
-            None => {
-                log::log_warn(
-                    "relay",
-                    "relay.bad_event_id",
-                    &format!("Skipping event with bad/missing id: {:?}", event.get("id")),
-                );
+    // One write scope for the whole batch: a snapshot carries up to 100 events, and
+    // committing each separately costs one sync apiece, which on slow storage is
+    // seconds per snapshot and stalls the worker loop through a peer's history replay.
+    let mut imported = Vec::new();
+    let scoped = db.with_write_scope(|| {
+        let mut max_event_id = last_event_id;
+
+        for event in events {
+            // Skip control events (handled separately)
+            if event.get("type").and_then(|v| v.as_str()) == Some("control") {
                 continue;
             }
-        };
-        if event_id <= last_event_id {
-            continue; // Already imported
-        }
-
-        // Skip events from before our reset
-        let event_ts = parse_ts(event.get("ts"));
-        if local_reset_ts > 0.0 && event_ts > 0.0 && event_ts < local_reset_ts {
-            continue;
-        }
-
-        // Namespace instance name
-        let instance = event.get("instance").and_then(|v| v.as_str()).unwrap_or("");
-        let namespaced_instance =
-            if !instance.is_empty() && !instance.contains(':') && !instance.starts_with('_') {
-                super::add_device_suffix(instance, short_id)
-            } else {
-                instance.to_string()
-            };
-
-        // Clone and namespace data fields
-        let mut data = event
-            .get("data")
-            .cloned()
-            .unwrap_or(Value::Object(Default::default()));
-
-        // Namespace asymmetry by design:
-        // - `instance` / `from` keep the remote short_id suffix -> globally unique history
-        // - `mentions` / `delivered_to` strip *our own* suffix -> local delivery still matches
-        if let Some(obj) = data.as_object_mut() {
-            // Namespace 'from' field
-            if let Some(from) = obj.get("from").and_then(|v| v.as_str()).map(String::from)
-                && !from.contains(':')
-            {
-                obj.insert(
-                    "from".to_string(),
-                    Value::String(super::add_device_suffix(&from, short_id)),
-                );
+            // Skip _device events
+            if event.get("instance").and_then(|v| v.as_str()) == Some("_device") {
+                continue;
             }
 
-            // Strip own device suffix from mentions and delivered_to
-            for field in &["mentions", "delivered_to"] {
-                if let Some(arr) = obj.get(*field).and_then(|v| v.as_array()).cloned() {
-                    let fixed: Vec<Value> = arr
-                        .iter()
-                        .filter_map(|v| v.as_str())
-                        .map(|name| Value::String(strip_device_suffix(name, own_short_id)))
-                        .collect();
-                    obj.insert(field.to_string(), Value::Array(fixed));
+            let event_id = match event.get("id").and_then(|v| v.as_i64()) {
+                Some(id) => id,
+                None => {
+                    log::log_warn(
+                        "relay",
+                        "relay.bad_event_id",
+                        &format!("Skipping event with bad/missing id: {:?}", event.get("id")),
+                    );
+                    continue;
                 }
+            };
+            if event_id <= last_event_id {
+                continue; // Already imported
             }
 
-            // Store relay origin
-            obj.insert(
-                "_relay".to_string(),
-                serde_json::json!({
-                    "device": device_id,
-                    "short": short_id,
-                    "id": event_id,
-                }),
-            );
+            // Skip events from before our reset
+            let event_ts = event_epoch(event);
+            if local_reset_ts > 0.0 && event_ts > 0.0 && event_ts < local_reset_ts {
+                continue;
+            }
+
+            imported.push(insert_remote_event(
+                db,
+                device_id,
+                short_id,
+                event_id,
+                event,
+                own_short_id,
+            )?);
+
+            max_event_id = max_event_id.max(event_id);
         }
 
-        // Insert event
-        let ts_str = match event.get("ts") {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Number(n)) => n.to_string(),
-            _ => String::new(),
-        };
-        let event_type = event
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
+        let imported_new_events = max_event_id > last_event_id;
+        if imported_new_events {
+            db.kv_set(
+                &format!("relay_events_{}", device_id),
+                Some(&max_event_id.to_string()),
+            )?;
+        }
+        Ok(imported_new_events)
+    });
 
-        let _ = db.log_event_with_ts(event_type, &namespaced_instance, &data, Some(&ts_str));
-
-        // Log per-message latency for message events
-        if event_type == "message" && event_ts > 0.0 {
-            let now = crate::shared::time::now_epoch_f64();
-            let latency_ms = ((now - event_ts) * 1000.0) as i64;
-            log::log_with_fields(
-                "INFO",
+    match scoped {
+        Ok(imported_new_events) => {
+            finish_imported_events(db, imported);
+            imported_new_events
+        }
+        Err(e) => {
+            // Rolled back with the cursor, so the next snapshot carrying these
+            // events imports them again (or records the range as a gap).
+            log::log_warn(
                 "relay",
-                "relay.msg_recv",
-                "",
-                &[
-                    ("device", short_id),
-                    ("instance", &namespaced_instance),
-                    ("latency_ms", &latency_ms.to_string()),
-                ],
+                "relay.import_err",
+                &format!("device={} error={}", short_id, e),
+            );
+            false
+        }
+    }
+}
+
+/// Seconds since the epoch for a relayed event's `ts` (0.0 when absent).
+pub(crate) fn event_epoch(event: &Value) -> f64 {
+    parse_ts(event.get("ts"))
+}
+
+/// A relayed event's `ts` as stored in the local `timestamp` column.
+pub(crate) fn event_ts_string(event: &Value) -> String {
+    match event.get("ts") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// A remote event row written inside a write scope. Its subscriptions and wakes
+/// run through [`finish_imported_events`] once the scope commits, so they see the row.
+pub(crate) struct ImportedEvent {
+    id: i64,
+    event_type: String,
+    instance: String,
+    data: Value,
+}
+
+/// Run the side effects of imported rows after their write scope committed.
+pub(crate) fn finish_imported_events(db: &HcomDb, imported: Vec<ImportedEvent>) {
+    for event in imported {
+        db.after_event_logged(event.id, &event.event_type, &event.instance, &event.data);
+    }
+}
+
+/// Namespace one remote event and insert its row. Shared by snapshot import
+/// and catch-up backfill so both produce identical rows. Callers import a batch
+/// inside one write scope (one sync instead of one per event) and pass the
+/// returned rows to [`finish_imported_events`] after it commits.
+pub(crate) fn insert_remote_event(
+    db: &HcomDb,
+    device_id: &str,
+    short_id: &str,
+    event_id: i64,
+    event: &Value,
+    own_short_id: &str,
+) -> anyhow::Result<ImportedEvent> {
+    let event_ts = event_epoch(event);
+
+    // Namespace instance name
+    let instance = event.get("instance").and_then(|v| v.as_str()).unwrap_or("");
+    let namespaced_instance =
+        if !instance.is_empty() && !instance.contains(':') && !instance.starts_with('_') {
+            super::add_device_suffix(instance, short_id)
+        } else {
+            instance.to_string()
+        };
+
+    // Clone and namespace data fields
+    let mut data = event
+        .get("data")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
+
+    // Namespace asymmetry by design:
+    // - `instance` / `from` keep the remote short_id suffix -> globally unique history
+    // - `mentions` / `delivered_to` strip *our own* suffix -> local delivery still matches
+    if let Some(obj) = data.as_object_mut() {
+        // Namespace 'from' field
+        if let Some(from) = obj.get("from").and_then(|v| v.as_str()).map(String::from)
+            && !from.contains(':')
+        {
+            obj.insert(
+                "from".to_string(),
+                Value::String(super::add_device_suffix(&from, short_id)),
             );
         }
 
-        max_event_id = max_event_id.max(event_id);
-    }
+        // Strip own device suffix from mentions and delivered_to
+        for field in &["mentions", "delivered_to"] {
+            if let Some(arr) = obj.get(*field).and_then(|v| v.as_array()).cloned() {
+                let fixed: Vec<Value> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|name| Value::String(strip_device_suffix(name, own_short_id)))
+                    .collect();
+                obj.insert(field.to_string(), Value::Array(fixed));
+            }
+        }
 
-    if max_event_id > last_event_id {
-        safe_kv_set(
-            db,
-            &format!("relay_events_{}", device_id),
-            Some(&max_event_id.to_string()),
+        // Store relay origin
+        obj.insert(
+            "_relay".to_string(),
+            serde_json::json!({
+                "device": device_id,
+                "short": short_id,
+                "id": event_id,
+            }),
         );
     }
+
+    // Insert event
+    let ts_str = event_ts_string(event);
+    let event_type = event
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    let id = db.insert_event_row(event_type, &namespaced_instance, &data, Some(&ts_str))?;
+
+    // Log per-message latency for message events
+    if event_type == "message" && event_ts > 0.0 {
+        let now = crate::shared::time::now_epoch_f64();
+        let latency_ms = ((now - event_ts) * 1000.0) as i64;
+        log::log_with_fields(
+            "INFO",
+            "relay",
+            "relay.msg_recv",
+            "",
+            &[
+                ("device", short_id),
+                ("instance", &namespaced_instance),
+                ("latency_ms", &latency_ms.to_string()),
+            ],
+        );
+    }
+
+    Ok(ImportedEvent {
+        id,
+        event_type: event_type.to_string(),
+        instance: namespaced_instance,
+        data,
+    })
 }
 
 /// Reverse lookup: find short_id for a device UUID.
@@ -713,7 +881,8 @@ fn resolve_short_id(db: &HcomDb, device_id: &str) -> Option<String> {
     None
 }
 
-/// Emit a relay device lifecycle event.
+/// Emit a relay device lifecycle event. Returns whether it was logged; the CALLER wakes waiters
+/// once the change the event announces has been applied.
 fn emit_device_event(
     db: &HcomDb,
     action: &str,
@@ -721,7 +890,7 @@ fn emit_device_event(
     device_id_prefix: &str,
     text: &str,
     reconnect: bool,
-) {
+) -> bool {
     let mut data = serde_json::json!({
         "action": action,
         "short_id": short_id,
@@ -731,7 +900,11 @@ fn emit_device_event(
     if reconnect {
         data["reconnect"] = serde_json::json!(true);
     }
-    let _ = db.log_event("life", "", &data);
+    // A lifecycle event is new local work that `hcom events --wait` may be waiting for,
+    // but waking here was too early for a join or
+    // reconnect: the snapshot handler logs those before it applies the peer's state, so a
+    // waiter could act on the event and still be told the peer is unsynced.
+    db.log_event("life", "", &data).is_ok()
 }
 
 /// Strip own device suffix from a name (case-insensitive).
@@ -766,6 +939,40 @@ mod tests {
     use serde_json::json;
     use serial_test::serial;
 
+    #[test]
+    #[serial]
+    fn failed_import_rolls_back_rows_and_cursor() {
+        let (_dir, _hcom_dir, _home, _guard) = isolated_test_env();
+        let db = HcomDb::open().unwrap();
+        db.conn()
+            .execute_batch(
+                "CREATE TRIGGER reject_import BEFORE INSERT ON events
+             WHEN json_extract(NEW.data, '$._relay.id') = 2
+             BEGIN SELECT RAISE(ABORT, 'test failure'); END;",
+            )
+            .unwrap();
+        let events = vec![
+            json!({"id": 1, "type": "life", "instance": "peer", "data": {}}),
+            json!({"id": 2, "type": "life", "instance": "peer", "data": {}}),
+        ];
+        assert!(!import_remote_events(
+            &db, "remote", "PEER", &events, 0.0, "SELF"
+        ));
+        assert_eq!(event_cursor(&db, "remote"), 0);
+        let count: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        db.conn()
+            .execute_batch("DROP TRIGGER reject_import")
+            .unwrap();
+        assert!(import_remote_events(
+            &db, "remote", "PEER", &events, 0.0, "SELF"
+        ));
+        assert_eq!(event_cursor(&db, "remote"), 2);
+    }
+
     fn fixture_psk() -> [u8; 32] {
         [0x33; 32]
     }
@@ -775,6 +982,106 @@ mod tests {
         let bytes = serde_json::to_vec(payload).unwrap();
         let now = crate::shared::time::now_epoch_f64() as u64;
         crate::relay::crypto::seal(&psk, relay_id, topic, &bytes, now).unwrap()
+    }
+
+    #[test]
+    #[serial]
+    fn a_device_lifecycle_event_wakes_event_waiters() {
+        let (_dir, _hcom_dir, _home, _guard) = isolated_test_env();
+        let db = HcomDb::open().unwrap();
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.set_nonblocking(true).unwrap();
+        db.upsert_notify_endpoint("waiter", "pty", probe.local_addr().unwrap().port())
+            .unwrap();
+
+        // A device leaving logs a lifecycle event and returns before the snapshot
+        // handler's own wake; the waiter must still be woken.
+        handle_device_gone(&db, "0123456789abcdef-device");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        let mut woken = false;
+        while std::time::Instant::now() < deadline {
+            if probe.accept().is_ok() {
+                woken = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(woken, "a device lifecycle event must wake event waiters");
+    }
+
+    #[test]
+    #[serial]
+    fn logging_a_lifecycle_event_does_not_wake_by_itself() {
+        let (_dir, _hcom_dir, _home, _guard) = isolated_test_env();
+        let db = HcomDb::open().unwrap();
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.set_nonblocking(true).unwrap();
+        db.upsert_notify_endpoint("waiter", "pty", probe.local_addr().unwrap().port())
+            .unwrap();
+
+        // The caller wakes once the change is applied; logging alone must not.
+        assert!(emit_device_event(
+            &db,
+            super::super::ACTION_DEVICE_JOIN,
+            "ABCD",
+            "device-1",
+            "new device ABCD joined the relay",
+            false,
+        ));
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        assert!(
+            probe.accept().is_err(),
+            "logging a lifecycle event must not wake anyone"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn a_joining_peer_wakes_waiters_after_its_state_is_applied() {
+        let (_dir, _hcom_dir, _home, _guard) = isolated_test_env();
+        let db = HcomDb::open().unwrap();
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.set_nonblocking(true).unwrap();
+        db.upsert_notify_endpoint("waiter", "pty", probe.local_addr().unwrap().port())
+            .unwrap();
+
+        // A new peer with no events and no control traffic: the only local work is its join.
+        let payload = json!({
+            "state": {"short_id": "ABCD", "reset_ts": 0.0, "capabilities": ["launch"], "instances": {}},
+            "events": []
+        });
+        let topic = "relay-test/device-1234";
+        let envelope = seal_for_test(&payload, topic, "relay-test");
+        let mut guard = ReplayGuard::default();
+        let psk = fixture_psk();
+        handle_state_message(
+            &db,
+            "device-1234",
+            &envelope,
+            "own-device-5678",
+            &mut InboundContext {
+                psk: &psk,
+                relay_id: "relay-test",
+                topic,
+                replay_guard: &mut guard,
+            },
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        let mut woken = false;
+        while std::time::Instant::now() < deadline {
+            if probe.accept().is_ok() {
+                woken = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(woken, "a join must still wake event waiters");
+        assert!(
+            safe_kv_get(&db, "relay_sync_time_device-1234").is_some(),
+            "the peer's sync time is applied by the time anyone is woken"
+        );
     }
 
     #[test]
@@ -1154,5 +1461,211 @@ mod tests {
 
         assert!(db.get_instance_full("luna:ABCD").unwrap().is_none());
         assert_eq!(safe_kv_get(&db, "relay_state_ts_device-1234"), None);
+    }
+    fn own_event(id: i64, text: &str) -> serde_json::Value {
+        json!({
+            "id": id,
+            "ts": "2026-09-26T10:00:00.000000+00:00",
+            "type": "message",
+            "instance": "luna",
+            "data": {"from": "luna", "text": text, "mentions": ["nova"]},
+        })
+    }
+
+    #[test]
+    #[serial]
+    fn a_snapshot_starting_above_the_cursor_records_the_skipped_range() {
+        let (_dir, _hcom_dir, _home, _guard) = isolated_test_env();
+        let db = HcomDb::open().unwrap();
+        safe_kv_set(&db, "relay_events_device-1234", Some("100"));
+
+        // We last imported id 100; the peer's snapshot now starts at 180.
+        let events = vec![own_event(180, "a"), own_event(190, "b")];
+        assert!(import_remote_events(
+            &db,
+            "device-1234",
+            "ABCD",
+            &events,
+            0.0,
+            "MINE"
+        ));
+
+        let gaps = crate::relay::backfill::load_gaps(&db, "device-1234");
+        assert_eq!(gaps.len(), 1);
+        assert_eq!((gaps[0].after, gaps[0].before), (100, 180));
+        assert_eq!(gaps[0].short_id, "ABCD");
+        assert_eq!(
+            safe_kv_get(&db, "relay_events_device-1234").as_deref(),
+            Some("190")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn an_overlapping_snapshot_records_no_gap() {
+        let (_dir, _hcom_dir, _home, _guard) = isolated_test_env();
+        let db = HcomDb::open().unwrap();
+        safe_kv_set(&db, "relay_events_device-1234", Some("100"));
+
+        // The retained tail re-carries id 100, so nothing was skipped even
+        // though ids 101..=149 belong to events the peer imported from others.
+        let events = vec![own_event(100, "seen"), own_event(150, "new")];
+        assert!(import_remote_events(
+            &db,
+            "device-1234",
+            "ABCD",
+            &events,
+            0.0,
+            "MINE"
+        ));
+        assert!(crate::relay::backfill::load_gaps(&db, "device-1234").is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn a_first_contact_starts_from_the_tail_without_a_gap() {
+        let (_dir, _hcom_dir, _home, _guard) = isolated_test_env();
+        let db = HcomDb::open().unwrap();
+
+        let events = vec![own_event(5000, "tail")];
+        assert!(import_remote_events(
+            &db,
+            "device-1234",
+            "ABCD",
+            &events,
+            0.0,
+            "MINE"
+        ));
+        assert!(crate::relay::backfill::load_gaps(&db, "device-1234").is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn an_id_regression_clears_recorded_gaps() {
+        let (_dir, _hcom_dir, _home, _guard) = isolated_test_env();
+        let db = HcomDb::open().unwrap();
+        safe_kv_set(&db, "relay_events_device-1234", Some("100"));
+        crate::relay::backfill::record_gap(&db, "device-1234", "ABCD", 40, 90);
+
+        // The peer's database was recreated: its ids restart below our cursor.
+        let events = vec![own_event(3, "fresh")];
+        import_remote_events(&db, "device-1234", "ABCD", &events, 0.0, "MINE");
+        assert!(crate::relay::backfill::load_gaps(&db, "device-1234").is_empty());
+    }
+
+    fn apply_snapshot_at(db: &HcomDb, events: Vec<serde_json::Value>, ts_secs: u64) {
+        apply_snapshot_with_reset_at(db, events, ts_secs, 0.0);
+    }
+
+    fn apply_snapshot_with_reset_at(
+        db: &HcomDb,
+        events: Vec<serde_json::Value>,
+        ts_secs: u64,
+        reset_ts: f64,
+    ) {
+        let topic = "relay-test/device-1234";
+        let payload = json!({
+            "state": {"short_id": "ABCD", "reset_ts": reset_ts, "instances": {}},
+            "events": events
+        });
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let psk = fixture_psk();
+        let envelope =
+            crate::relay::crypto::seal(&psk, "relay-test", topic, &bytes, ts_secs).unwrap();
+        let mut guard = ReplayGuard::default();
+        handle_state_message(
+            db,
+            "device-1234",
+            &envelope,
+            "own-device-5678",
+            &mut InboundContext {
+                psk: &psk,
+                relay_id: "relay-test",
+                topic,
+                replay_guard: &mut guard,
+            },
+        );
+    }
+
+    fn imported_from_peer(db: &HcomDb) -> i64 {
+        db.conn()
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE json_extract(data, '$._relay.device') = 'device-1234'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    #[serial]
+    fn a_same_second_older_snapshot_is_skipped_not_treated_as_a_reset() {
+        let (_dir, _hcom_dir, _home, _guard) = isolated_test_env();
+        let db = HcomDb::open().unwrap();
+        apply_snapshot_at(&db, vec![own_event(10, "a"), own_event(11, "b")], 2000);
+        crate::relay::backfill::record_gap(&db, "device-1234", "ABCD", 3, 9);
+        assert_eq!(imported_from_peer(&db), 2);
+
+        // An earlier snapshot from the same second arrives late, carrying only id 5.
+        apply_snapshot_at(&db, vec![own_event(5, "old")], 2000);
+
+        assert_eq!(imported_from_peer(&db), 2, "imported events must survive");
+        assert_eq!(
+            safe_kv_get(&db, "relay_events_device-1234").as_deref(),
+            Some("11"),
+            "the cursor must not be reset"
+        );
+        assert_eq!(
+            crate::relay::backfill::load_gaps(&db, "device-1234").len(),
+            1,
+            "pending gaps must stay scheduled"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn a_same_second_snapshot_announcing_a_newer_reset_still_resets() {
+        let (_dir, _hcom_dir, _home, _guard) = isolated_test_env();
+        let db = HcomDb::open().unwrap();
+        apply_snapshot_at(&db, vec![own_event(10, "a"), own_event(11, "b")], 2000);
+        crate::relay::backfill::record_gap(&db, "device-1234", "ABCD", 3, 9);
+
+        // The peer reset its database within the same second: its snapshot announces the reset
+        // and restarts its ids below our cursor. It is a new generation, not a stale snapshot.
+        apply_snapshot_with_reset_at(&db, vec![own_event(3, "fresh")], 2000, 1999.5);
+
+        assert_eq!(
+            imported_from_peer(&db),
+            1,
+            "the old generation is dropped and the new one imported"
+        );
+        assert_eq!(
+            safe_kv_get(&db, "relay_events_device-1234").as_deref(),
+            Some("3")
+        );
+        assert!(crate::relay::backfill::load_gaps(&db, "device-1234").is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn a_later_snapshot_below_the_cursor_still_resets() {
+        let (_dir, _hcom_dir, _home, _guard) = isolated_test_env();
+        let db = HcomDb::open().unwrap();
+        apply_snapshot_at(&db, vec![own_event(10, "a"), own_event(11, "b")], 2000);
+        crate::relay::backfill::record_gap(&db, "device-1234", "ABCD", 3, 9);
+
+        // The peer's database was recreated: a later snapshot restarts its ids.
+        apply_snapshot_at(&db, vec![own_event(3, "fresh")], 2001);
+
+        assert_eq!(
+            imported_from_peer(&db),
+            1,
+            "the old history is dropped and the new one imported"
+        );
+        assert_eq!(
+            safe_kv_get(&db, "relay_events_device-1234").as_deref(),
+            Some("3")
+        );
+        assert!(crate::relay::backfill::load_gaps(&db, "device-1234").is_empty());
     }
 }

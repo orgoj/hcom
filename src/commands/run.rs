@@ -16,17 +16,29 @@ use crate::shared::CommandContext;
 
 #[cfg(windows)]
 fn resolve_git_bash() -> Result<String, String> {
-    let bash = crate::terminal::which_bin("bash").ok_or_else(|| BASH_MISSING_MSG.to_string())?;
-    match Command::new(&bash).arg("--version").output() {
-        Ok(output) if output.status.success() => Ok(bash),
-        Ok(_) => Err(format!(
-            "{BASH_MISSING_MSG}\nFound `{bash}`, but it is not a working Bash installation \
-             (the Windows WSL launcher is not sufficient)."
-        )),
-        Err(err) => Err(format!(
-            "{BASH_MISSING_MSG}\nFound `{bash}`, but it could not be executed: {err}"
-        )),
-    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    find_git_bash(&path, |bash| {
+        // WSL's launcher can successfully run Bash once a distro is installed,
+        // but that Bash cannot open the Windows paths passed to our scripts.
+        Command::new(bash)
+            .args([
+                "--noprofile",
+                "--norc",
+                "-c",
+                "case \"$OSTYPE\" in msys*|cygwin*) exit 0 ;; *) exit 1 ;; esac",
+            ])
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
+    .map(|bash| bash.to_string_lossy().into_owned())
+    .ok_or_else(|| format!("{BASH_MISSING_MSG}\nThe Windows WSL launcher is not sufficient."))
+}
+
+#[cfg(windows)]
+fn find_git_bash(path: &std::ffi::OsStr, is_git_bash: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .map(|dir| dir.join("bash.exe"))
+        .find(|bash| bash.is_file() && is_git_bash(bash))
 }
 #[cfg(windows)]
 const BASH_MISSING_MSG: &str = "Git Bash required to run shell (.sh) workflow scripts — install it and ensure `bash` is on PATH.";
@@ -65,7 +77,11 @@ fn python_command() -> Result<Command, String> {
 }
 
 #[derive(clap::Parser, Debug)]
-#[command(name = "run", about = "Run a bundled or user workflow script")]
+#[command(
+    name = "run",
+    about = "Run a bundled or user workflow script",
+    disable_help_flag = true
+)]
 pub struct RunArgs {
     /// Script name plus forwarded args
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -236,7 +252,7 @@ fn list_scripts() -> i32 {
     }
 
     if !bundled.is_empty() {
-        println!("Examples:");
+        println!("Bundled Scripts:");
         println!();
         for s in &bundled {
             let agents = bundled_agent_desc(&s.name);
@@ -322,6 +338,30 @@ pub fn cmd_run(db: &HcomDb, args: &RunArgs, ctx: Option<&CommandContext>) -> i32
         return list_scripts();
     }
 
+    // `run` disables clap's built-in help flag so script-specific `--help`
+    // can be forwarded. Handle help here when there is no script name.
+    let run_help_only = {
+        let mut saw_help = false;
+        let mut only_help = true;
+        let mut i = 0;
+        while i < argv.len() {
+            if argv[i] == "--name" && i + 1 < argv.len() {
+                i += 2;
+            } else if argv[i] == "-h" || argv[i] == "--help" {
+                saw_help = true;
+                i += 1;
+            } else {
+                only_help = false;
+                break;
+            }
+        }
+        saw_help && only_help
+    };
+    if run_help_only {
+        println!("{}", help::get_command_help("run"));
+        return 0;
+    }
+
     // Handle --source flag
     let show_source = argv.iter().any(|a| a == "--source");
     let argv: Vec<String> = argv.into_iter().filter(|a| a != "--source").collect();
@@ -351,9 +391,36 @@ pub fn cmd_run(db: &HcomDb, args: &RunArgs, ctx: Option<&CommandContext>) -> i32
 
     // Special: docs command
     if name == "docs" {
-        let show_cli = args.iter().any(|a| a == "--cli");
-        let show_config = args.iter().any(|a| a == "--config");
-        let show_api = args.iter().any(|a| a == "--scripts");
+        let mut docs_args = Vec::new();
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--name" && i + 1 < args.len() {
+                i += 2;
+                continue;
+            }
+            docs_args.push(args[i].as_str());
+            i += 1;
+        }
+
+        if docs_args.iter().any(|a| *a == "-h" || *a == "--help") {
+            println!("{}", help::get_command_help("run"));
+            return 0;
+        }
+
+        let unknown: Vec<&str> = docs_args
+            .iter()
+            .copied()
+            .filter(|a| !matches!(*a, "--cli" | "--config" | "--scripts"))
+            .collect();
+        if !unknown.is_empty() {
+            eprintln!("Unknown docs option: {}", unknown.join(", "));
+            eprintln!("Run 'hcom run docs --help' for available sections.");
+            return 1;
+        }
+
+        let show_cli = docs_args.contains(&"--cli");
+        let show_config = docs_args.contains(&"--config");
+        let show_api = docs_args.contains(&"--scripts");
         return print_docs(show_cli, show_config, show_api);
     }
 
@@ -502,29 +569,36 @@ Add a description comment on line 2 (after shebang) — it shows in `hcom run` l
   set -euo pipefail
 
   name_flag=""
+  target=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -h|--help) echo "Usage: hcom run myscript [OPTIONS]"; exit 0 ;;
-      --name) name_flag="$2"; shift 2 ;;
-      --target) target="$2"; shift 2 ;;
-      *) shift ;;
+      --name|--target)
+        [[ $# -ge 2 && -n "$2" ]] || { echo "$1 requires a value" >&2; exit 1; }
+        if [[ "$1" == --name ]]; then name_flag="$2"; else target="$2"; fi
+        shift 2 ;;
+      *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
   done
 
-  name_arg=""
-  [[ -n "$name_flag" ]] && name_arg="--name $name_flag"
+  name_arg=()
+  [[ -n "$name_flag" ]] && name_arg=(--name "$name_flag")
+
+  [[ -n "$target" ]] || { echo "--target is required" >&2; exit 1; }
 
   # Your logic here
-  hcom send "@${target}" $name_arg --intent request -- "Do the task"
+  hcom send "@${target}" ${name_arg[@]+"${name_arg[@]}"} --intent request -- "Do the task"
 
 ## Identity Handling
 
 hcom passes --name to scripts automatically. Always parse and forward it:
 
-  name_arg=""
-  [[ -n "$name_flag" ]] && name_arg="--name $name_flag"
-  hcom send @target $name_arg -- "message"
-  hcom list self --json $name_arg
+  name_arg=()
+  [[ -n "$name_flag" ]] && name_arg=(--name "$name_flag")
+  hcom send @target ${name_arg[@]+"${name_arg[@]}"} -- "message"
+  hcom list self --json ${name_arg[@]+"${name_arg[@]}"}
+
+The conditional array expansion also works with macOS Bash 3.2 under `set -u`.
 
 ## Launching & Cleaning Up Agents
 
@@ -538,14 +612,65 @@ Launch output includes "Names: <name>" — parse to track spawned agents:
     for n in $names; do LAUNCHED_NAMES+=("$n"); done
   }
   cleanup() {
-    for name in "${LAUNCHED_NAMES[@]}"; do
-      hcom kill "$name" --go 2>/dev/null || true
+    for name in ${LAUNCHED_NAMES[@]+"${LAUNCHED_NAMES[@]}"}; do
+      hcom kill "$name" --go ${name_arg[@]+"${name_arg[@]}"} || true
     done
   }
-  trap cleanup ERR INT TERM
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 
-  launch_out=$(hcom 1 claude --tag worker --go --headless 2>&1)
+  launch_out=$(hcom 1 claude --tag worker --go --headless -p \
+    --hcom-prompt "Wait for a task via hcom; end your turn to receive messages." \
+    ${name_arg[@]+"${name_arg[@]}"} 2>&1) || { echo "$launch_out" >&2; exit 1; }
   track_launch "$launch_out"
+
+An `EXIT` trap also runs after a successful script. If you intentionally want
+spawned agents to remain running, clear the traps with `trap - EXIT INT TERM`
+only after successful setup. Otherwise, wait for the workflow to finish before
+exiting, so cleanup does not kill workers before they can do their task.
+
+## Waiting for Workflow Events
+
+For event-driven workflows, `hcom events --wait` can block until the next
+milestone instead of polling:
+
+  worker="${LAUNCHED_NAMES[0]}"
+  thread="myscript-$(date +%s)-$$"
+  hcom send "@${worker}" --thread "$thread" --intent request \
+    ${name_arg[@]+"${name_arg[@]}"} -- "Do the task, then send me DONE"
+  hcom events --wait 120 \
+    --sql "type='message' AND msg_from='${worker}' AND msg_thread='${thread}' AND msg_text LIKE '%DONE%'" \
+    ${name_arg[@]+"${name_arg[@]}"}
+
+Filter by the worker sender as well as the thread and completion marker; the
+request itself contains `DONE` and must not count as a worker response.
+
+## Workflow Building Blocks
+
+- Give concurrent workflow runs distinct `--thread` values when their messages
+  should stay separate.
+- `--intent request|inform|ack` tells recipients whether a reply is expected.
+- Scripted launches commonly use `--go` so they do not pause at the preview.
+- hcom injects `--name` when it knows the caller; parse and forward it when your
+  script issues hcom commands on that caller's behalf.
+- Launched agent names are generated dynamically. Capture them from the
+  `Names:` launch output when you need to address or clean them up.
+- `hcom events --wait` and `hcom events sub` are useful alternatives to sleeps
+  when the next step depends on an hcom event.
+
+## Generic Workflow Pattern Ideas
+
+- Worker + reviewer loop: a worker sends `ROUND N DONE`; a reviewer replies with
+  `FIX: ...` or `APPROVED`. The worker can revise until the reviewer accepts it.
+- Cascade pipeline: one stage finishes, the next reads its result or transcript
+  (`hcom transcript @name --full`) and continues from there.
+- Ensemble + judge: launch several agents on the same question in parallel, then
+  have a judge read their thread messages and synthesize a verdict.
+- Cross-tool pair: mix tools for different roles, for example one agent implements
+  while another tool reviews its transcript or checks the result.
+- Reactive workflow: subscribe to an event such as an agent becoming idle or a
+  file changing, then trigger the next action with `hcom events sub`.
 
 ## Reference Examples
 
@@ -634,6 +759,24 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    #[cfg(windows)]
+    #[test]
+    fn git_bash_search_skips_wsl_and_checks_later_path_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let wsl = dir.path().join("system32");
+        let git = dir.path().join("Git with spaces").join("bin");
+        for candidate in [&wsl, &git] {
+            std::fs::create_dir_all(candidate).unwrap();
+            std::fs::write(candidate.join("bash.exe"), "").unwrap();
+        }
+        let path = std::env::join_paths([&wsl, &git]).unwrap();
+        assert_eq!(
+            find_git_bash(&path, |bash| bash == git.join("bash.exe")),
+            Some(git.join("bash.exe"))
+        );
+        assert!(find_git_bash(&path, |_| false).is_none());
+    }
+
     #[test]
     fn run_args_capture_script_and_flags() {
         let args = RunArgs::try_parse_from(["run", "debate", "--topic", "hooks"]).unwrap();
@@ -672,11 +815,12 @@ mod tests {
 
     #[test]
     fn test_embedded_scripts_available() {
-        assert_eq!(scripts::SCRIPTS.len(), 3);
+        assert_eq!(scripts::SCRIPTS.len(), 4);
         let names: Vec<&str> = scripts::SCRIPTS.iter().map(|(n, _)| *n).collect();
         assert!(names.contains(&"confess"));
         assert!(names.contains(&"debate"));
         assert!(names.contains(&"fatcow"));
+        assert!(names.contains(&"onidle"));
     }
 
     #[test]

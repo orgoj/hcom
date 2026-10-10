@@ -2,19 +2,39 @@
 name: hcom-agent-messaging
 description: >
   Multi-agent communication for AI coding tools. Agents message, watch,
-  and spawn each other across terminals. Use when setting up hcom,
-  troubleshooting delivery, or writing multi-agent scripts.
+  and spawn each other across terminals. Use when setting up hcom or
+  troubleshooting.
 ---
 
 # hcom — multi-agent communication for AI coding tools
 
 AI agents running in separate terminals are isolated. hcom connects them via hooks and a shared database so they can message, watch, and spawn each other in real-time.
 
+Start an agent with `hcom` in front, then prompt normally.
+
+Use hcom to:
+
+- coordinate multi-agent pipelines
+- run different AI CLIs as each other's subagents
+- avoid copy-pasting
+
 ```bash
 curl -fsSL https://github.com/orgoj/hcom/releases/latest/download/hcom-installer.sh | sh
-hcom claude       # or: hcom gemini, hcom codex, hcom opencode, hcom kilo, hcom pi, hcom omp, hcom antigravity (agy binary), hcom cursor (cursor-agent binary), hcom kimi, hcom copilot, hcom hermes
+hcom claude       # or: hcom gemini, hcom codex, hcom opencode, hcom kilo, hcom pi, hcom omp, hcom antigravity (agy binary), hcom cursor (cursor-agent binary), hcom kimi, hcom copilot, hcom qoder, hcom grok, hcom hermes
 hcom              # TUI dashboard
 ```
+
+Quickstart:
+
+```bash
+# terminal 1
+hcom claude
+
+# terminal 2
+hcom codex
+```
+
+Prompt normally — e.g. `review what claude did and send it fixes`
 
 ---
 
@@ -36,15 +56,19 @@ tell any agent:
 
 ## what agents can do
 
-**Message** each other in real-time, bundle context for handoffs.
+**Message** each other in real time: mid-turn or wake immediately when idle
 
-**Observe** each other: transcripts, file edits, terminal screens, command history.
+**Observe** each other: status, transcripts, file edits, live terminal screens, command history.
 
-**Subscribe** to each other: notify on status changes, file edits, specific events. React automatically.
+**Subscribe** and notify on status changes, file edits, collisions, specific events. React automatically.
 
-**Spawn**, **fork**, **resume**, **kill** each other, in any terminal emulator.
+**Spawn**, **fork**, **resume**, **kill** in any terminal emulator or headless.
 
 run `hcom --help` for full command syntax and flags.
+
+---
+
+Works with Claude Code, Gemini CLI, Codex, OpenCode, Kilo Code, Pi, Oh My Pi, Antigravity, Cursor, Kimi, Copilot, Qoder CLI, Grok Build, Hermes, and other tools
 
 ---
 
@@ -131,51 +155,46 @@ For catalog-launched Antigravity agents, hcom passes the canonical catalog direc
 Direct tracked `hcom r <name>` restores the scope from the stopped snapshot.
 Broadcasts do not auto-start catalog agents. Send briefly waits for an autostarted target to
 acknowledge the initial event. If the agent is still starting when that check expires, output says
-`Queued; delivery pending`; the durable message is delivered later and send still succeeds. See
-`references/named-agents.md` for routing details.
+`Queued; delivery pending`; the durable message is delivered later and send still succeeds, so do
+not repeat it. See `references/named-agents.md` for routing details.
 
 Editable bundle instructions live only in `agents/<name>/SOUL.md`; bundle `AGENTS.md` files are
 not read as a fallback.
 
 For multiple agents, omit `--as` and capture the generated names from launch output; one explicit name cannot be assigned to a multi-agent launch.
 
----
-
-## tool support
-
-| tool | delivery | connect |
-|------|----------|---------|
-| claude code (incl. subagents) | automatic | `hcom claude` |
-| gemini cli (>= 0.26.0) | automatic | `hcom gemini` |
-| codex | automatic | `hcom codex` |
-| opencode | automatic | `hcom opencode` |
-| kilo code | automatic | `hcom kilo` |
-| antigravity (`agy` binary) | automatic | `hcom antigravity` |
-| cursor (`cursor-agent` binary) | automatic | `hcom cursor` |
-| hermes | automatic | `hcom hermes` |
-| any other ai tool | manual via `hcom listen` | `hcom start` (run inside tool) |
-
-session binding (hcom transcript, hcom r/f by session id) happens on first message or first prompt for all hcom-launched tools.
+`/clear` (and its aliases) ends the hcom session and starts a new one in the same terminal. An
+hcom-launched agent takes its own name back on that new session; a session hcom did not launch, or
+one whose name is already held by another running instance, gets a fresh generated name — check
+`hcom list` after clearing if a name matters.
 
 ---
 
 ## setup
 
-if the user invokes this skill without arguments:
+When this skill is invoked, first run:
 
-1. run `hcom status` — if "command not found", install first:
-   ```bash
-   curl -fsSL https://github.com/orgoj/hcom/releases/latest/download/hcom-installer.sh | sh
-   ```
-2. run `hcom hooks add` to install hooks for all detected tools
-3. restart the AI tool for hooks to activate
+```bash
+hcom status
+```
 
-| status output | meaning | action |
-|---------------|---------|--------|
-| command not found | not installed | install with the curl installer above (or the PowerShell installer on Windows) |
-| `[~] claude` | tool exists, hooks not installed | `hcom hooks add` then restart |
-| `[✓] claude` | hooks installed | ready |
-| `[✗] claude` | tool not found | install the AI tool first |
+If hcom status works: run `hcom list`
+
+If hcom list shows "Your name: <name>" where `<name>` is not "(not participating)": congratulations!
+
+If running `hcom status` returns "command not found", install first:
+```bash
+curl -fsSL https://github.com/orgoj/hcom/releases/latest/download/hcom-installer.sh | sh
+```
+
+On Windows, use the PowerShell installer from the same release.
+
+If hcom status shows a list of CLI tools and you are not any of them, run `hcom start` to connect to hcom.
+
+If you've just installed hcom now or if hcom list shows "Your name: (not participating)" and you are a tool in the hcom status list of CLI tools:
+
+Relaunch into hcom properly for automatic message delivery and full hcom functionality. User should exit and run `hcom <tool>`.
+Or if you know your sessionID/ses_/thread_name: user can exit and run `hcom r <session-id>` to resume you inside hcom. See `hcom r --help`.
 
 ---
 
@@ -189,28 +208,31 @@ hcom hooks status    # check hooks specifically
 hcom relay status    # check cross-device relay
 ```
 
-hooks missing? `hcom hooks add` then restart tool.
-
 Raw nested AI CLIs may inherit `HCOM_PROCESS_ID`; hcom ignores their hooks when
 the child CLI differs from the tool bound to that process. Current releases also
 repair older cross-tool corruption on the next unambiguous Claude hook.
 
 still broken?
 ```bash
-hcom reset all && hcom hooks add
-# close all ai tool windows
+hcom reset all # backup config/db + reset it
 hcom claude          # fresh start
 ```
 
-### "messages not arriving"
+still broken after that?
+```bash
+git clone https://github.com/orgoj/hcom.git
+cd hcom
+```
+Read code and figure out what is going on.
 
 | symptom | diagnosis | fix |
 |---------|-----------|-----|
 | catalog agent not in `hcom list` | agent stopped or never launched | target it directly; `hcom send` starts it on demand |
-| known agent reported unknown or unavailable | its catalog is not in scope from this directory | work from inside that project; exporting it elsewhere is the project owner's decision |
+| known agent reported as having no active agent | its catalog is not in scope from this directory | work from inside that project; exporting it elsewhere is the project owner's decision |
 | message sent but not delivered | check `hcom events --last 5` | verify @mention matches agent name/tag |
 | message reaches more than one agent | duplicate base name across tags | target the full `@tag-name` to hit exactly one |
 | messages leaking between workflows | no thread isolation | always use `--thread` |
+| Codex prompt never reported empty | `hcom term <name>` shows animated glyphs on an empty prompt | set `[tui] whimsy = false` and `animations = false` in `~/.codex/config.toml` |
 
 ### "Instance `<name>` already exists"
 
@@ -310,38 +332,11 @@ Choose replies from the received intent, not from conversational politeness:
 
 ### sandbox / permission issues
 
+Use project-local hcom state when the normal hcom directory is unavailable:
+
 ```bash
-export HCOM_DIR="$PWD/.hcom"     # project-local mode
-hcom hooks add                   # installs to project dir
+HCOM_DIR=$PWD/.hcom hcom <tool>
 ```
-
----
-
-## workflow scripting
-
-place scripts in `~/.hcom/scripts/` as `.sh` or `.py`. run with `hcom run <name> "task"`. see `references/script-template.md` for the full annotated template, or run `hcom run docs --scripts` inside an agent.
-
-### key rules
-
-- **never use `sleep`** — use `hcom events --wait` or `hcom listen`
-- **never hardcode generated agent names** — parse them from `grep '^Names: '` in launch output; `--as` is only for intentional single-agent names
-- **always use `--thread`** — without it, messages leak across workflows
-- **always use `trap cleanup ERR INT TERM`** — orphan headless agents run indefinitely
-- **always use `hcom kill` for cleanup** (not `stop`) — kill also closes the terminal pane
-- **always forward `--name`** — hcom injects it, scripts must propagate it
-- **always use `--go`** on launch commands — without it, scripts hang on confirmation prompt (`hcom kill` never prompts, so `--go` is optional there)
-
-### agent topologies
-
-| topology | agents | pattern |
-|----------|--------|---------|
-| worker-reviewer | 2 | worker sends result, reviewer reads transcript, sends APPROVED/FIX |
-| pipeline | N sequential | each stage reads previous via `hcom transcript`, signals via thread |
-| ensemble | N+1 (judge) | N agents answer independently, judge reads all via `hcom events --sql` |
-| hub-spoke | 1+N | coordinator broadcasts to `@tag-`, workers report back |
-| reactive | N | `hcom events sub` triggers agent actions on file edits/status changes |
-
----
 
 ## files
 
@@ -349,31 +344,22 @@ place scripts in `~/.hcom/scripts/` as `.sh` or `.py`. run with `hcom run <name>
 |------|----------|
 | database | `~/.hcom/hcom.db` |
 | config | `~/.hcom/config.toml` |
-| agent env passthrough | `~/.hcom/env` (preserved if created before first run) |
+| env | `~/.hcom/env` (preserved if created before first run) |
 | logs | `~/.hcom/.tmp/logs/` |
 | user scripts | `~/.hcom/scripts/` |
 
-with `HCOM_DIR` set, uses that path instead of `~/.hcom`.
-
----
-
-## reference files
-
-| file | when to read |
+| reference | when to read |
 |------|-------------|
 | `references/named-agents.md` | defining or launching recurring agents with `hcom agent`, JSON catalogs, start-mode overrides, and per-CLI `tools` profiles |
-| `references/patterns.md` | writing multi-agent scripts — 6 tested patterns with full code and real event JSON |
-| `references/cross-tool.md` | claude + codex + gemini + opencode + kilo + pi + omp + antigravity + cursor + kimi + copilot collaboration details and per-tool quirks |
-| `references/gotchas.md` | debugging scripts — timing, message delivery, intent system, cleanup |
-| `references/script-template.md` | writing a new script from scratch — full template with commentary |
 
 ---
 
 ## more info
 
 ```bash
-hcom --help              # all commands
-hcom <command> --help    # command details
+hcom --help
+hcom <command> --help
+hcom run docs --scripts   # script authoring info
 ```
 
-github: https://github.com/orgoj/hcom
+Github: https://github.com/orgoj/hcom
