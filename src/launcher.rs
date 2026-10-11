@@ -2248,17 +2248,20 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         };
         instance_env.insert("HCOM_INSTANCE_NAME".to_string(), instance_name.clone());
         // Only the caller's explicit env names a catalog agent; an inherited
-        // value belongs to the parent and must not reach a nested child.
-        let agent_name = params
+        // value belongs to the parent and must not reach a nested child. Only
+        // catalog names are recorded; outside the catalog the agent name is
+        // the instance name, so a fork gets its own.
+        let catalog_agent_name = params
             .env
             .as_ref()
             .and_then(|env| env.get(crate::commands::agent::AGENT_NAME_ENV))
             .filter(|name| !name.is_empty())
-            .cloned()
-            .unwrap_or_else(|| instance_name.clone());
+            .cloned();
         instance_env.insert(
             crate::commands::agent::AGENT_NAME_ENV.to_string(),
-            agent_name.clone(),
+            catalog_agent_name
+                .clone()
+                .unwrap_or_else(|| instance_name.clone()),
         );
 
         let mut instruction_args = params.args.clone();
@@ -2354,10 +2357,12 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
             if params.explicit_identity {
                 db.store_launch_context(&instance_name, r#"{"explicit_identity":true}"#)?;
             }
-            db.store_launch_context(
-                &instance_name,
-                &json!({ "agent_name": agent_name }).to_string(),
-            )?;
+            if let Some(agent_name) = &catalog_agent_name {
+                db.store_launch_context(
+                    &instance_name,
+                    &json!({ "agent_name": agent_name }).to_string(),
+                )?;
+            }
             if matches!(normalized, LaunchTool::Antigravity)
                 && let Some(policy_cwd) = base_env.get(crate::commands::agent::DIPPY_POLICY_CWD)
             {

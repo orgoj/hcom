@@ -3170,6 +3170,40 @@ fn handoff_relaunches_the_same_catalog_agent_under_its_instance_name() {
         "stdout={stdout}"
     );
 
+    // An agent launched outside the catalog has no catalog name to relaunch.
+    std::fs::remove_dir_all(h.path().join(".tmp/launch")).expect("clear launch directory");
+    let (code, stdout, stderr) = h.run([
+        "claude",
+        "--as",
+        "solo",
+        "--terminal",
+        "sh -c true {script}",
+        "--go",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let script = std::fs::read_dir(h.path().join(".tmp/launch"))
+        .expect("read launch directory")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let solo_process_id = script
+        .split("HCOM_PROCESS_ID=")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split(|c: char| c.is_whitespace() || c == '\'' || c == ';')
+                .find(|s| !s.is_empty())
+        })
+        .expect("process id in launch script")
+        .to_string();
+    let (code, _stdout, stderr) =
+        h.run_as_process(&solo_process_id, ["handoff", "--dry-run", "next"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("'solo' has no recorded agent name"),
+        "stderr={stderr}"
+    );
+
     // A caller without an agent identity has nothing to hand off.
     let (code, _stdout, stderr) = h.run(["handoff", "--dry-run", "next"]);
     assert_eq!(code, 1);

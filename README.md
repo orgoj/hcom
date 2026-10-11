@@ -436,7 +436,7 @@ hcom config -i <name> <key> <value>   # per-agent override at runtime
 | `tag` | Group label — launched agents become `tag-name` |
 | `hints` | Text appended to every message the agent receives |
 | `notes` | Text appended to bootstrap (one-time, at launch) |
-| `auto_approve` | Auto-approve safe hcom commands (send/list/events/…) |
+| `auto_approve` | Auto-approve safe hcom commands (send/list/events/handoff/…) |
 | `auto_subscribe` | Event subscription presets: `collision`, `created`, `stopped`, `blocked` |
 | `name_export` | Export instance name to a custom env var |
 | `title_mode` | Terminal/tab title behavior: `combined` (default), `label`, or `off` |

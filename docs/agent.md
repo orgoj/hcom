@@ -577,7 +577,10 @@ hcom checks the relaunch first, then runs `hcom agent <HCOM_AGENT_NAME> --as <HC
 agent it kills. The successor is the same catalog agent under the same instance name, so `--as`
 aliases and roaming instances keep their names. The prompt is its initial prompt. Run it as the last
 action of a turn; its output is logged to `.tmp/logs/handoff-<name>.log` in the hcom data directory.
-Only agents started by `hcom agent` or send autostart can hand off; others get an error and keep running.
+Only agents started by `hcom agent` or send autostart (or resumed or forked from one) can hand off;
+others get an error and keep running. `--restart` stops the old agent through its tracked process,
+so an agent without one keeps running and the log shows the failed relaunch. With `auto_approve`,
+`hcom handoff` is approved like the other safe hcom commands.
 
 ## Terminal placement
 
