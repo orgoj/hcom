@@ -158,6 +158,12 @@ additional-workspace mechanism. Launch fails clearly when the CLI cannot make it
 startup. Antigravity (`agy` or `antigravity`) receives the bundle through its repeatable
 `--add-dir` option.
 
+Every launched agent receives `HCOM_INSTANCE_NAME`, its actual instance name, and
+`HCOM_AGENT_NAME`, the catalog name it was started from. They differ under `--as` and for roaming
+agents (`reviewer` runs as `reviewer_<project>`); outside the catalog both carry the instance
+name, so one rule keyed on `HCOM_AGENT_NAME` covers every agent. `hcom r` keeps both, a fork keeps
+the parent's `HCOM_AGENT_NAME` under its new instance name, and nested child launches set their own.
+
 For catalog-launched Antigravity, hcom sets `DIPPY_POLICY_CWD` to the canonical catalog `dir`
 for that agent and passes it to the CLI process and its hooks. This launch scope is independent of
 a command-line `--dir` override, tool-call `Cwd`, and any bundle supplied with `--add-dir`.

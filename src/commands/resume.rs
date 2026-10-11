@@ -559,6 +559,18 @@ fn prepare_resume_plan_from_source(
         );
     }
 
+    // Resume keeps the catalog agent name; a fork is the same agent under a
+    // new instance name, so it inherits its parent's.
+    if !is_adoption
+        && !launch_env.contains_key(crate::commands::agent::AGENT_NAME_ENV)
+        && let Some(agent_name) = load_agent_name(db, &display_name)?
+    {
+        launch_env.insert(
+            crate::commands::agent::AGENT_NAME_ENV.to_string(),
+            agent_name,
+        );
+    }
+
     Ok(PreparedResume {
         output: ResumeOutputContext {
             action: if fork { "fork" } else { "resume" }.to_string(),
@@ -1085,6 +1097,37 @@ fn load_stopped_agy_policy_cwd(db: &HcomDb, name: &str) -> Result<Option<String>
         bail!("stored AGY policy directory is no longer canonical: {raw}");
     }
     Ok(Some(raw))
+}
+
+/// Catalog agent name of a live instance, else of its latest stopped snapshot.
+fn load_agent_name(db: &HcomDb, name: &str) -> Result<Option<String>> {
+    let live = db
+        .conn()
+        .query_row(
+            "SELECT CASE WHEN json_valid(launch_context)
+                         THEN json_extract(launch_context, '$.agent_name') END
+             FROM instances WHERE name=?",
+            rusqlite::params![name],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    if live.is_some() {
+        return Ok(live.filter(|n| !n.is_empty()));
+    }
+    let stopped = db
+        .conn()
+        .query_row(
+            "SELECT json_extract(data, '$.snapshot.agent_name') FROM events
+             WHERE type='life' AND instance=?
+               AND json_extract(data, '$.action')='stopped'
+             ORDER BY id DESC LIMIT 1",
+            rusqlite::params![name],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(stopped.filter(|n| !n.is_empty()))
 }
 
 /// Fail before a catalog launcher creates a terminal for an impossible resume.
@@ -3946,6 +3989,48 @@ mod tests {
             "forks bind a fresh session on first turn; must not inherit the parent's"
         );
         assert!(!fork.launch.explicit_identity);
+    }
+
+    #[test]
+    fn test_resume_and_fork_keep_catalog_agent_name() {
+        let db = test_db();
+        let mut data = serde_json::Map::new();
+        data.insert("session_id".into(), json!("session-123"));
+        data.insert("tool".into(), json!("codex"));
+        data.insert("status".into(), json!(ST_INACTIVE));
+        data.insert("created_at".into(), json!(1.0));
+        db.save_instance_named("rev2", &data).unwrap();
+        let snapshot = serde_json::json!({
+            "action": "stopped",
+            "snapshot": {
+                "tool": "codex",
+                "session_id": "session-123",
+                "launch_args": "[]",
+                "tag": "",
+                "background": 0,
+                "last_event_id": 0,
+                "directory": "/tmp",
+                "agent_name": "reviewer"
+            }
+        });
+        db.conn()
+            .execute(
+                "INSERT INTO events (timestamp, type, instance, data) VALUES (?, 'life', 'rev2', ?)",
+                rusqlite::params!["2026-01-01T00:00:00Z", snapshot.to_string()],
+            )
+            .unwrap();
+
+        for fork in [false, true] {
+            let plan =
+                prepare_resume_plan(&db, "rev2", fork, &[], &GlobalFlags::default()).unwrap();
+            let env = plan.launch.env.unwrap_or_default();
+            assert_eq!(
+                env.get(crate::commands::agent::AGENT_NAME_ENV)
+                    .map(String::as_str),
+                Some("reviewer"),
+                "fork={fork}"
+            );
+        }
     }
 
     #[test]

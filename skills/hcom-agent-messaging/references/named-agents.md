@@ -68,6 +68,12 @@ hcom grants only that directory when the CLI supports startup-time additional wo
 otherwise launch fails clearly. Antigravity (`agy` or `antigravity`) uses its repeatable
 `--add-dir` option.
 
+Every launched agent receives `HCOM_INSTANCE_NAME`, its actual instance name, and
+`HCOM_AGENT_NAME`, the catalog name it was started from. They differ under `--as` and for roaming
+agents (`reviewer` runs as `reviewer_<project>`); outside the catalog both carry the instance
+name, so one rule keyed on `HCOM_AGENT_NAME` covers every agent. `hcom r` keeps both, a fork keeps
+the parent's `HCOM_AGENT_NAME` under its new instance name, and nested child launches set their own.
+
 Catalog-launched Antigravity receives `DIPPY_POLICY_CWD` with the canonical catalog agent
 directory. Its hooks inherit this value regardless of `--dir`, tool-call `Cwd`, or additional bundle
 workspaces. A named resume recomputes it; nested child launches do not inherit it.

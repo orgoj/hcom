@@ -20,6 +20,10 @@ const EXTRA_CATALOGS_ENV: &str = "HCOM_AGENT_CATALOGS";
 pub(crate) const CATALOG_LAUNCH_ENV: &str = "HCOM_CATALOG_LAUNCH_ENV";
 const DEFAULT_CLI: &str = "claude";
 pub(crate) const DIPPY_POLICY_CWD: &str = "DIPPY_POLICY_CWD";
+/// Catalog name an agent was launched from; differs from HCOM_INSTANCE_NAME
+/// under `--as` and for roaming agents. The launcher defaults it to the
+/// instance name for launches outside the catalog.
+pub(crate) const AGENT_NAME_ENV: &str = "HCOM_AGENT_NAME";
 
 // ── CLI entry ───────────────────────────────────────────────────────────
 
@@ -82,6 +86,10 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   same-named non-project entry but still inherits global defaults.
   External bundles are granted through each CLI's additional-workspace mechanism;
   agy and antigravity use --add-dir.
+  Every launched agent receives HCOM_INSTANCE_NAME (its actual name) and
+  HCOM_AGENT_NAME (the catalog name it started from; under --as or roaming it
+  differs from the instance name, outside the catalog both are equal). Resume
+  keeps both, a fork keeps HCOM_AGENT_NAME, and children set their own.
   Catalog-launched agy/antigravity also receive DIPPY_POLICY_CWD: the canonical
   catalog dir, independent of --dir overrides, tool Cwd and --add-dir bundles.
   Tracked hcom r restores that scope from the stopped instance snapshot.
@@ -2434,6 +2442,7 @@ fn launch_named_with_roaming(
     let instance_name = cli.as_name.as_deref().unwrap_or(&default_instance);
     let window_explicit = def.window.is_some() || cli.def.window.is_some();
     let mut eff = effective(instance_name, def, cli);
+    eff.env.insert(AGENT_NAME_ENV.to_string(), name.to_string());
     let configured_terminal = configured_terminal();
     apply_herdr_placement(
         &mut eff,
@@ -3034,6 +3043,7 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     };
     let instance_name = cli.as_name.as_deref().unwrap_or(&default_instance);
     let mut eff = effective(instance_name, def, &cli);
+    eff.env.insert(AGENT_NAME_ENV.to_string(), name.clone());
     apply_agy_policy_cwd(&mut eff)?;
     let configured_terminal = configured_terminal();
     apply_herdr_placement(
@@ -4446,5 +4456,6 @@ mod tests {
         assert!(help.contains("--reasoning <val>"));
         assert!(help.contains("model_reasoning_effort for Codex"));
         assert!(help.contains("not a parent agent's location"));
+        assert!(help.contains("HCOM_AGENT_NAME (the catalog name it started from"));
     }
 }

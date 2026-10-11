@@ -333,6 +333,12 @@ Antigravity, an external bundle is made writable with
 `agy --add-dir`. An instance name is unique: launching one that already runs prints its status and
 exits. Use `--as` to run the same definition concurrently.
 
+Every launched agent receives `HCOM_INSTANCE_NAME`, its actual instance name, and
+`HCOM_AGENT_NAME`, the catalog name it was started from. They differ under `--as` and for roaming
+agents (`reviewer` runs as `reviewer_<project>`); outside the catalog both carry the instance
+name, so one rule keyed on `HCOM_AGENT_NAME` covers every agent. `hcom r` keeps both, a fork keeps
+the parent's `HCOM_AGENT_NAME` under its new instance name, and nested child launches set their own.
+
 Catalog-launched Antigravity receives `DIPPY_POLICY_CWD` set to the canonical catalog agent
 directory. Its hooks inherit this stable policy scope even when `--dir` overrides the launch
 directory, a tool uses another `Cwd`, or `--add-dir` adds a bundle workspace.

@@ -87,6 +87,7 @@ fn inherited_identity_vars(nested: NestedAgent) -> Vec<&'static str> {
     vars.extend([
         "HCOM_TOOL",
         "HCOM_INSTANCE_NAME",
+        "HCOM_AGENT_NAME",
         "HCOM_LAUNCHED_PRESET",
         crate::claude_actor::ENV_VAR,
         crate::claude_actor::SESSION_ENV_VAR,

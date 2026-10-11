@@ -2933,6 +2933,24 @@ fn agent_dry_run_renders_the_hcom_command_without_launching() {
 }
 
 #[test]
+fn agent_dry_run_exports_the_catalog_name_separately_from_the_instance_name() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"codex","terminal":"wezterm-tab"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "reviewer", "--as", "rev2", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("HCOM_AGENT_NAME=reviewer"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("codex --as rev2"), "stdout={stdout}");
+}
+
+#[test]
 fn agent_dry_run_inherits_specified_env_vars() {
     let h = Hcom::new();
     let test_var = "CUSTOM_SSH_AUTH_SOCK";
@@ -3051,6 +3069,56 @@ fn agent_catalog_system_prompt_file_renders_and_reaches_spawn_script() {
         launch_files.contains("Shared instructions from Markdown."),
         "catalog prompt did not reach spawn script: {launch_files}"
     );
+}
+
+#[test]
+fn launch_scripts_export_catalog_agent_name_and_instance_name() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"claude",
+                "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+    let launch_dir = h.path().join(".tmp/launch");
+    let launch_files = || {
+        std::fs::read_dir(&launch_dir)
+            .expect("read launch directory")
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let (code, stdout, stderr) = h.run(["agent", "reviewer", "--as", "rev2"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let scripts = launch_files();
+    assert!(scripts.contains("HCOM_AGENT_NAME=reviewer"), "{scripts}");
+    assert!(scripts.contains("HCOM_INSTANCE_NAME=rev2"), "{scripts}");
+    std::fs::remove_dir_all(&launch_dir).expect("clear launch directory");
+
+    // Outside the catalog the agent name is the instance name, even when the
+    // caller is itself an agent whose own name must not leak into the child.
+    let output = h
+        .cmd()
+        .env("HCOM_AGENT_NAME", "reviewer")
+        .args([
+            "claude",
+            "--as",
+            "solo",
+            "--terminal",
+            "sh -c true {script}",
+            "--go",
+        ])
+        .output()
+        .expect("run hcom");
+    let code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let scripts = launch_files();
+    assert!(scripts.contains("HCOM_AGENT_NAME=solo"), "{scripts}");
+    assert!(scripts.contains("HCOM_INSTANCE_NAME=solo"), "{scripts}");
 }
 
 #[test]

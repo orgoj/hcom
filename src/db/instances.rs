@@ -505,6 +505,9 @@ impl HcomDb {
                     agent_id, launch_args, origin_device_id, background_log_file, last_event_id,
                     CASE WHEN json_valid(launch_context)
                          THEN json_extract(launch_context, '$.dippy_policy_cwd')
+                         ELSE NULL END,
+                    CASE WHEN json_valid(launch_context)
+                         THEN json_extract(launch_context, '$.agent_name')
                          ELSE NULL END
              FROM instances WHERE name = ?",
         )?;
@@ -529,6 +532,7 @@ impl HcomDb {
                 "background_log_file": row.get::<_, String>(15).unwrap_or_default(),
                 "last_event_id": row.get::<_, i64>(16).unwrap_or(0),
                 "dippy_policy_cwd": row.get::<_, Option<String>>(17).unwrap_or(None),
+                "agent_name": row.get::<_, Option<String>>(18).unwrap_or(None),
             }))
         }) {
             Ok(snapshot) => Ok(Some(snapshot)),
@@ -1257,6 +1261,22 @@ mod tests {
 
         let snapshot = db.get_instance_snapshot("knowledge").unwrap().unwrap();
         assert_eq!(snapshot["dippy_policy_cwd"], "/home/michael/wiki");
+        cleanup_test_db(db_path);
+    }
+
+    #[test]
+    fn test_stopped_snapshot_keeps_catalog_agent_name() {
+        let (db, db_path) = setup_full_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, tool, created_at, launch_context) \
+                 VALUES ('rev2', 'claude', 1, ?)",
+                params![r#"{"agent_name":"reviewer"}"#],
+            )
+            .unwrap();
+
+        let snapshot = db.get_instance_snapshot("rev2").unwrap().unwrap();
+        assert_eq!(snapshot["agent_name"], "reviewer");
         cleanup_test_db(db_path);
     }
 
