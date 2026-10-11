@@ -3122,6 +3122,64 @@ fn launch_scripts_export_catalog_agent_name_and_instance_name() {
 }
 
 #[test]
+fn handoff_relaunches_the_same_catalog_agent_under_its_instance_name() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"claude",
+                "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+    let (code, stdout, stderr) = h.run(["agent", "reviewer", "--as", "rev2"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let scripts = std::fs::read_dir(h.path().join(".tmp/launch"))
+        .expect("read launch directory")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let process_id = scripts
+        .split("HCOM_PROCESS_ID=")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split(|c: char| c.is_whitespace() || c == '\'' || c == ';')
+                .find(|s| !s.is_empty())
+        })
+        .expect("process id in launch script")
+        .to_string();
+
+    let (code, stdout, stderr) = h.run_as_process(
+        &process_id,
+        [
+            "handoff",
+            "--dry-run",
+            "--cli",
+            "codex",
+            "Continue step 2 of PLAN.md",
+        ],
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("kill rev2"), "stdout={stdout}");
+    assert!(
+        stdout.contains("HCOM_AGENT_NAME=reviewer"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("codex --as rev2"), "stdout={stdout}");
+    assert!(
+        stdout.contains("Continue step 2 of PLAN.md"),
+        "stdout={stdout}"
+    );
+
+    // A caller without an agent identity has nothing to hand off.
+    let (code, _stdout, stderr) = h.run(["handoff", "--dry-run", "next"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("must be run by an hcom agent"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
 fn agent_catalog_inline_system_prompt_overrides_file() {
     let h = Hcom::new();
     std::fs::write(h.path().join("SYSTEM_PROMPT.md"), "Instructions from file.")

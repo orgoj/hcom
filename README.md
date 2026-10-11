@@ -290,6 +290,7 @@ hcom [N] claude|gemini|codex|opencode|kilo|pi|omp|antigravity|cursor|kimi|copilo
 hcom r <name|session_id>                # resume agent
 hcom f <name|session_id>                # fork session
 hcom kill <name|@group|tag:T|all>       # kill + close terminal pane
+hcom handoff "<prompt>" [--cli <tool>]  # agent restarts itself clean with this prompt
 ```
 
 hcom launch flags:
@@ -318,6 +319,8 @@ To temporarily replace a CLI across projects without editing their catalogs, add
 This applies once to catalog launches and send autostart, before selecting `tools.claude`;
 explicit `--cli` bypasses it. Running agents keep their CLI. Use
 `hcom agent <name> --restart --continue` to replace one with a handoff summary.
+A catalog agent can also hand off to itself: `hcom handoff "<prompt>"` restarts it in a clean
+session with that initial prompt, same catalog agent and name (`--cli <tool>` switches CLI).
 Keep CLI-specific models and arguments in `tools.<cli>`; shared fields still apply.
 Remove the mapping to restore project preferences. See [local CLI replacement](docs/agent.md#local-cli-replacement).
 

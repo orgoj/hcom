@@ -69,6 +69,7 @@ You MUST use `hcom <cmd+flags> --name {instance_name}` for all hcom commands:
   Get notified (watch agents, react): events sub [filters] [--once] | --help
   Example: events sub --idle luna → <hcom> msg when luna goes idle
 - Handoff context: bundle prepare
+- Restart yourself clean (catalog agents): handoff 'prompt for your successor' [--cli <tool>] — last action of your turn
 - Spawn agents: [num] <{launch_tools}> [--tag labelOrGroup] [--hcom-prompt 'task']
   Example: `hcom 1 claude --tag cool --hcom-prompt 'task'` → <hcom> sends you result when done
   Without --hcom-prompt: you get auto notify <hcom> when ready, then use hcom send

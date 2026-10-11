@@ -562,6 +562,23 @@ For an autostarted target, `Sent to:` means the initial event was acknowledged d
 post-start check. `Queued; delivery pending:` means the check expired first; the message remains
 stored and the delivery loop continues after the command returns.
 
+## Self handoff
+
+A catalog agent can replace itself with a clean session that starts from a prompt it writes:
+
+```bash
+hcom handoff "Continue with step 3 of PLAN.md; steps 1-2 are committed."
+hcom handoff --cli claude < handoff.md   # prompt from stdin, restart on another CLI
+hcom handoff --dry-run "..."             # print the relaunch, stop nothing
+```
+
+hcom checks the relaunch first, then runs `hcom agent <HCOM_AGENT_NAME> --as <HCOM_INSTANCE_NAME>
+--restart --clean --hcom-prompt <prompt>` from the agent's recorded directory, detached from the
+agent it kills. The successor is the same catalog agent under the same instance name, so `--as`
+aliases and roaming instances keep their names. The prompt is its initial prompt. Run it as the last
+action of a turn; its output is logged to `.tmp/logs/handoff-<name>.log` in the hcom data directory.
+Only agents started by `hcom agent` or send autostart can hand off; others get an error and keep running.
+
 ## Terminal placement
 
 `terminal` selects the launch backend. `session` and `window` configure placement for tmux and Herdr.

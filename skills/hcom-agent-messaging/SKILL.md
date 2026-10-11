@@ -64,6 +64,9 @@ tell any agent:
 
 **Spawn**, **fork**, **resume**, **kill** in any terminal emulator or headless.
 
+**Hand off** to a fresh session of yourself: `hcom handoff "<prompt>"` (catalog agents only;
+`--cli <tool>` switches CLI). Make it the last action of your turn.
+
 run `hcom --help` for full command syntax and flags.
 
 ---

@@ -65,7 +65,7 @@ pub fn bash_completion_script() -> &'static str {
         if [[ "$cur" == -* ]]; then
             COMPREPLY=( $(compgen -W "--name --go --help -h --version -v --new-terminal" -- "$cur") )
         else
-            local cmds="ack agent archive bundle completions completion config events hooks kill list listen relay reset run send start status stop term transcript update r f claude gemini codex opencode kilo pi omp antigravity agy cursor kimi copilot hermes"
+            local cmds="ack agent archive bundle completions completion config events handoff hooks kill list listen relay reset run send start status stop term transcript update r f claude gemini codex opencode kilo pi omp antigravity agy cursor kimi copilot hermes"
             COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
         fi
         return 0
@@ -436,6 +436,7 @@ _hcom() {
         'completion:Generate shell completions'
         'config:Get/set global and per-agent settings'
         'events:Query event stream, manage subscriptions'
+        'handoff:Restart yourself in a clean session'
         'hooks:Add or remove hooks'
         'kill:Kill + close terminal pane'
         'list:Show agents, status, unread counts'
@@ -626,7 +627,7 @@ compdef _hcom hcom
 pub fn fish_completion_script() -> &'static str {
     r#"# Fish completion for hcom
 
-set -l commands ack agent archive bundle completions completion config events hooks kill list listen relay reset run send start status stop term transcript update r f claude gemini codex opencode kilo pi omp antigravity agy cursor kimi copilot hermes
+set -l commands ack agent archive bundle completions completion config events handoff hooks kill list listen relay reset run send start status stop term transcript update r f claude gemini codex opencode kilo pi omp antigravity agy cursor kimi copilot hermes
 
 # Top-level commands
 complete -c hcom -f -n '__fish_use_subcommand' -a "$commands"

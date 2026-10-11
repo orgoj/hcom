@@ -26,6 +26,7 @@ const COMMANDS: &[&str] = &[
     "list",
     "events",
     "stop",
+    "handoff",
     "start",
     "listen",
     "status",
@@ -702,6 +703,7 @@ pub fn dispatch() -> anyhow::Result<()> {
                     | "send"
                     | "list"
                     | "stop"
+                    | "handoff"
                     | "listen"
                     | "events"
                     | "transcript"
@@ -951,6 +953,12 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
         "stop" => clap_dispatch!(crate::commands::stop::StopArgs, cmd, &cmd_argv, |args| {
             crate::commands::stop::cmd_stop(&db, &args, Some(&ctx))
         }),
+        "handoff" => clap_dispatch!(
+            crate::commands::handoff::HandoffArgs,
+            cmd,
+            &cmd_argv,
+            |args| crate::commands::handoff::cmd_handoff(&db, &args, Some(&ctx))
+        ),
         "listen" => clap_dispatch!(
             crate::commands::listen::ListenArgs,
             cmd,

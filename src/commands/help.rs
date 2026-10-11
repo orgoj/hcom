@@ -501,6 +501,23 @@ const STOP_HELP: &[HelpEntry] = &[
     ("stop all", "Disconnect all agents"),
 ];
 
+const HANDOFF_HELP: &[HelpEntry] = &[
+    (
+        "handoff <prompt>",
+        "Restart yourself: same catalog agent and name, clean session, <prompt> as initial prompt",
+    ),
+    ("handoff < file", "Read the prompt from stdin"),
+    ("  --cli <tool>", "Restart on another AI CLI"),
+    (
+        "  --dry-run",
+        "Print the relaunch without stopping anything",
+    ),
+    (
+        "",
+        "Only for agents launched by hcom agent or send autostart. End your turn after it.",
+    ),
+];
+
 const START_HELP: &[HelpEntry] = &[
     ("start", "Connect to hcom (from inside any AI session)"),
     (
@@ -1148,6 +1165,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "list",
     "events",
     "stop",
+    "handoff",
     "start",
     "listen",
     "status",
@@ -1229,6 +1247,7 @@ Commands:\n\
 \x20 transcript   Read another agent's conversation\n\
 \x20 start        Connect to hcom (run inside any AI tool)\n\
 \x20 stop         Disconnect from hcom\n\
+\x20 handoff      Restart yourself in a clean session with your prompt\n\
 \x20 config       Get/set global and per-agent settings\n\
 \x20 run          Execute workflow scripts\n\
 \x20 agent        Launch named agents from a JSON catalog\n\
@@ -1374,6 +1393,7 @@ fn command_help_raw(name: &str) -> String {
         "events" => Some(EVENTS_PAGE),
         "bundle" => Some(BUNDLE_PAGE),
         "stop" => Some(&[STOP_HELP]),
+        "handoff" => Some(&[HANDOFF_HELP]),
         "start" => Some(&[START_HELP]),
         "kill" => Some(&[KILL_HELP]),
         "listen" => Some(&[LISTEN_HELP]),
@@ -1476,6 +1496,7 @@ mod tests {
             "list",
             "events",
             "stop",
+            "handoff",
             "start",
             "listen",
             "status",

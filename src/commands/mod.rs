@@ -9,6 +9,7 @@ pub mod send;
 // Lifecycle
 pub mod daemon;
 pub mod fork;
+pub mod handoff;
 pub mod kill;
 pub mod launch;
 pub mod resume;
