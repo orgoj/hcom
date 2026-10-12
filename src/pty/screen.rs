@@ -191,6 +191,9 @@ fn is_dash_rule(line: &str) -> bool {
     trimmed.chars().count() >= 3 && trimmed.chars().all(|c| c == '─')
 }
 
+const ANTIGRAVITY_ACCEPT_EDITS_STATUS: &str =
+    "Accept-edits mode: file edits auto-approved (shift+tab to cycle)";
+
 /// Check if a line is a Gemini dash border (all ─ chars, at least 20 wide)
 fn is_dash_border(line: &str) -> bool {
     let trimmed = line.trim();
@@ -675,7 +678,8 @@ impl ScreenTracker {
     }
 
     /// Check if text after a prompt character is dim (placeholder styling).
-    /// Returns `Some(true)` if majority dim (placeholder), `Some(false)` if real input.
+    /// Returns `Some(true)` if all visible characters are dim (placeholder),
+    /// `Some(false)` if any non-dim characters exist (real user input) or no styled text.
     /// Returns `None` if the prompt glyph can't be located on the row.
     fn is_dim_after_prompt(&self, row: u16, prompt_char: &str) -> Option<bool> {
         let screen = self.parser.screen();
@@ -693,8 +697,8 @@ impl ScreenTracker {
         }
         let prompt_col = prompt_col?;
 
-        // Scan cells after prompt (skip prompt + space)
-        let start_col = prompt_col + 2;
+        // Scan cells after prompt glyph (skip prompt glyph itself; whitespace is skipped below)
+        let start_col = prompt_col + 1;
         let mut dim_count: u32 = 0;
         let mut non_dim_count: u32 = 0;
 
@@ -716,7 +720,7 @@ impl ScreenTracker {
             }
         }
 
-        Some(!(non_dim_count > 0 && non_dim_count > dim_count))
+        Some(dim_count > 0 && non_dim_count == 0)
     }
 
     /// Render the non-whitespace cells after a prompt as char:style pairs for
@@ -864,13 +868,144 @@ impl ScreenTracker {
                 return Some((text, false));
             }
 
-            let is_placeholder = self
-                .is_dim_after_prompt(row_idx as u16, &prompt_char.to_string())
-                .unwrap_or(true);
+            let is_placeholder =
+                self.is_claude_placeholder_or_suggestion(row_idx as u16, prompt_char, &text);
             return Some((text, is_placeholder));
         }
 
         None
+    }
+
+    /// Determine if the text in Claude's input box is a placeholder/suggestion
+    /// or active uncommitted user input.
+    ///
+    /// Handles:
+    /// - Claude suggesting a prompt: cursor is at the beginning
+    ///   (insertion point), text starts with `Try `, starts with dim styling, or is a hint
+    ///   -> true (safe to inject).
+    /// - Active user input: cursor has advanced past insertion point, or characters before
+    ///   cursor are non-dim, or user typed text (even if followed by dim ghost text)
+    ///   -> false (protected, do NOT overwrite).
+    /// - Fixed hints (e.g. `? for shortcuts`) -> true.
+    /// - User typed text and pressed Home key (cursor at start, but characters are non-dim)
+    ///   -> false (protected).
+    fn is_claude_placeholder_or_suggestion(&self, row: u16, prompt_char: char, text: &str) -> bool {
+        let screen = self.parser.screen();
+        let (_, cols) = screen_size(screen);
+
+        // 1. Explicit placeholder text patterns
+        let trimmed_lower = text.trim().to_lowercase();
+        if trimmed_lower.starts_with("try ") || trimmed_lower.starts_with("try\"") {
+            return true;
+        }
+        if trimmed_lower == "? for shortcuts" {
+            return true;
+        }
+
+        // Find the column where prompt glyph is located
+        let mut prompt_col: Option<u16> = None;
+        for col in 0..cols {
+            if let Some(cell) = screen.cell(row, col)
+                && cell.contents().starts_with(prompt_char)
+            {
+                prompt_col = Some(col);
+                break;
+            }
+        }
+        let Some(prompt_col) = prompt_col else {
+            return self
+                .is_dim_after_prompt(row, &prompt_char.to_string())
+                .unwrap_or(false);
+        };
+
+        // Determine insertion column (where input text starts, skipping prompt + space)
+        let insertion_col = if screen.cell(row, prompt_col + 1).is_some_and(|c| {
+            c.contents()
+                .chars()
+                .all(|ch| ch.is_whitespace() || ch == '\u{00A0}')
+        }) {
+            prompt_col + 2
+        } else {
+            prompt_col + 1
+        };
+
+        let (cursor_row, cursor_col) = screen.cursor_position();
+        let cursor_on_prompt_row = cursor_row == row;
+
+        // Check if cursor has advanced past insertion point:
+        // When user types text, cursor sits at cursor_col > insertion_col.
+        // Even if Claude displays dim ghost text after cursor_col,
+        // any non-dim characters in insertion_col..cursor_col are real user input!
+        if cursor_on_prompt_row && cursor_col > insertion_col {
+            let mut user_non_dim = 0;
+            for col in insertion_col..cursor_col {
+                if let Some(cell) = screen.cell(row, col) {
+                    let contents = cell.contents();
+                    if contents.is_empty()
+                        || contents
+                            .chars()
+                            .all(|c| c.is_whitespace() || c == '\u{00A0}')
+                    {
+                        continue;
+                    }
+                    if !cell.dim() {
+                        user_non_dim += 1;
+                    }
+                }
+            }
+            if user_non_dim > 0 {
+                return false;
+            }
+        }
+
+        // Scan styling of all cells from insertion_col onwards
+        let mut dim_count: u32 = 0;
+        let mut non_dim_count: u32 = 0;
+        let mut first_char_dim: Option<bool> = None;
+
+        for col in insertion_col..cols {
+            if let Some(cell) = screen.cell(row, col) {
+                let contents = cell.contents();
+                if contents.is_empty()
+                    || contents
+                        .chars()
+                        .all(|c| c.is_whitespace() || c == '\u{00A0}')
+                {
+                    continue;
+                }
+                if first_char_dim.is_none() {
+                    first_char_dim = Some(cell.dim());
+                }
+                if cell.dim() {
+                    dim_count += 1;
+                } else {
+                    non_dim_count += 1;
+                }
+            }
+        }
+
+        // When cursor is at or before insertion point (cursor parked at the beginning):
+        if cursor_on_prompt_row && cursor_col <= insertion_col {
+            // If the first visible character is dim, this is Claude's suggested prompt!
+            if first_char_dim == Some(true) {
+                return true;
+            }
+            // If all visible characters are dim:
+            if dim_count > 0 && non_dim_count == 0 {
+                return true;
+            }
+            // If first character is NOT dim and no placeholder pattern matched,
+            // this is user text where cursor was moved to the start (Home key).
+            return false;
+        }
+
+        // Fallback when cursor is not on prompt row (e.g. test frames with trailing \r\n):
+        // All dim -> placeholder
+        if dim_count > 0 && non_dim_count == 0 {
+            return true;
+        }
+
+        false
     }
 
     /// True when Claude's live input box is the native new-session dispatcher.
@@ -1101,6 +1236,24 @@ impl ScreenTracker {
             Some((row_idx, trim_with_nbsp(after)))
         }) {
             if text.is_empty() {
+                return Some(String::new());
+            }
+
+            let screen = self.parser.screen();
+            let (_, cols) = screen_size(screen);
+            let prompt_col = (0..cols).find(|&col| {
+                screen
+                    .cell(row_idx as u16, col)
+                    .is_some_and(|cell| cell.contents() == ">")
+            });
+            // Antigravity 1.1.20 renders this fixed mode status in the input row
+            // with the cursor still parked immediately after `> `. Require both
+            // signals so identical user-entered text remains protected.
+            if text == ANTIGRAVITY_ACCEPT_EDITS_STATUS
+                && prompt_col.is_some_and(|col| {
+                    screen.cursor_position() == (row_idx as u16, col.saturating_add(2))
+                })
+            {
                 return Some(String::new());
             }
 
@@ -2034,6 +2187,24 @@ mod tests {
     }
 
     #[test]
+    fn codex_typed_prefix_with_dim_completion_is_user_input() {
+        // Any non-dim cell after the prompt means the user typed something: a
+        // dim completion of a typed prefix must not read as an empty prompt.
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        let mut data = Vec::new();
+        data.extend_from_slice("› fi".as_bytes());
+        data.extend_from_slice(b"\x1b[2m"); // dim on
+        data.extend_from_slice(b"x the failing tests");
+        data.extend_from_slice(b"\x1b[0m"); // reset
+        data.extend_from_slice(b"\r\n? for shortcuts\r\n");
+        t.process(&data);
+        assert_eq!(
+            t.get_codex_input_text(),
+            Some("fix the failing tests".to_string())
+        );
+    }
+
+    #[test]
     fn codex_non_dim_text_with_ready_returns_text() {
         // Injected text is NOT dim, even if ready pattern still visible (race condition)
         // Should return the text (it's real input, not placeholder)
@@ -2501,6 +2672,20 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_fixed_mode_status_at_prompt_cursor_returns_empty() {
+        let status = ANTIGRAVITY_ACCEPT_EDITS_STATUS;
+        let mut t = make_tracker(24, 100, "? for shortcuts");
+        t.process(format!("> {status}\r\n? for shortcuts\x1b[1;3H").as_bytes());
+        assert_eq!(t.get_antigravity_input_text(), Some(String::new()));
+
+        let mut typed = make_tracker(24, 100, "? for shortcuts");
+        typed.process(
+            format!("> {status}\r\n? for shortcuts\x1b[1;{}H", status.len() + 3).as_bytes(),
+        );
+        assert_eq!(typed.get_antigravity_input_text(), Some(status.to_string()));
+    }
+
+    #[test]
     fn antigravity_empty_prompt_with_ready() {
         let mut t = make_tracker(24, 80, "? for shortcuts");
         t.process("> \r\n? for shortcuts\r\n".as_bytes());
@@ -2652,6 +2837,130 @@ mod tests {
         t.process(&data);
         t.process("────────────────────\r\n".as_bytes());
         assert_eq!(t.get_claude_input_text(), Some(String::new()));
+    }
+
+    #[test]
+    fn claude_prompt_with_short_user_text_and_dim_ghost_text() {
+        // User typed "hi" (normal intensity), followed by dim auto-completion / ghost text.
+        // Even though dim characters outnumber non-dim characters, this is real user input
+        // and must NEVER be treated as an empty placeholder prompt.
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        let mut data = Vec::new();
+        data.extend_from_slice("❯ hi".as_bytes());
+        data.extend_from_slice(b"\x1b[2m"); // SGR dim on
+        data.extend_from_slice(b" suggestions and ghost text");
+        data.extend_from_slice(b"\x1b[0m"); // SGR reset
+        data.extend_from_slice(b"\r\n");
+        t.process(&data);
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        assert!(!t.is_prompt_empty("claude"));
+        assert_eq!(
+            t.get_claude_input_text(),
+            Some("hi suggestions and ghost text".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_prompt_with_single_char_user_text_and_dim_hints() {
+        // User typed a single character "a" (non-dim) while right-aligned dim text
+        // (like shortcuts or hints) exists on the row. Must not be treated as empty.
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        let mut data = Vec::new();
+        data.extend_from_slice("❯ a".as_bytes());
+        data.extend_from_slice(b"\x1b[2m"); // SGR dim on
+        data.extend_from_slice(b"            ? for shortcuts");
+        data.extend_from_slice(b"\x1b[0m"); // SGR reset
+        data.extend_from_slice(b"\r\n");
+        t.process(&data);
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        assert!(!t.is_prompt_empty("claude"));
+    }
+
+    #[test]
+    fn claude_prompt_suggested_prompt_with_cursor_at_start() {
+        // Claude suggests a prompt in dim text while cursor
+        // is parked at the beginning (col 2). Must be treated as empty prompt!
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        let mut data = Vec::new();
+        data.extend_from_slice("❯ ".as_bytes());
+        data.extend_from_slice(b"\x1b[2m");
+        data.extend_from_slice(b"Fix the type error in pty/screen.rs");
+        data.extend_from_slice(b"\x1b[0m\r\n");
+        t.process(&data);
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        // Park cursor on row 1 (0-based) at column 2 (1-based: row 2, col 3)
+        t.process(b"\x1b[2;3H");
+        assert!(t.is_prompt_empty("claude"));
+        assert_eq!(t.get_claude_input_text(), Some(String::new()));
+    }
+
+    #[test]
+    fn claude_prompt_try_placeholder_with_non_dim_quotes_or_code() {
+        // Claude Code renders `Try "do something"` where quotes or command
+        // may be normal intensity or colored, not dim. Must be treated as empty prompt!
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        let mut data = Vec::new();
+        data.extend_from_slice("❯ ".as_bytes());
+        data.extend_from_slice(b"\x1b[2mTry \x1b[0m\"run tests\"");
+        data.extend_from_slice(b"\r\n");
+        t.process(&data);
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        assert!(t.is_prompt_empty("claude"));
+        assert_eq!(t.get_claude_input_text(), Some(String::new()));
+    }
+
+    #[test]
+    fn claude_prompt_user_text_with_cursor_at_start_is_protected() {
+        // User typed "cargo build" (all non-dim) and moved cursor to start (Home key).
+        // Must NOT be treated as empty prompt!
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        t.process("❯ cargo build\r\n".as_bytes());
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        t.process(b"\x1b[2;3H"); // park cursor at row 1, col 2
+        assert!(!t.is_prompt_empty("claude"));
+        assert_eq!(t.get_claude_input_text(), Some("cargo build".to_string()));
+    }
+
+    #[test]
+    fn claude_prompt_user_input_with_ghost_text_and_live_cursor_position() {
+        // Live cursor position is at col 4 (after "hi"), ghost text follows.
+        // Must NOT be treated as empty prompt!
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        let mut data = Vec::new();
+        data.extend_from_slice("❯ hi".as_bytes());
+        data.extend_from_slice(b"\x1b[2m suggestions\x1b[0m\r\n");
+        t.process(&data);
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        // Cursor at row 1, col 4 (1-based: row 2, col 5) - after "hi"
+        t.process(b"\x1b[2;5H");
+        assert!(!t.is_prompt_empty("claude"));
+        assert_eq!(
+            t.get_claude_input_text(),
+            Some("hi suggestions".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_prompt_user_short_text_with_long_ghost_text_and_cursor_at_start() {
+        // User typed "hi" (non-dim), Claude added long ghost text (dim),
+        // user pressed Home key so cursor is at insertion_col (col 2).
+        // Must NOT be treated as empty prompt!
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        let mut data = Vec::new();
+        data.extend_from_slice("❯ hi".as_bytes());
+        data.extend_from_slice(b"\x1b[2m, this is a very long suggested completion\x1b[0m\r\n");
+        t.process(&data);
+        t.process("────────────────────────────────────────\r\n".as_bytes());
+        // Cursor parked at row 1, col 2 (1-based: row 2, col 3) - start of prompt!
+        t.process(b"\x1b[2;3H");
+        assert!(!t.is_prompt_empty("claude"));
     }
 
     // ---- trim_with_nbsp ----
