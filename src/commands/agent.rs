@@ -1166,13 +1166,23 @@ fn roaming_route(
     }))
 }
 
+/// A catalog agent that cannot be routed from the sender's context.
+#[derive(Debug)]
+pub(crate) struct UnroutableAgent {
+    /// Every target that names this agent: alias, materialized instance, and
+    /// their `tag-` full names.
+    pub names: Vec<String>,
+    pub tag: Option<String>,
+    pub reason: String,
+}
+
 /// Catalog routing for one send: routable agents, plus catalog agents that
-/// cannot be routed from the sender's context and why. An unroutable agent
-/// only fails a send that addresses it.
+/// cannot be routed from the sender's context. An unroutable agent only fails
+/// a send that addresses it by name or tag.
 #[derive(Debug, Default)]
 pub(crate) struct CatalogTargets {
     pub routes: Vec<CatalogRoute>,
-    pub unroutable: Vec<(String, String)>,
+    pub unroutable: Vec<UnroutableAgent>,
 }
 
 /// Catalog agent identities available for message routing, including stopped agents.
@@ -1190,7 +1200,27 @@ pub(crate) fn catalog_message_targets(
         let roaming = match roaming_route(db, identity, name, &def) {
             Ok(route) => route,
             Err(e) => {
-                unroutable.push((name.clone(), format!("{e:#}")));
+                let tag = effective(name, def.clone(), &Cli::default()).tag;
+                let mut names = vec![name.clone()];
+                if let Some(slug) = roaming_context_directory(identity)
+                    .ok()
+                    .and_then(|dir| roaming_project_slug(&roaming_project_root(&dir)).ok())
+                {
+                    names.push(format!("{name}_{slug}"));
+                }
+                if let Some(tag) = tag.as_deref().filter(|tag| !tag.is_empty()) {
+                    names.extend(
+                        names
+                            .clone()
+                            .into_iter()
+                            .map(|name| format!("{tag}-{name}")),
+                    );
+                }
+                unroutable.push(UnroutableAgent {
+                    names,
+                    tag,
+                    reason: format!("{e:#}"),
+                });
                 continue;
             }
         };

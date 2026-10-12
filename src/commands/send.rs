@@ -28,7 +28,9 @@ Target matching:
   that first event's acknowledgement; otherwise it reports queued/pending.
   A catalog agent with \"roaming\": true resolves to <name>_<project> in the
   sender's Git/project root and starts there when missing.
-  Broadcasts never start agents.
+  Running agents route first; the catalog is read only for unmatched names,
+  tags (which include stopped catalog agents), stopped thread members, or
+  --spawn-as; an unreadable catalog only warns. Broadcasts never start agents.
 
 Inline bundle (attach structured context):
     --title <text>                 Create and attach bundle inline
@@ -1167,31 +1169,70 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         return 1;
     }
 
-    let mut catalog_instances = if !effective_targets.is_empty()
-        || message.contains('@')
-        || envelope.thread.is_some()
-        || args.spawn_as.is_some()
-    {
+    // The catalog is a fallback: running agents route exactly as upstream, and
+    // the catalog is read only when a send could reach a stopped or missing
+    // catalog agent — an unmatched name, a tag (which also covers stopped
+    // agents), a non-running thread member, or --spawn-as. An unreadable
+    // catalog only warns, so routing degrades to upstream behavior.
+    let has_explicit_targets = args.has_separator() || !effective_targets.is_empty();
+    let requested = if has_explicit_targets {
+        effective_targets.clone()
+    } else {
+        crate::shared::constants::extract_mentions(&message)
+    };
+    let running = match deliverable_instances(db) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+    let needs_catalog = args.spawn_as.is_some()
+        || requested.iter().any(|target| target.ends_with('-'))
+        || crate::messages::resolve_targets(&requested, &running)
+            .is_ok_and(|(_, unmatched)| !unmatched.is_empty())
+        || resolve_delivery(
+            db,
+            &sender_identity,
+            &message,
+            Some(&envelope),
+            has_explicit_targets.then_some(effective_targets.as_slice()),
+            &[],
+        )
+        .is_ok_and(|delivery| {
+            delivery.delivered_to.iter().any(|name| {
+                !running
+                    .iter()
+                    .any(|inst| inst.name.eq_ignore_ascii_case(name))
+            })
+        });
+    let mut catalog_instances = if needs_catalog {
         match super::agent::catalog_message_targets(db, &sender_identity) {
             Ok(targets) => {
-                let requested = if effective_targets.is_empty() {
-                    crate::shared::constants::extract_mentions(&message)
-                } else {
-                    effective_targets.clone()
-                };
-                if let Some((_, reason)) = targets.unroutable.iter().find(|(alias, _)| {
-                    requested
-                        .iter()
-                        .any(|target| target.eq_ignore_ascii_case(alias))
+                if let Some(agent) = targets.unroutable.iter().find(|agent| {
+                    requested.iter().any(|target| {
+                        agent
+                            .names
+                            .iter()
+                            .any(|name| target.eq_ignore_ascii_case(name))
+                            || target.strip_suffix('-').is_some_and(|tag| {
+                                agent
+                                    .tag
+                                    .as_deref()
+                                    .is_some_and(|agent_tag| agent_tag.eq_ignore_ascii_case(tag))
+                            })
+                    })
                 }) {
-                    eprintln!("Error: {reason}");
+                    eprintln!("Error: {}", agent.reason);
                     return 1;
                 }
                 targets.routes
             }
             Err(e) => {
-                eprintln!("Error: cannot load agent catalog for message routing: {e:#}");
-                return 1;
+                eprintln!(
+                    "Warning: cannot load agent catalog; routing to running agents only: {e:#}"
+                );
+                Vec::new()
             }
         }
     } else {

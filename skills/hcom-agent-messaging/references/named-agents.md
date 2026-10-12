@@ -246,7 +246,9 @@ The materialized name, not the archetype alias, is stored in mentions, thread me
 watches, and delivery metadata. The original message text remains unchanged. Direct
 `hcom agent/show/attach reviewer` commands resolve the current project identically. Broadcasts do
 not materialize roaming agents, and roots whose normalized basenames collide fail safely: only sends addressing that
-roaming agent fail, other messages still route.
+roaming agent by name, full name, or tag fail. Running agents route first; the catalog is read
+only for unmatched names, tags, stopped thread members, or `--spawn-as`, and an unreadable catalog
+only warns.
 
 Catalog `env` reaches the materialized process during nested autostart. A read-only roaming role
 can therefore select a separately managed Dippy policy with one variable:

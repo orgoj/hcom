@@ -369,6 +369,9 @@ Targeted messages start missing or stopped catalog agents before delivery. The s
 for that first event to be acknowledged; if startup is still settling, it succeeds with
 `Queued; delivery pending` and keeps the event durable for later delivery. To start a catalog
 agent under a custom instance name (or message an existing clone), use `--spawn-as <name>` (alias `--as <name>`).
+Running agents route first; the catalog is read only for unmatched names, tags (which include
+stopped catalog agents), stopped thread members, or `--spawn-as`. An unreadable catalog prints a
+warning and the send routes to running agents only.
 Catalog precedence, imports, tool profiles, terminal placement, resume behavior, instruction transport, and bundle skills are
 documented in [Named agents](docs/agent.md).
 

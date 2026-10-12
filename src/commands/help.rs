@@ -284,6 +284,10 @@ const SEND_HELP: &[HelpEntry] = &[
         "A catalog agent with roaming=true materializes as <name>_<project> in the sender's Git/project root.",
     ),
     (
+        "",
+        "Running agents route first; the catalog is read only for unmatched names, tags (which include stopped catalog agents), stopped thread members, or --spawn-as; an unreadable catalog only warns.",
+    ),
+    (
         "  --spawn-as <name>",
         "Autostart targeted catalog agent under this instance name (alias: --as)",
     ),

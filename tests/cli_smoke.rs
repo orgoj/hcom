@@ -266,6 +266,10 @@ fn send_help_explains_autostart_acknowledgement() {
     assert!(stdout.contains("queued/pending"), "stdout={stdout}");
     assert!(stdout.contains("roaming"), "stdout={stdout}");
     assert!(stdout.contains("<name>_<project>"), "stdout={stdout}");
+    assert!(
+        stdout.contains("Running agents route first"),
+        "stdout={stdout}"
+    );
 }
 
 #[test]
@@ -4459,16 +4463,16 @@ fn roaming_slug_collision_blocks_only_sends_that_address_that_agent() {
     std::fs::create_dir_all(second.join(".git")).expect("create second git marker");
     std::fs::write(
         h.path().join("agents.json"),
-        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex"}}}"#,
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex","tag":"review"}}}"#,
     )
     .expect("write catalog");
     let (code, _, stderr) = h.run(["list"]);
     assert_eq!(code, 0, "stderr={stderr}");
     let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
     conn.execute(
-        "INSERT INTO instances (name, status, directory, created_at) \
-         VALUES ('reviewer_app', 'stopped', ?1, 1000.0), \
-                ('nova', 'listening', ?1, 1000.0)",
+        "INSERT INTO instances (name, status, directory, created_at, tag) \
+         VALUES ('reviewer_app', 'stopped', ?1, 1000.0, 'review'), \
+                ('nova', 'listening', ?1, 1000.0, 'astro')",
         [first.to_string_lossy().as_ref()],
     )
     .expect("insert instances");
@@ -4491,12 +4495,76 @@ fn roaming_slug_collision_blocks_only_sends_that_address_that_agent() {
     assert!(ok, "stdout={stdout} stderr={stderr}");
     assert!(stdout.contains("nova"), "stdout={stdout}");
 
-    let (ok, stdout, stderr) = send(&["send", "--from", "bigboss", "--", "@reviewer inline"]);
-    assert!(!ok, "stdout={stdout} stderr={stderr}");
+    let (ok, stdout, stderr) = send(&["send", "--from", "bigboss", "@astro-", "--", "tagged"]);
+    assert!(ok, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("nova"), "stdout={stdout}");
+
+    for args in [
+        &["send", "--from", "bigboss", "@reviewer inline"][..],
+        &["send", "--from", "bigboss", "@review-", "--", "tagged"][..],
+        &[
+            "send",
+            "--from",
+            "bigboss",
+            "@review-reviewer",
+            "--",
+            "full name",
+        ][..],
+        &[
+            "send",
+            "--from",
+            "bigboss",
+            "@reviewer_app",
+            "--",
+            "instance",
+        ][..],
+    ] {
+        let (ok, stdout, stderr) = send(args);
+        assert!(!ok, "args={args:?} stdout={stdout} stderr={stderr}");
+        assert!(
+            stderr.contains("project directory basenames must be unique"),
+            "args={args:?} stderr={stderr}"
+        );
+    }
+}
+
+#[test]
+fn send_to_a_running_agent_does_not_read_the_catalog() {
+    let h = Hcom::new();
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "INSERT INTO instances (name, status, created_at, tag) \
+         VALUES ('nova', 'listening', 1000.0, 'astro')",
+        [],
+    )
+    .expect("insert running agent");
+    std::fs::write(h.path().join("agents.json"), "{not json").expect("write broken catalog");
+
+    let (code, stdout, stderr) = h.run(["send", "--from", "bigboss", "@nova", "--", "hello"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("nova"), "stdout={stdout}");
+    assert!(!stderr.contains("catalog"), "stderr={stderr}");
+
+    let (code, stdout, stderr) = h.run([
+        "send", "--from", "bigboss", "--thread", "empty", "--", "hello",
+    ]);
+    assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("has no members"), "stderr={stderr}");
+    assert!(!stderr.contains("catalog"), "stderr={stderr}");
+
+    let (code, stdout, stderr) = h.run(["send", "--from", "bigboss", "@astro-", "--", "hello"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("nova"), "stdout={stdout}");
     assert!(
-        stderr.contains("project directory basenames must be unique"),
+        stderr.contains("Warning: cannot load agent catalog"),
         "stderr={stderr}"
     );
+
+    let (code, stdout, stderr) = h.run(["send", "--from", "bigboss", "@ghost", "--", "hello"]);
+    assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("@ghost"), "stderr={stderr}");
 }
 
 #[test]
