@@ -371,6 +371,31 @@ fn send_to_missing_agent_lists_available() {
         stderr.contains("@nope") && stderr.contains("Available:"),
         "stderr={stderr}"
     );
+    assert!(
+        !stderr.contains("Catalog scope depends on the directory"),
+        "no catalog, no scope note: stderr={stderr}"
+    );
+}
+
+/// With a catalog in scope, a name it cannot resolve may live in a catalog
+/// that is out of scope here; the send error says only that.
+#[test]
+fn send_to_a_name_no_catalog_resolves_explains_catalog_scope() {
+    let h = Hcom::new();
+    let me = h.start();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"glob":{"dir":"/tmp","cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, _stdout, stderr) = h.run(["send", "@nope", "--name", &me, "--", "hi"]);
+    assert_ne!(code, 0, "send to nonexistent must fail");
+    assert!(stderr.contains("Available:"), "stderr={stderr}");
+    assert!(
+        stderr.contains("Catalog scope depends on the directory"),
+        "stderr={stderr}"
+    );
 }
 
 #[test]
@@ -4567,6 +4592,87 @@ fn send_to_a_running_agent_does_not_read_the_catalog() {
     let (code, stdout, stderr) = h.run(["send", "--from", "bigboss", "@ghost", "--", "hello"]);
     assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
     assert!(stderr.contains("@ghost"), "stderr={stderr}");
+}
+
+/// Invalid input must fail before a stopped catalog agent is started.
+#[test]
+fn send_with_an_invalid_inline_bundle_does_not_start_the_catalog_agent() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@reviewer",
+        "--title",
+        "no refs",
+        "--description",
+        "bundle without refs",
+        "--",
+        "review this",
+    ]);
+    assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("refs.transcript is required"),
+        "stderr={stderr}"
+    );
+
+    let (code, instances, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "instances={instances} stderr={stderr}");
+    assert!(
+        !instances.contains("\"reviewer\""),
+        "invalid send started the agent: {instances}"
+    );
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    assert!(
+        events.trim().is_empty(),
+        "invalid send wrote message: {events}"
+    );
+}
+
+/// The pre-start bundle check must add no missing-file warning of its own:
+/// a send that starts a catalog agent warns exactly as one that does not.
+#[test]
+fn send_with_a_bundle_that_starts_a_catalog_agent_adds_no_missing_file_warning() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+    let send = |target: &str| {
+        let mut args = vec!["send", "--from", "bigboss"];
+        args.extend((!target.is_empty()).then_some(target));
+        args.extend([
+            "--title",
+            "review",
+            "--description",
+            "bundle with a missing file",
+            "--events",
+            "1",
+            "--files",
+            "/nonexistent/hcom-missing.rs",
+            "--transcript",
+            "1:normal",
+            "--",
+            "review this",
+        ]);
+        let (code, stdout, stderr) = h.run(args);
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        stderr.matches("file(s) not found locally").count()
+    };
+
+    let without_start = send("");
+    assert!(without_start > 0);
+    assert_eq!(send("@reviewer"), without_start);
 }
 
 #[test]
