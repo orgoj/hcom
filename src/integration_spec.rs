@@ -143,6 +143,16 @@ pub struct LaunchSpec {
     /// Max agents per `hcom [N] <tool>` invocation. Claude gets a larger budget
     /// because of background bulk-launch (`-p` mode); others are capped at 10.
     pub max_launch_count: usize,
+    /// How long a single inline launch (`hcom <tool>` run from inside an AI
+    /// tool, `hcom r`, autostart on `hcom send`) waits for launch readiness.
+    ///
+    /// Per-tool because startup cost differs by an order of magnitude: a Codex
+    /// TUI reports ready in a few seconds, a Claude or Gemini TUI regularly
+    /// needs more than ten, and a cold model/plugin start far longer. The
+    /// windows are deliberately generous — they end as soon as the agent is
+    /// ready, and expiring only ends the *wait*: the agent keeps starting and
+    /// queued messages are still delivered.
+    pub inline_ready_wait_secs: u64,
     /// Background-launch capability (see [`BackgroundMode`]).
     pub background: BackgroundMode,
 }
@@ -501,6 +511,7 @@ pub static CLAUDE: IntegrationSpec = IntegrationSpec {
         initial_prompt: InitialPromptShape::DashDashPositional,
         uses_pty_default: false,
         max_launch_count: 100,
+        inline_ready_wait_secs: 90,
         background: BackgroundMode::NativePrint,
     },
     resume: Some(ResumeSpec {
@@ -555,6 +566,7 @@ pub static GEMINI: IntegrationSpec = IntegrationSpec {
         initial_prompt: InitialPromptShape::Positional,
         uses_pty_default: true,
         max_launch_count: 10,
+        inline_ready_wait_secs: 90,
         background: BackgroundMode::HeadlessPty,
     },
     resume: Some(ResumeSpec {
@@ -610,6 +622,7 @@ pub static CODEX: IntegrationSpec = IntegrationSpec {
         initial_prompt: InitialPromptShape::Positional,
         uses_pty_default: true,
         max_launch_count: 10,
+        inline_ready_wait_secs: 45,
         background: BackgroundMode::HeadlessPty,
     },
     resume: Some(ResumeSpec {
@@ -667,6 +680,7 @@ pub static OPENCODE: IntegrationSpec = IntegrationSpec {
         initial_prompt: InitialPromptShape::Flag("--prompt"),
         uses_pty_default: true,
         max_launch_count: 10,
+        inline_ready_wait_secs: 45,
         background: BackgroundMode::HeadlessPty,
     },
     resume: Some(ResumeSpec {
@@ -729,6 +743,7 @@ pub static KILO: IntegrationSpec = IntegrationSpec {
         initial_prompt: InitialPromptShape::Flag("--prompt"),
         uses_pty_default: true,
         max_launch_count: 10,
+        inline_ready_wait_secs: 45,
         background: BackgroundMode::HeadlessPty,
     },
     resume: Some(ResumeSpec {
@@ -784,6 +799,7 @@ pub static ANTIGRAVITY: IntegrationSpec = IntegrationSpec {
         initial_prompt: InitialPromptShape::Flag("--prompt-interactive"),
         uses_pty_default: true,
         max_launch_count: 10,
+        inline_ready_wait_secs: 90,
         background: BackgroundMode::HeadlessPty,
     },
     resume: Some(ResumeSpec {
@@ -845,6 +861,7 @@ pub static CURSOR: IntegrationSpec = IntegrationSpec {
         initial_prompt: InitialPromptShape::Positional,
         uses_pty_default: true,
         max_launch_count: 10,
+        inline_ready_wait_secs: 90,
         background: BackgroundMode::HeadlessPty,
     },
     resume: Some(ResumeSpec {
@@ -909,6 +926,7 @@ pub static KIMI: IntegrationSpec = IntegrationSpec {
         },
         uses_pty_default: true,
         max_launch_count: 10,
+        inline_ready_wait_secs: 45,
         background: BackgroundMode::HeadlessPty,
     },
     resume: Some(ResumeSpec {
@@ -978,6 +996,7 @@ pub static PI: IntegrationSpec = IntegrationSpec {
         initial_prompt: InitialPromptShape::Positional,
         uses_pty_default: true,
         max_launch_count: 10,
+        inline_ready_wait_secs: 45,
         background: BackgroundMode::HeadlessPty,
     },
     resume: Some(ResumeSpec {
@@ -1052,6 +1071,7 @@ pub static OMP: IntegrationSpec = IntegrationSpec {
         initial_prompt: InitialPromptShape::Positional,
         uses_pty_default: true,
         max_launch_count: 10,
+        inline_ready_wait_secs: 45,
         background: BackgroundMode::HeadlessPty,
     },
     resume: Some(ResumeSpec {
@@ -1119,6 +1139,7 @@ pub static COPILOT: IntegrationSpec = IntegrationSpec {
         initial_prompt: InitialPromptShape::Flag("-i"),
         uses_pty_default: true,
         max_launch_count: 10,
+        inline_ready_wait_secs: 90,
         background: BackgroundMode::HeadlessPty,
     },
     resume: Some(ResumeSpec {
@@ -1173,6 +1194,7 @@ pub static HERMES: IntegrationSpec = IntegrationSpec {
         },
         uses_pty_default: true,
         max_launch_count: 10,
+        inline_ready_wait_secs: 90,
         background: BackgroundMode::HeadlessPty,
     },
     resume: Some(ResumeSpec {
@@ -1235,6 +1257,7 @@ pub static QODER: IntegrationSpec = IntegrationSpec {
         initial_prompt: InitialPromptShape::Flag("--prompt-interactive"),
         uses_pty_default: true,
         max_launch_count: 10,
+        inline_ready_wait_secs: 90,
         background: BackgroundMode::HeadlessPty,
     },
     resume: Some(ResumeSpec {
@@ -1291,6 +1314,7 @@ pub static GROK: IntegrationSpec = IntegrationSpec {
         initial_prompt: InitialPromptShape::DashDashPositional,
         uses_pty_default: true,
         max_launch_count: 10,
+        inline_ready_wait_secs: 45,
         background: BackgroundMode::HeadlessPty,
     },
     resume: Some(ResumeSpec {
@@ -1345,6 +1369,7 @@ pub static ADHOC: IntegrationSpec = IntegrationSpec {
         initial_prompt: InitialPromptShape::Positional,
         uses_pty_default: false,
         max_launch_count: 0,
+        inline_ready_wait_secs: 45,
         background: BackgroundMode::Unsupported,
     },
     resume: None,
@@ -1537,6 +1562,23 @@ mod tests {
         assert_eq!(GEMINI.pty.delivery_start_timeout_secs, 60);
         assert_eq!(COPILOT.pty.delivery_start_timeout_secs, 60);
         assert_eq!(CLAUDE.pty.delivery_start_timeout_secs, 5);
+    }
+
+    /// The inline readiness wait must stay comfortably above real TUI startup
+    /// times: a wait that expires early produced the "could not start" report
+    /// for agents that were merely slow.
+    #[test]
+    fn every_tool_declares_a_generous_inline_ready_wait() {
+        for spec in ALL {
+            assert!(
+                spec.launch.inline_ready_wait_secs >= 45,
+                "{} inline readiness wait is too tight ({}s)",
+                spec.name,
+                spec.launch.inline_ready_wait_secs
+            );
+        }
+        assert_eq!(CLAUDE.launch.inline_ready_wait_secs, 90);
+        assert_eq!(CODEX.launch.inline_ready_wait_secs, 45);
     }
 
     #[test]
