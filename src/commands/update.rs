@@ -54,7 +54,7 @@ pub fn cmd_update(_db: &HcomDb, args: &UpdateArgs, _ctx: Option<&CommandContext>
         if crate::update::is_powershell_installer_command(info.cmd) {
             let program = crate::update::windows_installer_program();
             println!(
-                "Running: {program} -NoProfile -ExecutionPolicy Bypass -Command \"irm https://github.com/aannoo/hcom/releases/latest/download/hcom-installer.ps1 | iex\""
+                "Running: {program} -NoProfile -ExecutionPolicy Bypass -Command \"irm https://github.com/orgoj/hcom/releases/latest/download/hcom-installer.ps1 | iex\""
             );
             let mut cmd = std::process::Command::new(program);
             if program == "powershell" {
@@ -68,7 +68,7 @@ pub fn cmd_update(_db: &HcomDb, args: &UpdateArgs, _ctx: Option<&CommandContext>
                 "-ExecutionPolicy",
                 "Bypass",
                 "-Command",
-                "irm https://github.com/aannoo/hcom/releases/latest/download/hcom-installer.ps1 | iex",
+                "irm https://github.com/orgoj/hcom/releases/latest/download/hcom-installer.ps1 | iex",
             ])
             .status()
         } else if crate::update::is_shell_pipe_command(info.cmd) {

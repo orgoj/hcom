@@ -7,7 +7,7 @@ Issues and pull requests are welcome. Thanks for contributing!
 Prerequisites: Rust 1.89+. See pinned [Rust toolchain](rust-toolchain.toml).
 
 ```bash
-git clone https://github.com/aannoo/hcom.git
+git clone --branch orgoj https://github.com/orgoj/hcom.git
 cd hcom
 cargo build
 cargo test
