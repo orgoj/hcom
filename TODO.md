@@ -1,5 +1,16 @@
 # TODO
 
+## Fix failing `*_e2e_hook_dispatch` smoke tests
+
+`cargo test --test cli_smoke` fails `cursor_e2e_hook_dispatch`,
+`copilot_e2e_hook_dispatch`, and `pi_e2e_hook_dispatch` on a clean tree
+(already at `98dfede`). `antigravity_e2e_hook_dispatch` and
+`qoder_e2e_hook_dispatch` pass. The first native hook after `hcom start`
+(`cursor-sessionstart`, `pi-start`, ...) exits 0 with empty stdout, so the test
+cannot parse the expected JSON (`EOF while parsing a value`). Find why these
+hooks return no output for a process-bound instance in the isolated fixture,
+then fix the hook or the test, whichever is wrong.
+
 ## Retry transient Codex SQLite startup failures
 
 Codex CLI can exit before reaching `ready` when another Codex process briefly
