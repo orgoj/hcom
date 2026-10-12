@@ -578,10 +578,9 @@ pub static TERMINAL_PRESETS: LazyLock<Vec<(&'static str, TerminalPreset)>> = Laz
         // herdr forces the executable and won't run hcom's wrapper script.
         // `--label {instance_name}` labels the *tab* (e.g. `luna`) — herdr's
         // `tab create --label` sets the tab label, not the pane label, which
-        // stays null until the delivery loop's first `pane.rename`. The styled
-        // status label (`◉ luna [claude]`) is pushed separately from the
-        // delivery loop (`pane.rename`); herdr detects the agent and its state
-        // itself via the `HERDR_AGENT` hint on `hcom pty`.
+        // stays null until the delivery loop's first `pane.rename`. The runner
+        // supplies Herdr's native identity hint for known tools; only unknown
+        // tools need the delivery loop's `pane.report_agent` fallback.
         (
             "herdr",
             p(

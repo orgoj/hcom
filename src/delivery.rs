@@ -229,10 +229,26 @@ mod host_label {
     /// last label we successfully pushed (for dedupe). A connect failure (herdr
     /// exited) drops the backend immediately; transient I/O only skips the
     /// current op and retries next tick, so a momentary EAGAIN no longer
-    /// permanently kills label updates (issue #102, F1).
+    /// permanently kills label/state/rename updates (issue #102, F1).
     pub(super) struct HostLabel {
         backend: Option<Backend>,
         last_pushed: Option<String>,
+        /// Last agent state we reported via `pane.report_agent` (dedupe).
+        last_reported_state: Option<&'static str>,
+        /// Monotonic per-source sequence number for `pane.report_agent`; herdr
+        /// rejects stale (non-increasing) reports.
+        seq: u64,
+        /// Whether we've set herdr's canonical agent `name` via `agent.rename`
+        /// (once, after the pane is classified). Restores `herdr agent
+        /// send/prompt <name>` targeting that the old `agent start {name}`
+        /// flow provided — the new `tab create` launch doesn't set it. Flips
+        /// only when the rename returns a real success envelope, so it retries
+        /// across the classification race instead of latching on a bare ack.
+        name_set: bool,
+        /// Whether we've set Herdr's presentation-only agent label. This keeps
+        /// the visible kind (`codex`, `claude`, ...) independent from the
+        /// canonical target name managed by `agent.rename`.
+        display_agent_set: bool,
         /// Consecutive transient socket failures since the last success; any
         /// success resets it. See [`MAX_CONSECUTIVE_FAILURES`].
         consecutive_failures: u32,
@@ -258,6 +274,10 @@ mod host_label {
             Self {
                 backend: Backend::resolve(),
                 last_pushed: None,
+                last_reported_state: None,
+                seq: 0,
+                name_set: false,
+                display_agent_set: false,
                 consecutive_failures: 0,
             }
         }
@@ -267,22 +287,66 @@ mod host_label {
                 return;
             }
 
-            // Styled visual label via `pane.rename`, deduped on the last pushed
-            // string. On failure `last_pushed` stays unset so it retries next tick.
-            //
-            // That label is all hcom tells herdr. herdr identifies the agent from
-            // the `HERDR_AGENT` hint the launcher puts on `hcom pty`, and owns its
-            // state (screen detection / its own integrations): hcom state reports
-            // get silently dropped once herdr's integration registers a session,
-            // freezing the pane on hcom's first state (issue #156). No
-            // `agent.rename` either: the tab label already carries the hcom name,
-            // and herdr's sidebar shows an agent name in place of the tool.
+            // 1. Styled visual label via `pane.rename`, deduped on the last
+            //    pushed string. On failure we leave `last_pushed` unset so the
+            //    label retries next tick, but we do NOT abort — the state report
+            //    and rename below are independent ops and shouldn't be starved
+            //    by a transient label hiccup (issue #102, F1). If the failure
+            //    disabled the backend, those later `send`s are no-ops anyway.
             let label = pane_title_label(db, name, status, tool);
             if !label.is_empty()
                 && self.last_pushed.as_deref() != Some(label.as_str())
                 && self.send(|backend| backend.push(&label))
             {
                 self.last_pushed = Some(label);
+            }
+
+            // 2. Herdr-known tools are classified by the HERDR_AGENT hint on
+            //    the outer `hcom pty` process (or native descendant detection
+            //    on Windows), leaving lifecycle state to Herdr's screen
+            //    manifests/integrations. Unknown tools retain the custom
+            //    `pane.report_agent` fallback.
+            let herdr_knows_tool = crate::terminal::herdr_agent_label(tool).is_some();
+            if !tool.is_empty() && !herdr_knows_tool {
+                let state = map_report_state(status);
+                if self.last_reported_state != Some(state) {
+                    let seq = self.next_seq();
+                    if self.send(|backend| backend.report_agent(tool, state, seq)) {
+                        self.last_reported_state = Some(state);
+                    }
+                }
+            }
+
+            // 3. Preserve the native agent kind as Herdr's presentation label.
+            //    `agent.rename` below deliberately changes the canonical,
+            //    targetable name; without this display-only override Herdr's
+            //    sidebar would show that name in both rows. Guard by agent kind
+            //    so stale metadata cannot apply after the pane changes tools.
+            if !self.display_agent_set
+                && let Some(agent) = crate::terminal::herdr_agent_label(tool)
+                && self.send(|backend| backend.report_metadata(agent))
+            {
+                self.display_agent_set = true;
+            }
+
+            // 4. Set herdr's canonical agent `name` once so `herdr agent
+            //    send/prompt/focus <name>` resolves — parity with the retired
+            //    `agent start {name}` flow. herdr's `agent.rename` requires the
+            //    pane to already be a classified agent terminal. Classification
+            //    comes from either the native Herdr hint/detector for a known
+            //    tool or our fallback report for an unknown one. We attempt the
+            //    rename each tick after requesting either path: `name_set` flips
+            //    only when `agent.rename` returns a real success — before
+            //    classification it returns an `error` envelope (Rejected), which
+            //    leaves `name_set` false so the next tick retries. The styled
+            //    label stays on `pane.rename`; this only sets the plain name
+            //    field, so the two don't clobber each other.
+            if !self.name_set
+                && (herdr_knows_tool || self.last_reported_state.is_some())
+                && !name.is_empty()
+                && self.send(|backend| backend.rename_agent(name))
+            {
+                self.name_set = true;
             }
         }
 
@@ -292,7 +356,7 @@ mod host_label {
         /// disabled (dropped) when herdr is unreachable, or after a run of
         /// transient failures — a single EAGAIN/timeout just skips this op and
         /// retries next tick, and a semantic `Rejected` keeps the healthy
-        /// backend so the caller can retry (issue #102, F1).
+        /// backend so the caller can retry (issue #102, F1/F2).
         fn send<F>(&mut self, op: F) -> bool
         where
             F: FnOnce(&Backend) -> Result<(), SocketError>,
@@ -307,8 +371,8 @@ mod host_label {
                     true
                 }
                 Err(SocketError::Rejected(msg)) => {
-                    // herdr is alive and answered "no" (e.g. the pane is gone or
-                    // not ready yet). Keep the backend and let the
+                    // herdr is alive and answered "no" (e.g. rename before the
+                    // pane is a classified agent). Keep the backend and let the
                     // caller retry; this isn't a connectivity problem.
                     self.consecutive_failures = 0;
                     crate::log::log_info(
@@ -348,6 +412,36 @@ mod host_label {
                 }
             }
         }
+
+        /// Next `pane.report_agent` sequence. herdr keeps the last seq per
+        /// source *per terminal* and rejects any `seq <= last_seq`, and that map
+        /// outlives a delivery-loop restart in the same pane — so a plain
+        /// counter reset to 1 would be silently dropped after a restart. Anchor
+        /// to a wall-clock nanosecond timestamp (like herdr's own hook does)
+        /// while forcing strict monotonicity, so reports survive restarts and
+        /// never collide even on a coarse clock.
+        fn next_seq(&mut self) -> u64 {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            self.seq = self.seq.saturating_add(1).max(now_ns);
+            self.seq
+        }
+    }
+
+    /// Map an hcom status constant to a herdr `pane_agent_state` value.
+    ///
+    /// listening → idle, active → working, blocked → blocked; everything else
+    /// (inactive/launching/error) → unknown.
+    fn map_report_state(status: &str) -> &'static str {
+        use crate::shared::{ST_ACTIVE, ST_BLOCKED, ST_LISTENING};
+        match status {
+            ST_LISTENING => "idle",
+            ST_ACTIVE => "working",
+            ST_BLOCKED => "blocked",
+            _ => "unknown",
+        }
     }
 
     impl Backend {
@@ -373,7 +467,10 @@ mod host_label {
             }
         }
 
-        /// Push a visual label via `pane.rename` (herdr's manual pane label).
+        /// Push a visual label. Uses `pane.rename` (manual_label only) rather
+        /// than `agent.rename` (which would also overwrite the herdr-canonical
+        /// agent name with the status-icon-prefixed string and break
+        /// `herdr agent send <name>` targeting).
         fn push(&self, label: &str) -> Result<(), SocketError> {
             match self {
                 Backend::Herdr {
@@ -384,6 +481,76 @@ mod host_label {
                         "id": "hcom:pane:rename",
                         "method": "pane.rename",
                         "params": { "pane_id": pane_id, "label": label },
+                    });
+                    send_unix_request(socket_path, &request)
+                }
+            }
+        }
+
+        /// Report an Herdr-unknown agent and its state via `pane.report_agent`.
+        /// Known tools use Herdr's native process classification and never call
+        /// this fallback, keeping lifecycle/session ownership with Herdr.
+        fn report_agent(&self, agent: &str, state: &str, seq: u64) -> Result<(), SocketError> {
+            match self {
+                Backend::Herdr {
+                    socket_path,
+                    pane_id,
+                } => {
+                    let request = serde_json::json!({
+                        "id": "hcom:pane:report_agent",
+                        "method": "pane.report_agent",
+                        "params": {
+                            "pane_id": pane_id,
+                            "source": "hcom",
+                            "agent": agent,
+                            "state": state,
+                            "seq": seq,
+                        },
+                    });
+                    send_unix_request(socket_path, &request)
+                }
+            }
+        }
+
+        /// Set a presentation-only agent label without taking over Herdr's
+        /// lifecycle or session authority for a natively recognized tool.
+        fn report_metadata(&self, agent: &str) -> Result<(), SocketError> {
+            match self {
+                Backend::Herdr {
+                    socket_path,
+                    pane_id,
+                } => {
+                    let request = serde_json::json!({
+                        "id": "hcom:pane:report_metadata",
+                        "method": "pane.report_metadata",
+                        "params": {
+                            "pane_id": pane_id,
+                            "source": "hcom:display",
+                            "agent": agent,
+                            "display_agent": agent,
+                        },
+                    });
+                    send_unix_request(socket_path, &request)
+                }
+            }
+        }
+
+        /// Set herdr's canonical agent `name` (the targetable field) via
+        /// `agent.rename`, so `herdr agent send/prompt/focus <name>` resolves.
+        /// Only valid once the pane is a classified agent terminal — our
+        /// `report_agent` establishes that. Kept separate from the styled
+        /// `pane.rename` label so the status-icon string never clobbers the
+        /// plain name (herdr composes its own title from name + agent title).
+        fn rename_agent(&self, name: &str) -> Result<(), SocketError> {
+            match self {
+                Backend::Herdr {
+                    socket_path,
+                    pane_id,
+                } => {
+                    let request = serde_json::json!({
+                        "id": "hcom:agent:rename",
+                        "method": "agent.rename",
+                        "params": { "target": pane_id, "name": name },
                     });
                     send_unix_request(socket_path, &request)
                 }
@@ -412,10 +579,10 @@ mod host_label {
         /// interrupt). herdr is likely just busy; skip this op and retry next
         /// tick. Only a run of these disables the backend.
         Transient(String),
-        /// herdr received the request and answered with a JSON `error` (e.g. a
-        /// pane id it doesn't know yet). The socket is healthy; only this op
-        /// didn't apply, so we neither disable the backend nor record the op as
-        /// done — we retry next tick.
+        /// herdr received the request and answered with a JSON `error` (e.g.
+        /// `agent.rename` before the pane is a classified agent terminal). The
+        /// socket is healthy; only this specific op didn't apply, so we neither
+        /// disable the backend nor record the op as done — we retry next tick.
         Rejected(String),
     }
 
@@ -493,8 +660,64 @@ mod host_label {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::shared::ST_LISTENING;
+        use crate::shared::{ST_ACTIVE, ST_BLOCKED, ST_INACTIVE, ST_LAUNCHING, ST_LISTENING};
         use serial_test::serial;
+
+        #[cfg(unix)]
+        fn socket_backend(path: &std::path::Path) -> HostLabel {
+            HostLabel {
+                backend: Some(Backend::Herdr {
+                    socket_path: path.to_string_lossy().into_owned(),
+                    pane_id: "w1:p1".into(),
+                }),
+                last_pushed: None,
+                last_reported_state: None,
+                seq: 0,
+                name_set: false,
+                display_agent_set: false,
+                consecutive_failures: 0,
+            }
+        }
+
+        #[cfg(unix)]
+        fn serve_responses(
+            path: std::path::PathBuf,
+            responses: Vec<&'static str>,
+        ) -> std::thread::JoinHandle<Vec<serde_json::Value>> {
+            use std::io::{BufRead, BufReader, Write};
+            use std::os::unix::net::UnixListener;
+
+            std::thread::spawn(move || {
+                let listener = UnixListener::bind(path).unwrap();
+                let mut requests = Vec::new();
+                for response in responses {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut request = String::new();
+                    BufReader::new(&stream).read_line(&mut request).unwrap();
+                    let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                    requests.push(request);
+                    writeln!(stream, "{response}").unwrap();
+                }
+                requests
+            })
+        }
+
+        #[cfg(unix)]
+        fn request_methods(requests: &[serde_json::Value]) -> Vec<&str> {
+            requests
+                .iter()
+                .map(|request| request["method"].as_str().unwrap())
+                .collect()
+        }
+
+        #[test]
+        fn map_report_state_covers_hcom_statuses() {
+            assert_eq!(map_report_state(ST_LISTENING), "idle");
+            assert_eq!(map_report_state(ST_ACTIVE), "working");
+            assert_eq!(map_report_state(ST_BLOCKED), "blocked");
+            assert_eq!(map_report_state(ST_INACTIVE), "unknown");
+            assert_eq!(map_report_state(ST_LAUNCHING), "unknown");
+        }
 
         #[test]
         #[serial]
@@ -533,16 +756,21 @@ mod host_label {
         #[test]
         fn classify_response_distinguishes_error_success_and_closed() {
             // A JSON `error` envelope is a semantic rejection (herdr alive but
-            // said no) — keep the backend, retry the op (issue #102, F1).
-            let err = r#"{"id":"hcom:pane:rename","error":{"code":"pane_not_found","message":"pane w1:p1 not found"}}"#;
+            // said no) — keep the backend, retry the op (issue #102, F1/F2).
+            let err = r#"{"id":"hcom:agent:rename","error":{"code":"not_agent","message":"pane w1:p1 is not an agent"}}"#;
             match classify_response(err) {
-                Err(SocketError::Rejected(msg)) => assert!(msg.contains("not found")),
+                Err(SocketError::Rejected(msg)) => assert!(msg.contains("not an agent")),
                 _ => panic!("expected Rejected for an error envelope"),
             }
 
             // A `result` envelope is success — the op applied.
-            let ok = r#"{"id":"hcom:pane:rename","result":{"type":"pane_renamed"}}"#;
+            let ok = r#"{"id":"hcom:agent:rename","result":{"type":"agent_renamed"}}"#;
             assert!(classify_response(ok).is_ok());
+
+            // An ignored `report_agent` still comes back as a success envelope,
+            // so it must classify as Ok (we can't detect the shadowing — F2).
+            let ignored = r#"{"id":"hcom:pane:report_agent","result":{"type":"agent_reported"}}"#;
+            assert!(classify_response(ignored).is_ok());
 
             // A non-empty but unparseable line: herdr answered, so treat as Ok
             // rather than wedging retries on a body we don't read.
@@ -553,6 +781,131 @@ mod host_label {
                 classify_response("   \n"),
                 Err(SocketError::Unreachable(_))
             ));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        #[serial]
+        fn known_herdr_tool_skips_lifecycle_and_retries_agent_rename() {
+            let (dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
+            let socket = dir.path().join("herdr.sock");
+            let server = serve_responses(
+                socket.clone(),
+                vec![
+                    r#"{"result":{"type":"pane_renamed"}}"#,
+                    r#"{"result":{"type":"metadata_reported"}}"#,
+                    r#"{"error":{"code":"not_agent","message":"not classified yet"}}"#,
+                    r#"{"result":{"type":"agent_renamed"}}"#,
+                ],
+            );
+            while !socket.exists() {
+                std::thread::yield_now();
+            }
+
+            let db = crate::db::HcomDb::open().unwrap();
+            let mut label = socket_backend(&socket);
+            label.sync(&db, "luna", ST_LISTENING, "claude");
+            assert!(!label.name_set);
+            assert!(label.display_agent_set);
+            assert!(label.last_reported_state.is_none());
+            label.sync(&db, "luna", ST_LISTENING, "claude");
+            assert!(label.name_set);
+
+            let requests = server.join().unwrap();
+            assert_eq!(
+                request_methods(&requests),
+                vec![
+                    "pane.rename",
+                    "pane.report_metadata",
+                    "agent.rename",
+                    "agent.rename"
+                ]
+            );
+            assert_eq!(
+                requests[1]["params"],
+                serde_json::json!({
+                    "pane_id": "w1:p1",
+                    "source": "hcom:display",
+                    "agent": "claude",
+                    "display_agent": "claude",
+                })
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        #[serial]
+        fn rejected_display_metadata_retries_without_repeating_other_updates() {
+            let (dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
+            let socket = dir.path().join("herdr.sock");
+            let server = serve_responses(
+                socket.clone(),
+                vec![
+                    r#"{"result":{"type":"pane_renamed"}}"#,
+                    r#"{"error":{"code":"not_agent","message":"not classified yet"}}"#,
+                    r#"{"result":{"type":"agent_renamed"}}"#,
+                    r#"{"result":{"type":"metadata_reported"}}"#,
+                ],
+            );
+            while !socket.exists() {
+                std::thread::yield_now();
+            }
+
+            let db = crate::db::HcomDb::open().unwrap();
+            let mut label = socket_backend(&socket);
+            label.sync(&db, "luna", ST_LISTENING, "codex");
+            assert!(!label.display_agent_set);
+            assert!(label.name_set);
+            label.sync(&db, "luna", ST_LISTENING, "codex");
+            assert!(label.display_agent_set);
+
+            let requests = server.join().unwrap();
+            assert_eq!(
+                request_methods(&requests),
+                vec![
+                    "pane.rename",
+                    "pane.report_metadata",
+                    "agent.rename",
+                    "pane.report_metadata"
+                ]
+            );
+            assert_eq!(requests[1]["params"], requests[3]["params"]);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        #[serial]
+        fn unknown_herdr_tool_retains_report_agent_fallback() {
+            let (dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
+            let socket = dir.path().join("herdr.sock");
+            let server = serve_responses(
+                socket.clone(),
+                vec![
+                    r#"{"result":{"type":"pane_renamed"}}"#,
+                    r#"{"result":{"type":"agent_reported"}}"#,
+                    r#"{"result":{"type":"agent_renamed"}}"#,
+                ],
+            );
+            while !socket.exists() {
+                std::thread::yield_now();
+            }
+
+            let db = crate::db::HcomDb::open().unwrap();
+            let mut label = socket_backend(&socket);
+            label.sync(&db, "luna", ST_ACTIVE, "future-tool");
+            assert_eq!(label.last_reported_state, Some("working"));
+            assert!(label.name_set);
+
+            let requests = server.join().unwrap();
+            assert_eq!(
+                request_methods(&requests),
+                vec!["pane.rename", "pane.report_agent", "agent.rename"]
+            );
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request["method"] != "pane.report_metadata")
+            );
         }
     }
 }
