@@ -41,7 +41,12 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     if count > max_count {
         bail!("Too many agents requested (max {}).", max_count);
     }
+    if hcom_flags.name.is_some() && count > 1 {
+        bail!("Cannot use explicit name with count > 1 (count={count})");
+    }
 
+    let explicit_name = hcom_flags.name;
+    let has_explicit_name = explicit_name.is_some();
     let tag = hcom_flags.tag;
     let terminal = hcom_flags.terminal;
     let headless = hcom_flags.headless;
@@ -54,7 +59,10 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     let preview_background = headless || is_background_from_args(&launch_tool, &tool_args);
 
     let ctx = HcomContext::from_os();
-    if ctx.is_inside_ai_tool() && !flags.go && (!tool_args.is_empty() || count > 5) {
+    // `--dry-run` always previews and never launches (it beats `--go`); the
+    // unflagged preview stays an agent-only guardrail.
+    let dry_run = hcom_flags.dry_run;
+    if dry_run || (ctx.is_inside_ai_tool() && !flags.go && (!tool_args.is_empty() || count > 5)) {
         let remote_launch_note = "Remote launch requested; the target device will still apply its own configured defaults.";
         let remote_preview_note = "Mode shown here is only a local preview; the remote target decides the final launch mode.";
         let notes = if remote_device.is_some() {
@@ -74,6 +82,7 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
             config: &hcom_config,
             show_config_args: remote_device.is_none(),
             notes: if remote_device.is_some() { &notes } else { &[] },
+            dry_run,
         });
         return Ok(0);
     }
@@ -93,6 +102,7 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
         let params = json!({
             "tool": tool,
             "count": count,
+            "name": explicit_name,
             "args": tool_args,
             "tag": tag,
             "launcher": launcher_name,
@@ -205,7 +215,8 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
             launcher: Some(launcher_name.clone()),
             run_here: hcom_flags.run_here,
             batch_id: hcom_flags.batch_id,
-            name: None, // --name is caller identity, not instance name
+            name: explicit_name,
+            explicit_identity: has_explicit_name,
             skip_validation: false,
             terminal,
             append_reply_handoff: true,
@@ -347,6 +358,8 @@ pub(crate) struct LaunchPreview<'a> {
     pub config: &'a HcomConfig,
     pub show_config_args: bool,
     pub notes: &'a [&'a str],
+    /// Preview was explicitly requested via `--dry-run` (not the `--go` gate).
+    pub dry_run: bool,
 }
 
 pub(crate) fn print_launch_preview(preview: LaunchPreview<'_>) {
@@ -394,7 +407,11 @@ pub(crate) fn print_launch_preview(preview: LaunchPreview<'_>) {
         .unwrap_or_else(|| preview.config.terminal.clone());
 
     println!("\n== LAUNCH PREVIEW ==");
-    println!("Add --go to proceed.\n");
+    if preview.dry_run {
+        println!("Dry run: nothing was launched. Drop --dry-run to proceed.\n");
+    } else {
+        println!("Add --go to proceed.\n");
+    }
     println!("Action: {}", preview.action);
     println!(
         "Tool: {:<10} Count: {:<4} Mode: {}",
@@ -434,6 +451,7 @@ pub(crate) fn print_launch_preview(preview: LaunchPreview<'_>) {
 /// Hcom-level flags extracted from launch argv.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct HcomLaunchFlags {
+    pub name: Option<String>,
     pub tag: Option<String>,
     pub terminal: Option<String>,
     pub device: Option<String>,
@@ -443,6 +461,9 @@ pub(crate) struct HcomLaunchFlags {
     pub run_here: Option<bool>,
     pub batch_id: Option<String>,
     pub dir: Option<String>,
+    /// `--dry-run`: print the launch preview and exit without launching.
+    /// Unconditional (unlike the agent-guardrail preview) and wins over `--go`.
+    pub dry_run: bool,
 }
 
 /// Parse launch argv: extract count, tool name, hcom flags, and tool-specific args.
@@ -592,6 +613,11 @@ pub(crate) fn extract_launch_flags(args: &[String]) -> (HcomLaunchFlags, Vec<Str
             i += 1;
             continue;
         }
+        if args[i].starts_with("--as=") {
+            flags.name = Some(args[i][5..].to_string());
+            i += 1;
+            continue;
+        }
         if args[i].starts_with("--terminal=") {
             flags.terminal = Some(args[i][11..].to_string());
             i += 1;
@@ -608,6 +634,10 @@ pub(crate) fn extract_launch_flags(args: &[String]) -> (HcomLaunchFlags, Vec<Str
             continue;
         }
         match args[i].as_str() {
+            "--as" if i + 1 < args.len() => {
+                flags.name = Some(args[i + 1].clone());
+                i += 2;
+            }
             "--tag" if i + 1 < args.len() => {
                 flags.tag = Some(args[i + 1].clone());
                 i += 2;
@@ -626,6 +656,10 @@ pub(crate) fn extract_launch_flags(args: &[String]) -> (HcomLaunchFlags, Vec<Str
             }
             "--headless" => {
                 flags.headless = true;
+                i += 1;
+            }
+            "--dry-run" => {
+                flags.dry_run = true;
                 i += 1;
             }
             "--hcom-system-prompt" if i + 1 < args.len() => {
@@ -914,6 +948,16 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_launch_argv_with_explicit_name() {
+        let (count, tool, flags, args) =
+            parse_launch_argv(&s(&["codex", "--as", "karel", "--model", "gpt-5"])).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(tool, "codex");
+        assert_eq!(flags.name, Some("karel".to_string()));
+        assert_eq!(args, s(&["--model", "gpt-5"]));
+    }
+
+    #[test]
     fn test_parse_launch_argv_tag_after_tool_args() {
         // --tag after tool-specific args should still be extracted (order-independent)
         let (_, tool, flags, args) =
@@ -1055,6 +1099,23 @@ mod tests {
             parse_launch_argv(&s(&["claude", "--system", "you are helpful"])).unwrap();
         assert_eq!(flags.system_prompt, Some("you are helpful".to_string()));
         assert!(args.is_empty());
+    }
+
+    #[test]
+    fn test_parse_launch_argv_dry_run_is_hcom_flag() {
+        // --dry-run belongs to hcom: it must not reach the tool, where it would
+        // be an unknown option (the class of typo this flag closes).
+        let (_, _, flags, args) =
+            parse_launch_argv(&s(&["claude", "--dry-run", "--model", "haiku"])).unwrap();
+        assert!(flags.dry_run);
+        assert_eq!(args, s(&["--model", "haiku"]));
+    }
+
+    #[test]
+    fn test_parse_launch_argv_dry_run_after_double_dash_goes_to_tool() {
+        let (_, _, flags, args) = parse_launch_argv(&s(&["claude", "--", "--dry-run"])).unwrap();
+        assert!(!flags.dry_run);
+        assert_eq!(args, s(&["--dry-run"]));
     }
 
     #[test]

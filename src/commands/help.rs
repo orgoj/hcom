@@ -979,6 +979,10 @@ fn generate_tool_help(spec: &crate::integration_spec::IntegrationSpec) -> String
     }
     lines.push(format!(
         "    {:<29}{}",
+        "--as <name>", "Explicit name (single agent only)"
+    ));
+    lines.push(format!(
+        "    {:<29}{}",
         "--device <name>", "Launch on a remote relay device"
     ));
 
@@ -1190,6 +1194,9 @@ Launch:\n\
 \x20 hcom f <target>                       Fork agent session ({forkable})\n\
 \x20 hcom kill <name(s)|tag:T|all>         Kill + close terminal pane\n\
 \n\
+\x20 Any flag hcom does not know is forwarded verbatim to the tool; -- ends\n\
+\x20 hcom's own flags. Use --dry-run to see the command without running it.\n\
+\n\
 Commands:\n\
 \x20 send         Send message to your buddies\n\
 \x20 listen       Block until message or event arrives\n\
@@ -1229,6 +1236,7 @@ const SHARED_LAUNCH_FLAGS: &[(&str, &str)] = &[
         "--hcom-system-prompt <text>",
         "Invocation-local agent instructions",
     ),
+    ("--dry-run", "Print the launch preview, run nothing"),
 ];
 
 /// Shared help body for `hcom r` / `hcom f` (both accept the same target

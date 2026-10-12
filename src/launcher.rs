@@ -215,6 +215,9 @@ pub struct LaunchParams {
     pub run_here: Option<bool>,
     pub batch_id: Option<String>,
     pub name: Option<String>,
+    /// The name came from the user's `--as`, rather than an internally chosen
+    /// resume/fork identity.
+    pub explicit_identity: bool,
     pub skip_validation: bool,
     pub terminal: Option<String>,
     pub append_reply_handoff: bool,
@@ -239,6 +242,7 @@ impl Default for LaunchParams {
             run_here: None,
             batch_id: None,
             name: None,
+            explicit_identity: false,
             skip_validation: false,
             terminal: None,
             append_reply_handoff: true,
@@ -1699,9 +1703,10 @@ fn launch_pty_or_background(
 /// Resolve a naming conflict for an explicit instance name.
 ///
 /// - Name is free → Ok(()).
-/// - Name held by an inactive row → consume the row (delete) and return Ok(()).
-///   An inactive row is a resume handle from agy soft-finalize; launch will
-///   re-create a fresh row with the same name.
+/// - Name whose computed status is inactive and whose recorded process is
+///   provably dead, or an inactive exit row without a PID → consume the row and
+///   return Ok(()). Status alone is not proof of death: heartbeat timeouts can
+///   report a still-running process as inactive.
 /// - Name held by a `pending` placeholder reservation → Ok(()) without
 ///   deleting. This is *our own* reservation: the fork/resume path calls
 ///   `reserve_generated_name` (under flock, against an unused name) before the
@@ -1710,30 +1715,21 @@ fn launch_pty_or_background(
 ///   place, so it must survive — bailing here broke every tracked `hcom f`.
 /// - Name held by anything else (listening/active/blocked) → Err.
 fn resolve_explicit_name_conflict(db: &HcomDb, name: &str) -> Result<()> {
-    let Some(row) = db.get_instance(name).ok().flatten() else {
+    let Some(instance) = db.get_instance_full(name).ok().flatten() else {
         return Ok(());
     };
-    let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
-    if status == "inactive" {
+    let computed = crate::instance_lifecycle::get_instance_status(&instance, db);
+    if instance_is_replaceable(&instance, &computed) {
         db.delete_instance(name).map_err(|e| {
-            anyhow::anyhow!("Failed to clear inactive resume row '{}': {}", name, e)
+            anyhow::anyhow!("Failed to clear replaceable instance row '{}': {}", name, e)
         })?;
         return Ok(());
     }
     // A pending placeholder with no session yet is a reservation, not a live
     // agent — leave it for the launcher's pre-register promotion.
-    let status_context = row
-        .get("status_context")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let session_empty = row
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.is_empty())
-        .unwrap_or(true);
-    if status == instance_names::PLACEHOLDER_STATUS
-        && status_context == instance_names::PLACEHOLDER_CONTEXT
-        && session_empty
+    if instance.status == instance_names::PLACEHOLDER_STATUS
+        && instance.status_context == instance_names::PLACEHOLDER_CONTEXT
+        && instance.session_id.is_none()
     {
         return Ok(());
     }
@@ -1741,6 +1737,19 @@ fn resolve_explicit_name_conflict(db: &HcomDb, name: &str) -> Result<()> {
         "Instance '{}' already exists (stop it first or use a different name)",
         name
     );
+}
+
+pub(crate) fn instance_is_replaceable(
+    instance: &crate::db::InstanceRow,
+    computed: &crate::instance_lifecycle::ComputedStatus,
+) -> bool {
+    if computed.status != crate::shared::ST_INACTIVE {
+        return false;
+    }
+    match instance.pid.filter(|pid| *pid > 0) {
+        Some(pid) => !crate::sys::process::is_alive(pid as u32),
+        None => instance.status_context.starts_with("exit:") || computed.context == "launch_failed",
+    }
 }
 
 /// Inject ephemeral workspace trust flags into args for gemini and codex.
@@ -1925,6 +1934,13 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
 
     // Validation
     validate_launch_count(&normalized, params.count)?;
+    // A user-chosen `--as` name becomes the identity and per-instance paths.
+    if params.explicit_identity
+        && let Some(ref name) = params.name
+        && !crate::identity::is_valid_base_name(name)
+    {
+        bail!("{}", crate::identity::base_name_error(name));
+    }
 
     // HCOM_DIR placement: refuse if it sits under a tool-protected metadata
     // directory. codex hard-denies apply_patch into these via
@@ -2282,6 +2298,14 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                 working_dir,
                 initial_event_id,
             )?;
+            // `--as` is an identity choice, not merely a temporary launch name.
+            // Record it on the placeholder so a native tool resume can adopt the
+            // resumed session under this name instead of restoring its old hcom
+            // name. Internal `hcom r/f` launches carry `prior_session_id` and keep
+            // their existing canonical identity semantics.
+            if params.explicit_identity {
+                db.store_launch_context(&instance_name, r#"{"explicit_identity":true}"#)?;
+            }
             db.set_process_binding(&process_id, "", &instance_name)?;
             Ok(())
         })() {
@@ -4334,10 +4358,38 @@ mod tests {
         let now = chrono::Utc::now().timestamp() as f64;
         db.conn()
             .execute(
-                "INSERT INTO instances (name, status, created_at, tool) VALUES (?1, ?2, ?3, 'antigravity')",
+                "INSERT INTO instances (name, status, status_time, created_at, tool) \
+                 VALUES (?1, ?2, CAST(?3 AS INTEGER), ?3, 'antigravity')",
                 rusqlite::params![name, status, now],
             )
             .unwrap();
+    }
+
+    fn exited_child_pid() -> u32 {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--help")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[test]
+    fn explicit_launch_name_must_be_a_valid_base_name() {
+        let db = launcher_test_db();
+        for name in ["", "../x", "Luna", "a b"] {
+            let params = LaunchParams {
+                tool: "codex".to_string(),
+                count: 1,
+                name: Some(name.to_string()),
+                explicit_identity: true,
+                ..Default::default()
+            };
+            let err = launch(&db, params).unwrap_err().to_string();
+            assert!(err.contains("Invalid instance name"), "{name:?}: {err}");
+        }
     }
 
     #[test]
@@ -4350,8 +4402,66 @@ mod tests {
     fn resolve_explicit_name_conflict_consumes_inactive_resume_row() {
         let db = launcher_test_db();
         insert_test_instance(&db, "zeno", "inactive");
+        db.conn()
+            .execute(
+                "UPDATE instances SET status_context = 'exit:crashed' WHERE name = 'zeno'",
+                [],
+            )
+            .unwrap();
         assert!(resolve_explicit_name_conflict(&db, "zeno").is_ok());
         // Row must be gone so the launcher can create a fresh row with the same name.
+        assert!(db.get_instance("zeno").unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_explicit_name_conflict_rejects_inactive_with_live_pid() {
+        let db = launcher_test_db();
+        insert_test_instance(&db, "zeno", "inactive");
+        db.conn()
+            .execute(
+                "UPDATE instances SET pid = ?1 WHERE name = 'zeno'",
+                rusqlite::params![std::process::id() as i64],
+            )
+            .unwrap();
+
+        let err = resolve_explicit_name_conflict(&db, "zeno")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already exists"), "unexpected: {err}");
+        assert!(db.get_instance("zeno").unwrap().is_some());
+    }
+
+    #[test]
+    fn resolve_explicit_name_conflict_consumes_inactive_with_dead_pid() {
+        let dead_pid = exited_child_pid();
+
+        let db = launcher_test_db();
+        insert_test_instance(&db, "zeno", "inactive");
+        db.conn()
+            .execute(
+                "UPDATE instances SET pid = ?1 WHERE name = 'zeno'",
+                rusqlite::params![dead_pid as i64],
+            )
+            .unwrap();
+
+        assert!(resolve_explicit_name_conflict(&db, "zeno").is_ok());
+        assert!(db.get_instance("zeno").unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_explicit_name_conflict_consumes_stale_live_status_with_dead_pid() {
+        let dead_pid = exited_child_pid();
+
+        let db = launcher_test_db();
+        insert_test_instance(&db, "zeno", "listening");
+        db.conn()
+            .execute(
+                "UPDATE instances SET pid = ?1, status_time = status_time - 400 WHERE name = 'zeno'",
+                rusqlite::params![dead_pid as i64],
+            )
+            .unwrap();
+
+        assert!(resolve_explicit_name_conflict(&db, "zeno").is_ok());
         assert!(db.get_instance("zeno").unwrap().is_none());
     }
 
@@ -4389,6 +4499,31 @@ mod tests {
         assert!(err.contains("already exists"), "unexpected: {err}");
         // Row should still be present — no deletion on conflict.
         assert!(db.get_instance("rune").unwrap().is_some());
+    }
+
+    #[test]
+    fn resolve_explicit_name_conflict_cleans_stale_row() {
+        let db = launcher_test_db();
+        let old = chrono::Utc::now().timestamp() as f64 - 7200.0;
+        for name in ["rune", "other"] {
+            db.conn()
+                .execute(
+                    "INSERT INTO instances (name, status, status_time, created_at, tool) \
+                     VALUES (?1, 'blocked', CAST(?2 AS INTEGER), ?2, 'claude')",
+                    rusqlite::params![name, old],
+                )
+                .unwrap();
+        }
+        db.conn()
+            .execute(
+                "UPDATE instances SET pid = ?1 WHERE name = 'rune'",
+                rusqlite::params![exited_child_pid() as i64],
+            )
+            .unwrap();
+
+        assert!(resolve_explicit_name_conflict(&db, "rune").is_ok());
+        assert!(db.get_instance("rune").unwrap().is_none());
+        assert!(db.get_instance("other").unwrap().is_some());
     }
 
     // ── inject_workspace_trust_args ──────────────────────────────────────────

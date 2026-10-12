@@ -130,12 +130,19 @@ pub fn do_resume(
                 );
             }
         }
+        // `--dry-run` always previews and never runs (it beats `--go`), so a
+        // failure to build the plan is an error rather than a silent launch.
+        if resume_dry_run(extra_args) {
+            let plan = prepare_resume_plan(&db, &name, fork, extra_args, flags)?;
+            print_resume_preview(&plan, &hcom_config, &name, fork, true);
+            return Ok(0);
+        }
         if ctx.is_inside_ai_tool()
             && !flags.go
             && should_preview_resume_rpc(extra_args)
             && let Ok(plan) = prepare_resume_plan(&db, &name, fork, extra_args, flags)
         {
-            print_resume_preview(&plan, &hcom_config, &name, fork);
+            print_resume_preview(&plan, &hcom_config, &name, fork, false);
             return Ok(0);
         }
 
@@ -180,8 +187,9 @@ pub fn do_resume(
 
     let (resolved, plan) = resolve_name_to_plan(&db, &name, fork, extra_args, flags)?;
     let is_adoption = plan.launch.name.is_none();
-    if ctx.is_inside_ai_tool() && !flags.go && should_preview_resume_rpc(extra_args) {
-        print_resume_preview(&plan, &hcom_config, &resolved, fork);
+    let dry_run = resume_dry_run(extra_args);
+    if dry_run || (ctx.is_inside_ai_tool() && !flags.go && should_preview_resume_rpc(extra_args)) {
+        print_resume_preview(&plan, &hcom_config, &resolved, fork, dry_run);
         return Ok(0);
     }
 
@@ -563,6 +571,7 @@ fn prepare_resume_plan_from_source(
             run_here: launch_flags.run_here,
             batch_id: launch_flags.batch_id.clone(),
             name: launch_name,
+            explicit_identity: false,
             skip_validation: false,
             terminal: launch_flags.terminal.clone(),
             // Codex tracked-instance fork uses initial_prompt for an identity
@@ -716,6 +725,7 @@ fn print_resume_preview(
     hcom_config: &crate::config::HcomConfig,
     name: &str,
     fork: bool,
+    dry_run: bool,
 ) {
     let is_adoption = plan.launch.name.is_none();
     let identity_note = if fork {
@@ -740,7 +750,15 @@ fn print_resume_preview(
         config: hcom_config,
         show_config_args: false,
         notes: &notes,
+        dry_run,
     });
+}
+
+/// True when `--dry-run` appears among the resume/fork args. Unlike the
+/// guardrail preview this is unconditional and outranks `--go`.
+fn resume_dry_run(extra_args: &[String]) -> bool {
+    let (_, launch_flags, _) = extract_resume_flags(extra_args);
+    launch_flags.dry_run
 }
 
 fn should_preview_resume_rpc(extra_args: &[String]) -> bool {
@@ -3686,6 +3704,16 @@ mod tests {
     }
 
     #[test]
+    fn test_resume_dry_run_flag() {
+        assert!(resume_dry_run(&s(&["--dry-run", "--model", "opus"])));
+        assert!(!resume_dry_run(&s(&["--model", "opus"])));
+        // After `--` it is the tool's flag, not hcom's.
+        assert!(!resume_dry_run(&s(&["--", "--dry-run"])));
+        let (_, _, remaining) = extract_resume_flags(&s(&["--dry-run", "--model", "opus"]));
+        assert_eq!(remaining, s(&["--model", "opus"]));
+    }
+
+    #[test]
     fn test_extract_resume_flags_dir() {
         let (dir, flags, remaining) =
             extract_resume_flags(&s(&["--dir", "/tmp/test", "--model", "opus"]));
@@ -3863,12 +3891,14 @@ mod tests {
             "plain resume must pre-seed the recreated row with the prior session id \
              so a kill before the first turn (no hook re-bind) stays resumable"
         );
+        assert!(!resume.launch.explicit_identity);
 
         let fork = prepare_resume_plan(&db, "luna", true, &[], &GlobalFlags::default()).unwrap();
         assert_eq!(
             fork.launch.prior_session_id, None,
             "forks bind a fresh session on first turn; must not inherit the parent's"
         );
+        assert!(!fork.launch.explicit_identity);
     }
 
     #[test]
