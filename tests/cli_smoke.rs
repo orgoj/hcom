@@ -677,6 +677,63 @@ fn manual_ack_listen_redelivers_until_strict_ack() {
     );
 }
 
+/// A `start --as` rebind inherits the previous cursor, so a message queued for
+/// the dead session arrives as normal unread and `listen --missed` must not
+/// repeat it. (A fresh launch, which does miss it, is covered by the
+/// `missed_messages_*` unit test.)
+#[test]
+fn listen_missed_returns_what_a_fresh_launch_skipped() {
+    let h = Hcom::new();
+    let (code, stdout, _) = h.run(["listen", "--help"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("--missed"), "help={stdout}");
+
+    let name = h.start_with_process_id("missed-first");
+    let (code, stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "gateway-test",
+        &format!("@{name}"),
+        "--intent",
+        "request",
+        "--",
+        "lost task",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let (code, stdout, stderr) = h.run(["stop", &name]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let (code, stdout, stderr) = h.run_as_process("missed-second", ["start", "--as", &name]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    // Drain normal delivery so only the --missed path can print the message.
+    h.run(["listen", "--name", &name, "--timeout", "1", "--json"]);
+
+    let (code, stdout, stderr) = h.run(["listen", "--missed", "--name", &name]);
+    assert_eq!(code, 1, "no launch environment: stdout={stdout}");
+    assert!(stderr.contains("hcom-launched session"), "stderr={stderr}");
+
+    let (code, _, stderr) = h.run(["listen", "--missed", "--from", "nova", "--name", &name]);
+    assert_eq!(code, 1, "stderr={stderr}");
+    assert!(stderr.contains("event filters"), "stderr={stderr}");
+
+    // Fixture, not a real launch: the `start --as` identity above stands in
+    // for the new session, and these two variables are what the launcher
+    // would set for a fresh launch that began reading after the message.
+    let (_, last, _) = h.run(["events", "--last", "1"]);
+    let start = serde_json::from_str::<serde_json::Value>(last.trim()).expect("event")["id"]
+        .as_i64()
+        .expect("id");
+    let mut command = h.cmd();
+    command
+        .env("HCOM_INSTANCE_NAME", &name)
+        .env("HCOM_LAUNCH_EVENT_ID", start.to_string())
+        .args(["listen", "--missed", "--name", &name]);
+    let output = command.output().expect("run listen --missed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "stdout={stdout}");
+    assert!(stdout.contains("[request #"), "stdout={stdout}");
+    assert!(stdout.contains("lost task"), "stdout={stdout}");
+}
+
 #[test]
 fn intent_and_reply_to_roundtrip() {
     // Wiki contract (messaging.md §Intent + event-model.md `msg_intent`/`reply_to_local`):

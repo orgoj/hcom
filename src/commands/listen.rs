@@ -35,6 +35,9 @@ pub struct ListenArgs {
     /// Emit one full JSON envelope without advancing the delivery cursor
     #[arg(long)]
     pub manual_ack: bool,
+    /// Print direct messages no session under your name received, then exit
+    #[arg(long, conflicts_with_all = ["json", "manual_ack", "sql", "timeout", "timeout_positional"])]
+    pub missed: bool,
     /// SQL WHERE filter
     #[arg(long)]
     pub sql: Option<String>,
@@ -180,6 +183,14 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
             return 1;
         }
     };
+
+    if args.missed {
+        if args.filters.has_filters() {
+            eprintln!("Error: --missed cannot be combined with event filters");
+            return 1;
+        }
+        return print_missed(db, &instance_name);
+    }
 
     // Resolve timeout: --timeout flag > positional > default (24h)
     let mut timeout: f64 = if let Some(t) = args.timeout {
@@ -336,6 +347,79 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
     let _ = db.delete_notify_endpoint(&instance_name, "listen");
 
     result
+}
+
+/// Direct messages to `name` after its previous session's final cursor, up
+/// to `start` (where this session began reading). A resume starts at the old
+/// cursor, so the range is empty; only a fresh launch skips these.
+const MISSED_SQL: &str = "
+    WITH stopped AS (
+        SELECT json_extract(data, '$.snapshot.last_event_id') AS cursor FROM events
+        WHERE type = 'life' AND instance = ?1
+          AND json_extract(data, '$.action') = 'stopped'
+        ORDER BY id DESC LIMIT 1)
+    SELECT e.id, e.msg_from, e.msg_text, e.msg_intent, e.msg_thread,
+           json_extract(e.data, '$._relay.id') || ':'
+               || NULLIF(json_extract(e.data, '$._relay.short'), '')
+    FROM events_v e, stopped
+    WHERE e.type = 'message' AND e.id > stopped.cursor AND e.id <= ?2
+      AND e.msg_scope = 'mentions' AND e.msg_from != ?1
+      AND EXISTS (SELECT 1 FROM json_each(e.msg_mentions)
+                  WHERE value = ?1 OR substr(value, 1, length(?1) + 1) = ?1 || ':')
+    ORDER BY e.id";
+
+fn missed_messages(
+    db: &HcomDb,
+    name: &str,
+    start: i64,
+) -> rusqlite::Result<Vec<crate::db::Message>> {
+    let mut stmt = db.conn().prepare(MISSED_SQL)?;
+    stmt.query_map(rusqlite::params![name, start], |row| {
+        Ok(crate::db::Message {
+            event_id: Some(row.get(0)?),
+            from: row.get(1)?,
+            text: row.get(2)?,
+            intent: row.get(3)?,
+            thread: row.get(4)?,
+            relay_ref: row.get(5)?,
+            reply_to: None,
+            timestamp: None,
+            delivered_to: None,
+            bundle_id: None,
+        })
+    })?
+    .collect()
+}
+
+/// `--missed`: read-only; the delivery cursor is already past these.
+/// Needs the agent's own launch environment, which holds where it began
+/// reading. Exit 0 if any, 1 if none or not available.
+fn print_missed(db: &HcomDb, instance_name: &str) -> i32 {
+    let start = (std::env::var("HCOM_INSTANCE_NAME").as_deref() == Ok(instance_name))
+        .then(|| {
+            std::env::var("HCOM_LAUNCH_EVENT_ID")
+                .ok()?
+                .parse::<i64>()
+                .ok()
+        })
+        .flatten();
+    let Some(start) = start else {
+        eprintln!("Error: --missed must run inside {instance_name}'s own hcom-launched session");
+        return 1;
+    };
+    let messages = match missed_messages(db, instance_name, start) {
+        Ok(messages) => messages,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            return 1;
+        }
+    };
+    if messages.is_empty() {
+        eprintln!("[No missed messages]");
+        return 1;
+    }
+    println!("{}", format_messages_text(db, &messages, instance_name));
+    0
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -773,6 +857,51 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
         }
+    }
+
+    #[test]
+    #[serial]
+    fn missed_is_only_what_a_fresh_launch_skipped() {
+        let (db, db_path, _env) = setup_test_db();
+        let message = |to: &str, text: &str| {
+            let data = serde_json::json!({"from": "nova", "scope": "mentions",
+                "mentions": [to], "text": text, "intent": "request", "thread": "t1",
+                "_relay": {"id": 7, "short": "ABCD"}});
+            db.log_event("message", "nova", &data).unwrap()
+        };
+
+        // `_` is valid in names and must not act as a wildcard.
+        let read = message("lu_na", "read by the first session");
+        let snapshot = serde_json::json!({"last_event_id": read});
+        db.log_life_event("lu_na", "stopped", "user", "external", Some(snapshot))
+            .unwrap();
+        let missed = message("lu_na:ABCD", "missed");
+        message("mars", "someone else's");
+        message("luXna:ABCD", "a look-alike name's");
+        let start = db.get_last_event_id();
+        message("lu_na", "delivered normally");
+
+        let found = missed_messages(&db, "lu_na", start).unwrap();
+        assert_eq!(found.len(), 1, "fresh launch starts at {start}");
+        assert_eq!(found[0].event_id, Some(missed));
+        assert_eq!(found[0].intent.as_deref(), Some("request"));
+        assert_eq!(found[0].thread.as_deref(), Some("t1"));
+        assert_eq!(found[0].reply_id().as_deref(), Some("7:ABCD"));
+
+        // The second session reads on and stops; a resume starts at its cursor,
+        // which precedes that stop event, and must not reach the first stop.
+        let second_read = db.get_last_event_id();
+        let snapshot = serde_json::json!({"last_event_id": second_read});
+        db.log_life_event("lu_na", "stopped", "user", "external", Some(snapshot))
+            .unwrap();
+        assert!(
+            missed_messages(&db, "lu_na", second_read)
+                .unwrap()
+                .is_empty(),
+            "a resume starts at the old cursor"
+        );
+
+        cleanup_test_db(db_path);
     }
 
     fn listen_args(extra: &[&str]) -> ListenArgs {

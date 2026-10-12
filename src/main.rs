@@ -327,9 +327,17 @@ mod tests {
         )
         .unwrap();
 
-        super::record_spawn_failure(&mut db, "luna", "database is locked", "");
+        // The row now belongs to another process: leave it alone.
+        db.set_process_binding("other-proc", "bound-session", "luna")
+            .unwrap();
+        super::record_spawn_failure(&mut db, "luna", "database is locked", "failed-proc");
+        assert!(db.get_instance_full("luna").unwrap().is_some());
 
+        db.set_process_binding("failed-proc", "bound-session", "luna")
+            .unwrap();
+        super::record_spawn_failure(&mut db, "luna", "database is locked", "failed-proc");
         assert!(db.get_instance_full("luna").unwrap().is_none());
+        assert!(db.get_process_binding("failed-proc").unwrap().is_none());
         let failed: bool = db
             .conn()
             .query_row(

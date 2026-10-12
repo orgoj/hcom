@@ -329,6 +329,9 @@ Choose replies from the received intent, not from conversational politeness:
 - `hcom` can append unread messages to the stdout of ordinary identity-bound
   commands; `listen` is therefore not the only receive path. Inspect every
   hcom command result for delivered messages before issuing another command.
+- A new session starts reading after its launch. A direct message sent while a
+  previous session under the same name was dead is not unread for it; fetch it
+  from that agent's own session with `hcom listen --missed --name <name>`.
 - Use foreground `hcom listen` only when the user explicitly wants continuous
   waiting. After a message arrives, process and report it; do not repeatedly
   block the parent agent if the result already answers the active task.
