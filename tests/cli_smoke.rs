@@ -3197,6 +3197,29 @@ fn agent_cli_overrides_support_aliases_and_default_cli() {
     assert!(stdout.contains("claude --as default"), "stdout={stdout}");
 }
 
+/// An override onto `agy` must pick the `agy` tool profile: resolving it to
+/// `antigravity` dropped the profile and launched without its permission args.
+#[test]
+fn agent_cli_override_to_agy_keeps_agy_tool_profile() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{
+        "cli_overrides":{"codex":"agy"},
+        "defaults":{"tools":{"agy":{"args":["--dangerously-skip-permissions"]}}},
+        "agents":{"reviewer":{"cli":"codex"}}
+    }"#,
+    )
+    .unwrap();
+    let (code, stdout, stderr) = h.run(["agent", "reviewer", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("--dangerously-skip-permissions"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("agy --as reviewer"), "stdout={stdout}");
+}
+
 #[test]
 fn agent_cli_overrides_reject_invalid_tools_and_non_global_catalogs() {
     let h = Hcom::new();

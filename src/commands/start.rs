@@ -442,6 +442,26 @@ fn start_rebind(
     let mut last_event_id = target_meta.as_ref().map(|m| m.last_event_id);
     let target_data = db.get_instance_full(&target_name)?;
 
+    // The PTY wrapper writes `pid` once, at spawn, and the rows below are
+    // deleted and recreated; without carrying the calling tool's process over,
+    // `hcom kill` (and so handoff) finds no PID for the reclaimed identity.
+    let own_process = if ctx.process_id.is_some() && !adhoc_session {
+        let current_data = if current_name.is_empty() || current_name == target_name {
+            None
+        } else {
+            db.get_instance_full(&current_name)?
+        };
+        own_tool_process(
+            current_data
+                .iter()
+                .chain(target_data.iter())
+                .map(|row| (row.pid, row.launch_context.clone()))
+                .chain(target_meta.as_ref().map(|meta| (meta.pid, None))),
+        )
+    } else {
+        None
+    };
+
     // Final fallback: use current max to avoid re-delivering old messages
     if last_event_id.is_none() {
         last_event_id = Some(db.get_last_event_id());
@@ -489,6 +509,17 @@ fn start_rebind(
         None,  // hints
         Some(&cwd_override),
     );
+
+    if let Some((pid, launch_context)) = own_process {
+        if let Some(context) = launch_context
+            && let Err(e) = db.store_launch_context(&target_name, &context)
+        {
+            eprintln!("[hcom] warn: store_launch_context failed for {target_name}: {e}");
+        }
+        if let Err(e) = db.update_instance_pid(&target_name, pid) {
+            eprintln!("[hcom] warn: update_instance_pid failed for {target_name}: {e}");
+        }
+    }
 
     if let Some(ref sid) = session_id {
         let old_root = if current_name.is_empty() {
@@ -568,11 +599,24 @@ fn start_rebind(
     Ok(0)
 }
 
+/// The first candidate `(pid, launch_context)` whose PID is an ancestor of this
+/// command: the tool process the rebind runs inside. A stale or recycled PID
+/// is never adopted.
+fn own_tool_process(
+    candidates: impl IntoIterator<Item = (Option<i64>, Option<String>)>,
+) -> Option<(u32, Option<String>)> {
+    candidates.into_iter().find_map(|(pid, launch_context)| {
+        let pid = u32::try_from(pid?).ok()?;
+        crate::sys::process::is_ancestor_of_current(pid).then_some((pid, launch_context))
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RebindTargetMetadata {
     tool: String,
     directory: String,
     last_event_id: i64,
+    pid: Option<i64>,
 }
 
 /// `row_tool` is the tool the reclaimed row will have: `adhoc` for a direct
@@ -620,6 +664,7 @@ fn load_rebind_target_metadata(db: &HcomDb, name: &str) -> Result<RebindTargetMe
             tool: inst.tool,
             directory: inst.directory,
             last_event_id: inst.last_event_id,
+            pid: inst.pid,
         });
     }
 
@@ -652,6 +697,7 @@ fn load_rebind_target_metadata(db: &HcomDb, name: &str) -> Result<RebindTargetMe
                     .get("last_event_id")
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0),
+                pid: snapshot.get("pid").and_then(|v| v.as_i64()),
             });
         }
     }
@@ -1282,6 +1328,51 @@ mod tests {
 
         assert!(db.get_instance_full("fama").unwrap().is_none());
         assert_eq!(db.get_session_binding("sid-fama").unwrap(), None);
+    }
+
+    /// Rebind recreates the row; the PTY wrapper wrote `pid` only at spawn, so
+    /// without carrying it over `hcom kill` and handoff fail with "No tracked
+    /// PID". Only this command's own ancestor is adopted, never another process.
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn test_launched_rebind_keeps_own_tool_pid_from_stopped_snapshot() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let ancestor = std::os::unix::process::parent_id();
+        for (snapshot_pid, expected) in [(ancestor, Some(ancestor)), (child.id(), None)] {
+            let (_dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
+            let db = HcomDb::open().unwrap();
+            db.log_event(
+                "life",
+                "nova",
+                &json!({
+                    "action": "stopped",
+                    "snapshot": {
+                        "tool": "claude",
+                        "directory": "/tmp/project",
+                        "last_event_id": 5,
+                        "pid": snapshot_pid
+                    }
+                }),
+            )
+            .unwrap();
+            let env = HashMap::from([
+                ("CLAUDECODE".to_string(), "1".to_string()),
+                ("HCOM_LAUNCHED".to_string(), "1".to_string()),
+                ("HCOM_PROCESS_ID".to_string(), "pid-launch".to_string()),
+            ]);
+            let ctx = HcomContext::from_env(&env, PathBuf::from("/tmp/project"));
+
+            assert_eq!(start_rebind(&db, "nova", &ctx, None).unwrap(), 0);
+
+            let inst = db.get_instance_full("nova").unwrap().unwrap();
+            assert_eq!(inst.pid, expected.map(i64::from));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]

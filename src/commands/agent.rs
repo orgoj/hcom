@@ -54,7 +54,7 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   3. matching catalog \"defaults\"
   4. the named agent entry
   5. global cli_overrides maps the catalog CLI once (explicit --cli bypasses it)
-  6. the matching tools.<effective-cli> profile
+  6. the matching tools.<effective-cli> profile (exact key, else an alias: agy = antigravity)
   7. command-line flags
 
   Steps 3-4 repeat for each matching imported, additive, or project catalog in
@@ -483,8 +483,8 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
             }
             Ok(tool)
         };
-        let source = parse(source)?.to_string();
-        let target = parse(target)?.to_string();
+        let source = catalog_cli_name(parse(source)?);
+        let target = catalog_cli_name(parse(target)?);
         if overrides.insert(source.clone(), target).is_some() {
             bail!(
                 "duplicate cli_overrides source '{source}' in {}",
@@ -1761,6 +1761,28 @@ fn single_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The name catalogs use for a CLI: the command users run, so Antigravity is
+/// `agy`. Overrides resolve to it, and `tools` profiles are keyed by it.
+fn catalog_cli_name(tool: crate::tool::Tool) -> String {
+    match tool {
+        crate::tool::Tool::Antigravity => "agy".to_string(),
+        tool => tool.to_string(),
+    }
+}
+
+/// The `tools` profile for `cli`: its exact key first, else a key naming the
+/// same tool under another alias (`antigravity` for `agy`).
+fn tool_profile(tools: &BTreeMap<String, ToolDef>, cli: &str) -> Option<ToolDef> {
+    if let Some(profile) = tools.get(cli) {
+        return Some(profile.clone());
+    }
+    let tool = cli.parse::<crate::tool::Tool>().ok()?;
+    tools
+        .iter()
+        .find(|(key, _)| key.parse::<crate::tool::Tool>().ok() == Some(tool))
+        .map(|(_, profile)| profile.clone())
+}
+
 fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
     let mut selected_cli = cli
         .def
@@ -1773,13 +1795,13 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
     if cli.def.cli.is_none() {
         let source = selected_cli
             .parse::<crate::tool::Tool>()
-            .map(|tool| tool.to_string())
+            .map(catalog_cli_name)
             .unwrap_or_else(|_| selected_cli.clone());
         if let Some(target) = def.cli_overrides.get(&source) {
             selected_cli = target.clone();
         }
     }
-    if let Some(profile) = def.tools.get(&selected_cli).cloned() {
+    if let Some(profile) = tool_profile(&def.tools, &selected_cli) {
         if profile.model.is_some() {
             def.model = profile.model;
         }
@@ -4212,6 +4234,24 @@ mod tests {
         // Start-mode flags are ours, not something the tool should see.
         assert!(parse(&["--resume"]).passthrough.is_empty());
         assert!(parse(&["--clean"]).passthrough.is_empty());
+    }
+
+    #[test]
+    fn tool_profile_prefers_exact_key_then_alias() {
+        let both = def_from(
+            r#"{"tools":{"agy":{"model":"agy-model"},"antigravity":{"model":"long-model"}}}"#,
+        );
+        let profile =
+            |def: &AgentDef, cli: &str| tool_profile(&def.tools, cli).and_then(|p| p.model);
+        assert_eq!(profile(&both, "agy").as_deref(), Some("agy-model"));
+        assert_eq!(profile(&both, "antigravity").as_deref(), Some("long-model"));
+
+        let agy_only = def_from(r#"{"tools":{"agy":{"model":"agy-model"}}}"#);
+        assert_eq!(
+            profile(&agy_only, "antigravity").as_deref(),
+            Some("agy-model")
+        );
+        assert_eq!(profile(&agy_only, "codex"), None);
     }
 
     #[test]

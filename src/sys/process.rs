@@ -137,6 +137,76 @@ pub fn has_identity(pid: u32, expected: &str) -> bool {
     identity(pid).as_deref() == Some(expected)
 }
 
+/// Whether `pid` is an ancestor of this process. A live ancestor cannot have
+/// been recycled, so a stored PID that passes this still names the process
+/// that started us.
+pub fn is_ancestor_of_current(pid: u32) -> bool {
+    let mut current = std::process::id();
+    // Bounded: a corrupt or cyclic parent chain must not loop forever.
+    for _ in 0..64 {
+        match parent_platform(current) {
+            Some(parent) if parent == pid => return true,
+            Some(parent) if parent > 1 && parent != current => current = parent,
+            _ => return false,
+        }
+    }
+    false
+}
+
+#[cfg(any(target_os = "android", target_os = "linux"))]
+fn parent_platform(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Fields after the final `) ` begin at field 3 (`state`); field 4 is ppid.
+    stat.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+fn parent_platform(pid: u32) -> Option<u32> {
+    // SAFETY: as in `process_identity_platform`.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut libc::proc_bsdinfo).cast(),
+            size,
+        )
+    };
+    (read == size).then_some(info.pbi_ppid)
+}
+
+#[cfg(windows)]
+fn parent_platform(pid: u32) -> Option<u32> {
+    snapshot_parents()?.get(&pid).copied()
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "android",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "macos"
+    ))
+))]
+fn parent_platform(pid: u32) -> Option<u32> {
+    let output = Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "ppid="])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
+}
+
 /// Whether a process with the given PID is currently alive.
 ///
 /// Unix: `kill(pid, 0)`, treating `EPERM` (the process exists but is owned by
@@ -730,6 +800,19 @@ mod tests {
     #[test]
     fn test_is_alive_dead_process() {
         assert!(!is_alive(99_999_999));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_ancestor_of_current_accepts_parent_only() {
+        let parent = std::os::unix::process::parent_id();
+        assert!(is_ancestor_of_current(parent));
+        assert!(!is_ancestor_of_current(std::process::id()));
+
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+        assert!(!is_ancestor_of_current(child.id()));
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]
