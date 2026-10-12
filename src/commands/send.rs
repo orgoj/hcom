@@ -1,6 +1,8 @@
 //! `hcom send` command — send messages to hcom instances.
 
+use std::collections::HashSet;
 use std::io::{IsTerminal, Read as IoRead};
+use std::time::{Duration, Instant};
 
 use crate::cli_context::InlineBatch;
 use crate::db::HcomDb;
@@ -21,6 +23,14 @@ Target matching:
     @api-                          all local agents with exact tag 'api'
     @luna:BOXE                     exact or uniquely prefixed remote agent
   Partial local names are rejected to avoid accidental fan-out.
+  A targeted stopped/missing local agent is started automatically when its
+  name is defined in the effective hcom agent catalog. Send briefly waits for
+  that first event's acknowledgement; otherwise it reports queued/pending.
+  A catalog agent with \"roaming\": true resolves to <name>_<project> in the
+  sender's Git/project root and starts there when missing.
+  Running agents route first; the catalog is read only for unmatched names,
+  tags (which include stopped catalog agents), stopped thread members, or
+  --spawn-as; an unreadable catalog only warns. Broadcasts never start agents.
 
 Inline bundle (attach structured context):
     --title <text>                 Create and attach bundle inline
@@ -91,6 +101,10 @@ pub struct SendArgs {
     /// Threaded routing: seed recipients once, then reuse thread members
     #[arg(long)]
     pub thread: Option<String>,
+
+    /// Autostart a targeted catalog agent under this instance name if not already running
+    #[arg(long, visible_alias = "as")]
+    pub spawn_as: Option<String>,
 
     // ── Sender ──
     /// External sender identity
@@ -218,10 +232,18 @@ impl SendArgs {
     }
 }
 
+const AUTOSTART_DELIVERY_ACK_WAIT: Duration = Duration::from_secs(15);
+const AUTOSTART_DELIVERY_ACK_POLL: Duration = Duration::from_millis(50);
+
 /// Get formatted recipient feedback showing who received the message.
 ///
 /// `thread` is set when delivery was limited to that thread's members.
-fn get_recipient_feedback(db: &HcomDb, delivered_to: &[String], thread: Option<&str>) -> String {
+fn get_recipient_feedback(
+    db: &HcomDb,
+    delivered_to: &[String],
+    pending_autostarts: &HashSet<String>,
+    thread: Option<&str>,
+) -> String {
     if delivered_to.is_empty() {
         return match thread {
             Some(thread) => {
@@ -230,21 +252,74 @@ fn get_recipient_feedback(db: &HcomDb, delivered_to: &[String], thread: Option<&
             None => format!("Sent to: {SENDER} only (no other agents are active)"),
         };
     }
-    if delivered_to.len() > 10 {
-        return format!("Sent to {} agents", delivered_to.len());
-    }
-
-    let mut parts = Vec::new();
+    let mut delivered = Vec::new();
+    let mut pending = Vec::new();
     for name in delivered_to {
         if let Ok(Some(data)) = db.get_instance_full(name) {
             let icon = status_icon(&data.status);
             let display = identity::get_display_name(db, name);
-            parts.push(format!("{icon} {display}"));
+            let rendered = format!("{icon} {display}");
+            if pending_autostarts.contains(name) {
+                pending.push(rendered);
+            } else {
+                delivered.push(rendered);
+            }
         } else {
-            parts.push(format!("◌ {name}"));
+            let rendered = format!("◌ {name}");
+            if pending_autostarts.contains(name) {
+                pending.push(rendered);
+            } else {
+                delivered.push(rendered);
+            }
         }
     }
-    format!("Sent to: {}", parts.join(", "))
+    let mut lines = Vec::new();
+    if delivered.len() > 10 {
+        lines.push(format!("Sent to {} agents", delivered.len()));
+    } else if !delivered.is_empty() {
+        lines.push(format!("Sent to: {}", delivered.join(", ")));
+    }
+    if pending.len() > 10 {
+        lines.push(format!(
+            "Queued; delivery pending for {} agents",
+            pending.len()
+        ));
+    } else if !pending.is_empty() {
+        lines.push(format!("Queued; delivery pending: {}", pending.join(", ")));
+    }
+    lines.join("\n")
+}
+
+fn wait_for_autostart_delivery_ack(
+    db: &HcomDb,
+    event_id: i64,
+    autostarted: &[String],
+) -> HashSet<String> {
+    wait_for_autostart_delivery_ack_until(db, event_id, autostarted, AUTOSTART_DELIVERY_ACK_WAIT)
+}
+
+fn wait_for_autostart_delivery_ack_until(
+    db: &HcomDb,
+    event_id: i64,
+    autostarted: &[String],
+    timeout: Duration,
+) -> HashSet<String> {
+    if autostarted.is_empty() {
+        return HashSet::new();
+    }
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        let pending: HashSet<String> = autostarted
+            .iter()
+            .filter(|name| db.get_cursor(name) < event_id)
+            .cloned()
+            .collect();
+        if pending.is_empty() || Instant::now() >= deadline {
+            return pending;
+        }
+        std::thread::sleep(AUTOSTART_DELIVERY_ACK_POLL);
+    }
 }
 
 struct ResolvedDelivery {
@@ -252,7 +327,14 @@ struct ResolvedDelivery {
     effective_scope: MessageScope,
     effective_mentions: Vec<String>,
     delivered_to: Vec<String>,
+    catalog_starts: Vec<super::agent::CatalogRoute>,
     is_thread_resolved: bool,
+}
+
+struct SendOutcome {
+    delivered_to: Vec<String>,
+    autostarted: Vec<String>,
+    event_id: i64,
 }
 
 fn deliverable_instances(db: &HcomDb) -> Result<Vec<InstanceInfo>, String> {
@@ -283,6 +365,7 @@ fn resolve_delivery(
     message: &str,
     envelope: Option<&MessageEnvelope>,
     explicit_targets: Option<&[String]>,
+    catalog_instances: &[super::agent::CatalogRoute],
 ) -> Result<ResolvedDelivery, String> {
     // Deliverable agents: exclude session-stopped (exit:*) and launch_failed placeholders.
     // Adhoc instances use inactive:tool:* between commands — still @mentionable.
@@ -290,7 +373,28 @@ fn resolve_delivery(
 
     // Compute scope and routing. Thread-only sends keep their original message
     // semantics; membership only affects the delivery target set.
-    let scope_result = compute_scope(message, &rows, explicit_targets)?;
+    let mut routing_rows = rows.clone();
+    for catalog in catalog_instances {
+        if !routing_rows
+            .iter()
+            .any(|inst| inst.name.eq_ignore_ascii_case(&catalog.alias))
+        {
+            routing_rows.push(InstanceInfo {
+                name: catalog.alias.clone(),
+                tag: catalog.tag.clone(),
+            });
+        }
+        if !routing_rows
+            .iter()
+            .any(|inst| inst.name.eq_ignore_ascii_case(&catalog.instance))
+        {
+            routing_rows.push(InstanceInfo {
+                name: catalog.instance.clone(),
+                tag: catalog.tag.clone(),
+            });
+        }
+    }
+    let scope_result = compute_scope(message, &routing_rows, explicit_targets)?;
     let thread_delivery_members =
         if let Some(thread) = envelope.and_then(|env| env.thread.as_deref()) {
             if scope_result.scope == MessageScope::Broadcast {
@@ -313,26 +417,102 @@ fn resolve_delivery(
     } else {
         MessageScope::Mentions
     };
-    let effective_mentions = if thread_delivery_members.is_empty() {
+    let raw_mentions = if thread_delivery_members.is_empty() {
         scope_result.mentions.clone()
     } else {
         thread_delivery_members.clone()
     };
+    let mut effective_mentions = Vec::new();
+    for mention in raw_mentions {
+        // A running agent with this exact name routes first; only a name no
+        // running agent holds can stand for a catalog alias.
+        let canonical = if rows
+            .iter()
+            .any(|inst| inst.name.eq_ignore_ascii_case(&mention))
+        {
+            mention
+        } else {
+            catalog_instances
+                .iter()
+                .find(|route| route.alias.eq_ignore_ascii_case(&mention))
+                .map(|route| route.instance.clone())
+                .unwrap_or(mention)
+        };
+        if !effective_mentions
+            .iter()
+            .any(|name: &String| name.eq_ignore_ascii_case(&canonical))
+        {
+            effective_mentions.push(canonical);
+        }
+    }
 
     let scope_data = build_scope_data(identity, effective_scope, &effective_mentions);
-    let delivered_to = rows
+    let mut delivery_rows = rows.clone();
+    for catalog in catalog_instances {
+        if !delivery_rows
+            .iter()
+            .any(|inst| inst.name.eq_ignore_ascii_case(&catalog.instance))
+        {
+            delivery_rows.push(InstanceInfo {
+                name: catalog.instance.clone(),
+                tag: catalog.tag.clone(),
+            });
+        }
+    }
+    if is_thread_resolved {
+        for member in &effective_mentions {
+            if !delivery_rows
+                .iter()
+                .any(|inst| inst.name.eq_ignore_ascii_case(member))
+                && let Some(existing) = db.get_instance_full(member).map_err(|e| e.to_string())?
+            {
+                delivery_rows.push(InstanceInfo {
+                    name: existing.name,
+                    tag: existing.tag,
+                });
+            }
+        }
+    }
+    let recipient_rows = if effective_scope == MessageScope::Mentions {
+        &delivery_rows
+    } else {
+        &rows
+    };
+    let delivered_to: Vec<String> = recipient_rows
         .iter()
         .filter(|inst| {
             should_deliver_message(&scope_data, &inst.name, &identity.name).unwrap_or(false)
         })
         .map(|inst| inst.name.clone())
         .collect();
+    let mut catalog_starts = Vec::new();
+    for name in delivered_to
+        .iter()
+        .filter(|name| !rows.iter().any(|inst| inst.name.eq_ignore_ascii_case(name)))
+    {
+        if let Some(route) = catalog_instances
+            .iter()
+            .find(|route| route.instance.eq_ignore_ascii_case(name))
+        {
+            catalog_starts.push(route.clone());
+            continue;
+        }
+        for route in catalog_instances {
+            if let Some(retargeted) =
+                super::agent::retarget_roaming_route(db, route, name).map_err(|e| e.to_string())?
+            {
+                catalog_starts.push(retargeted);
+                break;
+            }
+        }
+    }
 
     Ok(ResolvedDelivery {
         original_scope: scope_result.scope,
         effective_scope,
         effective_mentions,
         delivered_to,
+        catalog_starts,
         is_thread_resolved,
     })
 }
@@ -393,9 +573,31 @@ pub fn send_message(
     envelope: Option<&MessageEnvelope>,
     explicit_targets: Option<&[String]>,
 ) -> Result<(i64, Vec<String>), String> {
+    send_message_with_catalog_outcome(db, identity, message, envelope, explicit_targets, &[])
+        .map(|outcome| (outcome.event_id, outcome.delivered_to))
+}
+
+fn send_message_with_catalog_outcome(
+    db: &HcomDb,
+    identity: &SenderIdentity,
+    message: &str,
+    envelope: Option<&MessageEnvelope>,
+    explicit_targets: Option<&[String]>,
+    catalog_instances: &[super::agent::CatalogRoute],
+) -> Result<SendOutcome, String> {
     validate_message(message)?;
 
-    let delivery = resolve_delivery(db, identity, message, envelope, explicit_targets)?;
+    let delivery = resolve_delivery(
+        db,
+        identity,
+        message,
+        envelope,
+        explicit_targets,
+        catalog_instances,
+    )?;
+    for route in &delivery.catalog_starts {
+        super::agent::autostart_catalog_agent(db, route).map_err(|e| e.to_string())?;
+    }
     let scope_str = delivery.effective_scope.as_str();
 
     // Build event data
@@ -484,7 +686,15 @@ pub fn send_message(
     // Trigger relay push so remote devices see the message immediately
     crate::relay::trigger_push();
 
-    Ok((event_id, delivery.delivered_to))
+    Ok(SendOutcome {
+        delivered_to: delivery.delivered_to,
+        autostarted: delivery
+            .catalog_starts
+            .into_iter()
+            .map(|route| route.instance)
+            .collect(),
+        event_id,
+    })
 }
 
 /// Resolve reply_to to local event ID. Returns None if not found or ambiguous.
@@ -861,7 +1071,7 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
     //   - Single "@name message" (with space) → entire text is message, @mention parsed by compute_scope
     //   - Non-@ args → message text (broadcast)
     //   - Pure @targets → explicit targets
-    let (effective_targets, compat_message) =
+    let (mut effective_targets, compat_message) =
         if !args.has_separator() && !args.stdin && args.file.is_none() && args.base64.is_none() {
             let (targets, message) = process_positionals(&args.positionals);
             if let Some(word) = message.as_deref()
@@ -968,6 +1178,133 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         return 1;
     }
 
+    // The catalog is a fallback: running agents route exactly as upstream, and
+    // the catalog is read only when a send could reach a stopped or missing
+    // catalog agent — an unmatched name, a tag (which also covers stopped
+    // agents), a non-running thread member, or --spawn-as. An unreadable
+    // catalog only warns, so routing degrades to upstream behavior.
+    let has_explicit_targets = args.has_separator() || !effective_targets.is_empty();
+    let requested = if has_explicit_targets {
+        effective_targets.clone()
+    } else {
+        crate::shared::constants::extract_mentions(&message)
+    };
+    let running = match deliverable_instances(db) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return 1;
+        }
+    };
+    let needs_catalog = args.spawn_as.is_some()
+        || requested.iter().any(|target| target.ends_with('-'))
+        || crate::messages::resolve_targets(&requested, &running)
+            .is_ok_and(|(_, unmatched)| !unmatched.is_empty())
+        || resolve_delivery(
+            db,
+            &sender_identity,
+            &message,
+            Some(&envelope),
+            has_explicit_targets.then_some(effective_targets.as_slice()),
+            &[],
+        )
+        .is_ok_and(|delivery| {
+            delivery.delivered_to.iter().any(|name| {
+                !running
+                    .iter()
+                    .any(|inst| inst.name.eq_ignore_ascii_case(name))
+            })
+        });
+    let mut catalog_instances = if needs_catalog {
+        match super::agent::catalog_message_targets(db, &sender_identity) {
+            Ok(targets) => {
+                // A thread-only send addresses the thread's members.
+                let mut addressed = requested.clone();
+                if requested.is_empty()
+                    && let Some(thread) = envelope.thread.as_deref()
+                {
+                    addressed.extend(db.get_thread_members(thread));
+                }
+                if let Some(agent) = targets.unroutable.iter().find(|agent| {
+                    addressed.iter().any(|target| {
+                        agent
+                            .names
+                            .iter()
+                            .any(|name| target.eq_ignore_ascii_case(name))
+                            || target.strip_suffix('-').is_some_and(|tag| {
+                                agent
+                                    .tag
+                                    .as_deref()
+                                    .is_some_and(|agent_tag| agent_tag.eq_ignore_ascii_case(tag))
+                            })
+                    })
+                }) {
+                    eprintln!("Error: {}", agent.reason);
+                    return 1;
+                }
+                targets.routes
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: cannot load agent catalog; routing to running agents only: {e:#}"
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+
+    if let Some(ref spawn_name) = args.spawn_as {
+        if !crate::identity::is_valid_base_name(spawn_name) {
+            eprintln!("Error: {}", crate::identity::base_name_error(spawn_name));
+            return 1;
+        }
+        if effective_targets.len() != 1 {
+            eprintln!(
+                "Error: --spawn-as requires exactly one target agent (e.g. hcom send @agent --spawn-as clone_name)"
+            );
+            return 1;
+        }
+        let target = effective_targets[0].clone();
+        if !spawn_name.eq_ignore_ascii_case(&target) {
+            let deliverable = match deliverable_instances(db) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                    return 1;
+                }
+            };
+            let already_running = deliverable
+                .iter()
+                .any(|inst| inst.name.eq_ignore_ascii_case(spawn_name));
+
+            if already_running {
+                effective_targets = vec![spawn_name.clone()];
+            } else {
+                let target_route = catalog_instances.iter().find(|r| {
+                    r.alias.eq_ignore_ascii_case(&target)
+                        || r.instance.eq_ignore_ascii_case(&target)
+                });
+                let Some(target_route) = target_route else {
+                    eprintln!(
+                        "Error: Unknown catalog agent '@{target}'. --spawn-as requires a configured catalog agent."
+                    );
+                    return 1;
+                };
+                let clone_route = super::agent::CatalogRoute {
+                    alias: spawn_name.clone(),
+                    instance: spawn_name.clone(),
+                    tag: target_route.tag.clone(),
+                    launch_name: target_route.launch_name.clone(),
+                    launch_dir: target_route.launch_dir.clone(),
+                };
+                catalog_instances.push(clone_route);
+                effective_targets = vec![spawn_name.clone()];
+            }
+        }
+    }
+
     let targets_to_pass: Option<&[String]> =
         if args.has_separator() || !effective_targets.is_empty() {
             Some(&effective_targets)
@@ -987,6 +1324,7 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
             None
         },
         targets_to_pass,
+        &catalog_instances,
     ) {
         Ok(delivery) => delivery,
         Err(e) => {
@@ -1111,12 +1449,13 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         || envelope.thread.is_some()
         || envelope.bundle_id.is_some();
 
-    let (event_id, delivered_to) = match send_message(
+    let outcome = match send_message_with_catalog_outcome(
         db,
         &sender_identity,
         &message,
         if has_envelope { Some(&envelope) } else { None },
         targets_to_pass,
+        &catalog_instances,
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -1129,11 +1468,14 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
     // that failed earlier leaves it to the router.
     crate::cli_context::claim_inline_delivery();
 
+    let pending_autostarts =
+        wait_for_autostart_delivery_ack(db, outcome.event_id, &outcome.autostarted);
+
     // ── Feedback ──
     if args.json {
         let out = serde_json::json!({
-            "event_id": event_id,
-            "delivered_to": delivered_to,
+            "event_id": outcome.event_id,
+            "delivered_to": outcome.delivered_to,
         });
         println!("{}", serde_json::to_string(&out).unwrap());
         crate::relay::worker::try_spawn_worker();
@@ -1147,7 +1489,8 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
 
     let feedback = get_recipient_feedback(
         db,
-        &delivered_to,
+        &outcome.delivered_to,
+        &pending_autostarts,
         envelope
             .thread
             .as_deref()
@@ -1550,6 +1893,293 @@ mod tests {
         let shm = PathBuf::from(format!("{}-shm", path.display()));
         let _ = std::fs::remove_file(wal);
         let _ = std::fs::remove_file(shm);
+    }
+
+    #[test]
+    #[serial]
+    fn autostart_ack_wait_tracks_the_specific_message_event() {
+        let (db, path, _env) = setup_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, last_event_id, created_at) \
+                 VALUES ('reviewer', 'listening', 7, 0)",
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            wait_for_autostart_delivery_ack_until(
+                &db,
+                7,
+                &["reviewer".to_string()],
+                Duration::ZERO,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            wait_for_autostart_delivery_ack_until(
+                &db,
+                8,
+                &["reviewer".to_string()],
+                Duration::ZERO,
+            ),
+            HashSet::from(["reviewer".to_string()])
+        );
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn autostart_ack_wait_observes_a_later_cursor_advance() {
+        let (db, path, _env) = setup_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, last_event_id, created_at) \
+                 VALUES ('reviewer', 'listening', 7, 0)",
+                [],
+            )
+            .unwrap();
+
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            let writer_db = HcomDb::open_at(&writer_path).unwrap();
+            writer_db
+                .conn()
+                .execute(
+                    "UPDATE instances SET last_event_id = 8 WHERE name = 'reviewer'",
+                    [],
+                )
+                .unwrap();
+        });
+
+        let pending = wait_for_autostart_delivery_ack_until(
+            &db,
+            8,
+            &["reviewer".to_string()],
+            Duration::from_secs(1),
+        );
+        writer.join().unwrap();
+        assert!(pending.is_empty());
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn pending_autostart_feedback_does_not_claim_delivery() {
+        let (db, path, _env) = setup_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, created_at) \
+                 VALUES ('reviewer', 'listening', 0)",
+                [],
+            )
+            .unwrap();
+
+        let feedback = get_recipient_feedback(
+            &db,
+            &["reviewer".to_string()],
+            &HashSet::from(["reviewer".to_string()]),
+            None,
+        );
+        assert!(feedback.contains("Queued; delivery pending:"));
+        assert!(!feedback.contains("Sent to:"));
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn catalog_agents_are_routable_and_marked_for_start_only_when_targeted() {
+        let (db, path, _env) = setup_test_db();
+        let sender = SenderIdentity {
+            kind: SenderKind::External,
+            name: "bigboss".into(),
+            instance_data: None,
+            session_id: None,
+        };
+        let catalog = vec![crate::commands::agent::CatalogRoute {
+            alias: "reviewer".into(),
+            instance: "reviewer".into(),
+            tag: Some("review".into()),
+            launch_name: "reviewer".into(),
+            launch_dir: None,
+        }];
+
+        let targeted = resolve_delivery(
+            &db,
+            &sender,
+            "review this",
+            None,
+            Some(&["reviewer".to_string()]),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(targeted.delivered_to, vec!["reviewer"]);
+        assert_eq!(targeted.catalog_starts[0].instance, "reviewer");
+
+        let tagged = resolve_delivery(
+            &db,
+            &sender,
+            "review this",
+            None,
+            Some(&["review-".to_string()]),
+            &catalog,
+        )
+        .unwrap();
+        assert_eq!(tagged.delivered_to, vec!["reviewer"]);
+        assert_eq!(tagged.catalog_starts[0].instance, "reviewer");
+
+        let broadcast = resolve_delivery(&db, &sender, "hello", None, None, &catalog).unwrap();
+        assert!(broadcast.delivered_to.is_empty());
+        assert!(broadcast.catalog_starts.is_empty());
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn roaming_catalog_alias_routes_inline_mentions_to_the_materialized_instance() {
+        let (db, path, _env) = setup_test_db();
+        let sender = SenderIdentity {
+            kind: SenderKind::External,
+            name: "bigboss".into(),
+            instance_data: None,
+            session_id: None,
+        };
+        let catalog = vec![crate::commands::agent::CatalogRoute {
+            alias: "reviewer".into(),
+            instance: "reviewer_weather".into(),
+            tag: None,
+            launch_name: "reviewer".into(),
+            launch_dir: Some(std::path::PathBuf::from("/projects/weather")),
+        }];
+
+        let delivery =
+            resolve_delivery(&db, &sender, "@reviewer inspect this", None, None, &catalog).unwrap();
+        assert_eq!(delivery.effective_mentions, vec!["reviewer_weather"]);
+        assert_eq!(delivery.delivered_to, vec!["reviewer_weather"]);
+        assert_eq!(delivery.catalog_starts[0].launch_name, "reviewer");
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn running_agent_named_like_a_roaming_alias_routes_first() {
+        let (db, path, _env) = setup_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, created_at) \
+                 VALUES ('reviewer', 'listening', 1000.0)",
+                [],
+            )
+            .unwrap();
+        let sender = SenderIdentity {
+            kind: SenderKind::External,
+            name: "bigboss".into(),
+            instance_data: None,
+            session_id: None,
+        };
+        let catalog = vec![crate::commands::agent::CatalogRoute {
+            alias: "reviewer".into(),
+            instance: "reviewer_weather".into(),
+            tag: None,
+            launch_name: "reviewer".into(),
+            launch_dir: Some(std::path::PathBuf::from("/projects/weather")),
+        }];
+
+        let delivery =
+            resolve_delivery(&db, &sender, "@reviewer inspect this", None, None, &catalog).unwrap();
+        assert_eq!(delivery.effective_mentions, vec!["reviewer"]);
+        assert_eq!(delivery.delivered_to, vec!["reviewer"]);
+        assert!(delivery.catalog_starts.is_empty());
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn stopped_roaming_thread_member_restarts_in_its_original_project() {
+        let (db, path, _env) = setup_test_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, directory, created_at) \
+                 VALUES ('reviewer_project', 'stopped', ?1, 1000.0)",
+                [project.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        db.add_thread_memberships("review", None, &["reviewer_project".to_string()]);
+        let sender = SenderIdentity {
+            kind: SenderKind::External,
+            name: "bigboss".into(),
+            instance_data: None,
+            session_id: None,
+        };
+        let envelope = MessageEnvelope {
+            thread: Some("review".into()),
+            ..Default::default()
+        };
+        let catalog = vec![crate::commands::agent::CatalogRoute {
+            alias: "reviewer".into(),
+            instance: "reviewer_elsewhere".into(),
+            tag: None,
+            launch_name: "reviewer".into(),
+            launch_dir: Some(std::path::PathBuf::from("/projects/elsewhere")),
+        }];
+
+        let delivery =
+            resolve_delivery(&db, &sender, "continue", Some(&envelope), None, &catalog).unwrap();
+        assert_eq!(delivery.delivered_to, vec!["reviewer_project"]);
+        assert_eq!(delivery.catalog_starts[0].instance, "reviewer_project");
+        assert_eq!(
+            delivery.catalog_starts[0].launch_dir.as_deref(),
+            Some(project.as_path())
+        );
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn stopped_catalog_thread_member_is_marked_for_start() {
+        let (db, path, _env) = setup_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, created_at) VALUES ('reviewer', 'stopped', 1000.0)",
+                [],
+            )
+            .unwrap();
+        db.add_thread_memberships("review", None, &["reviewer".to_string()]);
+        let sender = SenderIdentity {
+            kind: SenderKind::External,
+            name: "bigboss".into(),
+            instance_data: None,
+            session_id: None,
+        };
+        let envelope = MessageEnvelope {
+            thread: Some("review".into()),
+            ..Default::default()
+        };
+        let catalog = vec![crate::commands::agent::CatalogRoute {
+            alias: "reviewer".into(),
+            instance: "reviewer".into(),
+            tag: None,
+            launch_name: "reviewer".into(),
+            launch_dir: None,
+        }];
+
+        let delivery =
+            resolve_delivery(&db, &sender, "next task", Some(&envelope), None, &catalog).unwrap();
+        assert_eq!(delivery.delivered_to, vec!["reviewer"]);
+        assert_eq!(delivery.catalog_starts[0].instance, "reviewer");
+
+        cleanup_test_db(path);
     }
 
     #[test]

@@ -4426,3 +4426,587 @@ fn kill_by_group_matches_members_running_under_another_instance_name() {
     let status = child.wait().expect("reap orphan");
     assert!(!status.success(), "orphan should be terminated: {status}");
 }
+
+#[test]
+fn send_help_explains_autostart_acknowledgement() {
+    let h = Hcom::new();
+    let (code, stdout, stderr) = h.run(["send", "--help"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("first event's acknowledgement"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("queued/pending"), "stdout={stdout}");
+    assert!(stdout.contains("roaming"), "stdout={stdout}");
+    assert!(stdout.contains("<name>_<project>"), "stdout={stdout}");
+    assert!(
+        stdout.contains("Running agents route first"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn agent_cli_overrides_apply_to_message_autostart() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"cli_overrides":{"codex":"claude"},"agents":{"reviewer":{"dir":"/tmp","cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@reviewer",
+        "--intent",
+        "request",
+        "--",
+        "review this",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("Queued; delivery pending:"),
+        "stdout={stdout}"
+    );
+    assert!(!stdout.contains("Sent to:"), "stdout={stdout}");
+    assert!(stdout.contains("reviewer"), "stdout={stdout}");
+
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
+    assert_eq!(event["data"]["text"], "review this");
+
+    let (code, instances, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "instances={instances} stderr={stderr}");
+    let instances: serde_json::Value =
+        serde_json::from_str(&instances).expect("instance list JSON");
+    let reviewer = instances
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["name"] == "reviewer"))
+        .expect("autostarted reviewer instance");
+    assert_eq!(reviewer["unread_count"], 1);
+    assert_eq!(reviewer["tool"], "claude");
+}
+
+#[test]
+fn targeted_send_starts_catalog_agent_and_reports_unacknowledged_message_pending() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@reviewer",
+        "--intent",
+        "request",
+        "--",
+        "review this",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("Queued; delivery pending:"),
+        "stdout={stdout}"
+    );
+    assert!(!stdout.contains("Sent to:"), "stdout={stdout}");
+    assert!(stdout.contains("reviewer"), "stdout={stdout}");
+
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
+    assert_eq!(event["data"]["text"], "review this");
+
+    let (code, instances, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "instances={instances} stderr={stderr}");
+    let instances: serde_json::Value =
+        serde_json::from_str(&instances).expect("instance list JSON");
+    let reviewer = instances
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["name"] == "reviewer"))
+        .expect("autostarted reviewer instance");
+    assert_eq!(reviewer["unread_count"], 1);
+}
+
+#[test]
+fn targeted_send_with_spawn_as_starts_catalog_agent_under_custom_instance_name() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@reviewer",
+        "--spawn-as",
+        "reviewer_fix",
+        "--intent",
+        "request",
+        "--",
+        "review this bug",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("Queued; delivery pending:"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("reviewer_fix"), "stdout={stdout}");
+
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
+    assert_eq!(event["data"]["text"], "review this bug");
+
+    let (code, instances, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "instances={instances} stderr={stderr}");
+    let instances: serde_json::Value =
+        serde_json::from_str(&instances).expect("instance list JSON");
+    let clone = instances
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["name"] == "reviewer_fix"))
+        .expect("autostarted reviewer_fix instance");
+    assert_eq!(clone["unread_count"], 1);
+
+    // Sending again with --as alias to the already running clone does not relaunch
+    let (code2, stdout2, stderr2) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@reviewer",
+        "--as",
+        "reviewer_fix",
+        "--",
+        "second message to clone",
+    ]);
+    assert_eq!(code2, 0, "stdout={stdout2} stderr={stderr2}");
+    assert!(stdout2.contains("reviewer_fix"), "stdout={stdout2}");
+}
+
+#[test]
+fn targeted_send_with_spawn_as_validates_target_and_name() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    // Invalid base name
+    let (code, _stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@reviewer",
+        "--spawn-as",
+        "Bad-Name!",
+        "--",
+        "msg",
+    ]);
+    assert_ne!(code, 0, "invalid name must fail");
+    assert!(stderr.contains("Invalid instance name"), "stderr={stderr}");
+
+    // Multiple targets with spawn-as
+    let (code, _stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@reviewer",
+        "@other",
+        "--spawn-as",
+        "clone_agent",
+        "--",
+        "msg",
+    ]);
+    assert_ne!(code, 0, "multiple targets must fail");
+    assert!(
+        stderr.contains("exactly one target agent"),
+        "stderr={stderr}"
+    );
+
+    // Broadcast with spawn-as
+    let (code, _stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "--spawn-as",
+        "clone_agent",
+        "--",
+        "msg",
+    ]);
+    assert_ne!(code, 0, "broadcast with spawn-as must fail");
+    assert!(
+        stderr.contains("exactly one target agent"),
+        "stderr={stderr}"
+    );
+
+    // Non-catalog target with spawn-as
+    let (code, _stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@nonexistent",
+        "--spawn-as",
+        "clone_agent",
+        "--",
+        "msg",
+    ]);
+    assert_ne!(code, 0, "nonexistent catalog agent must fail");
+    assert!(stderr.contains("Unknown catalog agent"), "stderr={stderr}");
+}
+
+#[test]
+fn targeted_send_materializes_roaming_agent_in_the_senders_git_root() {
+    let h = Hcom::new();
+    let project = h.root_path().join("weather-app");
+    let nested = project.join("services/api");
+    std::fs::create_dir_all(project.join(".git")).expect("create git marker");
+    std::fs::create_dir_all(&nested).expect("create nested working directory");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex",
+            "env":{"DIPPY_CONFIG_ONLY":"/tmp/roaming-senior.dippy"},
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let output = h
+        .cmd()
+        .current_dir(&nested)
+        .args([
+            "send",
+            "--from",
+            "bigboss",
+            "@reviewer",
+            "--intent",
+            "request",
+            "--",
+            "review this",
+        ])
+        .output()
+        .expect("send to roaming agent");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("reviewer_weather_app"), "stdout={stdout}");
+
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1", "--full"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
+    assert_eq!(event["data"]["text"], "review this");
+    assert_eq!(
+        event["data"]["mentions"],
+        serde_json::json!(["reviewer_weather_app"])
+    );
+    assert_eq!(
+        event["data"]["delivered_to"],
+        serde_json::json!(["reviewer_weather_app"])
+    );
+
+    let (code, instances, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "instances={instances} stderr={stderr}");
+    let instances: serde_json::Value =
+        serde_json::from_str(&instances).expect("instance list JSON");
+    let reviewer = instances
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["name"] == "reviewer_weather_app")
+        })
+        .expect("materialized reviewer instance");
+    assert_eq!(reviewer["directory"], project.to_string_lossy().as_ref());
+
+    let launch_dir = h.path().join(".tmp/launch");
+    let launch_files = std::fs::read_dir(&launch_dir)
+        .expect("read launch directory")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        launch_files.contains("DIPPY_CONFIG_ONLY")
+            && launch_files.contains("/tmp/roaming-senior.dippy"),
+        "catalog env did not reach launched process: {launch_files}"
+    );
+}
+
+#[test]
+fn roaming_send_from_an_agent_uses_its_recorded_directory_not_process_cwd() {
+    let h = Hcom::new();
+    let project = h.root_path().join("agent-project");
+    let other = h.root_path().join("unrelated-cwd");
+    std::fs::create_dir_all(project.join(".git")).expect("create git marker");
+    std::fs::create_dir_all(&other).expect("create unrelated directory");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+    let sender = h.start_with_process_id("roaming-sender-process");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "UPDATE instances SET directory = ?1 WHERE name = ?2",
+        rusqlite::params![project.to_string_lossy().as_ref(), sender],
+    )
+    .expect("move sender context to project");
+    conn.execute(
+        "INSERT INTO instances (name, status, directory, created_at) \
+         VALUES ('reviewer_agent_project', 'listening', ?1, 1000.0)",
+        [project.to_string_lossy().as_ref()],
+    )
+    .expect("insert materialized reviewer");
+
+    let output = h
+        .cmd()
+        .current_dir(&other)
+        .env("HCOM_PROCESS_ID", "roaming-sender-process")
+        .args(["send", "@reviewer", "--", "inspect"])
+        .output()
+        .expect("send from registered agent");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("reviewer_agent_project"), "stdout={stdout}");
+    assert!(
+        !stdout.contains("reviewer_unrelated_cwd"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn roaming_send_rejects_same_slug_for_a_different_project_root() {
+    let h = Hcom::new();
+    let first = h.root_path().join("one/app");
+    let second = h.root_path().join("two/app");
+    std::fs::create_dir_all(first.join(".git")).expect("create first git marker");
+    std::fs::create_dir_all(second.join(".git")).expect("create second git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "INSERT INTO instances (name, status, directory, created_at) \
+         VALUES ('reviewer_app', 'stopped', ?1, 1000.0)",
+        [first.to_string_lossy().as_ref()],
+    )
+    .expect("insert first project reviewer");
+
+    let output = h
+        .cmd()
+        .current_dir(&second)
+        .args(["send", "--from", "bigboss", "@reviewer", "--", "inspect"])
+        .output()
+        .expect("send from colliding project");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("project directory basenames must be unique"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
+fn roaming_slug_collision_blocks_only_sends_that_address_that_agent() {
+    let h = Hcom::new();
+    let first = h.root_path().join("one/app");
+    let second = h.root_path().join("two/app");
+    std::fs::create_dir_all(first.join(".git")).expect("create first git marker");
+    std::fs::create_dir_all(second.join(".git")).expect("create second git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex","tag":"review"}}}"#,
+    )
+    .expect("write catalog");
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "INSERT INTO instances (name, status, directory, created_at, tag) \
+         VALUES ('reviewer_app', 'stopped', ?1, 1000.0, 'review'), \
+                ('nova', 'listening', ?1, 1000.0, 'astro')",
+        [first.to_string_lossy().as_ref()],
+    )
+    .expect("insert instances");
+
+    let send = |args: &[&str]| {
+        let output = h
+            .cmd()
+            .current_dir(&second)
+            .args(args)
+            .output()
+            .expect("send from colliding project");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    let (ok, stdout, stderr) = send(&["send", "--from", "bigboss", "@nova", "--", "unrelated"]);
+    assert!(ok, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("nova"), "stdout={stdout}");
+
+    let (ok, stdout, stderr) = send(&["send", "--from", "bigboss", "@astro-", "--", "tagged"]);
+    assert!(ok, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("nova"), "stdout={stdout}");
+
+    for args in [
+        &["send", "--from", "bigboss", "@reviewer inline"][..],
+        &["send", "--from", "bigboss", "@review-", "--", "tagged"][..],
+        &[
+            "send",
+            "--from",
+            "bigboss",
+            "@review-reviewer",
+            "--",
+            "full name",
+        ][..],
+        &[
+            "send",
+            "--from",
+            "bigboss",
+            "@reviewer_app",
+            "--",
+            "instance",
+        ][..],
+    ] {
+        let (ok, stdout, stderr) = send(args);
+        assert!(!ok, "args={args:?} stdout={stdout} stderr={stderr}");
+        assert!(
+            stderr.contains("project directory basenames must be unique"),
+            "args={args:?} stderr={stderr}"
+        );
+    }
+}
+
+#[test]
+fn send_to_a_running_agent_does_not_read_the_catalog() {
+    let h = Hcom::new();
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "INSERT INTO instances (name, status, created_at, tag) \
+         VALUES ('nova', 'listening', 1000.0, 'astro')",
+        [],
+    )
+    .expect("insert running agent");
+    std::fs::write(h.path().join("agents.json"), "{not json").expect("write broken catalog");
+
+    let (code, stdout, stderr) = h.run(["send", "--from", "bigboss", "@nova", "--", "hello"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("nova"), "stdout={stdout}");
+    assert!(!stderr.contains("catalog"), "stderr={stderr}");
+
+    let (code, stdout, stderr) = h.run([
+        "send", "--from", "bigboss", "--thread", "empty", "--", "hello",
+    ]);
+    assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("has no members"), "stderr={stderr}");
+    assert!(!stderr.contains("catalog"), "stderr={stderr}");
+
+    let (code, stdout, stderr) = h.run(["send", "--from", "bigboss", "@astro-", "--", "hello"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("nova"), "stdout={stdout}");
+    assert!(
+        stderr.contains("Warning: cannot load agent catalog"),
+        "stderr={stderr}"
+    );
+
+    let (code, stdout, stderr) = h.run(["send", "--from", "bigboss", "@ghost", "--", "hello"]);
+    assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("@ghost"), "stderr={stderr}");
+}
+
+#[test]
+fn catalog_autostart_failure_does_not_write_message() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"broken":{"dir":"/tmp","cli":"not-a-real-tool",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, _stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@broken",
+        "--",
+        "must not be queued",
+    ]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(
+        stderr.contains("could not start catalog agent 'broken'"),
+        "stderr={stderr}"
+    );
+
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    assert!(
+        events.trim().is_empty(),
+        "failed send wrote message: {events}"
+    );
+}
+
+#[test]
+fn roaming_slug_collision_blocks_thread_only_send_to_that_agent() {
+    let h = Hcom::new();
+    let first = h.root_path().join("one/app");
+    let second = h.root_path().join("two/app");
+    std::fs::create_dir_all(first.join(".git")).expect("create first git marker");
+    std::fs::create_dir_all(second.join(".git")).expect("create second git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex","tag":"review"}}}"#,
+    )
+    .expect("write catalog");
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "INSERT INTO instances (name, status, directory, created_at, tag) \
+         VALUES ('reviewer_app', 'stopped', ?1, 1000.0, 'review')",
+        [first.to_string_lossy().as_ref()],
+    )
+    .expect("insert stopped roaming instance");
+    conn.execute(
+        "INSERT INTO kv (key, value) VALUES ('events_sub:thread-review-reviewer_app', ?1)",
+        [r#"{"caller":"reviewer_app","thread_name":"review","auto_thread_member":true,"delivery_only":true,"sql":"0","created":1.0,"last_id":0,"once":false}"#],
+    )
+    .expect("insert thread membership");
+
+    let output = h
+        .cmd()
+        .current_dir(&second)
+        .args([
+            "send", "--from", "bigboss", "--thread", "review", "--", "continue",
+        ])
+        .output()
+        .expect("thread send from colliding project");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("project directory basenames must be unique"),
+        "stderr={stderr}"
+    );
+}

@@ -212,6 +212,12 @@ fn build_unmatched_error(unmatched: &[String], full_names: &[String], from_text:
     if !suggestions.is_empty() {
         msg.push_str(&format!("\nDid you mean: {}?", suggestions.join(", ")));
     }
+    // A name can also be unreachable because the catalog holding it is not in
+    // scope from this directory, which "No active agent" alone reads as
+    // "this agent is gone". The note says only that; which agents a project
+    // keeps to itself stays the project's business.
+    msg.push('\n');
+    msg.push_str(crate::commands::agent::OUT_OF_SCOPE_NOTE);
     msg.push_str(&format!(
         "\nAvailable: {}",
         format_recipients(full_names, 30)
