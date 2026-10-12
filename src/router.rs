@@ -26,6 +26,7 @@ const COMMANDS: &[&str] = &[
     "list",
     "events",
     "stop",
+    "handoff",
     "start",
     "listen",
     "status",
@@ -39,7 +40,10 @@ const COMMANDS: &[&str] = &[
     "term",
     "relay",
     "run",
+    "agent",
     "update",
+    "completions",
+    "completion",
 ];
 
 fn is_command(name: &str) -> bool {
@@ -678,12 +682,32 @@ pub fn dispatch() -> anyhow::Result<()> {
             }
         }
         Action::Command { ref cmd, ref args }
+            if matches!(cmd.as_str(), "completions" | "completion") =>
+        {
+            let (_, _, help) = extract_global_flags_full(args);
+            if help {
+                crate::commands::help::print_command_help(cmd);
+                return Ok(());
+            }
+            let (stripped, _) = extract_global_flags(args);
+            let comp_args = if stripped.len() > 1 {
+                &stripped[1..]
+            } else {
+                &[][..]
+            };
+            let exit_code = crate::commands::completions::run(comp_args)?;
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
+        Action::Command { ref cmd, ref args }
             if matches!(
                 cmd.as_str(),
                 "ack"
                     | "send"
                     | "list"
                     | "stop"
+                    | "handoff"
                     | "listen"
                     | "events"
                     | "transcript"
@@ -696,6 +720,7 @@ pub fn dispatch() -> anyhow::Result<()> {
                     | "term"
                     | "relay"
                     | "run"
+                    | "agent"
                     | "update"
             ) =>
         {
@@ -932,6 +957,12 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
         "stop" => clap_dispatch!(crate::commands::stop::StopArgs, cmd, &cmd_argv, |args| {
             crate::commands::stop::cmd_stop(&db, &args, Some(&ctx))
         }),
+        "handoff" => clap_dispatch!(
+            crate::commands::handoff::HandoffArgs,
+            cmd,
+            &cmd_argv,
+            |args| crate::commands::handoff::cmd_handoff(&db, &args, Some(&ctx))
+        ),
         "listen" => clap_dispatch!(
             crate::commands::listen::ListenArgs,
             cmd,
@@ -1009,6 +1040,9 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
         }),
         "run" => clap_dispatch!(crate::commands::run::RunArgs, cmd, &cmd_argv, |args| {
             crate::commands::run::cmd_run(&db, &args, Some(&ctx))
+        }),
+        "agent" => clap_dispatch!(crate::commands::agent::AgentArgs, cmd, &cmd_argv, |args| {
+            crate::commands::agent::cmd_agent(&args)
         }),
         "update" => clap_dispatch!(
             crate::commands::update::UpdateArgs,

@@ -1450,7 +1450,7 @@ pub(crate) fn exact_instance_transcript(
 }
 
 /// Resolve instance name to (name, transcript_path, agent_type, session_id).
-fn resolve_instance_transcript(
+pub(crate) fn resolve_instance_transcript(
     db: &HcomDb,
     name: &str,
 ) -> Option<(String, String, String, Option<String>)> {

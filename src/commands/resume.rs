@@ -3,7 +3,8 @@
 //!
 //! Loads a stopped instance's snapshot and relaunches with --resume session_id.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use rusqlite::OptionalExtension;
 use serde_json::json;
 use std::io::BufRead;
 
@@ -541,6 +542,30 @@ fn prepare_resume_plan_from_source(
     } else {
         None
     };
+    let mut launch_env = super::launch::catalog_launch_env()?.unwrap_or_default();
+    if !fork
+        && !is_adoption
+        && matches!(tool.as_str(), "agy" | "antigravity")
+        && !launch_env.contains_key(crate::commands::agent::DIPPY_POLICY_CWD)
+        && let Some(policy_cwd) = load_stopped_agy_policy_cwd(db, &display_name)?
+    {
+        launch_env.insert(
+            crate::commands::agent::DIPPY_POLICY_CWD.to_string(),
+            policy_cwd,
+        );
+    }
+
+    // Resume keeps the catalog agent name; a fork is the same agent under a
+    // new instance name, so it inherits its parent's.
+    if !is_adoption
+        && !launch_env.contains_key(crate::commands::agent::AGENT_NAME_ENV)
+        && let Some(agent_name) = load_agent_name(db, &display_name)?
+    {
+        launch_env.insert(
+            crate::commands::agent::AGENT_NAME_ENV.to_string(),
+            agent_name,
+        );
+    }
 
     Ok(PreparedResume {
         output: ResumeOutputContext {
@@ -566,7 +591,7 @@ fn prepare_resume_plan_from_source(
             initial_prompt: fork_initial_prompt,
             background: is_headless,
             cwd: Some(effective_cwd),
-            env: None,
+            env: (!launch_env.is_empty()).then_some(launch_env),
             launcher: Some(launcher_name),
             run_here: launch_flags.run_here,
             batch_id: launch_flags.batch_id.clone(),
@@ -1039,6 +1064,76 @@ fn load_stopped_snapshot(
         "No agent named '{name}' to resume (not a known hcom agent, session UUID, or thread name){}\n  Stopped agents: hcom list --stopped",
         crate::shared::suggest::did_you_mean(name, known.iter().map(String::as_str))
     )
+}
+
+/// Restore only the launch-time policy directory recorded for a tracked AGY
+/// instance. Historical and adopted sessions have no trusted catalog scope.
+fn load_stopped_agy_policy_cwd(db: &HcomDb, name: &str) -> Result<Option<String>> {
+    let raw = db
+        .conn()
+        .query_row(
+            "SELECT json_extract(data, '$.snapshot.dippy_policy_cwd') FROM events
+             WHERE type='life' AND instance=?
+               AND json_extract(data, '$.action')='stopped'
+             ORDER BY id DESC LIMIT 1",
+            rusqlite::params![name],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let path = std::path::Path::new(&raw);
+    if !path.is_absolute() {
+        bail!("stored AGY policy directory is not absolute: {raw}");
+    }
+    let canonical = std::fs::canonicalize(path)
+        .with_context(|| format!("stored AGY policy directory is unavailable: {raw}"))?;
+    if !canonical.is_dir() || canonical.to_str() != Some(raw.as_str()) {
+        bail!("stored AGY policy directory is no longer canonical: {raw}");
+    }
+    Ok(Some(raw))
+}
+
+/// Catalog agent name of a live instance, else of its latest stopped snapshot.
+fn load_agent_name(db: &HcomDb, name: &str) -> Result<Option<String>> {
+    let live = db
+        .conn()
+        .query_row(
+            "SELECT CASE WHEN json_valid(launch_context)
+                         THEN json_extract(launch_context, '$.agent_name') END
+             FROM instances WHERE name=?",
+            rusqlite::params![name],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    if live.is_some() {
+        return Ok(live.filter(|n| !n.is_empty()));
+    }
+    let stopped = db
+        .conn()
+        .query_row(
+            "SELECT json_extract(data, '$.snapshot.agent_name') FROM events
+             WHERE type='life' AND instance=?
+               AND json_extract(data, '$.action')='stopped'
+             ORDER BY id DESC LIMIT 1",
+            rusqlite::params![name],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(stopped.filter(|n| !n.is_empty()))
+}
+
+/// Fail before a catalog launcher creates a terminal for an impossible resume.
+pub(crate) fn validate_tracked_resume(db: &HcomDb, name: &str) -> Result<()> {
+    let (_, session_id, _, _, _, _, _) = load_stopped_snapshot(db, name)?;
+    if session_id.is_empty() {
+        bail!("No session ID found for '{name}' — cannot resume");
+    }
+    Ok(())
 }
 
 /// Build tool-specific resume/fork args from the integration spec.
@@ -3556,6 +3651,52 @@ mod tests {
     }
 
     #[test]
+    fn test_catalog_resume_preflight_rejects_missing_session_id() {
+        let db = test_db();
+        let snapshot = serde_json::json!({
+            "action": "stopped",
+            "snapshot": {
+                "tool": "codex",
+                "session_id": "",
+                "directory": "/tmp"
+            }
+        });
+        db.conn()
+            .execute(
+                "INSERT INTO events (timestamp, type, instance, data) VALUES (?, 'life', 'bin', ?)",
+                rusqlite::params!["2026-01-01T00:00:00Z", snapshot.to_string()],
+            )
+            .unwrap();
+
+        let error = validate_tracked_resume(&db, "bin").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "No session ID found for 'bin' — cannot resume"
+        );
+    }
+
+    #[test]
+    fn test_catalog_resume_preflight_accepts_session_id() {
+        let db = test_db();
+        let snapshot = serde_json::json!({
+            "action": "stopped",
+            "snapshot": {
+                "tool": "codex",
+                "session_id": "019ff5ad-18b7-7431-b6ef-71b053888ff6",
+                "directory": "/tmp"
+            }
+        });
+        db.conn()
+            .execute(
+                "INSERT INTO events (timestamp, type, instance, data) VALUES (?, 'life', 'bin', ?)",
+                rusqlite::params!["2026-01-01T00:00:00Z", snapshot.to_string()],
+            )
+            .unwrap();
+
+        validate_tracked_resume(&db, "bin").unwrap();
+    }
+
+    #[test]
     fn test_merge_resume_args_opencode_preserves_non_session_flags() {
         let merged = merge_resume_args(
             "opencode",
@@ -3899,6 +4040,77 @@ mod tests {
             "forks bind a fresh session on first turn; must not inherit the parent's"
         );
         assert!(!fork.launch.explicit_identity);
+    }
+
+    #[test]
+    fn test_resume_and_fork_keep_catalog_agent_name() {
+        let db = test_db();
+        let mut data = serde_json::Map::new();
+        data.insert("session_id".into(), json!("session-123"));
+        data.insert("tool".into(), json!("codex"));
+        data.insert("status".into(), json!(ST_INACTIVE));
+        data.insert("created_at".into(), json!(1.0));
+        db.save_instance_named("rev2", &data).unwrap();
+        let snapshot = serde_json::json!({
+            "action": "stopped",
+            "snapshot": {
+                "tool": "codex",
+                "session_id": "session-123",
+                "launch_args": "[]",
+                "tag": "",
+                "background": 0,
+                "last_event_id": 0,
+                "directory": "/tmp",
+                "agent_name": "reviewer"
+            }
+        });
+        db.conn()
+            .execute(
+                "INSERT INTO events (timestamp, type, instance, data) VALUES (?, 'life', 'rev2', ?)",
+                rusqlite::params!["2026-01-01T00:00:00Z", snapshot.to_string()],
+            )
+            .unwrap();
+
+        for fork in [false, true] {
+            let plan =
+                prepare_resume_plan(&db, "rev2", fork, &[], &GlobalFlags::default()).unwrap();
+            let env = plan.launch.env.unwrap_or_default();
+            assert_eq!(
+                env.get(crate::commands::agent::AGENT_NAME_ENV)
+                    .map(String::as_str),
+                Some("reviewer"),
+                "fork={fork}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_agy_stopped_policy_scope_requires_recorded_canonical_directory() {
+        let db = test_db();
+        let add_stop = |snapshot: serde_json::Value| {
+            db.conn()
+                .execute(
+                    "INSERT INTO events (timestamp, type, instance, data) \
+                     VALUES ('2026-01-01T00:00:00Z', 'life', 'knowledge', ?)",
+                    rusqlite::params![
+                        serde_json::json!({"action": "stopped", "snapshot": snapshot}).to_string()
+                    ],
+                )
+                .unwrap();
+        };
+        add_stop(serde_json::json!({"tool": "antigravity"}));
+        assert_eq!(load_stopped_agy_policy_cwd(&db, "knowledge").unwrap(), None);
+
+        add_stop(serde_json::json!({"dippy_policy_cwd": "relative/path"}));
+        assert!(load_stopped_agy_policy_cwd(&db, "knowledge").is_err());
+
+        let directory = tempfile::tempdir().unwrap();
+        let canonical = std::fs::canonicalize(directory.path()).unwrap();
+        add_stop(serde_json::json!({"dippy_policy_cwd": canonical}));
+        assert_eq!(
+            load_stopped_agy_policy_cwd(&db, "knowledge").unwrap(),
+            Some(canonical.to_string_lossy().into_owned())
+        );
     }
 
     #[test]

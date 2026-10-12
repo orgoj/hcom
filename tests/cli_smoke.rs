@@ -2313,3 +2313,2116 @@ fn herdr_autostart_config_and_env() {
     assert_eq!(code, 0);
     assert_eq!(stdout.trim(), "false");
 }
+
+#[test]
+fn agent_help_lists_catalog_layers() {
+    let h = Hcom::new();
+    let (code, stdout, stderr) = h.run(["agent", "--help"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.starts_with("Usage:"), "stdout={stdout}");
+    assert!(stdout.contains("agents.json"), "stdout={stdout}");
+    assert!(stdout.contains(".hcom/agents.json"), "stdout={stdout}");
+    assert!(stdout.contains("agents/<name>/SOUL.md"), "stdout={stdout}");
+    assert!(
+        stdout.contains(".claude/skills -> ../skills"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("system_prompt_file"), "stdout={stdout}");
+    assert!(stdout.contains("cli_overrides"), "stdout={stdout}");
+    assert!(
+        stdout.contains("agy and antigravity use --add-dir"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("DIPPY_POLICY_CWD"), "stdout={stdout}");
+    assert!(stdout.contains("--as <name>"), "stdout={stdout}");
+    assert!(stdout.contains("@<group>"), "stdout={stdout}");
+    assert!(stdout.contains("\"groups\""), "stdout={stdout}");
+    assert!(stdout.contains("\"roaming\": true"), "stdout={stdout}");
+    assert!(stdout.contains("DIPPY_CONFIG_ONLY"), "stdout={stdout}");
+    assert!(stdout.contains("--all"), "stdout={stdout}");
+    assert!(stdout.contains("--local"), "stdout={stdout}");
+    assert!(stdout.contains("--for-agents"), "stdout={stdout}");
+    assert!(stdout.contains("--for-humans"), "stdout={stdout}");
+    assert!(stdout.contains("hcom agent list"), "stdout={stdout}");
+    assert!(stdout.contains("--continue"), "stdout={stdout}");
+    assert!(stdout.contains("--last <N>"), "stdout={stdout}");
+    assert!(
+        stdout.contains("regardless of launch directory"),
+        "stdout={stdout}"
+    );
+    for layer in [
+        "1. built-in defaults",
+        "2. \"defaults\" in ~/.hcom/agents.json",
+        "3. matching catalog \"defaults\"",
+        "4. the named agent entry",
+        "5. global cli_overrides",
+        "6. the matching tools.<effective-cli> profile",
+        "7. command-line flags",
+    ] {
+        assert!(stdout.contains(layer), "missing {layer}: {stdout}");
+    }
+    assert!(
+        stdout.contains("system_prompt replaces rather than appends"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("explicit empty string clears it"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("Imports are recursive and apply before"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("not a parent agent's location"),
+        "stdout={stdout}"
+    );
+    assert!(!stdout.contains("hcom agent ls"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_list_without_catalog_points_at_the_global_file() {
+    let h = Hcom::new();
+    let (code, stdout, stderr) = h.run(["agent", "list", "--no-project"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("No agents defined"), "stdout={stdout}");
+    assert!(stdout.contains("agents.json"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_bundle_is_discovered_across_nested_git_roots_and_composes_prompt() {
+    let h = Hcom::new();
+    let project = h.root_path().join("multi-repo");
+    let nested = project.join("services/api");
+    let bundle = project.join(".hcom/agents/reviewer");
+    std::fs::create_dir_all(nested.join(".git")).expect("create nested git marker");
+    std::fs::create_dir_all(&bundle).expect("create agent bundle");
+    std::fs::write(bundle.join("SOUL.md"), "Improve this file when you learn.")
+        .expect("write agent instructions");
+    std::fs::write(
+        project.join(".hcom/agents.json"),
+        r#"{"agents":{"reviewer":{"cli":"claude","dir":".","system_prompt":"Fixed identity."}}}"#,
+    )
+    .expect("write project catalog");
+
+    let output = h
+        .cmd()
+        .current_dir(&nested)
+        .args(["agent", "show", "reviewer"])
+        .output()
+        .expect("show bundle agent");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains(&format!("dir:       {}", project.display())),
+        "project-relative dir must use the parent of .hcom: {stdout}"
+    );
+    assert!(stdout.contains(&format!("bundle:    {}", bundle.display())));
+    assert!(stdout.contains("Fixed identity."), "stdout={stdout}");
+    assert!(
+        stdout.contains("Improve this file when you learn."),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.find("Fixed identity.") < stdout.find("Improve this file when you learn."),
+        "fixed prompt must precede SOUL.md: {stdout}"
+    );
+
+    let json_output = h
+        .cmd()
+        .current_dir(&nested)
+        .args(["agent", "list", "--json"])
+        .output()
+        .expect("list bundle agent");
+    let rows: serde_json::Value = serde_json::from_slice(&json_output.stdout).expect("agent JSON");
+    assert_eq!(rows[0]["agent_dir"], bundle.to_string_lossy().as_ref());
+    assert_eq!(
+        rows[0]["instructions"],
+        bundle.join("SOUL.md").to_string_lossy().as_ref()
+    );
+}
+
+#[test]
+fn nested_project_catalog_sees_enclosing_project_agents_and_overrides_them() {
+    let h = Hcom::new();
+    let outer = h.root_path().join("outer");
+    let inner = outer.join("repos/inner");
+    std::fs::create_dir_all(outer.join(".hcom")).expect("create outer catalog dir");
+    std::fs::create_dir_all(inner.join(".hcom")).expect("create inner catalog dir");
+    std::fs::write(
+        outer.join(".hcom/agents.json"),
+        r#"{"defaults":{"model":"opus"},"agents":{"outer_only":{"cli":"claude","dir":"."},"shared":{"cli":"claude","dir":".","description":"from outer"}}}"#,
+    )
+    .expect("write outer catalog");
+    std::fs::write(
+        inner.join(".hcom/agents.json"),
+        r#"{"agents":{"inner_only":{"cli":"claude","dir":"."},"shared":{"cli":"claude","dir":".","description":"from inner"}}}"#,
+    )
+    .expect("write inner catalog");
+
+    let output = h
+        .cmd()
+        .current_dir(&inner)
+        .args(["agent", "list", "--json"])
+        .output()
+        .expect("list nested catalogs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr={stderr}");
+    let rows: serde_json::Value = serde_json::from_slice(&output.stdout).expect("agent JSON");
+    let rows = rows.as_array().expect("array");
+    let by_name = |name: &str| {
+        rows.iter()
+            .find(|row| row["name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing from {rows:?}"))
+    };
+    assert_eq!(
+        by_name("outer_only")["dir"],
+        outer.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        by_name("inner_only")["dir"],
+        inner.to_string_lossy().as_ref()
+    );
+    assert_eq!(
+        by_name("inner_only")["model"],
+        "opus",
+        "an agent of a nested project inherits the enclosing project's defaults"
+    );
+    let shared = by_name("shared");
+    assert_eq!(shared["description"], "from inner");
+    assert_eq!(shared["dir"], inner.to_string_lossy().as_ref());
+
+    let outer_output = h
+        .cmd()
+        .current_dir(&outer)
+        .args(["agent", "list", "--names"])
+        .output()
+        .expect("list outer catalog");
+    let outer_names = String::from_utf8_lossy(&outer_output.stdout);
+    assert!(
+        !outer_names.contains("inner_only"),
+        "a nested project must stay private to itself: {outer_names}"
+    );
+}
+
+#[test]
+fn agent_ignores_legacy_agents_md_only_bundle() {
+    let h = Hcom::new();
+    let bundle = h.path().join("agents/legacy");
+    std::fs::create_dir_all(&bundle).expect("create legacy bundle");
+    std::fs::write(bundle.join("AGENTS.md"), "Legacy instructions.")
+        .expect("write legacy instructions");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"known":{"cli":"claude"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "list", "--no-project", "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let rows: serde_json::Value = serde_json::from_str(&stdout).expect("agent JSON");
+    assert_eq!(rows.as_array().map(Vec::len), Some(1), "stdout={stdout}");
+    assert_eq!(rows[0]["name"], "known", "stdout={stdout}");
+}
+
+#[test]
+fn project_bundle_fully_shadows_same_named_global_agent() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"cli":"codex","dir":"/global","model":"global-model"}}}"#,
+    )
+    .expect("write global catalog");
+    let project = h.root_path().join("project");
+    let bundle = project.join(".hcom/agents/reviewer");
+    std::fs::create_dir_all(&bundle).expect("create project bundle");
+    std::fs::write(bundle.join("SOUL.md"), "Project reviewer.").expect("write instructions");
+
+    let output = h
+        .cmd()
+        .current_dir(&project)
+        .args(["agent", "show", "reviewer"])
+        .output()
+        .expect("show project agent");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("cli:       claude"), "stdout={stdout}");
+    assert!(!stdout.contains("/global"), "stdout={stdout}");
+    assert!(!stdout.contains("global-model"), "stdout={stdout}");
+    assert!(stdout.contains("Project reviewer."), "stdout={stdout}");
+}
+
+#[test]
+fn project_agent_resolves_identically_inside_and_outside_project() {
+    let h = Hcom::new();
+    let project = h.root_path().join("wdt");
+    let project_catalog = project.join(".hcom/agents.json");
+    std::fs::create_dir_all(project_catalog.parent().unwrap()).expect("create project catalog dir");
+    std::fs::write(
+        &project_catalog,
+        r#"{"defaults":{"cli":"codex","system_prompt":"Project instructions."},
+            "agents":{"wdt_main":{"dir":".","model":"shared",
+                "tools":{"codex":{"model":"profile-model"}}}}}"#,
+    )
+    .expect("write project catalog");
+    std::fs::write(
+        h.path().join("agents.json"),
+        serde_json::json!({
+            "defaults": {
+                "terminal": "herdr",
+                "system_prompt": "Global instructions."
+            },
+            "imports": [{
+                "from": project_catalog,
+                "agents": ["wdt_main"]
+            }]
+        })
+        .to_string(),
+    )
+    .expect("write global catalog");
+
+    let outside = h
+        .cmd()
+        .args(["agent", "show", "wdt_main"])
+        .output()
+        .expect("show imported project agent outside project");
+    let inside = h
+        .cmd()
+        .current_dir(&project)
+        .args(["agent", "show", "wdt_main"])
+        .output()
+        .expect("show project agent inside project");
+    let outside_stdout = String::from_utf8_lossy(&outside.stdout);
+    let outside_stderr = String::from_utf8_lossy(&outside.stderr);
+    let inside_stdout = String::from_utf8_lossy(&inside.stdout);
+    let inside_stderr = String::from_utf8_lossy(&inside.stderr);
+
+    assert!(
+        outside.status.success(),
+        "stdout={outside_stdout} stderr={outside_stderr}"
+    );
+    assert!(
+        inside.status.success(),
+        "stdout={inside_stdout} stderr={inside_stderr}"
+    );
+    let inside_command = inside_stdout
+        .split_once("\ncommand:\n")
+        .expect("inside show command")
+        .1;
+    let outside_command = outside_stdout
+        .split_once("\ncommand:\n")
+        .expect("outside show command")
+        .1;
+    assert_eq!(inside_command, outside_command);
+    assert_eq!(
+        inside_stdout
+            .lines()
+            .find(|line| line.starts_with("terminal:")),
+        outside_stdout
+            .lines()
+            .find(|line| line.starts_with("terminal:"))
+    );
+    assert!(
+        inside_stdout.contains("terminal:  preset herdr"),
+        "global catalog defaults must apply: {inside_stdout}"
+    );
+    assert!(!inside_stdout.contains("(hcom config default)"));
+    assert!(inside_stdout.contains("Project instructions."));
+    assert!(!inside_stdout.contains("Global instructions."));
+    assert!(inside_stdout.contains("model:     profile-model"));
+}
+
+#[test]
+fn legacy_project_catalog_is_ignored_and_edit_creates_dot_hcom_catalog() {
+    let h = Hcom::new();
+    let project = h.root_path().join("legacy");
+    std::fs::create_dir_all(&project).expect("create project");
+    std::fs::write(
+        project.join(".hcom-agents.json"),
+        r#"{"agents":{"legacy_agent":{}}}"#,
+    )
+    .expect("write legacy catalog");
+
+    let output = h
+        .cmd()
+        .current_dir(&project)
+        .args(["agent", "list", "--names"])
+        .output()
+        .expect("list without project scope");
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("legacy_agent"));
+
+    let edit = h
+        .cmd()
+        .current_dir(&project)
+        .env("EDITOR", "true")
+        .args(["agent", "edit", "--project"])
+        .output()
+        .expect("create project catalog");
+    assert!(
+        edit.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&edit.stderr)
+    );
+    assert!(project.join(".hcom/agents.json").is_file());
+}
+
+#[test]
+fn additive_catalog_env_keeps_global_agents_and_imports_selected_project_agents() {
+    let h = Hcom::new();
+    let project = h.root_path().join("wdt");
+    std::fs::create_dir_all(project.join(".hcom")).expect("create project dir");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"global_main":{"dir":"/tmp"}}}"#,
+    )
+    .expect("write global catalog");
+    std::fs::write(
+        project.join(".hcom/agents.json"),
+        r#"{"agents":{"wdt_main":{"dir":"."},"wdt_private":{"dir":"."}}}"#,
+    )
+    .expect("write project catalog");
+    let overlay = h.root_path().join("hermes-agents.json");
+    std::fs::write(
+        &overlay,
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["wdt_main"]}}]}}"#,
+            serde_json::to_string(&project.join(".hcom/agents.json")).unwrap()
+        ),
+    )
+    .expect("write overlay catalog");
+
+    let output = h
+        .cmd()
+        .env("HCOM_AGENT_CATALOGS", &overlay)
+        .args(["agent", "list", "--names"])
+        .output()
+        .expect("run hcom agent list");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.lines().any(|line| line == "global_main"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.lines().any(|line| line == "wdt_main"),
+        "stdout={stdout}"
+    );
+    assert!(!stdout.contains("wdt_private"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_list_all_includes_agents_hidden_by_recursive_selective_imports() {
+    let h = Hcom::new();
+    let leaf = h.path().join("leaf-agents.json");
+    std::fs::write(
+        &leaf,
+        r#"{"agents":{
+            "leaf_public":{"dir":"/tmp","cli":"claude"},
+            "leaf_private":{"dir":"/tmp","cli":"gemini",
+                "tools":{"gemini":{"model":"gemini-2.5-pro"}}}
+        }}"#,
+    )
+    .expect("write leaf catalog");
+    let middle = h.path().join("middle-agents.json");
+    std::fs::write(
+        &middle,
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["leaf_public"]}}],
+                "agents":{{
+                    "middle_public":{{"dir":"/tmp","cli":"codex"}},
+                    "middle_private":{{"dir":"/tmp","cli":"claude"}}
+                }}}}"#,
+            serde_json::to_string(&leaf).unwrap()
+        ),
+    )
+    .expect("write middle catalog");
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["middle_public"]}}]}}"#,
+            serde_json::to_string(&middle).unwrap()
+        ),
+    )
+    .expect("write root catalog");
+
+    let (code, visible, stderr) = h.run(["agent", "list", "--names", "--no-project"]);
+    assert_eq!(code, 0, "stdout={visible} stderr={stderr}");
+    assert_eq!(visible.trim(), "middle_public");
+
+    let (code, all_names, stderr) = h.run(["agent", "list", "--all", "--names", "--no-project"]);
+    assert_eq!(code, 0, "stdout={all_names} stderr={stderr}");
+    assert_eq!(
+        all_names.lines().collect::<Vec<_>>(),
+        [
+            "leaf_private",
+            "leaf_public",
+            "middle_private",
+            "middle_public"
+        ]
+    );
+
+    let (code, table, stderr) = h.run(["agent", "list", "--all", "--for-humans", "--no-project"]);
+    assert_eq!(code, 0, "stdout={table} stderr={stderr}");
+    assert!(table.starts_with("NAME"));
+    assert!(table.contains("MODEL"));
+    assert!(table.lines().any(|line| line.starts_with("leaf_private ")));
+    assert!(table.contains("gemini-2.5-pro"));
+
+    let (code, json, stderr) = h.run(["agent", "list", "--all", "--json", "--no-project"]);
+    assert_eq!(code, 0, "stdout={json} stderr={stderr}");
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&json).expect("list JSON");
+    let leaf_private = entries
+        .iter()
+        .find(|entry| entry["name"] == "leaf_private")
+        .expect("hidden leaf agent in JSON");
+    assert_eq!(leaf_private["cli"], "gemini");
+    assert_eq!(leaf_private["model"], "gemini-2.5-pro");
+    assert!(
+        leaf_private["source"]
+            .as_str()
+            .is_some_and(|source| source.starts_with("import:"))
+    );
+}
+
+#[test]
+fn agent_list_local_includes_only_project_agents_and_their_imports() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"global_agent":{"dir":"/tmp"}}}"#,
+    )
+    .expect("write global catalog");
+
+    let project = h.root_path().join("project");
+    std::fs::create_dir_all(project.join(".hcom")).expect("create project catalog dir");
+    let imported = project.join("included.json");
+    std::fs::write(
+        &imported,
+        r#"{"agents":{
+            "included":{"dir":"/tmp","groups":["local_group"]},
+            "hidden":{"dir":"/tmp","groups":["hidden_group"]}
+        }}"#,
+    )
+    .expect("write imported catalog");
+    std::fs::write(
+        project.join(".hcom/agents.json"),
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["included"]}}],
+                "agents":{{"direct":{{"dir":".","groups":["local_group"]}}}}}}"#,
+            serde_json::to_string(&imported).unwrap()
+        ),
+    )
+    .expect("write project catalog");
+
+    let run = |args: &[&str]| {
+        let output = h
+            .cmd()
+            .current_dir(&project)
+            .args(args)
+            .output()
+            .expect("list local agents");
+        (
+            output.status.code().unwrap_or(1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    let (code, names, stderr) = run(&["agent", "list", "--local", "--names"]);
+    assert_eq!(code, 0, "stdout={names} stderr={stderr}");
+    assert_eq!(names.lines().collect::<Vec<_>>(), ["direct", "included"]);
+
+    let (code, groups, stderr) = run(&["agent", "list", "--local", "--groups"]);
+    assert_eq!(code, 0, "stdout={groups} stderr={stderr}");
+    assert_eq!(groups.trim(), "@hidden_group\n@local_group");
+
+    let (code, all, stderr) = run(&["agent", "list", "--local", "--all", "--names"]);
+    assert_eq!(code, 0, "stdout={all} stderr={stderr}");
+    assert_eq!(
+        all.lines().collect::<Vec<_>>(),
+        ["direct", "hidden", "included"]
+    );
+}
+
+#[test]
+fn imported_agent_config_overrides_global_defaults() {
+    let h = Hcom::new();
+    let project = h.root_path().join("wdt");
+    std::fs::create_dir_all(project.join(".hcom")).expect("create project dir");
+    std::fs::write(
+        project.join(".hcom/agents.json"),
+        r#"{"defaults":{"cli":"claude"},"agents":{"wdt_main":{"dir":".","cli":"claude"}}}"#,
+    )
+    .expect("write project catalog");
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"defaults":{{"cli":"codex"}},"imports":[{{"from":{},"agents":["wdt_main"]}}]}}"#,
+            serde_json::to_string(&project.join(".hcom/agents.json")).unwrap()
+        ),
+    )
+    .expect("write global catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "wdt_main"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.lines().any(|line| line == "cli:       claude"),
+        "stdout={stdout}"
+    );
+    let sources = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("sources:   "))
+        .expect("catalog sources in show output");
+    for source in sources.split(", ") {
+        assert!(
+            std::path::Path::new(source).starts_with(h.root_path()),
+            "fixture leaked catalog source outside {}: {source}\nstdout={stdout}",
+            h.root_path().display()
+        );
+    }
+}
+
+#[test]
+fn agent_list_for_agents_shows_only_names_and_descriptions() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{
+            "described":{"dir":"/tmp","cli":"codex","description":"backend API service, Go"},
+            "plain":{"dir":"/tmp"}
+        }}"#,
+    )
+    .expect("write catalog");
+
+    let (code, brief, stderr) = h.run(["agent", "list", "--for-agents", "--no-project"]);
+    assert_eq!(code, 0, "stdout={brief} stderr={stderr}");
+    assert_eq!(
+        brief.lines().collect::<Vec<_>>(),
+        ["described  backend API service, Go", "plain      -"]
+    );
+    assert!(!brief.contains("NAME"), "stdout={brief}");
+    assert!(!brief.contains("codex"), "stdout={brief}");
+    assert!(!brief.contains("/tmp"), "stdout={brief}");
+
+    // Test output is not a terminal, so the default matches --for-agents.
+    let (code, default, stderr) = h.run(["agent", "list", "--no-project"]);
+    assert_eq!(code, 0, "stdout={default} stderr={stderr}");
+    assert_eq!(default, brief);
+
+    let (code, json, stderr) = h.run(["agent", "list", "--json", "--no-project"]);
+    assert_eq!(code, 0, "stdout={json} stderr={stderr}");
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&json).expect("list JSON");
+    assert_eq!(entries[0]["description"], "backend API service, Go");
+    assert!(entries[1]["description"].is_null(), "stdout={json}");
+
+    let (code, show, stderr) = h.run(["agent", "show", "described", "--no-project"]);
+    assert_eq!(code, 0, "stdout={show} stderr={stderr}");
+    assert!(
+        show.lines()
+            .any(|line| line == "description: backend API service, Go"),
+        "stdout={show}"
+    );
+}
+
+#[test]
+fn agent_unknown_name_suggests_a_close_match() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"wdt_main":{"dir":"/tmp","cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, _stdout, stderr) = h.run(["agent", "wdt_mian"]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(
+        stderr.contains("unknown agent 'wdt_mian'"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("did you mean 'wdt_main'"),
+        "stderr={stderr}"
+    );
+}
+
+/// A selective import hides a project's other agents on purpose. Someone
+/// outside must not learn from an error that they exist, where they live, or
+/// how to pull them in — the scope note says only that scope is directional.
+#[test]
+fn agent_unknown_name_keeps_an_import_filtered_entry_private() {
+    let h = Hcom::new();
+    let project = h.root_path().join("proj");
+    std::fs::create_dir_all(project.join(".hcom")).expect("create project catalog dir");
+    std::fs::write(
+        project.join(".hcom").join("agents.json"),
+        r#"{"defaults":{"cli":"codex"},"agents":{"p_main":{"dir":"/tmp"},"p_two":{"dir":"/tmp"}}}"#,
+    )
+    .expect("write project catalog");
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["p_main"]}}],"agents":{{"glob":{{"dir":"/tmp","cli":"codex"}}}}}}"#,
+            serde_json::to_string(&project.join(".hcom").join("agents.json").to_string_lossy())
+                .expect("encode path")
+        ),
+    )
+    .expect("write global catalog");
+
+    let (code, _stdout, stderr) = h.run(["agent", "show", "p_two"]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(stderr.contains("unknown agent 'p_two'"), "stderr={stderr}");
+    assert!(
+        stderr.contains("Catalog scope depends on the directory"),
+        "stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains(
+            &project
+                .join(".hcom")
+                .join("agents.json")
+                .display()
+                .to_string()
+        ),
+        "leaked the hidden catalog's path: stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("is defined in"),
+        "leaked that the agent exists: stderr={stderr}"
+    );
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "p_main"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+}
+
+/// A name no reachable catalog defines still needs the scope note: the user
+/// cannot tell "misspelled" from "the catalog holding it is not in scope here".
+#[test]
+fn agent_unknown_name_explains_catalog_scope() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"glob":{"dir":"/tmp","cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, _stdout, stderr) = h.run(["agent", "show", "absent_one"]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(
+        stderr.contains("Catalog scope depends on the directory"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
+fn agent_cli_overrides_apply_to_projects_and_select_target_profile() {
+    let h = Hcom::new();
+    let project = h.root_path().join("project/.hcom");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{
+        "cli_overrides":{"codex":"claude","claude":"gemini"},
+        "imports":[{"from":"../project/.hcom/agents.json"}],
+        "agents":{"global":{"cli":"codex"},"unchanged":{"cli":"gemini"}}
+    }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("agents.json"),
+        r#"{
+        "agents":{"solo":{"cli":"codex","groups":["review"],
+            "tools":{"codex":{"model":"source-model","args":["--source-flag"]},
+                     "claude":{"model":"target-model","args":["--target-flag"]}}}}
+    }"#,
+    )
+    .unwrap();
+    let catalog = project.join("agents.json");
+    let catalog = catalog.to_str().unwrap();
+    for args in [
+        vec!["agent", "solo", "--catalog", catalog, "--dry-run"],
+        vec!["agent", "solo", "--dry-run"],
+        vec!["agent", "@review", "--catalog", catalog, "--dry-run"],
+    ] {
+        let (code, stdout, stderr) = h.run(args);
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        assert!(stdout.contains("claude --as solo"), "stdout={stdout}");
+        assert!(stdout.contains("target-model"), "stdout={stdout}");
+        assert!(stdout.contains("--target-flag"), "stdout={stdout}");
+        assert!(!stdout.contains("source-model"), "stdout={stdout}");
+        assert!(!stdout.contains("--source-flag"), "stdout={stdout}");
+    }
+    let (code, stdout, stderr) = h.run([
+        "agent",
+        "solo",
+        "--catalog",
+        catalog,
+        "--cli",
+        "codex",
+        "--dry-run",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
+    assert!(stdout.contains("source-model"), "stdout={stdout}");
+    let (code, stdout, stderr) = h.run(["agent", "list", "--catalog", catalog, "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let entries: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let solo = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "solo")
+        .unwrap();
+    assert_eq!(solo["cli"], "claude");
+    assert_eq!(solo["model"], "target-model");
+    for (name, tool) in [("global", "claude"), ("unchanged", "gemini")] {
+        let (code, stdout, stderr) = h.run(["agent", name, "--dry-run"]);
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        assert!(
+            stdout.contains(&format!("{tool} --as {name}")),
+            "stdout={stdout}"
+        );
+    }
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"imports":[{"from":"../project/.hcom/agents.json"}]}"#,
+    )
+    .unwrap();
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_cli_overrides_support_aliases_and_default_cli() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{
+        "cli_overrides":{"agy":"claude","claude":"codex"},
+        "agents":{"alias":{"cli":"antigravity"},"default":{}}
+    }"#,
+    )
+    .unwrap();
+    for (name, tool) in [("alias", "claude"), ("default", "codex")] {
+        let (code, stdout, stderr) = h.run(["agent", name, "--dry-run"]);
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        assert!(
+            stdout.contains(&format!("{tool} --as {name}")),
+            "stdout={stdout}"
+        );
+    }
+    let (code, stdout, stderr) = h.run(["agent", "default", "--tool", "claude", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("claude --as default"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_cli_overrides_reject_invalid_tools_and_non_global_catalogs() {
+    let h = Hcom::new();
+    for overrides in [
+        r#"{"codex":"typo"}"#,
+        r#"{"typo":"claude"}"#,
+        r#"{"adhoc":"claude"}"#,
+        r#"{"codex":"adhoc"}"#,
+        r#"{"agy":"claude","antigravity":"codex"}"#,
+    ] {
+        std::fs::write(
+            h.path().join("agents.json"),
+            format!(r#"{{"cli_overrides":{overrides},"agents":{{"solo":{{}}}}}}"#),
+        )
+        .unwrap();
+        let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+        assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+        assert!(stderr.contains("cli_overrides"), "stderr={stderr}");
+    }
+    std::fs::write(h.path().join("agents.json"), "{}").unwrap();
+    let local = h.root_path().join("local.json");
+    std::fs::write(
+        &local,
+        r#"{"cli_overrides":{"codex":"claude"},"agents":{"solo":{}}}"#,
+    )
+    .unwrap();
+    let (code, stdout, stderr) = h.run([
+        "agent",
+        "solo",
+        "--catalog",
+        local.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("cli_overrides is only supported in the global catalog"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
+fn agent_dry_run_renders_the_hcom_command_without_launching() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"defaults":{"cli":"claude"},
+            "agents":{"solo":{"dir":"/tmp","cli":"codex","terminal":"wezterm-tab",
+                              "env":{"AWS_PROFILE":"wdt"},"args":["--from-catalog"]}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--model", "gpt-5", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("AWS_PROFILE=wdt"), "stdout={stdout}");
+    assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
+    assert!(stdout.contains("--dir /tmp"), "stdout={stdout}");
+    assert!(stdout.contains("--terminal wezterm-tab"), "stdout={stdout}");
+    assert!(stdout.contains("--model gpt-5"), "stdout={stdout}");
+    assert!(stdout.contains("--from-catalog"), "stdout={stdout}");
+
+    // Nothing was launched.
+    let (code, list, _stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0);
+    assert_eq!(list.trim(), "[]", "dry-run must not create an instance");
+}
+
+#[test]
+fn agent_dry_run_exports_the_catalog_name_separately_from_the_instance_name() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"codex","terminal":"wezterm-tab"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "reviewer", "--as", "rev2", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("HCOM_AGENT_NAME=reviewer"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("codex --as rev2"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_dry_run_inherits_specified_env_vars() {
+    let h = Hcom::new();
+    let test_var = "CUSTOM_SSH_AUTH_SOCK";
+    let test_val = "/tmp/custom_ssh_agent.sock";
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"defaults":{{"cli":"claude","inherit_env":["{test_var}"]}},
+                "agents":{{"worker":{{"dir":"/tmp","cli":"codex"}}}}}}"#
+        ),
+    )
+    .expect("write catalog");
+
+    h.set_launch_env(test_var, test_val);
+
+    let (code, stdout, stderr) = h.run(["agent", "worker", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains(&format!("{test_var}={test_val}")),
+        "stdout={stdout}"
+    );
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "worker"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains(&format!("inherit_env: {test_var}")),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("{test_var}={test_val}")),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn claude_agent_start_links_private_skills_without_prompt_manifest() {
+    let h = Hcom::new();
+    let workspace = h.root_path().join("workspace");
+    let bundle = h.path().join("agents/solo");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(bundle.join("skills/review")).unwrap();
+    std::fs::write(bundle.join("SOUL.md"), "Agent notes.").unwrap();
+    std::fs::write(
+        bundle.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review changes\n---\n",
+    )
+    .unwrap();
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"agents":{{"solo":{{"dir":{},"cli":"claude","terminal_command":"sh -c true {{script}}"}}}}}}"#,
+            serde_json::to_string(&workspace).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let native_skills = bundle.join(".claude/skills");
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains(&format!("--add-dir {}", bundle.display())));
+    assert!(!stdout.contains("# Available agent skills"));
+    assert!(
+        !native_skills.exists(),
+        "dry-run must not change the bundle"
+    );
+    let (code, stdout, stderr) = h.run(["agent", "solo"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert_eq!(
+        std::fs::read_link(&native_skills).unwrap(),
+        std::path::Path::new("../skills")
+    );
+    assert_eq!(
+        std::fs::read_to_string(native_skills.join("review/SKILL.md")).unwrap(),
+        "---\nname: review\ndescription: Review changes\n---\n"
+    );
+    let (code, stdout, stderr) = h.run(["agent", "solo"]);
+    assert_eq!(code, 0, "repeated start: stdout={stdout} stderr={stderr}");
+    assert_eq!(
+        std::fs::read_link(&native_skills).unwrap(),
+        std::path::Path::new("../skills")
+    );
+}
+
+#[test]
+fn agent_catalog_system_prompt_file_renders_and_reaches_spawn_script() {
+    let h = Hcom::new();
+    let prompt_path = h.path().join("SYSTEM_PROMPT.md");
+    std::fs::write(&prompt_path, "Shared instructions from Markdown.\n")
+        .expect("write system prompt");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"system_prompt_file":"SYSTEM_PROMPT.md",
+            "agents":{"solo":{"dir":"/tmp","cli":"codex",
+                "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("Shared instructions from Markdown."),
+        "stdout={stdout}"
+    );
+
+    let (code, stdout, stderr) = h.run(["agent", "solo"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let launch_dir = h.path().join(".tmp/launch");
+    let launch_files = std::fs::read_dir(&launch_dir)
+        .expect("read launch directory")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        launch_files.contains("Shared instructions from Markdown."),
+        "catalog prompt did not reach spawn script: {launch_files}"
+    );
+}
+
+#[test]
+fn launch_scripts_export_catalog_agent_name_and_instance_name() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"claude",
+                "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+    let launch_dir = h.path().join(".tmp/launch");
+    let launch_files = || {
+        std::fs::read_dir(&launch_dir)
+            .expect("read launch directory")
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let (code, stdout, stderr) = h.run(["agent", "reviewer", "--as", "rev2"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let scripts = launch_files();
+    assert!(scripts.contains("HCOM_AGENT_NAME=reviewer"), "{scripts}");
+    assert!(scripts.contains("HCOM_INSTANCE_NAME=rev2"), "{scripts}");
+    std::fs::remove_dir_all(&launch_dir).expect("clear launch directory");
+
+    // Outside the catalog the agent name is the instance name, even when the
+    // caller is itself an agent whose own name must not leak into the child.
+    let output = h
+        .cmd()
+        .env("HCOM_AGENT_NAME", "reviewer")
+        .args([
+            "claude",
+            "--as",
+            "solo",
+            "--terminal",
+            "sh -c true {script}",
+            "--no-run-here",
+            "--go",
+        ])
+        .output()
+        .expect("run hcom");
+    let code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let scripts = launch_files();
+    assert!(scripts.contains("HCOM_AGENT_NAME=solo"), "{scripts}");
+    assert!(scripts.contains("HCOM_INSTANCE_NAME=solo"), "{scripts}");
+}
+
+#[test]
+fn handoff_relaunches_the_same_catalog_agent_under_its_instance_name() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"claude",
+                "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+    let (code, stdout, stderr) = h.run(["agent", "reviewer", "--as", "rev2"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let scripts = std::fs::read_dir(h.path().join(".tmp/launch"))
+        .expect("read launch directory")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let process_id = scripts
+        .split("HCOM_PROCESS_ID=")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split(|c: char| c.is_whitespace() || c == '\'' || c == ';')
+                .find(|s| !s.is_empty())
+        })
+        .expect("process id in launch script")
+        .to_string();
+
+    let (code, stdout, stderr) = h.run_as_process(
+        &process_id,
+        [
+            "handoff",
+            "--dry-run",
+            "--cli",
+            "codex",
+            "Continue step 2 of PLAN.md",
+        ],
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("kill rev2"), "stdout={stdout}");
+    assert!(
+        stdout.contains("HCOM_AGENT_NAME=reviewer"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("codex --as rev2"), "stdout={stdout}");
+    assert!(
+        stdout.contains("Continue step 2 of PLAN.md"),
+        "stdout={stdout}"
+    );
+
+    // An agent launched outside the catalog has no catalog name to relaunch.
+    std::fs::remove_dir_all(h.path().join(".tmp/launch")).expect("clear launch directory");
+    let (code, stdout, stderr) = h.run([
+        "claude",
+        "--as",
+        "solo",
+        "--terminal",
+        "sh -c true {script}",
+        "--no-run-here",
+        "--go",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let script = std::fs::read_dir(h.path().join(".tmp/launch"))
+        .expect("read launch directory")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let solo_process_id = script
+        .split("HCOM_PROCESS_ID=")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split(|c: char| c.is_whitespace() || c == '\'' || c == ';')
+                .find(|s| !s.is_empty())
+        })
+        .expect("process id in launch script")
+        .to_string();
+    let (code, _stdout, stderr) =
+        h.run_as_process(&solo_process_id, ["handoff", "--dry-run", "next"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("'solo' has no recorded agent name"),
+        "stderr={stderr}"
+    );
+
+    // Without a recorded name, the agent's own HCOM_AGENT_NAME is used, but
+    // only when the environment belongs to the instance being handed off.
+    let handoff_with_env = |instance: &str| {
+        let output = h
+            .cmd()
+            .env("HCOM_PROCESS_ID", &solo_process_id)
+            .env("HCOM_INSTANCE_NAME", instance)
+            .env("HCOM_AGENT_NAME", "reviewer")
+            .args(["handoff", "--dry-run", "next"])
+            .output()
+            .expect("run handoff");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (code, stdout, stderr) = handoff_with_env("solo");
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("kill solo"), "stdout={stdout}");
+    assert!(
+        stdout.contains("HCOM_AGENT_NAME=reviewer"),
+        "stdout={stdout}"
+    );
+    let (code, _stdout, stderr) = handoff_with_env("rev2");
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("'solo' has no recorded agent name"),
+        "stderr={stderr}"
+    );
+
+    // A caller without an agent identity has nothing to hand off.
+    let (code, _stdout, stderr) = h.run(["handoff", "--dry-run", "next"]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("must be run by an hcom agent"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
+fn agent_catalog_inline_system_prompt_overrides_file() {
+    let h = Hcom::new();
+    std::fs::write(h.path().join("SYSTEM_PROMPT.md"), "Instructions from file.")
+        .expect("write system prompt");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"system_prompt_file":"SYSTEM_PROMPT.md",
+            "defaults":{"system_prompt":"Inline instructions."},
+            "agents":{"solo":{"dir":"/tmp","cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "solo"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("Inline instructions."), "stdout={stdout}");
+    assert!(
+        !stdout.contains("Instructions from file."),
+        "stdout={stdout}"
+    );
+
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"system_prompt_file":"SYSTEM_PROMPT.md",
+            "defaults":{"system_prompt":""},
+            "agents":{"solo":{"dir":"/tmp","cli":"codex"}}}"#,
+    )
+    .expect("clear inline system prompt");
+    let (code, stdout, stderr) = h.run(["agent", "show", "solo"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(!stdout.contains("--hcom-system-prompt"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_catalog_imported_system_prompt_file_resolves_beside_source() {
+    let h = Hcom::new();
+    let source_dir = h.root_path().join("shared-catalog");
+    std::fs::create_dir_all(&source_dir).expect("create source catalog directory");
+    std::fs::write(
+        source_dir.join("SYSTEM_PROMPT.md"),
+        "Imported instructions.",
+    )
+    .expect("write imported system prompt");
+    let source_catalog = source_dir.join("agents.json");
+    std::fs::write(
+        &source_catalog,
+        r#"{"system_prompt_file":"SYSTEM_PROMPT.md","agents":{"shared":{"cli":"codex"}}}"#,
+    )
+    .expect("write imported catalog");
+    std::fs::write(
+        h.path().join("agents.json"),
+        serde_json::json!({"imports": [{"from": source_catalog, "agents": ["shared"]}]})
+            .to_string(),
+    )
+    .expect("write global catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "shared"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("Imported instructions."), "stdout={stdout}");
+}
+
+#[test]
+fn agent_catalog_system_prompt_file_reports_read_error() {
+    let h = Hcom::new();
+    let catalog_path = h.path().join("agents.json");
+    std::fs::write(
+        &catalog_path,
+        r#"{"system_prompt_file":"missing.md","agents":{"solo":{}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, _stdout, stderr) = h.run(["agent", "show", "solo"]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(
+        stderr.contains(&catalog_path.display().to_string()),
+        "stderr={stderr}"
+    );
+    assert!(stderr.contains("missing.md"), "stderr={stderr}");
+    assert!(
+        stderr.contains("cannot read system prompt"),
+        "stderr={stderr}"
+    );
+
+    std::fs::write(h.path().join("missing.md"), [0xff, 0xfe])
+        .expect("write non-UTF-8 system prompt");
+    let (code, _stdout, stderr) = h.run(["agent", "show", "solo"]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(
+        stderr.contains("cannot read system prompt"),
+        "stderr={stderr}"
+    );
+    assert!(stderr.contains("valid UTF-8"), "stderr={stderr}");
+}
+
+#[test]
+fn agent_agy_external_bundle_dry_run_adds_bundle_to_workspace() {
+    let h = Hcom::new();
+    let workspace = h.root_path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("create workspace");
+    for name in ["agy_agent", "antigravity_agent"] {
+        let bundle = h.path().join("agents").join(name);
+        std::fs::create_dir_all(&bundle).expect("create bundle");
+        std::fs::write(bundle.join("SOUL.md"), "Editable agent memory.")
+            .expect("write bundle instructions");
+    }
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"agents":{{
+                "agy_agent":{{"dir":{},"cli":"agy"}},
+                "antigravity_agent":{{"dir":{},"cli":"antigravity"}}
+            }}}}"#,
+            serde_json::to_string(&workspace).unwrap(),
+            serde_json::to_string(&workspace).unwrap()
+        ),
+    )
+    .expect("write catalog");
+
+    for name in ["agy_agent", "antigravity_agent"] {
+        let bundle = h.path().join("agents").join(name);
+        let (code, stdout, stderr) = h.run(["agent", name, "--dry-run"]);
+        assert_eq!(code, 0, "name={name} stdout={stdout} stderr={stderr}");
+        assert!(
+            stdout.contains(&format!("--add-dir {}", bundle.display())),
+            "name={name} stdout={stdout}"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn agent_agy_policy_cwd_uses_canonical_launch_directory() {
+    let h = Hcom::new();
+    h.set_launch_env("DIPPY_POLICY_CWD", "/parent-policy");
+    let workspace = h.root_path().join("workspace");
+    let alias = h.root_path().join("workspace-alias");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::os::unix::fs::symlink(&workspace, &alias).unwrap();
+    let bundle = h.path().join("agents/knowledge");
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("SOUL.md"), "Knowledge agent.").unwrap();
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"agents":{{"knowledge":{{"dir":{},"cli":"agy","env":{{"DIPPY_POLICY_CWD":"/wrong"}}}}}}}}"#,
+            serde_json::to_string(&alias).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = h.run(["agent", "knowledge", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains(&format!("DIPPY_POLICY_CWD={}", workspace.display())),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains(&format!("--add-dir {}", bundle.display())));
+    assert!(!stdout.contains("DIPPY_POLICY_CWD=/wrong"));
+    let other = h.root_path().join("other-workspace");
+    std::fs::create_dir_all(&other).unwrap();
+    let (code, stdout, stderr) = h.run([
+        "agent",
+        "knowledge",
+        "--dir",
+        other.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains(&format!("--dir {}", other.display())));
+    assert!(stdout.contains(&format!("DIPPY_POLICY_CWD={}", workspace.display())));
+
+    // The generated launcher script exports the value to AGY; AGY hook
+    // subprocesses inherit this process environment. A plain child launch
+    // cannot inherit the parent agent's policy scope.
+    let (code, _script, stderr) = h.run(["agent", "knowledge", "--terminal", "print"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let launch_dir = h.path().join(".tmp/launch");
+    let knowledge_env_path = std::fs::read_dir(&launch_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("antigravity_knowledge_") && name.ends_with(".env")
+                })
+        })
+        .expect("knowledge launcher environment file");
+    let script = std::fs::read_to_string(&knowledge_env_path).unwrap();
+    assert!(
+        script.contains(&format!("DIPPY_POLICY_CWD={}", workspace.display())),
+        "launcher env path={}",
+        knowledge_env_path.display()
+    );
+    assert!(!script.contains("/parent-policy"));
+    assert!(!script.contains("DIPPY_POLICY_CWD=/wrong"));
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).unwrap();
+    let launch_context: String = conn
+        .query_row(
+            "SELECT launch_context FROM instances WHERE name='knowledge'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let launch_context: serde_json::Value = serde_json::from_str(&launch_context).unwrap();
+    assert_eq!(
+        launch_context["dippy_policy_cwd"].as_str(),
+        workspace.to_str()
+    );
+    let hook = std::process::Command::new("bash")
+        .args([
+            "-c",
+            "source \"$1\"; sh -c 'printf %s \"$DIPPY_POLICY_CWD\"'",
+            "_",
+        ])
+        .arg(&knowledge_env_path)
+        .env_remove("DIPPY_POLICY_CWD")
+        .output()
+        .unwrap();
+    assert!(hook.status.success());
+    assert_eq!(hook.stdout, workspace.to_string_lossy().as_bytes());
+
+    let (code, _script, stderr) = h.run(["agy", "--terminal", "print", "--no-run-here"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let child_env_paths = std::fs::read_dir(&launch_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == "env") && path != &knowledge_env_path
+        })
+        .collect::<Vec<_>>();
+    assert!(!child_env_paths.is_empty());
+    for path in child_env_paths {
+        let child_env = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !child_env.contains("DIPPY_POLICY_CWD"),
+            "path={}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn agent_agy_policy_cwd_survives_tracked_resume_and_cli_switch() {
+    let h = Hcom::new();
+    h.set_launch_env("DIPPY_POLICY_CWD", "/ambient-policy");
+    let workspace = h.root_path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"cli_overrides":{{"codex":"claude"}},"agents":{{"knowledge":{{"dir":{},"cli":"codex","env":{{"DIPPY_POLICY_CWD":"/wrong"}}}}}}}}"#,
+            serde_json::to_string(&workspace).unwrap()
+        ),
+    )
+    .unwrap();
+
+    let (code, stdout, stderr) = h.run(["agent", "knowledge", "--cli", "agy", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains(&format!("DIPPY_POLICY_CWD={}", workspace.display())));
+    let (code, stdout, stderr) = h.run(["agent", "knowledge", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(!stdout.contains("DIPPY_POLICY_CWD"), "stdout={stdout}");
+    assert!(stdout.contains("claude --as knowledge"), "stdout={stdout}");
+
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).unwrap();
+    conn.execute(
+        "INSERT INTO instances (name, session_id, tool, directory, status, status_context, created_at) \
+         VALUES ('knowledge', 'agy-session', 'antigravity', ?1, 'inactive', 'exit:0', 1)",
+        rusqlite::params![workspace.to_string_lossy().as_ref()],
+    )
+    .unwrap();
+    let snapshot = serde_json::json!({
+        "action": "stopped",
+        "snapshot": {
+            "tool": "antigravity",
+            "session_id": "agy-session",
+            "launch_args": "[]",
+            "directory": workspace,
+            "dippy_policy_cwd": workspace,
+            "tag": "",
+            "background": 0,
+            "last_event_id": 0
+        }
+    });
+    conn.execute(
+        "INSERT INTO events (timestamp, type, instance, data) \
+         VALUES ('2026-01-01T00:00:00Z', 'life', 'knowledge', ?1)",
+        rusqlite::params![snapshot.to_string()],
+    )
+    .unwrap();
+    drop(conn);
+
+    let (code, _stdout, stderr) = h.run(["r", "knowledge", "--terminal", "print", "--no-run-here"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let launch_dir = h.path().join(".tmp/launch");
+    let resume_env = std::fs::read_dir(&launch_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "env"))
+        .map(|path| std::fs::read_to_string(path).unwrap())
+        .find(|content| content.contains("DIPPY_POLICY_CWD"))
+        .expect("tracked resume launcher environment");
+    assert!(
+        resume_env.contains(&format!("DIPPY_POLICY_CWD={}", workspace.display())),
+        "resume launcher has wrong policy cwd"
+    );
+    assert!(!resume_env.contains("/ambient-policy"));
+
+    let (code, _stdout, stderr) = h.run(["f", "knowledge", "--dry-run"]);
+    assert_ne!(code, 0, "AGY fork is unsupported");
+    assert!(stderr.contains("fork"), "stderr={stderr}");
+}
+
+#[test]
+fn agent_group_dry_run_includes_agents_hidden_by_selective_import() {
+    let h = Hcom::new();
+    let imported = h.path().join("project-agents.json");
+    std::fs::write(
+        &imported,
+        r#"{"agents":{
+            "public":{"dir":"/tmp","cli":"claude","groups":["crew"]},
+            "private":{"dir":"/tmp","cli":"gemini","groups":["crew"]}
+        }}"#,
+    )
+    .expect("write imported catalog");
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["public"]}}]}}"#,
+            serde_json::to_string(&imported).unwrap()
+        ),
+    )
+    .expect("write catalog");
+
+    let (code, visible, stderr) = h.run(["agent", "list", "--names", "--no-project"]);
+    assert_eq!(code, 0, "stdout={visible} stderr={stderr}");
+    assert_eq!(visible.trim(), "public");
+
+    let (code, groups, stderr) = h.run(["agent", "list", "--groups", "--no-project"]);
+    assert_eq!(code, 0, "stdout={groups} stderr={stderr}");
+    assert_eq!(groups.trim(), "@crew");
+
+    let (code, members, stderr) = h.run(["agent", "list", "@crew", "--names", "--no-project"]);
+    assert_eq!(code, 0, "stdout={members} stderr={stderr}");
+    assert_eq!(members.trim(), "private\npublic");
+
+    let (code, json, stderr) = h.run(["agent", "list", "@crew", "--json", "--no-project"]);
+    assert_eq!(code, 0, "stdout={json} stderr={stderr}");
+    let listed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON listing");
+    assert_eq!(listed.as_array().map(Vec::len), Some(2));
+
+    let (code, stdout, stderr) = h.run([
+        "agent",
+        "@crew",
+        "--cli",
+        "codex",
+        "--dry-run",
+        "--no-project",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("codex --as private"), "stdout={stdout}");
+    assert!(stdout.contains("codex --as public"), "stdout={stdout}");
+    assert!(
+        stdout.find("--as private") < stdout.find("--as public"),
+        "members must launch in name order: {stdout}"
+    );
+    assert!(
+        stdout.contains("group '@crew': 2 succeeded, 0 failed (2 total)"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn kill_by_group_and_at_prefix() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{
+            "worker_a":{"dir":"/tmp","cli":"claude","groups":["workers"]},
+            "worker_b":{"dir":"/tmp","cli":"gemini","groups":["workers"]}
+        }}"#,
+    )
+    .expect("write catalog");
+
+    // Initially nothing running, kill @workers fails with no active agents
+    let (code, stdout, stderr) = h.run(["kill", "@workers"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("No active agents in group '@workers'"),
+        "stderr={stderr}"
+    );
+
+    // Bare group name without @ suggests @workers
+    let (code, stdout, stderr) = h.run(["kill", "workers"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("No agent named 'workers'")
+            && stderr.contains("\nDid you mean @workers? Groups require @"),
+        "stderr={stderr}"
+    );
+
+    // Populate active instances for worker_a and worker_b
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO instances (name, status, status_time, created_at, tool, pid) \
+         VALUES ('worker_a', 'listening', ?1, ?1, 'claude', 999991)",
+        rusqlite::params![now],
+    )
+    .expect("insert worker_a");
+    conn.execute(
+        "INSERT INTO instances (name, status, status_time, created_at, tool, pid) \
+         VALUES ('worker_b', 'listening', ?1, ?1, 'gemini', 999992)",
+        rusqlite::params![now],
+    )
+    .expect("insert worker_b");
+
+    // @ prefix is strictly for groups; @worker_a is not a group so it fails
+    let (code, stdout, stderr) = h.run(["kill", "@worker_a"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("unknown or empty agent group '@worker_a'"),
+        "stderr={stderr}"
+    );
+
+    // Single agent kill works by plain agent name
+    let (code, stdout, stderr) = h.run(["kill", "worker_a"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("worker_a"), "stdout={stdout}");
+
+    // Group kill works and kills remaining member worker_b
+    let (code, stdout, stderr) = h.run(["kill", "@workers"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("Killed 1 (group:@workers)"),
+        "stdout={stdout}"
+    );
+
+    // Now group is completely stopped
+    let (code, stdout, stderr) = h.run(["kill", "@workers"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("No active agents in group '@workers'"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
+fn agent_zsh_completions_add_names_and_groups_separately() {
+    let h = Hcom::new();
+    let (code, stdout, stderr) = h.run(["agent", "completions", "zsh"]);
+
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("  compadd -a names\n"), "stdout={stdout}");
+    assert!(stdout.contains("  compadd -a groups\n"), "stdout={stdout}");
+    assert!(
+        !stdout.contains("compadd -a names -a groups"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn completions_command_generates_valid_scripts_for_all_shells() {
+    let h = Hcom::new();
+
+    // Bash
+    let (code, stdout, stderr) = h.run(["completions", "bash"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("_hcom()"), "stdout={stdout}");
+    assert!(stdout.contains("complete -F _hcom hcom"), "stdout={stdout}");
+    assert!(stdout.contains("agent"), "stdout={stdout}");
+    assert!(stdout.contains("kill"), "stdout={stdout}");
+
+    // Singular alias 'completion'
+    let (code, stdout_alias, stderr) = h.run(["completion", "bash"]);
+    assert_eq!(code, 0, "stdout={stdout_alias} stderr={stderr}");
+    assert_eq!(stdout, stdout_alias);
+
+    // Zsh
+    let (code, stdout, stderr) = h.run(["completions", "zsh"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("#compdef hcom"), "stdout={stdout}");
+    assert!(stdout.contains("compdef _hcom hcom"), "stdout={stdout}");
+
+    // Fish
+    let (code, stdout, stderr) = h.run(["completions", "fish"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("complete -c hcom"), "stdout={stdout}");
+
+    // Help
+    let (code, stdout, stderr) = h.run(["completions", "--help"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("Usage:"), "stdout={stdout}");
+    assert!(stdout.contains("hcom completions"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_group_rejects_single_instance_flags_and_terminal_here() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"solo":{"dir":"/tmp","groups":["crew"]}}}"#,
+    )
+    .expect("write catalog");
+
+    for flag in ["--as", "--attach"] {
+        let args = if flag == "--as" {
+            vec!["agent", "@crew", flag, "alias", "--dry-run"]
+        } else {
+            vec!["agent", "@crew", flag, "--dry-run"]
+        };
+        let (code, _stdout, stderr) = h.run(args);
+        assert_ne!(code, 0, "flag={flag}");
+        assert!(stderr.contains(flag), "stderr={stderr}");
+    }
+
+    let (code, _stdout, stderr) = h.run(["agent", "@crew", "--terminal", "here", "--dry-run"]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("current terminal"), "stderr={stderr}");
+}
+
+#[test]
+fn agent_group_continues_after_a_member_fails() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{
+            "a_broken":{"dir":"/tmp","cli":"not-a-real-tool","groups":["crew"],
+                "terminal_command":"sh -c true {script}"},
+            "z_working":{"dir":"/tmp","cli":"codex","groups":["crew"],
+                "terminal_command":"sh -c true {script}"}
+        }}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "@crew", "--no-project"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("agent 'a_broken' failed"),
+        "stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("group '@crew': 1 succeeded, 1 failed (2 total)"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn agent_as_uses_catalog_config_with_a_distinct_instance_name() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"solo":{"dir":"/tmp","cli":"codex","terminal":"wezterm-tab"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--as", "solo_two", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("codex --as solo_two"), "stdout={stdout}");
+    assert!(stdout.contains("--dir /tmp"), "stdout={stdout}");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "solo", "--as", "solo_two"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("name:      solo_two"), "stdout={stdout}");
+    assert!(stdout.contains("codex --as solo_two"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_start_mode_uses_catalog_and_cli_override() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"defaults":{"resume":true},
+            "agents":{"solo":{"dir":"/tmp","cli":"codex","terminal":"wezterm-tab"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "solo"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains(" r solo "), "stdout={stdout}");
+    assert!(stdout.contains("--go"), "stdout={stdout}");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--clean", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
+    assert!(!stdout.contains(" r solo "), "stdout={stdout}");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "solo", "--clean"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("start:     clean"), "stdout={stdout}");
+    assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_continue_without_previous_session_fails() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"solo":{"dir":"/tmp","cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, _stdout, stderr) = h.run(["agent", "solo", "--continue"]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("cannot continue 'solo'"), "stderr={stderr}");
+}
+
+#[test]
+fn agent_continue_dry_run_builds_handoff_prompt_from_previous_session() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"solo":{"dir":"/tmp","cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+
+    let transcript_dir = tempfile::tempdir().unwrap();
+    let transcript_path = transcript_dir.path().join("rollout.jsonl");
+    let content = [
+        serde_json::json!({
+            "type": "response_item",
+            "timestamp": "2026-03-27T10:00:00Z",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Implement OAuth flow"}]
+            }
+        }),
+        serde_json::json!({
+            "type": "response_item",
+            "timestamp": "2026-03-27T10:00:01Z",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Working on auth.rs"}]
+            }
+        }),
+        serde_json::json!({
+            "type": "response_item",
+            "timestamp": "2026-03-27T10:00:02Z",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Add unit tests"}]
+            }
+        }),
+        serde_json::json!({
+            "type": "response_item",
+            "timestamp": "2026-03-27T10:00:03Z",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Tests added"}]
+            }
+        }),
+    ]
+    .iter()
+    .map(serde_json::Value::to_string)
+    .collect::<Vec<_>>()
+    .join("\n");
+    std::fs::write(&transcript_path, content).unwrap();
+
+    let _ = h.run(["list", "--json"]);
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "INSERT INTO instances (name, created_at, transcript_path, tool, status, status_context) VALUES ('solo', 1000, ?1, 'codex', 'inactive', 'exit:0')",
+        [transcript_path.to_str().unwrap()],
+    )
+    .expect("insert instance");
+
+    let (code, stdout, stderr) = h.run([
+        "agent",
+        "solo",
+        "--cli",
+        "claude",
+        "--continue",
+        "--dry-run",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("claude --as solo"), "stdout={stdout}");
+    assert!(stdout.contains("--hcom-prompt"), "stdout={stdout}");
+    assert!(stdout.contains("Implement OAuth flow"), "stdout={stdout}");
+    assert!(stdout.contains("Add unit tests"), "stdout={stdout}");
+
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"cli_overrides":{"codex":"claude"},"agents":{"solo":{"dir":"/tmp","cli":"codex","resume":true}}}"#,
+    ).unwrap();
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--restart", "--continue", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("claude --as solo"), "stdout={stdout}");
+    assert!(stdout.contains("Implement OAuth flow"), "stdout={stdout}");
+    assert!(stdout.contains("Previous tool: `codex`"), "stdout={stdout}");
+
+    let (code, show_out, stderr) = h.run(["agent", "show", "solo", "--continue"]);
+    assert_eq!(code, 0, "stdout={show_out} stderr={stderr}");
+    assert!(
+        show_out.contains("start:     continue"),
+        "stdout={show_out}"
+    );
+
+    let (code, stdout_last, stderr) = h.run([
+        "agent",
+        "solo",
+        "--cli",
+        "claude",
+        "--continue",
+        "--last",
+        "1",
+        "--dry-run",
+        "--hcom-prompt",
+        "finish now",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout_last} stderr={stderr}");
+    assert!(
+        stdout_last.contains("Recent Activity (last 1 exchanges)"),
+        "stdout={stdout_last}"
+    );
+    assert!(stdout_last.contains("finish now"), "stdout={stdout_last}");
+}
+
+#[test]
+fn agent_show_materializes_roaming_agent_for_the_current_project() {
+    let h = Hcom::new();
+    let project = h.root_path().join("forecast-service");
+    let nested = project.join("src/jobs");
+    std::fs::create_dir_all(project.join(".git")).expect("create git marker");
+    std::fs::create_dir_all(&nested).expect("create nested working directory");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+
+    let output = h
+        .cmd()
+        .current_dir(&nested)
+        .args(["agent", "show", "reviewer"])
+        .output()
+        .expect("show roaming agent");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("name:      reviewer_forecast_service"));
+    assert!(stdout.contains("roaming:   true"));
+    assert!(
+        stdout.contains(&format!("dir:       {}", project.display())),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("codex --as reviewer_forecast_service"));
+}
+
+#[test]
+fn roaming_agent_rejects_catalog_static_placement() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"dir":"/tmp"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "reviewer"]);
+    assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("roaming agent 'reviewer' cannot set dir"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
+fn agent_dry_run_selects_the_effective_cli_tool_profile() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"solo":{"dir":"/tmp","cli":"claude","args":["--common"],
+            "tools":{"claude":{"model":"sonnet","args":["--agent","reviewer"]},
+                     "codex":{"model":"gpt-5","args":["--sandbox","workspace-write"]}}}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--cli", "codex", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
+    assert!(stdout.contains("--model gpt-5"), "stdout={stdout}");
+    assert!(stdout.contains("--common"), "stdout={stdout}");
+    assert!(
+        stdout.contains("--sandbox workspace-write"),
+        "stdout={stdout}"
+    );
+    assert!(!stdout.contains("--agent reviewer"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_show_uses_configured_herdr_placement_instead_of_parent_placement() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"defaults":{"cli":"codex","session":"child-space"},"agents":{"solo":{"dir":"/tmp"}}}"#,
+    )
+    .expect("write catalog");
+
+    let mut cmd = h.cmd();
+    cmd.env("HCOM_TERMINAL", "herdr")
+        .env("HCOM_HERDR_WORKSPACE", "parent-space")
+        .env("HCOM_HERDR_TAB", "parent-tab")
+        .args(["agent", "show", "solo"]);
+    let output = cmd.output().expect("run agent show");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("terminal:  preset herdr (hcom config default)"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("HCOM_HERDR_WORKSPACE=child-space"),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("HCOM_HERDR_TAB=solo"), "stdout={stdout}");
+    assert!(!stdout.contains("parent-space"), "stdout={stdout}");
+    assert!(!stdout.contains("parent-tab"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_with_terminal_preset_opens_its_own_surface() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{
+            "solo":{"dir":"/tmp","cli":"codex","terminal":"tmux","session":"work"},
+            "inplace":{"dir":"/tmp","cli":"codex","terminal":"here"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("--terminal tmux --no-run-here --go"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stderr.contains("session 'work' ignored: terminal preset 'tmux' is not herdr"),
+        "stderr={stderr}"
+    );
+
+    let (code, stdout, stderr) = h.run(["agent", "inplace", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("--terminal here --go"), "stdout={stdout}");
+    assert!(!stdout.contains("--no-run-here"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_catalog_rejects_removed_pre_field() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"solo":{"dir":"/tmp","cli":"codex","pre":"echo ready"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+    assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("unknown field `pre`"), "stderr={stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn kill_by_group_matches_members_running_under_another_instance_name() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{
+            "worker_a":{"dir":"/tmp","cli":"claude","groups":["workers"]},
+            "worker_b":{"dir":"/tmp","cli":"gemini","groups":["workers"]}
+        }}"#,
+    )
+    .expect("write catalog");
+    // Make sure the schema exists before inserting rows directly.
+    let (code, stdout, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+
+    // worker_a runs as `rev2` (`hcom agent worker_a --as rev2`).
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO instances (name, status, status_time, created_at, tool, pid, launch_context) \
+         VALUES ('rev2', 'listening', ?1, ?1, 'claude', 999991, '{\"agent_name\":\"worker_a\"}')",
+        rusqlite::params![now],
+    )
+    .expect("insert rev2");
+
+    // worker_b survives only as a tracked orphan process named `rev3`.
+    let mut child = Command::new("sh")
+        .args(["-c", "exec sleep 60"])
+        .process_group(0)
+        .spawn()
+        .expect("spawn orphan process group");
+    let pid = child.id();
+    h.track_cleanup_pid(i64::from(pid));
+    std::fs::create_dir_all(h.hcom_dir.join(".tmp")).expect("create .tmp");
+    std::fs::write(
+        h.hcom_dir.join(".tmp/launched_pids.json"),
+        format!(
+            r#"{{"{pid}":{{"tool":"gemini","names":["rev3"],"launched_at":0,"agent_name":"worker_b"}}}}"#
+        ),
+    )
+    .expect("write pidfile");
+
+    let (code, stdout, stderr) = h.run(["kill", "@workers"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("'rev2'"), "stdout={stdout}");
+    assert!(
+        stdout.contains(&format!("stopped process group {pid} for 'rev3'")),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("Killed 2 (group:@workers)"),
+        "stdout={stdout}"
+    );
+    let status = child.wait().expect("reap orphan");
+    assert!(!status.success(), "orphan should be terminated: {status}");
+}

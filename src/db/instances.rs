@@ -145,6 +145,16 @@ impl InstanceRow {
         ctx.get("pid_identity")?.as_str().map(str::to_string)
     }
 
+    /// Catalog agent this instance was launched from, if recorded. Differs
+    /// from the instance name under `--as` and for roaming agents.
+    pub fn catalog_agent_name(&self) -> Option<String> {
+        let ctx: serde_json::Value = serde_json::from_str(self.launch_context.as_deref()?).ok()?;
+        ctx.get("agent_name")?
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    }
+
     /// Whether a *different* live process now holds `pid` (the identity in
     /// this snapshot no longer matches), so it must not be signalled on this
     /// instance's behalf. Checked against the snapshot, not a fresh read, so

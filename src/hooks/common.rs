@@ -48,9 +48,11 @@ pub(crate) fn dispatch_with_panic_guard<R>(
 /// Included: read-only queries, messaging, and session lifecycle commands that
 /// agents need to run without user approval prompts.
 /// Excluded: `stop`, `kill`, `run`, `reset` — these are destructive or
-/// admin-level and require explicit user approval.
+/// admin-level and require explicit user approval. `handoff` only replaces
+/// the calling agent itself, after validating the relaunch.
 pub(crate) const SAFE_HCOM_COMMANDS: &[&str] = &[
     "send",
+    "handoff",
     "start",
     "help",
     "--help",
@@ -1334,6 +1336,7 @@ fn stop_instance_inner(
                     notify_port,
                     inject_port,
                     tag: instance_data.tag.as_deref().unwrap_or(""),
+                    agent_name: &instance_data.catalog_agent_name().unwrap_or_default(),
                 });
                 log::log_info(
                     "stop",

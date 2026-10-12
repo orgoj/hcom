@@ -9,6 +9,7 @@ pub mod send;
 // Lifecycle
 pub mod daemon;
 pub mod fork;
+pub mod handoff;
 pub mod kill;
 pub mod launch;
 pub mod resume;
@@ -24,7 +25,9 @@ pub mod term;
 pub mod transcript;
 
 // Management
+pub mod agent;
 pub mod archive;
+pub mod completions;
 pub mod config;
 pub mod help;
 pub mod hooks;

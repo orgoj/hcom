@@ -354,6 +354,19 @@ fn apply_inherited_notes(instance_env: &mut HashMap<String, String>, inherited: 
     }
 }
 
+/// Preserve a caller's task-local catalog imports across the sanitized
+/// nested-launch environment. Explicit launch/config values still win.
+fn apply_inherited_agent_catalogs(
+    instance_env: &mut HashMap<String, String>,
+    inherited: Option<String>,
+) {
+    if let Some(val) = inherited {
+        instance_env
+            .entry("HCOM_AGENT_CATALOGS".to_string())
+            .or_insert(val);
+    }
+}
+
 /// Start a new Grok conversation under an explicit session id.
 ///
 /// Without one the TUI opens on its welcome screen over a hidden "home"
@@ -1586,10 +1599,18 @@ fn finalize_background_launch(
             e
         );
     }
+    let agent_name = ctx
+        .db
+        .get_instance_full(ctx.instance_name)
+        .ok()
+        .flatten()
+        .and_then(|row| row.catalog_agent_name())
+        .unwrap_or_default();
     crate::pidtrack::record_pid(&crate::pidtrack::PidRecord {
         process_id: ctx.process_id,
         terminal_preset: &effective_preset,
         tag: ctx.tag,
+        agent_name: &agent_name,
         ..crate::pidtrack::PidRecord::new(
             &crate::paths::hcom_dir(),
             pid,
@@ -1997,11 +2018,18 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         &hcom_config,
         launch_env_regime(base_env_run_here, inside_ai_tool),
     );
+    // This scope belongs to a single catalog launch. Do not pass a parent's
+    // policy directory into a nested child or an unrelated resumed process.
+    base_env.remove(crate::commands::agent::DIPPY_POLICY_CWD);
     if let Some(ref caller_env) = params.env {
         for (key, value) in caller_env {
             insert_effective_env(&mut base_env, key.clone(), value.clone(), cfg!(windows));
         }
     }
+    if !matches!(normalized, LaunchTool::Antigravity) {
+        base_env.remove(crate::commands::agent::DIPPY_POLICY_CWD);
+    }
+    base_env.remove(crate::commands::agent::CATALOG_LAUNCH_ENV);
     base_env.remove("HCOM_TERMINAL");
     ensure_tool_config_env(&normalized, &mut base_env);
 
@@ -2195,6 +2223,10 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         // launch (an agent that inherited notes spawning a child) doesn't lose
         // them — but only as a fallback (see `apply_inherited_notes`).
         apply_inherited_notes(&mut instance_env, std::env::var("HCOM_NOTES").ok());
+        apply_inherited_agent_catalogs(
+            &mut instance_env,
+            std::env::var("HCOM_AGENT_CATALOGS").ok(),
+        );
 
         let process_id = generate_process_id();
         instance_env.insert("HCOM_PROCESS_ID".to_string(), process_id.clone());
@@ -2212,6 +2244,22 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
             instance_names::generate_unique_name(db)?
         };
         instance_env.insert("HCOM_INSTANCE_NAME".to_string(), instance_name.clone());
+        // Only the caller's explicit env names a catalog agent; an inherited
+        // value belongs to the parent and must not reach a nested child. Only
+        // catalog names are recorded; outside the catalog the agent name is
+        // the instance name, so a fork gets its own.
+        let catalog_agent_name = params
+            .env
+            .as_ref()
+            .and_then(|env| env.get(crate::commands::agent::AGENT_NAME_ENV))
+            .filter(|name| !name.is_empty())
+            .cloned();
+        instance_env.insert(
+            crate::commands::agent::AGENT_NAME_ENV.to_string(),
+            catalog_agent_name
+                .clone()
+                .unwrap_or_else(|| instance_name.clone()),
+        );
 
         let mut instruction_args = params.args.clone();
         if let Some(ref instructions) = params.system_prompt {
@@ -2305,6 +2353,20 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
             // their existing canonical identity semantics.
             if params.explicit_identity {
                 db.store_launch_context(&instance_name, r#"{"explicit_identity":true}"#)?;
+            }
+            if let Some(agent_name) = &catalog_agent_name {
+                db.store_launch_context(
+                    &instance_name,
+                    &json!({ "agent_name": agent_name }).to_string(),
+                )?;
+            }
+            if matches!(normalized, LaunchTool::Antigravity)
+                && let Some(policy_cwd) = base_env.get(crate::commands::agent::DIPPY_POLICY_CWD)
+            {
+                db.store_launch_context(
+                    &instance_name,
+                    &json!({ "dippy_policy_cwd": policy_cwd }).to_string(),
+                )?;
             }
             db.set_process_binding(&process_id, "", &instance_name)?;
             Ok(())
@@ -3873,6 +3935,26 @@ mod tests {
         let mut env = HashMap::new();
         apply_inherited_notes(&mut env, None);
         assert!(!env.contains_key("HCOM_NOTES"));
+    }
+
+    #[test]
+    fn test_inherited_agent_catalogs_fill_gap_without_overriding_explicit_value() {
+        let mut env = HashMap::new();
+        apply_inherited_agent_catalogs(&mut env, Some("/task/agents.toml".to_string()));
+        assert_eq!(
+            env.get("HCOM_AGENT_CATALOGS").map(String::as_str),
+            Some("/task/agents.toml")
+        );
+
+        env.insert(
+            "HCOM_AGENT_CATALOGS".to_string(),
+            "/explicit/agents.toml".to_string(),
+        );
+        apply_inherited_agent_catalogs(&mut env, Some("/parent/agents.toml".to_string()));
+        assert_eq!(
+            env.get("HCOM_AGENT_CATALOGS").map(String::as_str),
+            Some("/explicit/agents.toml")
+        );
     }
 
     #[test]

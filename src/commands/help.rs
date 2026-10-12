@@ -478,6 +478,23 @@ const STOP_HELP: &[HelpEntry] = &[
     ("stop all", "Disconnect all agents"),
 ];
 
+const HANDOFF_HELP: &[HelpEntry] = &[
+    (
+        "handoff <prompt>",
+        "Restart yourself: same catalog agent and name, clean session, <prompt> as initial prompt",
+    ),
+    ("handoff < file", "Read the prompt from stdin"),
+    ("  --cli <tool>", "Restart on another AI CLI"),
+    (
+        "  --dry-run",
+        "Print the relaunch without stopping anything",
+    ),
+    (
+        "",
+        "Only for agents launched by hcom agent or send autostart. End your turn after it.",
+    ),
+];
+
 const START_HELP: &[HelpEntry] = &[
     ("start", "Connect to hcom (from inside any AI session)"),
     (
@@ -506,6 +523,7 @@ const KILL_HELP: &[HelpEntry] = &[
         "kill <name>...",
         "Kill one or more processes (+ close terminal panes)",
     ),
+    ("kill @<group>", "Kill all agents in catalog group"),
     ("kill tag:<name>", "Kill all with tag"),
     ("kill all", "Kill all with tracked PIDs"),
 ];
@@ -1125,6 +1143,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "list",
     "events",
     "stop",
+    "handoff",
     "start",
     "listen",
     "status",
@@ -1192,7 +1211,7 @@ Launch:\n\
 \x20 hcom [N] {launchable} [flags] [tool-args]\n\
 \x20 hcom r <target>                       Resume stopped agent\n\
 \x20 hcom f <target>                       Fork agent session ({forkable})\n\
-\x20 hcom kill <name(s)|tag:T|all>         Kill + close terminal pane\n\
+\x20 hcom kill <name(s)|@group|tag:T|all>  Kill + close terminal pane\n\
 \n\
 \x20 Any flag hcom does not know is forwarded verbatim to the tool; -- ends\n\
 \x20 hcom's own flags. Use --dry-run to see the command without running it.\n\
@@ -1206,15 +1225,18 @@ Commands:\n\
 \x20 transcript   Read another agent's conversation\n\
 \x20 start        Connect to hcom (run inside any AI tool)\n\
 \x20 stop         Disconnect from hcom\n\
+\x20 handoff      Restart yourself in a clean session with your prompt\n\
 \x20 config       Get/set global and per-agent settings\n\
 \x20 run          Execute workflow scripts\n\
+\x20 agent        Launch named agents from a JSON catalog\n\
 \x20 relay        Cross-device sync + relay daemon\n\
 \x20 archive      Query past hcom sessions\n\
 \x20 reset        Archive and clear database\n\
 \x20 hooks        Add or remove hooks\n\
 \x20 status       Installation and diagnostics\n\
 \x20 term         View/inject into agent PTY screens\n\
-\x20 update       Check and apply updates",
+\x20 update       Check and apply updates\n\
+\x20 completions  Generate shell completions (bash, zsh, fish)",
         env!("CARGO_PKG_VERSION"),
     )
 }
@@ -1301,6 +1323,13 @@ fn format_page(sections: &[&[HelpEntry]]) -> Vec<String> {
 fn command_help_raw(name: &str) -> String {
     let mut lines = vec!["Usage:".to_string()];
 
+    if name == "agent" {
+        return crate::commands::agent::help_text();
+    }
+    if name == "completions" || name == "completion" {
+        return crate::commands::completions::help_text().to_string();
+    }
+
     // Tool launch commands use the template generator
     if let Some(spec) = get_tool_spec(name) {
         return generate_tool_help(spec);
@@ -1342,6 +1371,7 @@ fn command_help_raw(name: &str) -> String {
         "events" => Some(EVENTS_PAGE),
         "bundle" => Some(BUNDLE_PAGE),
         "stop" => Some(&[STOP_HELP]),
+        "handoff" => Some(&[HANDOFF_HELP]),
         "start" => Some(&[START_HELP]),
         "kill" => Some(&[KILL_HELP]),
         "listen" => Some(&[LISTEN_HELP]),
@@ -1444,6 +1474,7 @@ mod tests {
             "list",
             "events",
             "stop",
+            "handoff",
             "start",
             "listen",
             "status",
@@ -1464,6 +1495,7 @@ mod tests {
             "agy",
             "antigravity",
             "kimi",
+            "completions",
         ];
         for cmd in commands {
             let help = get_command_help(cmd);

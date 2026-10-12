@@ -41,6 +41,9 @@ pub struct PidEntry {
     pub inject_port: u16,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tag: String,
+    /// Catalog agent name, for `hcom kill @group` after the row is gone.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent_name: String,
 }
 
 fn is_zero(v: &u16) -> bool {
@@ -66,6 +69,7 @@ pub struct OrphanProcess {
     pub notify_port: u16,
     pub inject_port: u16,
     pub tag: String,
+    pub agent_name: String,
 }
 
 impl OrphanProcess {
@@ -103,6 +107,7 @@ impl From<(u32, &PidEntry)> for OrphanProcess {
             notify_port: entry.notify_port,
             inject_port: entry.inject_port,
             tag: entry.tag.clone(),
+            agent_name: entry.agent_name.clone(),
         }
     }
 }
@@ -152,6 +157,7 @@ pub struct PidRecord<'a> {
     pub notify_port: u16,
     pub inject_port: u16,
     pub tag: &'a str,
+    pub agent_name: &'a str,
 }
 
 impl<'a> PidRecord<'a> {
@@ -181,6 +187,7 @@ impl<'a> PidRecord<'a> {
             notify_port: 0,
             inject_port: 0,
             tag: "",
+            agent_name: "",
         }
     }
 }
@@ -205,6 +212,7 @@ pub fn record_pid(rec: &PidRecord<'_>) {
         notify_port,
         inject_port,
         tag,
+        agent_name,
     } = rec;
     let mut data = read_raw(hcom_dir);
     let key = pid.to_string();
@@ -251,6 +259,9 @@ pub fn record_pid(rec: &PidRecord<'_>) {
         if !tag.is_empty() && entry.tag.is_empty() {
             entry.tag = tag.to_string();
         }
+        if !agent_name.is_empty() && entry.agent_name.is_empty() {
+            entry.agent_name = agent_name.to_string();
+        }
     } else {
         data.insert(
             key,
@@ -271,6 +282,7 @@ pub fn record_pid(rec: &PidRecord<'_>) {
                 notify_port: *notify_port,
                 inject_port: *inject_port,
                 tag: tag.to_string(),
+                agent_name: agent_name.to_string(),
             },
         );
     }
@@ -495,6 +507,7 @@ fn attach_runtime_state(
         ("pane_id", &orphan.pane_id),
         ("terminal_id", &orphan.terminal_id),
         ("kitty_listen_on", &orphan.kitty_listen_on),
+        ("agent_name", &orphan.agent_name),
     ] {
         if !value.is_empty() {
             launch_context.insert(key.into(), serde_json::json!(value));
@@ -646,6 +659,7 @@ mod tests {
             notify_port: 8080,
             inject_port: 8081,
             tag: "test-tag",
+            agent_name: "reviewer",
         });
 
         let data = read_raw(dir.path());
@@ -666,9 +680,11 @@ mod tests {
         assert_eq!(entry.session_id, "sess-1");
         assert_eq!(entry.notify_port, 8080);
         assert_eq!(entry.inject_port, 8081);
+        assert_eq!(entry.agent_name, "reviewer");
 
         // An orphan closes its pane on the herdr server that owns it.
         let orphan = OrphanProcess::from((12345, entry));
+        assert_eq!(orphan.agent_name, "reviewer");
         let info = orphan.terminal_info();
         assert_eq!(info.preset_name, "kitty");
         assert_eq!(info.pane_id, "pane-1");
@@ -820,6 +836,7 @@ mod tests {
             notify_port: 0,
             inject_port: 0,
             tag: String::new(),
+            agent_name: String::new(),
         };
 
         let result = recover_single_orphan_to_db(&db, &orphan, "luna");
@@ -851,6 +868,7 @@ mod tests {
             notify_port: 0,
             inject_port: 0,
             tag: String::new(),
+            agent_name: String::new(),
         };
 
         let result = recover_single_orphan_to_db(&db, &orphan, "luna");
@@ -893,5 +911,37 @@ mod tests {
         );
         // Bound to proc-1, so a PTY sharing only the session is not its owner.
         assert_eq!(owning_instance(db.conn(), "proc-2", "sess-1"), None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_recovered_orphan_keeps_catalog_agent_name() {
+        let (_dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
+        let db = crate::db::HcomDb::open().unwrap();
+        let entry = PidEntry {
+            tool: "claude".into(),
+            names: vec!["rev2".into()],
+            launched_at: 0.0,
+            directory: "/tmp".into(),
+            process_id: String::new(),
+            terminal_preset: String::new(),
+            pane_id: String::new(),
+            terminal_id: String::new(),
+            kitty_listen_on: String::new(),
+            zellij_session_name: String::new(),
+            herdr_socket_path: String::new(),
+            wezterm_unix_socket: String::new(),
+            session_id: String::new(),
+            notify_port: 0,
+            inject_port: 0,
+            tag: String::new(),
+            agent_name: "reviewer".into(),
+        };
+        let orphan = OrphanProcess::from((std::process::id(), &entry));
+
+        recover_single_orphan_to_db(&db, &orphan, "rev2").unwrap();
+
+        let row = db.get_instance_full("rev2").unwrap().unwrap();
+        assert_eq!(row.catalog_agent_name().as_deref(), Some("reviewer"));
     }
 }
