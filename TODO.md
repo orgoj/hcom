@@ -98,3 +98,34 @@ Investigation for the next occurrence:
   failed automatic and manual bare wakes, preservation of the unread request,
   safe recovery, cursor advancement exactly once, a real child session, a user
   session switch, tracked resume, fork, and nested child launch.
+
+## Move hcom skills into this repository and add a skill installer
+
+hcom-specific skills currently live in the external skills repository
+`/home/michael/work/ai/SKILLS/orgoj-skills/skills/` and are installed by hand as
+symlinks in `~/.claude/skills/`. Only `skills/hcom-agent-messaging/` lives here,
+and neither the README nor `docs/` describes how to install it.
+
+- Move the skills whose subject is hcom itself into `skills/`, in English.
+  Candidates (they mention hcom): `hcom-handoff`, `reviewing-sessions-with-coach`,
+  `keeping-work-journal`, `evaluating-agent-efficiency`. Decide each one on
+  its subject: move a skill only when it is about using hcom. Keep a skill
+  whose subject is general and merely mentions hcom in `orgoj-skills`.
+- Make each moved skill self-contained. `hcom-handoff` depends on the external
+  `handoff` skill, so either inline the needed document procedure or declare
+  the dependency explicitly. A repository skill must not break for users who
+  lack the external skill.
+- Coordinate the move with the owner of `orgoj-skills` (`skills` agent): one
+  canonical copy only, no duplicates. Update the installed symlinks.
+- Add a skill (e.g. `installing-hcom-skills`) and a matching documented
+  procedure that installs this repository's `skills/*` for each supported CLI
+  (Claude `~/.claude/skills/`, Codex/Antigravity `.agents/skills/`, ...).
+  Symlink rather than copy, so updating the repository updates the skills.
+  Make it idempotent. Report rather than overwrite a foreign entry with the
+  same name. Reuse what `skill-install-external` in `orgoj-skills` already
+  does where it fits.
+- Keep the upstream merge cost low: `skills/hcom-agent-messaging/` is shared
+  with `aannoo/hcom`. Keep fork-only skills in separate directories and leave
+  upstream files unchanged where possible.
+- Update the README and `docs/` with the install procedure, and the
+  `hcom-agent-messaging` reference to `hcom-handoff` (now "when installed").
