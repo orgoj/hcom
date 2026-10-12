@@ -1646,11 +1646,19 @@ pub fn soft_finalize_session(
 ///
 /// Common to SessionEnd handlers. Errors are handled internally; the returned
 /// outcome is for callers that must report whether the stop completed.
+///
+/// `process_id` is the hook's `HCOM_PROCESS_ID`, if hcom launched it. A
+/// relaunch under the same name (`hcom agent --restart`, `hcom handoff`) can
+/// register its successor while this SessionEnd still runs. Once `hcom kill`
+/// has stopped this session's row, its process binding is gone and the
+/// name-keyed stop would delete the successor's row and binding instead, so
+/// the ownership check and the stop share one write lock.
 pub fn finalize_session(
     db: &HcomDb,
     instance_name: &str,
     reason: &str,
     updates: Option<&serde_json::Map<String, Value>>,
+    process_id: Option<&str>,
 ) -> StopOutcome {
     log::log_info(
         "hooks",
@@ -1658,6 +1666,35 @@ pub fn finalize_session(
         &format!("instance={} reason={}", instance_name, reason),
     );
 
+    let mut outcome = StopOutcome::AlreadyStopped;
+    let result = db.with_write_scope(|| {
+        if let Some(process_id) = process_id
+            && !crate::delivery::instance_owns_process_binding(db, process_id, instance_name)
+        {
+            log::log_warn(
+                "hooks",
+                "sessionend.not_owner",
+                &format!("instance={instance_name} process_id={process_id} reason={reason}"),
+            );
+            return Ok(());
+        }
+        outcome = finalize_owned_session(db, instance_name, reason, updates);
+        Ok(())
+    });
+    match result {
+        Ok(()) => outcome,
+        Err(e) => StopOutcome::RetryableError(format!(
+            "could not finalize session for {instance_name}: {e}"
+        )),
+    }
+}
+
+fn finalize_owned_session(
+    db: &HcomDb,
+    instance_name: &str,
+    reason: &str,
+    updates: Option<&serde_json::Map<String, Value>>,
+) -> StopOutcome {
     // `hcom kill` records exit:killed + its initiator before signalling, and the
     // tool's SessionEnd fires in response to that signal. Keep the kill as the
     // stop reason: overwriting it here would make whichever finalizer wins (this
@@ -2719,7 +2756,7 @@ mod tests {
             [],
         );
 
-        finalize_session(&db, "inst", "user_quit", None);
+        finalize_session(&db, "inst", "user_quit", None, None);
 
         // Instance should be deleted
         let count: i64 = db
@@ -2738,6 +2775,38 @@ mod tests {
             [], |r| r.get(0)
         ).unwrap();
         assert_eq!(count, 1, "stopped life event should be logged");
+    }
+
+    #[test]
+    fn finalize_session_spares_successor_after_kill() {
+        crate::config::Config::init();
+        let (_dir, db) = make_test_db();
+
+        // `hcom kill` stopped the old session (row and binding gone), then the
+        // relaunch registered a successor under the same name before the old
+        // session's SessionEnd ran.
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, tool, status, status_context, status_time, created_at)
+                 VALUES ('inst', 'claude', 'pending', 'launching', 0, 1)",
+                [],
+            )
+            .unwrap();
+        db.set_process_binding("p-new", "", "inst").unwrap();
+
+        let outcome = finalize_session(&db, "inst", "other", None, Some("p-old"));
+
+        assert_eq!(outcome, StopOutcome::AlreadyStopped);
+        assert!(db.get_instance("inst").unwrap().is_some());
+        assert_eq!(
+            db.get_process_binding("p-new").unwrap().as_deref(),
+            Some("inst")
+        );
+
+        // The successor's own SessionEnd still stops it.
+        let outcome = finalize_session(&db, "inst", "other", None, Some("p-new"));
+        assert_eq!(outcome, StopOutcome::Stopped);
+        assert!(db.get_instance("inst").unwrap().is_none());
     }
 
     #[test]
@@ -2767,7 +2836,7 @@ mod tests {
         db.mark_killed("inst", "boss").unwrap();
 
         // The tool's SessionEnd fires in response to the kill's SIGTERM.
-        finalize_session(&db, "inst", "other", None);
+        finalize_session(&db, "inst", "other", None, None);
 
         let (by, reason): (String, String) = db
             .conn()

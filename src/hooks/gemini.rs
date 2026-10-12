@@ -505,7 +505,7 @@ fn handle_notification(db: &HcomDb, _ctx: &HcomContext, payload: &HookPayload) -
 }
 
 /// Handle SessionEnd hook - fires when a session ends.
-fn handle_sessionend(db: &HcomDb, _ctx: &HcomContext, payload: &HookPayload) -> HookResult {
+fn handle_sessionend(db: &HcomDb, ctx: &HcomContext, payload: &HookPayload) -> HookResult {
     let instance = match resolve_instance_gemini(db, payload) {
         Some(inst) => inst,
         None => return hook_noop(),
@@ -544,7 +544,7 @@ fn handle_sessionend(db: &HcomDb, _ctx: &HcomContext, payload: &HookPayload) -> 
             );
         }
     } else {
-        common::finalize_session(db, &instance.name, &reason, None);
+        common::finalize_session(db, &instance.name, &reason, None, ctx.process_id.as_deref());
     }
 
     hook_noop()

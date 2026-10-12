@@ -186,7 +186,7 @@ impl PiFamily {
                 "status" => plugin_rpc::handle_status(&db, handler_argv),
                 "read" => plugin_rpc::handle_read(&db, handler_argv),
                 "beforetool" => plugin_rpc::handle_tool(&db, handler_argv, self.name()),
-                "stop" => plugin_rpc::handle_stop(&db, handler_argv),
+                "stop" => plugin_rpc::handle_stop(&db, handler_argv, ctx.process_id.as_deref()),
                 _ => plugin_rpc::error(format!("Unknown {} hook: {}", self.name(), hook_name)),
             },
         );

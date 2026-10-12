@@ -172,7 +172,7 @@ pub(crate) fn handle_tool(db: &HcomDb, argv: &[String], tool: &str) -> (i32, Str
 
 /// `<tool>-stop --name N [--reason R] [--soft]`. `--soft` keeps the instance
 /// row (and process binding) so the same process can rebind it.
-pub(crate) fn handle_stop(db: &HcomDb, argv: &[String]) -> (i32, String) {
+pub(crate) fn handle_stop(db: &HcomDb, argv: &[String], process_id: Option<&str>) -> (i32, String) {
     let Some(name) = parse_flag(argv, "--name") else {
         return error("Missing --name");
     };
@@ -183,7 +183,7 @@ pub(crate) fn handle_stop(db: &HcomDb, argv: &[String]) -> (i32, String) {
             Err(e) => error(format!("Stop failed: {e}")),
         }
     } else {
-        match common::finalize_session(db, &name, &reason, None) {
+        match common::finalize_session(db, &name, &reason, None, process_id) {
             common::StopOutcome::RetryableError(e) => error(format!("Stop failed: {e}")),
             _ => ok(json!({ "ok": true })),
         }
@@ -353,16 +353,16 @@ mod tests {
                  BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
             )
             .unwrap();
-        let soft = reply(&handle_stop(&db, &sv(&["--name", "luna", "--soft"])));
+        let soft = reply(&handle_stop(&db, &sv(&["--name", "luna", "--soft"]), None));
         assert!(soft.get("error").is_some(), "{soft}");
         db.conn().execute_batch("DROP TRIGGER no_inactive").unwrap();
-        let hard = reply(&handle_stop(&db, &sv(&["--name", "luna"])));
+        let hard = reply(&handle_stop(&db, &sv(&["--name", "luna"]), None));
         assert!(hard.get("error").is_some(), "{hard}");
         assert!(db.get_instance_full("luna").unwrap().is_some());
 
         db.conn().execute_batch("DROP TRIGGER no_delete").unwrap();
         assert_eq!(
-            reply(&handle_stop(&db, &sv(&["--name", "luna"]))),
+            reply(&handle_stop(&db, &sv(&["--name", "luna"]), None)),
             json!({ "ok": true })
         );
         assert!(db.get_instance_full("luna").unwrap().is_none());

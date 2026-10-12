@@ -57,7 +57,7 @@ pub fn dispatch_hermes_hook(hook: &str, argv: &[String]) -> (i32, String) {
             (0, String::new())
         }
         "hermes-stop" => {
-            finalize_session(&db, &name, "exit", None);
+            finalize_session(&db, &name, "exit", None, ctx.process_id.as_deref());
             (0, String::new())
         }
         other => (1, format!("unknown Hermes hook '{other}'")),

@@ -469,8 +469,14 @@ fn route_claude_hook(
         );
         if hook_type == HOOK_SESSIONEND {
             let handler_start = Instant::now();
-            let (code, stdout) =
-                handle_sessionend(db, instance_name, &session_id, &payload.raw, &updates);
+            let (code, stdout) = handle_sessionend(
+                db,
+                instance_name,
+                &session_id,
+                &payload.raw,
+                &updates,
+                ctx.process_id.as_deref(),
+            );
             timing.handler_ms = Some(handler_start.elapsed().as_secs_f64() * 1000.0);
             return (code, stdout, None, timing);
         }
@@ -536,8 +542,14 @@ fn route_claude_hook(
             handle_userpromptsubmit(db, ctx, payload, instance_name, &updates, &instance_data)
         }
         HOOK_SESSIONEND => {
-            let (code, stdout) =
-                handle_sessionend(db, instance_name, &session_id, &payload.raw, &updates);
+            let (code, stdout) = handle_sessionend(
+                db,
+                instance_name,
+                &session_id,
+                &payload.raw,
+                &updates,
+                ctx.process_id.as_deref(),
+            );
             (code, stdout, None)
         }
         _ => (0, String::new(), None),
@@ -2000,6 +2012,7 @@ fn handle_sessionend(
     session_id: &str,
     raw: &Value,
     updates: &serde_json::Map<String, Value>,
+    process_id: Option<&str>,
 ) -> (i32, String) {
     let reason = raw
         .get("reason")
@@ -2055,6 +2068,7 @@ fn handle_sessionend(
         } else {
             Some(updates)
         },
+        process_id,
     );
 
     cleanup_sessionend_scoped_state(db, session_id);
@@ -6325,7 +6339,7 @@ mod tests {
             "transcript_path".into(),
             serde_json::json!("/tmp/deferred-session.jsonl"),
         )]);
-        handle_sessionend(&db, "nova", "sess-1", &raw, &updates);
+        handle_sessionend(&db, "nova", "sess-1", &raw, &updates, None);
         let instance = db.get_instance_full("nova").unwrap().unwrap();
         assert_eq!(instance.transcript_path, "/tmp/deferred-session.jsonl");
         let stopped: i64 = db
@@ -6343,7 +6357,7 @@ mod tests {
             &serde_json::json!({"action": "ready", "batch_id": "current"}),
         )
         .unwrap();
-        handle_sessionend(&db, "nova", "sess-1", &raw, &serde_json::Map::new());
+        handle_sessionend(&db, "nova", "sess-1", &raw, &serde_json::Map::new(), None);
         assert!(db.get_instance_full("nova").unwrap().is_none());
     }
 

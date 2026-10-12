@@ -145,7 +145,7 @@ Flags:
   --catalog <path>          Use this file instead of the project catalog
   --no-project              Ignore every enclosing project .hcom/{PROJECT_FILE}
   --attach                  Focus the agent's Herdr pane when it is already running
-  --restart                 Kill a running agent first instead of reporting it
+  --restart                 Kill a running agent and wait for it to exit instead of reporting it
   --resume                  Continue the agent's previous session
   --continue                Start a clean session with handoff summary from previous session
   --clean                   Start a clean session (overrides configured resume/continue)
@@ -2195,6 +2195,7 @@ struct LiveAgent {
     tool: String,
     directory: String,
     launch_context: serde_json::Value,
+    pid: Option<u32>,
 }
 
 impl LiveAgent {
@@ -2204,6 +2205,10 @@ impl LiveAgent {
             status,
             tool: data.tool.clone(),
             directory: data.directory.clone(),
+            pid: data
+                .pid
+                .map(|pid| pid as u32)
+                .filter(|pid| !data.pid_reused(*pid)),
             launch_context: data
                 .launch_context
                 .as_deref()
@@ -2242,6 +2247,20 @@ fn live_agents() -> Vec<LiveAgent> {
             LiveAgent::from_instance(data, computed.status)
         })
         .collect()
+}
+
+/// How long `--restart` waits for the killed agent's process to exit.
+const RESTART_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(15);
+
+fn wait_for_exit(pid: u32, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while crate::sys::process::is_alive(pid) {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    true
 }
 
 fn find_live(name: &str) -> Option<LiveAgent> {
@@ -2337,6 +2356,16 @@ fn launch_named_with_roaming(
                 let _ = Command::new(hcom_bin())
                     .args(["kill", instance_name])
                     .status();
+                // The old session's SessionEnd hook still runs after the
+                // kill; let it finish before the successor takes the name.
+                if let Some(pid) = live.pid
+                    && !wait_for_exit(pid, RESTART_EXIT_WAIT)
+                {
+                    eprintln!(
+                        "warning: '{instance_name}' (pid {pid}) still running after {}s; relaunching anyway",
+                        RESTART_EXIT_WAIT.as_secs()
+                    );
+                }
             }
         } else {
             let where_ = live.location().unwrap_or_default();
@@ -3185,7 +3214,24 @@ mod tests {
             tool: "codex".to_string(),
             directory: "/tmp/project".to_string(),
             launch_context: serde_json::json!({}),
+            pid: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_for_exit_waits_until_the_process_is_gone() {
+        use std::time::Duration;
+        let mut running = Command::new("sleep").arg("5").spawn().unwrap();
+        assert!(!wait_for_exit(running.id(), Duration::from_millis(100)));
+        running.kill().unwrap();
+        running.wait().unwrap();
+
+        let mut exiting = Command::new("sleep").arg("0.2").spawn().unwrap();
+        let pid = exiting.id();
+        let reaper = std::thread::spawn(move || exiting.wait());
+        assert!(wait_for_exit(pid, Duration::from_secs(5)));
+        reaper.join().unwrap().unwrap();
     }
 
     #[test]

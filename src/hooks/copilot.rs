@@ -738,7 +738,7 @@ fn handle_sessionend(db: &HcomDb, ctx: &HcomContext, payload: &HookPayload) -> V
         return json!({});
     }
     update_position(db, ctx, payload, &instance.name);
-    common::finalize_session(db, &instance.name, reason, None);
+    common::finalize_session(db, &instance.name, reason, None, ctx.process_id.as_deref());
     json!({})
 }
 

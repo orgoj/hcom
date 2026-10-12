@@ -421,6 +421,7 @@ fn soft_stop_keeps_instance_row_and_process_binding() {
             "--reason".to_string(),
             "turn_end".to_string(),
         ],
+        None,
     );
 
     assert_eq!(code, 0);
@@ -463,6 +464,7 @@ fn start_rebinds_via_process_binding_after_soft_stop() {
             "miso".to_string(),
             "--soft".to_string(),
         ],
+        None,
     );
     assert_eq!(stop_code, 0);
     assert_eq!(

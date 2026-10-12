@@ -366,7 +366,9 @@ pub fn dispatch_opencode_hook(hook_name: &str, argv: &[String]) -> (i32, String)
             "opencode-standby" => handle_standby(&ctx, &db, &handler_argv),
             "opencode-status" => handle_status(&db, &handler_argv),
             "opencode-read" => plugin_rpc::handle_read(&db, &handler_argv),
-            "opencode-stop" => plugin_rpc::handle_stop(&db, &handler_argv),
+            "opencode-stop" => {
+                plugin_rpc::handle_stop(&db, &handler_argv, ctx.process_id.as_deref())
+            }
             "opencode-approve" => handle_approve(&ctx, &handler_argv),
             _ => (
                 0,
