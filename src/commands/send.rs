@@ -1173,7 +1173,22 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         || args.spawn_as.is_some()
     {
         match super::agent::catalog_message_targets(db, &sender_identity) {
-            Ok(targets) => targets,
+            Ok(targets) => {
+                let requested = if effective_targets.is_empty() {
+                    crate::shared::constants::extract_mentions(&message)
+                } else {
+                    effective_targets.clone()
+                };
+                if let Some((_, reason)) = targets.unroutable.iter().find(|(alias, _)| {
+                    requested
+                        .iter()
+                        .any(|target| target.eq_ignore_ascii_case(alias))
+                }) {
+                    eprintln!("Error: {reason}");
+                    return 1;
+                }
+                targets.routes
+            }
             Err(e) => {
                 eprintln!("Error: cannot load agent catalog for message routing: {e:#}");
                 return 1;

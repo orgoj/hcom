@@ -1166,18 +1166,35 @@ fn roaming_route(
     }))
 }
 
+/// Catalog routing for one send: routable agents, plus catalog agents that
+/// cannot be routed from the sender's context and why. An unroutable agent
+/// only fails a send that addresses it.
+#[derive(Debug, Default)]
+pub(crate) struct CatalogTargets {
+    pub routes: Vec<CatalogRoute>,
+    pub unroutable: Vec<(String, String)>,
+}
+
 /// Catalog agent identities available for message routing, including stopped agents.
 pub(crate) fn catalog_message_targets(
     db: &HcomDb,
     identity: &SenderIdentity,
-) -> Result<Vec<CatalogRoute>> {
+) -> Result<CatalogTargets> {
     let catalogs = Catalogs::load(false, None)?;
     let mut routes = Vec::new();
+    let mut unroutable = Vec::new();
     for name in catalogs.names().keys().filter(|name| !name.contains(':')) {
         let Some(def) = catalogs.resolve(name) else {
             continue;
         };
-        if let Some(route) = roaming_route(db, identity, name, &def)? {
+        let roaming = match roaming_route(db, identity, name, &def) {
+            Ok(route) => route,
+            Err(e) => {
+                unroutable.push((name.clone(), format!("{e:#}")));
+                continue;
+            }
+        };
+        if let Some(route) = roaming {
             routes.push(route);
         } else {
             let eff = effective(name, def, &Cli::default());
@@ -1190,7 +1207,7 @@ pub(crate) fn catalog_message_targets(
             });
         }
     }
-    Ok(routes)
+    Ok(CatalogTargets { routes, unroutable })
 }
 
 /// How long autostart waits for the launched agent's instance row to appear.

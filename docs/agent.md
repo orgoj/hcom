@@ -361,7 +361,8 @@ memberships, request watches, and delivery use the materialized name. `hcom agen
 way. `hcom agent list` shows the archetype; `hcom list` shows running materialized instances.
 
 Two different roots with the same normalized basename are rejected if their materialized name
-would collide. Broadcasts never start a roaming agent. Catalog `env` values are transported to the
+would collide; only a send that addresses that roaming agent fails, and messages to other agents
+still route. Broadcasts never start a roaming agent. Catalog `env` values are transported to the
 materialized process even when another AI agent triggers the launch; hcom does not interpret the
 variables or provide a permission engine itself.
 

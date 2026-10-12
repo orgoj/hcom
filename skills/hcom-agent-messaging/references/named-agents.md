@@ -245,7 +245,8 @@ runtime name such as `reviewer_weather_app`. Without a Git root it falls back to
 The materialized name, not the archetype alias, is stored in mentions, thread membership, request
 watches, and delivery metadata. The original message text remains unchanged. Direct
 `hcom agent/show/attach reviewer` commands resolve the current project identically. Broadcasts do
-not materialize roaming agents, and roots whose normalized basenames collide fail safely.
+not materialize roaming agents, and roots whose normalized basenames collide fail safely: only sends addressing that
+roaming agent fail, other messages still route.
 
 Catalog `env` reaches the materialized process during nested autostart. A read-only roaming role
 can therefore select a separately managed Dippy policy with one variable:

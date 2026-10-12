@@ -4451,6 +4451,55 @@ fn roaming_send_rejects_same_slug_for_a_different_project_root() {
 }
 
 #[test]
+fn roaming_slug_collision_blocks_only_sends_that_address_that_agent() {
+    let h = Hcom::new();
+    let first = h.root_path().join("one/app");
+    let second = h.root_path().join("two/app");
+    std::fs::create_dir_all(first.join(".git")).expect("create first git marker");
+    std::fs::create_dir_all(second.join(".git")).expect("create second git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "INSERT INTO instances (name, status, directory, created_at) \
+         VALUES ('reviewer_app', 'stopped', ?1, 1000.0), \
+                ('nova', 'listening', ?1, 1000.0)",
+        [first.to_string_lossy().as_ref()],
+    )
+    .expect("insert instances");
+
+    let send = |args: &[&str]| {
+        let output = h
+            .cmd()
+            .current_dir(&second)
+            .args(args)
+            .output()
+            .expect("send from colliding project");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    let (ok, stdout, stderr) = send(&["send", "--from", "bigboss", "@nova", "--", "unrelated"]);
+    assert!(ok, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("nova"), "stdout={stdout}");
+
+    let (ok, stdout, stderr) = send(&["send", "--from", "bigboss", "--", "@reviewer inline"]);
+    assert!(!ok, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("project directory basenames must be unique"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
 fn catalog_autostart_failure_does_not_write_message() {
     let h = Hcom::new();
     std::fs::write(
