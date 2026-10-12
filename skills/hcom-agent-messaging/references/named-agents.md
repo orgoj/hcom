@@ -171,7 +171,7 @@ include agents hidden by the project's selective imports.
 {
   "defaults": {
     "cli": "claude",
-    "terminal": "tmux-window",
+    "terminal": "herdr",
     "resume": false
   },
   "agents": {
@@ -221,7 +221,7 @@ failed. `--as`, `--attach`, and `terminal: here` are invalid for group launches.
 
 The positional name selects the catalog definition; `--as <name>` selects the runtime identity.
 The alias is used for duplicate detection, routing, restart/attach behavior, resume history, and the
-default tmux window or Herdr tab. An explicit `window` remains unchanged. Address the instance by
+default Herdr tab. An explicit `window` remains unchanged. Address the instance by
 its alias, such as `hcom send @review_api -- "Review this"`.
 
 To autostart a catalog agent under an adhoc clone/alias name directly via send, use `--spawn-as <name>` (alias `--as <name>`):
@@ -414,12 +414,12 @@ to Codex or another CLI.
 
 ## Terminal selection
 
-`terminal` selects how the agent is launched. `session` and `window` are supplementary placement
-settings; they do not select a multiplexer by themselves. For tmux, they select the session and
-window. For Herdr, they select the workspace and tab, including when Herdr is hcom's configured
-default. Nested launches and targeted-message autostart use the catalog agent's placement rather
-than the launching agent's inherited workspace and tab. Other non-multiplexer terminals ignore
-`session` with a warning.
+`terminal` selects how the agent is launched. `session` and `window` are supplementary Herdr
+placement settings; they do not select Herdr by themselves. They select the workspace and tab,
+including when Herdr is hcom's configured default. Nested launches and targeted-message autostart
+use the catalog agent's placement rather than the launching agent's inherited workspace and tab.
+Other terminals ignore `session` with a warning. A catalog agent with a terminal preset always
+opens its own pane or window, even from a human shell; `terminal: here` runs it in place.
 
 `terminal: orca` launches an unfocused tab in the local Orca runtime, bound to
 the registered folder workspace matching the agent's canonical directory.
@@ -434,7 +434,7 @@ For tools Herdr recognizes, hcom lets Herdr's native process detection, screen m
 installed integrations own classification, lifecycle state, and resume metadata. hcom uses
 `pane.report_agent` only as a fallback for tools outside Herdr's agent catalog.
 
-`pre` runs inside the prepared window before hcom, and `env` variables are supplied to the launch.
+`env` variables are supplied to the launch.
 
 ## Schema summary
 
@@ -445,7 +445,7 @@ Agent and `defaults` fields:
 - `description`: one line on what the agent is for; the only field other agents see in
   `hcom agent list --for-agents`
 - `cli`, `dir`, boolean `roaming`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`, `reasoning`
-- `prompt`, `system_prompt`, `pre`, boolean `resume`, and boolean `continue`
+- `prompt`, `system_prompt`, boolean `resume`, and boolean `continue`
 - `env` object and `args` array
 - `tools` object keyed by CLI name
 

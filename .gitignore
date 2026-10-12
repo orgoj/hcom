@@ -1,8 +1,8 @@
-/.dippy
+/target/
+/bin/
 /.hcom/
+/node_modules/
+/.dippy
 /.omc/
 /AGENTS.local.md
-/bin/
-/node_modules/
-/target/
 /tmp/

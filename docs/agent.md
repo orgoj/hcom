@@ -16,7 +16,7 @@ hcom agent list --json              # full JSON output with effective config and
 hcom agent list --names             # output agent names only
 hcom agent list --groups            # output catalog group names only
 hcom agent show wdt_main            # effective configuration and exact command
-hcom agent attach wdt_main          # focus its managed terminal window
+hcom agent attach wdt_main          # focus its Herdr pane
 hcom agent edit                     # edit the global catalog
 hcom agent edit --project           # edit the current project's catalog
 hcom agent completions bash         # output shell completions for bash, zsh, or fish
@@ -276,10 +276,9 @@ In a recurring agent fleet, this enables a self-improving autonomy loop:
       "cli": "codex",
       "session": "wdt",
       "window": "review",
-      "terminal": "wezterm-tab",
+      "terminal": "herdr",
       "groups": ["wdt", "review"],
       "env": { "AWS_PROFILE": "wdt" },
-      "pre": "source .venv/bin/activate",
       "prompt": "Review the current change",
       "system_prompt": "Concentrate on deployment safety",
       "tools": {
@@ -307,15 +306,14 @@ Supported agent fields:
 | `cli` | CLI selected by default |
 | `terminal` | hcom terminal preset, or `here` |
 | `terminal_command` | Raw terminal command containing `{script}` |
-| `session` | tmux session or Herdr workspace; ignored by other terminals |
-| `window` | tmux window or Herdr tab; defaults to the instance name |
+| `session` | Herdr workspace; ignored by other terminals |
+| `window` | Herdr tab; defaults to the instance name |
 | `tag` | hcom group tag |
 | `groups` | Catalog-only groups used by `hcom agent @<group>` |
 | `model` | Default model passed to the selected CLI |
 | `reasoning` | Reasoning effort for Claude, Antigravity, or Codex |
 | `prompt` | Initial user prompt |
 | `system_prompt` | Additional system prompt |
-| `pre` | Shell command run before the CLI |
 | `resume` | Resume the previous session by default |
 | `continue` | Continue previous session with handoff summary by default |
 | `env` | Environment variables merged by key |
@@ -379,19 +377,18 @@ variables or provide a permission engine itself.
 | `--dir <path>` | Working directory |
 | `--terminal <preset>` | Terminal preset, or `here` |
 | `--terminal-command <cmd>` | Raw terminal command with `{script}` (sets `HCOM_TERMINAL`) |
-| `--session <name>` | tmux session or Herdr workspace (empty string disables) |
-| `--window <name>` | tmux window or Herdr tab (defaults to agent name) |
+| `--session <name>` | Herdr workspace (empty string disables) |
+| `--window <name>` | Herdr tab (defaults to agent name) |
 | `--as <name>` | Launch under an alternate runtime instance name |
 | `--tag <val>` | Runtime group tag forwarded to hcom |
 | `--model <val>` | Forwarded model name |
 | `--reasoning <val>` | Reasoning effort (Claude, Antigravity, and Codex) |
 | `--hcom-prompt <text>` | Initial user prompt (overrides catalog `prompt`) |
 | `--hcom-system-prompt <text>` | Invocation-local instructions (overrides catalog `system_prompt`) |
-| `--pre <cmd>` | Shell command run before the agent starts |
 | `--env KEY=VALUE` | Extra environment variable (repeatable) |
 | `--catalog <path>` | Use this file instead of the project catalog |
 | `--no-project` | Ignore every enclosing project `.hcom/agents.json` |
-| `--attach` | Focus window after launching |
+| `--attach` | Focus the Herdr pane of an already running agent |
 | `--restart` | Kill running agent first instead of reporting it |
 | `--resume` | Resume previous session |
 | `--continue` | Start clean session with handoff summary from previous session |
@@ -532,7 +529,7 @@ hcom agent wdt_main --as wdt_backend
 hcom agent show wdt_main --as wdt_review # inspect the aliased command
 ```
 
-`wdt_main` remains the catalog key used to resolve configuration. The `--as` value becomes the runtime identity used by `hcom list`, messages, duplicate detection, `--restart`, `--attach`, and resume history. It is also the default tmux window or Herdr tab name; an explicit catalog or CLI `window` still takes precedence. Address an aliased instance directly, for example `hcom send @wdt_review -- "Review this"`. Catalog-driven message startup uses the canonical catalog name and does not invent or restart aliases unless requested via `--spawn-as`.
+`wdt_main` remains the catalog key used to resolve configuration. The `--as` value becomes the runtime identity used by `hcom list`, messages, duplicate detection, `--restart`, `--attach`, and resume history. It is also the default Herdr tab name; an explicit catalog or CLI `window` still takes precedence. Address an aliased instance directly, for example `hcom send @wdt_review -- "Review this"`. Catalog-driven message startup uses the canonical catalog name and does not invent or restart aliases unless requested via `--spawn-as`.
 
 To start a catalog agent under an adhoc clone/alias name directly via send, use `--spawn-as <name>` (alias `--as <name>`):
 
@@ -589,7 +586,7 @@ so an agent without one keeps running and the log shows the failed relaunch. Wit
 
 ## Terminal placement
 
-`terminal` selects the launch backend. `session` and `window` configure placement for tmux and Herdr.
+`terminal` selects the launch backend. `session` and `window` configure Herdr placement.
 
 hcom chooses the launch strategy in this order:
 
@@ -597,7 +594,7 @@ hcom chooses the launch strategy in this order:
 2. explicit `terminal`: launch through that terminal preset
 3. hcom's configured default terminal
 
-For tmux, `session` selects or creates the tmux session and `window` selects the window. For Herdr, `session` selects or creates the space (called a workspace by the CLI), `window` selects or creates the tab, and each agent runs in a pane split inside that tab. When a project catalog supplies no Herdr session, hcom uses the name of the directory containing `.hcom`; unless `window` is configured explicitly, each agent gets a tab named after the agent. This placement also applies when Herdr comes from hcom's configured default, including nested launches and message autostart; the launching agent's workspace and tab are not inherited. If no Herdr server is running at launch time, hcom automatically starts `herdr server` headless in the background (enabled by default; toggle with `hcom config terminal.herdr_autostart true|false` or `HCOM_HERDR_AUTOSTART`). Other non-tmux terminal presets ignore `session` with a warning. Managed agents retain normal hcom lifecycle behavior, including closing their pane through `hcom kill`.
+For Herdr, `session` selects or creates the space (called a workspace by the CLI), `window` selects or creates the tab, and each agent runs in a pane split inside that tab. When a project catalog supplies no Herdr session, hcom uses the name of the directory containing `.hcom`; unless `window` is configured explicitly, each agent gets a tab named after the agent. This placement also applies when Herdr comes from hcom's configured default, including nested launches and message autostart; the launching agent's workspace and tab are not inherited. If no Herdr server is running at launch time, hcom automatically starts `herdr server` headless in the background (enabled by default; toggle with `hcom config terminal.herdr_autostart true|false` or `HCOM_HERDR_AUTOSTART`). Other terminal presets ignore `session` with a warning. A catalog agent with a terminal preset (explicit or configured) always opens its own pane or window, even when launched from a human shell; `terminal: here` runs it in the invoking terminal. Managed agents retain normal hcom lifecycle behavior, including closing their pane through `hcom kill`.
 
 For Herdr-recognized tools, hcom identifies the outer PTY process to Herdr on Unix/macOS; on Windows, Herdr detects the tool in the descendant process tree. Herdr screen manifests and native integrations manage working, idle, blocked state and session-resume metadata. The hcom `pane.report_agent` fallback is reserved for tools Herdr does not recognize.
 

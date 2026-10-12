@@ -444,15 +444,7 @@ pub static TERMINAL_PRESETS: LazyLock<Vec<(&'static str, TerminalPreset)>> = Laz
             p(
                 Some("tmux"),
                 None,
-                argv(&[
-                    "tmux",
-                    "new-session",
-                    "-d",
-                    "-s",
-                    "hcom-{instance_name}",
-                    "bash",
-                    "{script}",
-                ]),
+                argv(&["tmux", "new-session", "-d", "bash", "{script}"]),
                 argv(&["tmux", "kill-pane", "-t", "{pane_id}"]),
                 Some("TMUX_PANE"),
                 DL,
@@ -464,23 +456,6 @@ pub static TERMINAL_PRESETS: LazyLock<Vec<(&'static str, TerminalPreset)>> = Laz
                 Some("tmux"),
                 None,
                 argv(&["tmux", "split-window", "-h", "{script}"]),
-                argv(&["tmux", "kill-pane", "-t", "{pane_id}"]),
-                Some("TMUX_PANE"),
-                DL,
-            ),
-        ),
-        (
-            "tmux-window",
-            p(
-                Some("tmux"),
-                None,
-                argv(&[
-                    "tmux",
-                    "new-window",
-                    "-n",
-                    "hcom-{instance_name}",
-                    "{script}",
-                ]),
                 argv(&["tmux", "kill-pane", "-t", "{pane_id}"]),
                 Some("TMUX_PANE"),
                 DL,
@@ -669,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_terminal_presets_count() {
-        assert_eq!(TERMINAL_PRESETS.len(), 31);
+        assert_eq!(TERMINAL_PRESETS.len(), 30);
     }
 
     #[test]
@@ -687,38 +662,6 @@ mod tests {
         assert_eq!(
             preset.close.select(false),
             Some(&["kitten", "@", "close-window", "--match", "id:{pane_id}"] as ArgvTemplate)
-        );
-    }
-
-    #[test]
-    fn test_tmux_session_name_matches_instance_name() {
-        let preset = get_terminal_preset("tmux").unwrap();
-        assert_eq!(
-            preset.open.select(false),
-            Some(&[
-                "tmux",
-                "new-session",
-                "-d",
-                "-s",
-                "hcom-{instance_name}",
-                "bash",
-                "{script}",
-            ] as ArgvTemplate)
-        );
-    }
-
-    #[test]
-    fn test_tmux_window_name_matches_instance_name() {
-        let preset = get_terminal_preset("tmux-window").unwrap();
-        assert_eq!(
-            preset.open.select(false),
-            Some(&[
-                "tmux",
-                "new-window",
-                "-n",
-                "hcom-{instance_name}",
-                "{script}",
-            ] as ArgvTemplate)
         );
     }
 

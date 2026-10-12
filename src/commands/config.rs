@@ -1717,7 +1717,7 @@ pub fn terminal_help_text(show_current: bool) -> String {
     const MANAGED_PARENTS: &[(&str, &str)] = &[
         ("kitty", "auto split/tab/window"),
         ("wezterm", "auto tab/split/window"),
-        ("tmux", "named detached sessions"),
+        ("tmux", "detached sessions"),
         ("cmux", "workspaces"),
         ("zellij", "panes"),
         ("waveterm", "blocks"),
@@ -1730,7 +1730,7 @@ pub fn terminal_help_text(show_current: bool) -> String {
             "wezterm",
             &["wezterm-window", "wezterm-tab", "wezterm-split"],
         ),
-        ("tmux", &["tmux-window", "tmux-split"]),
+        ("tmux", &["tmux-split"]),
     ];
 
     let all_managed: std::collections::HashSet<&str> = {

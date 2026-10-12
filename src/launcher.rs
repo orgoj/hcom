@@ -294,11 +294,6 @@ pub fn will_run_in_current_terminal(
     if terminal == Some("here") {
         return true;
     }
-    // An explicit/configured terminal preset requests a separate terminal
-    // surface even for a single launch from a human shell.
-    if terminal.is_some_and(|t| !t.is_empty() && t != "default") {
-        return false;
-    }
     if inside_ai_tool {
         return false;
     }
@@ -3464,15 +3459,6 @@ mod tests {
             false,
             None,
             Some("here"),
-            false
-        ));
-
-        // Explicit terminal presets open a new surface even for one agent.
-        assert!(!will_run_in_current_terminal(
-            1,
-            false,
-            None,
-            Some("tmux-window"),
             false
         ));
 

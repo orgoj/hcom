@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -44,7 +44,7 @@ pub fn help_text() -> String {
                  [--for-agents|--for-humans]
                                              Catalog entries, filtered names, or reachable groups
   hcom agent show <name>                     Effective config and the exact command
-  hcom agent attach <name>                   Focus a running agent's window
+  hcom agent attach <name>                   Focus a running agent's Herdr pane
   hcom agent edit [--project]                Open a catalog in $EDITOR (creates a starter file)
   hcom agent completions bash|zsh|fish       Shell completion for agent names
 
@@ -132,20 +132,19 @@ Flags:
   --dir <path>              Working directory
   --terminal <preset>       hcom terminal preset, or \"here\"
   --terminal-command <cmd>  Raw terminal command with {{script}} (passed via HCOM_TERMINAL)
-  --session <name>          tmux session or Herdr space/workspace; empty string disables
-  --window <name>           tmux window or Herdr tab (default: agent name)
+  --session <name>          Herdr space/workspace; empty string disables
+  --window <name>           Herdr tab (default: agent name)
   --as <name>               Run under a different instance name
   --tag / --model <val>     Forwarded to hcom / the tool
   --reasoning <val>         Reasoning effort (Claude, Antigravity, and Codex)
   --hcom-prompt <text>      Initial user prompt (catalog key: prompt)
   --hcom-system-prompt <text>
                             Invocation-local instructions (catalog key: system_prompt)
-  --pre <cmd>               Shell command run in the window before the agent
   --env K=V                 Extra environment variable (repeatable)
   --inherit-env <var>       Inherit environment variable from caller (repeatable)
   --catalog <path>          Use this file instead of the project catalog
   --no-project              Ignore every enclosing project .hcom/{PROJECT_FILE}
-  --attach                  Focus the window after launching (or when already running)
+  --attach                  Focus the agent's Herdr pane when it is already running
   --restart                 Kill a running agent first instead of reporting it
   --resume                  Continue the agent's previous session
   --continue                Start a clean session with handoff summary from previous session
@@ -171,8 +170,8 @@ Terminal strategy, in order:
   2. terminal preset selected      -> hcom launches through that preset
   3. otherwise                     -> hcom uses its configured default terminal
 
-For tmux, session and window select the tmux session/window. For Herdr, session selects
-the space (workspace), window selects the tab, and the agent runs in a split pane.
+For Herdr, session selects the space (workspace), window selects the tab, and the agent
+runs in a split pane. Other presets ignore session and window.
 Configured-default Herdr launches use the catalog placement, not a parent agent's location.
 
 An instance name is unique: launching one that already runs prints its status and exits 0.
@@ -233,7 +232,6 @@ struct AgentDef {
     reasoning: Option<String>,
     prompt: Option<String>,
     system_prompt: Option<String>,
-    pre: Option<String>,
     resume: Option<bool>,
     #[serde(rename = "continue")]
     continue_session: Option<bool>,
@@ -307,7 +305,6 @@ impl AgentDef {
             reasoning,
             prompt,
             system_prompt,
-            pre,
             resume,
             continue_session,
             agent_dir,
@@ -1492,10 +1489,6 @@ fn parse_cli(argv: &[String]) -> Result<Cli> {
                 cli.def.system_prompt = Some(value()?);
                 i += 2;
             }
-            "--pre" => {
-                cli.def.pre = Some(value()?);
-                i += 2;
-            }
             "--env" => {
                 let kv = value()?;
                 let (k, v) = kv
@@ -1576,7 +1569,6 @@ struct Effective {
     session: Option<String>,
     terminal: Option<String>,
     terminal_command: Option<String>,
-    pre: Option<String>,
     tag: Option<String>,
     groups: Vec<String>,
     model: Option<String>,
@@ -1853,7 +1845,6 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         session: nonempty(def.session),
         terminal: nonempty(def.terminal),
         terminal_command: nonempty(def.terminal_command),
-        pre: nonempty(def.pre),
         tag: nonempty(def.tag),
         groups: def.groups,
         model: nonempty(def.model),
@@ -2068,17 +2059,11 @@ fn merge_json(base: &mut serde_json::Value, addition: serde_json::Value) {
 enum Strategy {
     /// Raw terminal command handed to hcom through HCOM_TERMINAL.
     Custom(String),
-    /// Named tmux session/window prepared here; agent runs with `--terminal here`.
-    Tmux { session: String, window: String },
     /// hcom opens the window itself.
     Direct(Option<String>),
 }
 
-fn choose_strategy(
-    eff: &Effective,
-    tmux_available: bool,
-    configured_terminal: Option<&str>,
-) -> (Strategy, Vec<String>) {
+fn choose_strategy(eff: &Effective, configured_terminal: Option<&str>) -> (Strategy, Vec<String>) {
     let mut warnings = Vec::new();
 
     if let Some(cmd) = &eff.terminal_command {
@@ -2088,32 +2073,13 @@ fn choose_strategy(
         return (Strategy::Custom(cmd.clone()), warnings);
     }
 
-    if let Some(session) = &eff.session {
-        if eff.terminal.as_deref().or(configured_terminal) == Some("herdr") {
-            return (Strategy::Direct(eff.terminal.clone()), warnings);
-        }
-        let mux_ok = eff
-            .terminal
-            .as_deref()
-            .is_some_and(|t| t.starts_with("tmux"));
-        if !mux_ok {
-            let preset = eff.terminal.as_deref().unwrap_or("default");
-            warnings.push(format!(
-                "session '{session}' ignored: terminal preset '{preset}' is not a multiplexer"
-            ));
-        } else if !tmux_available {
-            warnings.push(format!(
-                "session '{session}' ignored: tmux not found on PATH"
-            ));
-        } else {
-            return (
-                Strategy::Tmux {
-                    session: session.clone(),
-                    window: eff.window.clone(),
-                },
-                warnings,
-            );
-        }
+    if let Some(session) = &eff.session
+        && eff.terminal.as_deref().or(configured_terminal) != Some("herdr")
+    {
+        let preset = eff.terminal.as_deref().unwrap_or("default");
+        warnings.push(format!(
+            "session '{session}' ignored: terminal preset '{preset}' is not herdr"
+        ));
     }
 
     (Strategy::Direct(eff.terminal.clone()), warnings)
@@ -2137,8 +2103,34 @@ fn hcom_bin() -> String {
         .unwrap_or_else(|| "hcom".to_string())
 }
 
-/// Arguments for a fresh launch (`resume = false`) or `hcom r` (`resume = true`).
+/// `hcom_argv` for a strategy. hcom runs a single launch from a human shell in
+/// that terminal; a catalog agent with a terminal preset gets its own surface.
+fn launch_argv(
+    eff: &Effective,
+    strategy: &Strategy,
+    configured_terminal: Option<&str>,
+    resume: bool,
+) -> Vec<String> {
+    let (terminal, preset) = match strategy {
+        Strategy::Custom(cmd) => (None, Some(cmd.as_str())),
+        Strategy::Direct(t) => (t.as_deref(), t.as_deref().or(configured_terminal)),
+    };
+    let separate = preset.is_some_and(|t| !t.is_empty() && t != "default" && t != "here");
+    build_hcom_argv(eff, terminal, separate, resume)
+}
+
+#[cfg(test)]
 fn hcom_argv(eff: &Effective, terminal: Option<&str>, resume: bool) -> Vec<String> {
+    build_hcom_argv(eff, terminal, false, resume)
+}
+
+/// Arguments for a fresh launch (`resume = false`) or `hcom r` (`resume = true`).
+fn build_hcom_argv(
+    eff: &Effective,
+    terminal: Option<&str>,
+    no_run_here: bool,
+    resume: bool,
+) -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
     if resume {
         v.push("r".into());
@@ -2153,6 +2145,9 @@ fn hcom_argv(eff: &Effective, terminal: Option<&str>, resume: bool) -> Vec<Strin
     if let Some(t) = terminal {
         v.push("--terminal".into());
         v.push(t.to_string());
+    }
+    if no_run_here {
+        v.push("--no-run-here".into());
     }
     if let Some(tag) = &eff.tag {
         v.push("--tag".into());
@@ -2191,40 +2186,6 @@ fn hcom_argv(eff: &Effective, terminal: Option<&str>, resume: bool) -> Vec<Strin
     }
     v.extend(eff.extra.iter().cloned());
     v
-}
-
-/// Shell line executed inside a multiplexer window.
-fn window_command(eff: &Effective, resume: bool) -> String {
-    let mut parts: Vec<String> = eff
-        .env
-        .iter()
-        .map(|(k, v)| format!("{k}={}", shell_words::quote(v)))
-        .collect();
-    if !eff.env.is_empty() {
-        let encoded =
-            serde_json::to_string(&eff.env).expect("catalog env serialization cannot fail");
-        parts.push(format!(
-            "{CATALOG_LAUNCH_ENV}={}",
-            shell_words::quote(&encoded)
-        ));
-    }
-    let mut argv = vec![hcom_bin()];
-    argv.extend(hcom_argv(eff, Some("here"), resume));
-    parts.push(shell_words::join(argv.iter().map(String::as_str)));
-
-    let mut line = parts.join(" ");
-    if let Some(pre) = &eff.pre {
-        line = format!("{pre} && {line}");
-    }
-    // tmux executes a supplied window command through a non-interactive shell.
-    // Re-enter the user's login+interactive shell from the target directory so
-    // its init files establish the same environment as a normal terminal.
-    // Keep the pane in that initialized shell once the agent exits.
-    line.push_str("; exec \"${SHELL:-/bin/bash}\" -l");
-    format!(
-        "exec \"${{SHELL:-/bin/bash}}\" -lic {}",
-        shell_words::quote(&line)
-    )
 }
 
 // ── Live state ──────────────────────────────────────────────────────────
@@ -2295,154 +2256,25 @@ fn find_live(name: &str) -> Option<LiveAgent> {
     Some(LiveAgent::from_instance(&instance, computed.status))
 }
 
-// ── tmux backend ────────────────────────────────────────────────────────
-
-fn tmux_bin() -> Option<String> {
-    crate::terminal::which_bin("tmux")
-}
-
-fn tmux_ok(args: &[&str]) -> bool {
-    let Some(bin) = tmux_bin() else {
-        return false;
-    };
-    Command::new(bin)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn tmux_capture(args: &[&str]) -> Option<String> {
-    let bin = tmux_bin()?;
-    let out = Command::new(bin)
-        .args(args)
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-fn tmux_run(args: &[String], dry_run: bool) -> Result<()> {
-    if dry_run {
-        let mut shown = vec!["tmux".to_string()];
-        shown.extend(args.iter().cloned());
-        println!("{}", shell_words::join(shown.iter().map(String::as_str)));
-        return Ok(());
-    }
-    let bin = tmux_bin().ok_or_else(|| anyhow::anyhow!("tmux not found on PATH"))?;
-    let status = Command::new(bin).args(args).status()?;
-    if !status.success() {
-        bail!("tmux {} failed", args.first().cloned().unwrap_or_default());
-    }
-    Ok(())
-}
-
-fn tmux_window_exists(session: &str, window: &str) -> bool {
-    tmux_capture(&[
-        "list-windows",
-        "-t",
-        &format!("={session}"),
-        "-F",
-        "#{window_name}",
-    ])
-    .map(|out| out.lines().any(|l| l == window))
-    .unwrap_or(false)
-}
-
-/// Create the session (with the agent as its first window) or add a window to it.
-fn tmux_launch(session: &str, window: &str, dir: &str, command: &str, dry_run: bool) -> Result<()> {
-    let session_exists = !dry_run && tmux_ok(&["has-session", "-t", &format!("={session}")]);
-
-    let args: Vec<String> = if !session_exists {
-        vec![
-            "new-session".into(),
-            "-d".into(),
-            "-s".into(),
-            session.into(),
-            "-n".into(),
-            window.into(),
-            "-c".into(),
-            dir.into(),
-            command.into(),
-        ]
-    } else if tmux_window_exists(session, window) {
-        // Window left over from a previous run; reuse it instead of stacking duplicates.
-        vec![
-            "respawn-window".into(),
-            "-k".into(),
-            "-t".into(),
-            format!("{session}:{window}"),
-            "-c".into(),
-            dir.into(),
-            command.into(),
-        ]
-    } else {
-        vec![
-            "new-window".into(),
-            "-d".into(),
-            "-t".into(),
-            format!("{session}:"),
-            "-n".into(),
-            window.into(),
-            "-c".into(),
-            dir.into(),
-            command.into(),
-        ]
-    };
-    tmux_run(&args, dry_run)
-}
-
-/// Focus a window, either by tmux target or by a recorded pane id.
-fn tmux_focus(target: &str) -> Result<()> {
-    if tmux_bin().is_none() {
-        bail!("tmux not found on PATH");
-    }
-    tmux_run(
-        &[
-            "select-window".to_string(),
-            "-t".to_string(),
-            target.to_string(),
-        ],
-        false,
-    )?;
-    let inside = std::env::var_os("TMUX").is_some();
-    let verb = if inside {
-        "switch-client"
-    } else {
-        "attach-session"
-    };
-    tmux_run(
-        &[verb.to_string(), "-t".to_string(), target.to_string()],
-        false,
-    )
-}
-
 fn focus_running(eff: &Effective, live: &LiveAgent) -> Result<()> {
     if live
         .launch_context
         .get("terminal_preset_effective")
         .and_then(|value| value.as_str())
-        == Some("herdr")
+        != Some("herdr")
     {
-        let status = Command::new("herdr")
-            .args(["agent", "focus", &eff.name])
-            .status()?;
-        if !status.success() {
-            bail!("could not focus Herdr agent '{}'", eff.name);
-        }
-        return Ok(());
+        bail!(
+            "'{}' does not run in Herdr — only Herdr agents can be attached",
+            eff.name
+        );
     }
-    if let Some(pane) = live.pane_id() {
-        return tmux_focus(pane);
+    let status = Command::new("herdr")
+        .args(["agent", "focus", &eff.name])
+        .status()?;
+    if !status.success() {
+        bail!("could not focus Herdr agent '{}'", eff.name);
     }
-    match &eff.session {
-        Some(session) => tmux_focus(&format!("{session}:{}", eff.window)),
-        None => bail!("no pane recorded for '{}' — nothing to attach to", eff.name),
-    }
+    Ok(())
 }
 
 // ── Subcommand: launch ──────────────────────────────────────────────────
@@ -2574,8 +2406,7 @@ fn cmd_launch_group(group: &str, rest: &[String]) -> Result<i32> {
             false,
             configured_terminal.as_deref(),
         );
-        let (strategy, _) =
-            choose_strategy(&eff, tmux_bin().is_some(), configured_terminal.as_deref());
+        let (strategy, _) = choose_strategy(&eff, configured_terminal.as_deref());
         if strategy == Strategy::Direct(Some("here".to_string())) {
             bail!(
                 "agent '{name}' in group '@{group}' would launch in the current terminal; groups require separate terminal panes"
@@ -2749,8 +2580,7 @@ fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
     apply_agy_policy_cwd(&mut policy_eff)?;
     let eff = &policy_eff;
     let configured_terminal = configured_terminal();
-    let (strategy, warnings) =
-        choose_strategy(eff, tmux_bin().is_some(), configured_terminal.as_deref());
+    let (strategy, warnings) = choose_strategy(eff, configured_terminal.as_deref());
     for w in &warnings {
         eprintln!("warning: {w}");
     }
@@ -2760,29 +2590,10 @@ fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
         println!("continuing '{}' ({})", eff.name, eff.cli);
     }
 
+    let argv = launch_argv(eff, &strategy, configured_terminal.as_deref(), resume);
     match strategy {
-        Strategy::Tmux { session, window } => {
-            let command = window_command(eff, resume);
-            tmux_launch(&session, &window, &eff.dir, &command, cli.dry_run)?;
-            if !cli.dry_run {
-                println!(
-                    "launched '{}' ({}) in tmux {session}:{window} [{}]",
-                    eff.name, eff.cli, eff.dir
-                );
-                if cli.attach {
-                    tmux_focus(&format!("{session}:{window}"))?;
-                }
-            }
-            Ok(0)
-        }
-        Strategy::Custom(term_cmd) => {
-            let argv = hcom_argv(eff, None, resume);
-            run_hcom(eff, &argv, Some(&term_cmd), cli.dry_run)
-        }
-        Strategy::Direct(terminal) => {
-            let argv = hcom_argv(eff, terminal.as_deref(), resume);
-            run_hcom(eff, &argv, None, cli.dry_run)
-        }
+        Strategy::Custom(term_cmd) => run_hcom(eff, &argv, Some(&term_cmd), cli.dry_run),
+        Strategy::Direct(_) => run_hcom(eff, &argv, None, cli.dry_run),
     }
 }
 
@@ -3099,8 +2910,7 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
         window_explicit,
         configured_terminal.as_deref(),
     );
-    let (strategy, mut warnings) =
-        choose_strategy(&eff, tmux_bin().is_some(), configured_terminal.as_deref());
+    let (strategy, mut warnings) = choose_strategy(&eff, configured_terminal.as_deref());
     warnings.extend(eff.skill_warnings.iter().cloned());
     if let Some(error) = &eff.bundle_access_error {
         warnings.push(error.clone());
@@ -3150,9 +2960,6 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
         }
     );
     match &strategy {
-        Strategy::Tmux { session, window } => {
-            println!("terminal:  tmux {session}:{window} (--terminal here)")
-        }
         Strategy::Custom(c) => println!("terminal:  HCOM_TERMINAL={c}"),
         Strategy::Direct(Some(t)) => println!("terminal:  preset {t}"),
         Strategy::Direct(None) => match configured_terminal.as_deref() {
@@ -3173,9 +2980,6 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     }
     if let Some(reasoning) = &eff.reasoning {
         println!("reasoning: {reasoning}");
-    }
-    if let Some(p) = &eff.pre {
-        println!("pre:       {p}");
     }
     if !eff.env.is_empty() {
         println!(
@@ -3210,18 +3014,14 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     }
     println!();
     println!("command:");
-    match &strategy {
-        Strategy::Tmux { .. } => println!("  {}", window_command(&eff, eff.resume)),
-        Strategy::Custom(_) | Strategy::Direct(_) => {
-            let terminal = match &strategy {
-                Strategy::Direct(t) => t.clone(),
-                _ => None,
-            };
-            let mut shown = vec![hcom_bin()];
-            shown.extend(hcom_argv(&eff, terminal.as_deref(), eff.resume));
-            println!("  {}", shell_words::join(shown.iter().map(String::as_str)));
-        }
-    }
+    let mut shown = vec![hcom_bin()];
+    shown.extend(launch_argv(
+        &eff,
+        &strategy,
+        configured_terminal.as_deref(),
+        eff.resume,
+    ));
+    println!("  {}", shell_words::join(shown.iter().map(String::as_str)));
     Ok(0)
 }
 
@@ -4179,8 +3979,8 @@ mod tests {
     }
 
     #[test]
-    fn window_defaults_to_agent_name_and_empty_session_disables_mux() {
-        let eff = eff_of(r#"{"dir":"/w","session":"wdt","terminal":"tmux"}"#, &[]);
+    fn window_defaults_to_agent_name_and_empty_session_disables_placement() {
+        let eff = eff_of(r#"{"dir":"/w","session":"wdt","terminal":"herdr"}"#, &[]);
         assert_eq!(eff.window, "wdt_main");
         assert_eq!(eff.session.as_deref(), Some("wdt"));
 
@@ -4189,48 +3989,31 @@ mod tests {
     }
 
     #[test]
-    fn strategy_prefers_terminal_command_then_mux_then_preset() {
+    fn strategy_prefers_terminal_command_then_preset() {
         let eff = eff_of(r#"{"dir":"/w","terminal_command":"myterm {script}"}"#, &[]);
-        let (s, _) = choose_strategy(&eff, true, None);
+        let (s, _) = choose_strategy(&eff, None);
         assert_eq!(s, Strategy::Custom("myterm {script}".into()));
 
-        let eff = eff_of(r#"{"dir":"/w","session":"wdt","terminal":"tmux"}"#, &[]);
-        let (s, w) = choose_strategy(&eff, true, None);
-        assert_eq!(
-            s,
-            Strategy::Tmux {
-                session: "wdt".into(),
-                window: "wdt_main".into()
-            }
-        );
-        assert!(w.is_empty());
-
         let eff = eff_of(r#"{"dir":"/w","terminal":"wezterm-tab"}"#, &[]);
-        let (s, _) = choose_strategy(&eff, true, None);
+        let (s, _) = choose_strategy(&eff, None);
         assert_eq!(s, Strategy::Direct(Some("wezterm-tab".into())));
 
         let eff = eff_of(r#"{"dir":"/w"}"#, &[]);
-        let (s, _) = choose_strategy(&eff, true, None);
+        let (s, _) = choose_strategy(&eff, None);
         assert_eq!(s, Strategy::Direct(None));
     }
 
     #[test]
-    fn session_falls_back_to_preset_without_tmux() {
-        let eff = eff_of(r#"{"dir":"/w","session":"wdt","terminal":"tmux"}"#, &[]);
-        let (s, warnings) = choose_strategy(&eff, false, None);
-        assert_eq!(s, Strategy::Direct(Some("tmux".into())));
-        assert!(warnings[0].contains("tmux not found"));
-    }
-
-    #[test]
-    fn session_with_non_mux_preset_warns_and_falls_back() {
-        let eff = eff_of(
-            r#"{"dir":"/w","session":"wdt","terminal":"kitty-tab"}"#,
-            &[],
-        );
-        let (s, warnings) = choose_strategy(&eff, true, None);
-        assert_eq!(s, Strategy::Direct(Some("kitty-tab".into())));
-        assert!(warnings[0].contains("not a multiplexer"));
+    fn session_with_non_herdr_preset_warns_and_falls_back() {
+        for terminal in ["kitty-tab", "tmux"] {
+            let eff = eff_of(
+                &format!(r#"{{"dir":"/w","session":"wdt","terminal":"{terminal}"}}"#),
+                &[],
+            );
+            let (s, warnings) = choose_strategy(&eff, None);
+            assert_eq!(s, Strategy::Direct(Some(terminal.into())));
+            assert!(warnings[0].contains("is not herdr"));
+        }
     }
 
     #[test]
@@ -4248,7 +4031,7 @@ mod tests {
             eff.env.get("HCOM_HERDR_TAB").map(String::as_str),
             Some("review")
         );
-        let (strategy, warnings) = choose_strategy(&eff, false, None);
+        let (strategy, warnings) = choose_strategy(&eff, None);
         assert_eq!(strategy, Strategy::Direct(Some("herdr".into())));
         assert!(warnings.is_empty());
     }
@@ -4284,9 +4067,9 @@ mod tests {
     }
 
     #[test]
-    fn session_without_terminal_does_not_select_tmux() {
+    fn session_without_herdr_terminal_warns() {
         let eff = eff_of(r#"{"dir":"/w","session":"wdt"}"#, &[]);
-        let (s, warnings) = choose_strategy(&eff, true, None);
+        let (s, warnings) = choose_strategy(&eff, None);
         assert_eq!(s, Strategy::Direct(None));
         assert!(warnings[0].contains("terminal preset 'default'"));
     }
@@ -4294,7 +4077,7 @@ mod tests {
     #[test]
     fn session_uses_configured_herdr_without_catalog_terminal() {
         let eff = eff_of(r#"{"dir":"/w","session":"wdt"}"#, &[]);
-        let (strategy, warnings) = choose_strategy(&eff, true, Some("herdr"));
+        let (strategy, warnings) = choose_strategy(&eff, Some("herdr"));
         assert_eq!(strategy, Strategy::Direct(None));
         assert!(warnings.is_empty());
     }
@@ -4423,18 +4206,47 @@ mod tests {
     }
 
     #[test]
-    fn window_command_carries_env_pre_and_keeps_pane_alive() {
+    fn launch_argv_requests_own_surface_for_any_terminal_preset() {
+        // Startup text equal to "--go" must stay intact.
         let eff = eff_of(
-            r#"{"dir":"/w","env":{"AWS_PROFILE":"wdt"},"pre":"source .venv/bin/activate"}"#,
+            r#"{"dir":"/w","cli":"codex","prompt":"--go","system_prompt":"--go"}"#,
             &[],
         );
-        let cmd = window_command(&eff, false);
-        assert!(cmd.starts_with("exec \"${SHELL:-/bin/bash}\" -lic "));
-        assert!(cmd.contains("source .venv/bin/activate && AWS_PROFILE=wdt "));
-        assert!(cmd.contains(CATALOG_LAUNCH_ENV));
-        assert!(cmd.contains("AWS_PROFILE"));
-        assert!(cmd.contains("--terminal here"));
-        assert!(cmd.contains("; exec \"${SHELL:-/bin/bash}\" -l"));
+        let has = |argv: &[String]| argv.iter().any(|a| a == "--no-run-here");
+        let value_of = |argv: &[String], flag: &str| {
+            argv.iter()
+                .position(|a| a == flag)
+                .map(|i| argv[i + 1].clone())
+        };
+
+        for (strategy, configured, resume) in [
+            (Strategy::Direct(Some("herdr".into())), None, false),
+            (Strategy::Direct(None), Some("herdr"), false),
+            (Strategy::Custom("myterm {script}".into()), None, false),
+            (Strategy::Direct(Some("herdr".into())), None, true),
+        ] {
+            let argv = launch_argv(&eff, &strategy, configured, resume);
+            assert!(has(&argv), "{strategy:?} {configured:?}: {argv:?}");
+            assert_eq!(
+                value_of(&argv, "--hcom-prompt").as_deref(),
+                Some("--go"),
+                "{argv:?}"
+            );
+            assert_eq!(
+                value_of(&argv, "--hcom-system-prompt").as_deref(),
+                Some("--go"),
+                "{argv:?}"
+            );
+        }
+
+        for (strategy, configured) in [
+            (Strategy::Direct(Some("here".into())), None),
+            (Strategy::Direct(None), Some("default")),
+            (Strategy::Direct(None), None),
+        ] {
+            let argv = launch_argv(&eff, &strategy, configured, false);
+            assert!(!has(&argv), "{strategy:?} {configured:?}: {argv:?}");
+        }
     }
 
     #[test]

@@ -292,13 +292,6 @@ const SEND_HELP: &[HelpEntry] = &[
         "Autostart targeted catalog agent under this instance name (alias: --as)",
     ),
     ("", ""),
-    ("Output:", ""),
-    ("  --quiet", "Suppress feedback"),
-    (
-        "  --json",
-        "One JSON line: {\"event_id\":<id>,\"delivered_to\":[..]}",
-    ),
-    ("", ""),
     ("Envelope:", ""),
     ("  --intent <type>", "request | inform | ack"),
     ("", "  request: expect a response"),

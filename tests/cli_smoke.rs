@@ -3169,6 +3169,7 @@ fn launch_scripts_export_catalog_agent_name_and_instance_name() {
             "solo",
             "--terminal",
             "sh -c true {script}",
+            "--no-run-here",
             "--go",
         ])
         .output()
@@ -3239,6 +3240,7 @@ fn handoff_relaunches_the_same_catalog_agent_under_its_instance_name() {
         "solo",
         "--terminal",
         "sh -c true {script}",
+        "--no-run-here",
         "--go",
     ]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
@@ -3527,7 +3529,7 @@ fn agent_agy_policy_cwd_uses_canonical_launch_directory() {
     assert!(hook.status.success());
     assert_eq!(hook.stdout, workspace.to_string_lossy().as_bytes());
 
-    let (code, _script, stderr) = h.run(["agy", "--terminal", "print"]);
+    let (code, _script, stderr) = h.run(["agy", "--terminal", "print", "--no-run-here"]);
     assert_eq!(code, 0, "stderr={stderr}");
     let child_env_paths = std::fs::read_dir(&launch_dir)
         .unwrap()
@@ -3600,7 +3602,7 @@ fn agent_agy_policy_cwd_survives_tracked_resume_and_cli_switch() {
     .unwrap();
     drop(conn);
 
-    let (code, _stdout, stderr) = h.run(["r", "knowledge", "--terminal", "print"]);
+    let (code, _stdout, stderr) = h.run(["r", "knowledge", "--terminal", "print", "--no-run-here"]);
     assert_eq!(code, 0, "stderr={stderr}");
     let launch_dir = h.path().join(".tmp/launch");
     let resume_env = std::fs::read_dir(&launch_dir)
@@ -4804,6 +4806,7 @@ printf '%s\n' '{"id":"request-launch","ok":true,"result":{"terminal":{"handle":"
         launch_dir.to_str().expect("UTF-8 launch dir"),
         "--as",
         "orca-direct",
+        "--no-run-here",
     ]);
     let output = cmd.output().expect("run Orca direct launch");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -4879,7 +4882,14 @@ printf '%s\n' '{"id":"cli:terminal:close","ok":true,"result":{"close":{"handle":
         std::env::join_paths(path_entries).expect("join fake cleanup PATH"),
     )
     .env("ORCA_CAPTURE_PATH", &capture)
-    .args(["claude", "--terminal", "orca", "--as", "orca-cleanup"]);
+    .args([
+        "claude",
+        "--terminal",
+        "orca",
+        "--as",
+        "orca-cleanup",
+        "--no-run-here",
+    ]);
     let output = cmd.output().expect("run invalid Orca launch");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -4903,27 +4913,45 @@ printf '%s\n' '{"id":"cli:terminal:close","ok":true,"result":{"close":{"handle":
 }
 
 #[test]
-fn agent_session_uses_tmux_window_with_terminal_here() {
+fn agent_with_terminal_preset_opens_its_own_surface() {
     let h = Hcom::new();
     std::fs::write(
         h.path().join("agents.json"),
-        r#"{"agents":{"solo":{"dir":"/tmp","cli":"codex","terminal":"tmux","session":"work","window":"main",
-                              "pre":"echo ready"}}}"#,
+        r#"{"agents":{
+            "solo":{"dir":"/tmp","cli":"codex","terminal":"tmux","session":"work"},
+            "inplace":{"dir":"/tmp","cli":"codex","terminal":"here"}}}"#,
     )
     .expect("write catalog");
 
     let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-    if stderr.contains("tmux not found") {
-        // No tmux on this machine: the session must degrade to a plain launch.
-        assert!(!stdout.contains("tmux "), "stdout={stdout}");
-        return;
-    }
-    assert!(stdout.contains("-s work"), "stdout={stdout}");
-    assert!(stdout.contains("-n main"), "stdout={stdout}");
-    assert!(stdout.contains("echo ready &&"), "stdout={stdout}");
-    assert!(stdout.contains("--terminal here"), "stdout={stdout}");
-    assert!(stdout.contains(r#"exec "${SHELL:-"#), "stdout={stdout}");
+    assert!(
+        stdout.contains("--terminal tmux --no-run-here --go"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stderr.contains("session 'work' ignored: terminal preset 'tmux' is not herdr"),
+        "stderr={stderr}"
+    );
+
+    let (code, stdout, stderr) = h.run(["agent", "inplace", "--dry-run"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("--terminal here --go"), "stdout={stdout}");
+    assert!(!stdout.contains("--no-run-here"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_catalog_rejects_removed_pre_field() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"solo":{"dir":"/tmp","cli":"codex","pre":"echo ready"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--dry-run"]);
+    assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("unknown field `pre`"), "stderr={stderr}");
 }
 
 #[test]

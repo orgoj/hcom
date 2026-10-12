@@ -138,18 +138,10 @@ auto-start them. Catalog layers resolve identically inside and outside a project
 Use `--as` for one intentional, stable agent name. It is valid only when launching one agent:
 
 ```bash
-hcom codex --as audit_api --dir /path/to/repo --terminal tmux-window --hcom-prompt "Inspect authentication and report back" --go
+hcom codex --as audit_api --dir /path/to/repo --terminal herdr --hcom-prompt "Inspect authentication and report back" --go
 ```
 
-The `tmux-window` preset creates a window named `hcom-audit_api` in the launching agent's current tmux session. Switch to it with normal tmux window navigation.
-
-Use `--terminal tmux` when the child needs its own detached session. A human can access that session later:
-
-```bash
-tmux attach -t hcom-audit_api
-```
-
-Use `--terminal tmux-split` only when the child should split the launching agent's current window. Always pass `--dir` when the child must work in another repository. Use `hcom send @audit_api -- "..."` for follow-up work and `hcom kill audit_api` to stop the agent and close its managed tmux pane.
+Always pass `--dir` when the child must work in another repository. Use `hcom send @audit_api -- "..."` for follow-up work and `hcom kill audit_api` to stop the agent and close its managed pane.
 
 For agents defined in the effective `hcom agent` JSON catalog, a targeted send is also the normal
 launch operation: `hcom send @audit_api --intent request -- "..."` starts `audit_api` when it is
