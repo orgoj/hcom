@@ -247,23 +247,10 @@ pub fn run_pty(args: &[String]) -> Result<()> {
                 launch.stop_leader();
             }
             if let Some(name) = instance_name_for_failure.as_deref()
-                && let Ok(db) = db::HcomDb::open()
-                && let Ok(Some(instance)) = db.get_instance_full(name)
+                && let Ok(mut db) = db::HcomDb::open()
             {
-                let fallback = format!("{err:#}");
-                if let Some(detail) = instance_lifecycle::finalize_launch_failure_detail(
-                    &db,
-                    &instance,
-                    Some(&fallback),
-                ) {
-                    let _ = db.emit_launch_failed_event(
-                        name,
-                        shared::ST_INACTIVE,
-                        "launch_failed",
-                        "spawn_failed",
-                        &detail,
-                    );
-                }
+                let process_id = std::env::var("HCOM_PROCESS_ID").unwrap_or_default();
+                record_spawn_failure(&mut db, name, &format!("{err:#}"), &process_id);
             }
             return Err(err);
         }
@@ -282,6 +269,33 @@ pub fn run_pty(args: &[String]) -> Result<()> {
     std::process::exit(exit_code);
 }
 
+/// Report a failed PTY spawn for `name` and leave no live-looking row behind.
+fn record_spawn_failure(db: &mut db::HcomDb, name: &str, error: &str, process_id: &str) {
+    let Ok(Some(instance)) = db.get_instance_full(name) else {
+        return;
+    };
+    let detail = instance_lifecycle::finalize_launch_failure_detail(db, &instance, Some(error));
+    let _ = db.emit_launch_failed_event(
+        name,
+        shared::ST_INACTIVE,
+        "launch_failed",
+        "spawn_failed",
+        detail.as_deref().unwrap_or(error),
+    );
+    // The child can bind its session before the spawn fails (e.g. a DB write
+    // after the fork). Its process is gone, so stop the bound row: left
+    // listening it goes stale, blocks a relaunch under the same name, and
+    // queues messages for a dead agent instead of autostarting a new one.
+    if detail.is_none() {
+        if delivery::instance_owns_process_binding(db, process_id, name) {
+            delivery::cleanup_deleted_instance(db, name);
+        }
+        if !process_id.is_empty() {
+            let _ = db.delete_process_binding(process_id);
+        }
+    }
+}
+
 fn pty_child_env() -> Vec<(String, String)> {
     vec![("HCOM_LAUNCHED".to_string(), "1".to_string())]
 }
@@ -292,6 +306,40 @@ mod tests {
 
     fn args(s: &[&str]) -> Vec<String> {
         s.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A spawn that fails after the child bound its session must not leave a
+    /// listening row that blocks relaunch and swallows messages.
+    #[test]
+    #[serial_test::serial]
+    fn spawn_failure_after_bind_stops_the_bound_row() {
+        let (_dir, hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
+        let mut db = crate::db::HcomDb::open_at(&hcom_dir.join("test.db")).unwrap();
+        db.save_instance_named(
+            "luna",
+            &serde_json::Map::from_iter([
+                ("tool".into(), serde_json::json!("claude")),
+                ("session_id".into(), serde_json::json!("bound-session")),
+                ("status".into(), serde_json::json!("listening")),
+                ("status_context".into(), serde_json::json!("start")),
+                ("created_at".into(), serde_json::json!(1.0)),
+            ]),
+        )
+        .unwrap();
+
+        super::record_spawn_failure(&mut db, "luna", "database is locked", "");
+
+        assert!(db.get_instance_full("luna").unwrap().is_none());
+        let failed: bool = db
+            .conn()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM events WHERE instance = 'luna'
+                 AND json_extract(data, '$.action') = 'launch_failed')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(failed);
     }
 
     /// Test that no args runs Rust TUI
