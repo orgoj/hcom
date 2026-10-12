@@ -95,6 +95,9 @@ pub fn capture_and_store_launch_context(db: &HcomDb, instance_name: &str) {
         "process_id",
         "terminal_preset_effective",
         "pid_identity",
+        // Written by the launcher for the stop snapshot, handoff and resume.
+        "agent_name",
+        "dippy_policy_cwd",
     ];
     let missing: Vec<&str> = preserve_keys
         .iter()
@@ -1590,7 +1593,7 @@ mod tests {
     fn test_capture_and_store_launch_context_preserves_terminal_metadata() {
         // Preserve only the fields we can't recapture from hook env:
         // pane_id, terminal_id, kitty_listen_on, process_id, and the resolved
-        // terminal preset name.
+        // terminal preset name, plus the launcher's catalog fields.
         let (db, path) = setup_test_db();
         db.conn()
             .execute(
@@ -1599,7 +1602,7 @@ mod tests {
                     "luna",
                     "claude",
                     1.0f64,
-                    r#"{"terminal_preset_effective":"herdr","pane_id":"p_7","process_id":"proc-1","pid_identity":"spawn-1"}"#
+                    r#"{"terminal_preset_effective":"herdr","pane_id":"p_7","process_id":"proc-1","pid_identity":"spawn-1","agent_name":"reviewer","dippy_policy_cwd":"/work"}"#
                 ],
             )
             .unwrap();
@@ -1624,6 +1627,14 @@ mod tests {
         assert_eq!(
             ctx.get("pid_identity").and_then(|v| v.as_str()),
             Some("spawn-1")
+        );
+        assert_eq!(
+            ctx.get("agent_name").and_then(|v| v.as_str()),
+            Some("reviewer")
+        );
+        assert_eq!(
+            ctx.get("dippy_policy_cwd").and_then(|v| v.as_str()),
+            Some("/work")
         );
 
         cleanup(path);
