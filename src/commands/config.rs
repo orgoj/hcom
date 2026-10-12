@@ -1096,6 +1096,21 @@ Notes:
   - Increase for complex subagent tasks",
         ),
 
+        "HCOM_CONTINUE_LAST" => Some(
+            "\
+HCOM_CONTINUE_LAST - Number of recent exchanges for --continue
+
+Default: 5
+
+Purpose:
+  Default number of recent exchanges included in the handoff summary
+  when launching or continuing an agent with --continue.
+
+Usage:
+  hcom config continue_last 10
+  export HCOM_CONTINUE_LAST=10",
+        ),
+
         "HCOM_CLAUDE_DELIVERY" => Some(
             "\
 HCOM_CLAUDE_DELIVERY - How hcom wakes idle Claude agents
@@ -1251,6 +1266,31 @@ Notes:
   - This affects terminal/tab titles, not the visible PTY output.
   - Tools that do not emit terminal titles have no live child title to append.
   - The same setting can be provided with HCOM_TITLE_MODE in the environment.",
+        ),
+
+        "HCOM_HERDR_AUTOSTART" => Some(
+            "\
+HCOM_HERDR_AUTOSTART - Auto-start Herdr server when not running
+
+Default: true
+
+Purpose:
+  Controls whether hcom automatically spawns `herdr server` in the background
+  when launching agents into Herdr if no Herdr server is currently running.
+
+Values:
+  true  - Auto-start `herdr server` headless and wait for socket readiness (default)
+  false - Fail immediately with a clear error if Herdr server is not running
+
+Usage:
+  hcom config herdr_autostart true    # Enable autostart (default)
+  hcom config herdr_autostart false   # Disable autostart
+  hcom config herdr_autostart         # Show current value
+
+Notes:
+  - This allows headless agent launches (e.g. on remote servers) into Herdr
+    without requiring a persistent TUI session to be running beforehand.
+  - The same setting can be provided with HCOM_HERDR_AUTOSTART in the environment.",
         ),
 
         "HCOM_NAME_EXPORT" => Some(
@@ -1490,7 +1530,9 @@ pub fn terminal_help_text(show_current: bool) -> String {
             };
             lines.push(format!("Current: default (auto-detect){suffix}"));
         } else {
-            let kind = if crate::config::get_merged_preset(&current)
+            let kind = if current == "here" {
+                "current terminal"
+            } else if crate::config::get_merged_preset(&current)
                 .is_some_and(|p| p.has_close(cfg!(windows)))
             {
                 "managed"
@@ -1545,6 +1587,11 @@ pub fn terminal_help_text(show_current: bool) -> String {
         let mark = if is_available(name) { "[+]" } else { "[-]" };
         lines.push(format!("  {mark} {name}"));
     }
+
+    lines.push(String::new());
+    lines.push("Current terminal:".to_string());
+    lines.push("  here            run the agent in the invoking terminal".to_string());
+    lines.push("                  Example: hcom codex --terminal here".to_string());
 
     // TOML-defined presets not in built-ins
     let toml_path = crate::paths::config_toml_path();
@@ -1696,6 +1743,12 @@ fn config_terminal(argv: &[String], setup_mode: bool) -> i32 {
                 };
             println!("  {name}{availability}{marker}");
         }
+        let here_marker = if current == "here" {
+            " ← current"
+        } else {
+            ""
+        };
+        println!("  here{here_marker}");
         // Include TOML-defined presets not in built-ins
         let toml_path = crate::paths::config_toml_path();
         if let Some(toml_presets) = crate::config::load_toml_presets(&toml_path)
@@ -1760,6 +1813,7 @@ fn config_terminal(argv: &[String], setup_mode: bool) -> i32 {
 
     if !valid {
         let mut available: Vec<&str> = TERMINAL_PRESETS.iter().map(|(name, _)| *name).collect();
+        available.push("here");
         // Include user-defined presets
         let toml_path = crate::paths::config_toml_path();
         let user_names: Vec<String> = crate::config::load_toml_presets(&toml_path)
@@ -2191,6 +2245,13 @@ mod tests {
 
         assert!(managed.contains("cmux"));
         assert!(!other.contains("cmux"));
+    }
+
+    #[test]
+    fn test_terminal_help_text_documents_here_mode() {
+        let help = terminal_help_text(false);
+        assert!(help.contains("here            run the agent in the invoking terminal"));
+        assert!(help.contains("hcom codex --terminal here"));
     }
 
     #[test]

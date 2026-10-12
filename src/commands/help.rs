@@ -548,6 +548,10 @@ const LISTEN_HELP: &[HelpEntry] = &[
 const RESET_HELP: &[HelpEntry] = &[
     ("reset", "Archive conversation, clear database"),
     (
+        "",
+        "On Unix, an open TUI reconnects after database replacement.",
+    ),
+    (
         "reset all",
         "Stop all + clear db + remove hooks + reset config",
     ),
@@ -624,6 +628,14 @@ const CONFIG_KEYS_HELP: &[HelpEntry] = &[
     (
         "  title_mode",
         "Terminal/tab title: combined, label, or off",
+    ),
+    (
+        "  herdr_autostart",
+        "Auto-start Herdr server if not running",
+    ),
+    (
+        "  continue_last",
+        "Recent exchanges in the --continue handoff",
     ),
 ];
 
@@ -1361,6 +1373,10 @@ fn command_help_raw(name: &str) -> String {
         lines.push(format_entry(
             "",
             "Precedence: defaults < config.toml < env vars",
+        ));
+        lines.push(format_entry(
+            "",
+            "An existing HCOM_DIR/env survives first-run config creation.",
         ));
         // Dynamic: resolved config file paths
         let hcom_dir = env::var("HCOM_DIR")

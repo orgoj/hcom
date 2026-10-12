@@ -182,10 +182,12 @@ use FieldKind::{Bool, Int, Str};
 pub(crate) const FIELDS: &[ConfigField] = &[
     f("terminal", "HCOM_TERMINAL", "terminal.active", Str, "Terminal preset for spawning agent panes"),
     f("title_mode", "HCOM_TITLE_MODE", "terminal.title_mode", Str, "Terminal title mode (combined | label | off)"),
+    f("herdr_autostart", "HCOM_HERDR_AUTOSTART", "terminal.herdr_autostart", Bool, "Auto-start Herdr server when not running (true/false)"),
     f("tag", "HCOM_TAG", "launch.tag", Str, "Group tag for launched instances"),
     f("hints", "HCOM_HINTS", "launch.hints", Str, "Text injected with all messages"),
     f("notes", "HCOM_NOTES", "launch.notes", Str, "One-time notes appended at bootstrap"),
     f("subagent_timeout", "HCOM_SUBAGENT_TIMEOUT", "launch.subagent_timeout", Int, "Timeout for Claude subagents in seconds (default: 30)"),
+    f("continue_last", "HCOM_CONTINUE_LAST", "launch.continue_last", Int, "Number of recent exchanges for --continue (default: 5)"),
     f("auto_subscribe", "HCOM_AUTO_SUBSCRIBE", "launch.auto_subscribe", Str, "Auto-subscribe event presets (comma-separated)"),
     f("auto_trust_workspace", "HCOM_AUTO_TRUST_WORKSPACE", "launch.auto_trust_workspace", Bool, "Auto-approve workspace trust at launch; may persist in tool config"),
     f("claude_args", "HCOM_CLAUDE_ARGS", "launch.claude.args", Str, "Default args for claude on launch"),
@@ -267,6 +269,7 @@ fn get_nested(table: &toml::Value, dotted_path: &str) -> Option<toml::Value> {
 pub struct HcomConfig {
     pub timeout: i64,
     pub subagent_timeout: i64,
+    pub continue_last: i64,
     pub terminal: String,
     pub hints: String,
     pub notes: String,
@@ -307,6 +310,8 @@ pub struct HcomConfig {
     /// `{icon} name [tool]` only, `"off"` leaves the tool's own title untouched.
     /// See [`crate::shared::TitleMode`].
     pub title_mode: String,
+    /// Auto-start Herdr server in the background if not running (default: true).
+    pub herdr_autostart: bool,
 }
 
 impl Default for HcomConfig {
@@ -314,6 +319,7 @@ impl Default for HcomConfig {
         Self {
             timeout: 86400,
             subagent_timeout: 30,
+            continue_last: 5,
             terminal: "default".to_string(),
             hints: String::new(),
             notes: String::new(),
@@ -345,6 +351,7 @@ impl Default for HcomConfig {
             auto_trust_workspace: true,
             copilot_delivery: DEFAULT_DELIVERY.to_string(),
             title_mode: "combined".to_string(),
+            herdr_autostart: true,
         }
     }
 }
@@ -383,6 +390,14 @@ impl HcomConfig {
                     "subagent_timeout must be 1-86400 seconds, got {}",
                     self.subagent_timeout
                 ),
+            );
+        }
+
+        // Validate continue_last
+        if !(1..=100).contains(&self.continue_last) {
+            errors.insert(
+                "continue_last".into(),
+                format!("continue_last must be 1-100, got {}", self.continue_last),
             );
         }
 
@@ -504,6 +519,7 @@ impl HcomConfig {
         match field {
             "timeout" => Some(self.timeout.to_string()),
             "subagent_timeout" => Some(self.subagent_timeout.to_string()),
+            "continue_last" => Some(self.continue_last.to_string()),
             "terminal" => Some(self.terminal.clone()),
             "hints" => Some(self.hints.clone()),
             "notes" => Some(self.notes.clone()),
@@ -537,6 +553,7 @@ impl HcomConfig {
             }
             "copilot_delivery" => Some(self.copilot_delivery.clone()),
             "title_mode" => Some(self.title_mode.clone()),
+            "herdr_autostart" => Some(if self.herdr_autostart { "1" } else { "0" }.into()),
             _ => None,
         }
     }
@@ -553,6 +570,11 @@ impl HcomConfig {
                 self.subagent_timeout = value
                     .parse()
                     .map_err(|_| format!("subagent_timeout must be an integer, got '{value}'"))?;
+            }
+            "continue_last" => {
+                self.continue_last = value
+                    .parse()
+                    .map_err(|_| format!("continue_last must be an integer, got '{value}'"))?;
             }
             "terminal" => self.terminal = value.to_string(),
             "hints" => self.hints = value.to_string(),
@@ -586,6 +608,7 @@ impl HcomConfig {
             "copilot_delivery" => self.copilot_delivery = value.to_string(),
             // Validated in `collect_errors`, like the other enum-like fields.
             "title_mode" => self.title_mode = value.to_string(),
+            "herdr_autostart" => self.herdr_autostart = !is_falsy(value),
             _ => return Err(format!("unknown field: {field}")),
         }
         Ok(())
@@ -1286,6 +1309,9 @@ pub fn load_config_snapshot() -> ConfigSnapshot {
 pub fn write_default_config() -> std::io::Result<()> {
     let config = HcomConfig::default();
     save_toml_config(&config)?;
+    if Config::get().hcom_dir.join("env").exists() {
+        return Ok(());
+    }
     save_env_file(&HashMap::new())
 }
 
@@ -1432,6 +1458,22 @@ mod tests {
     use crate::hooks::test_helpers::{EnvGuard, isolated_test_env};
     use serial_test::serial;
     use std::env;
+
+    #[test]
+    #[serial]
+    fn write_default_config_preserves_preseeded_env() {
+        let (_dir, hcom_dir, _home, _guard) = isolated_test_env();
+        let env_path = hcom_dir.join("env");
+        std::fs::write(&env_path, "ANTHROPIC_BASE_URL=http://127.0.0.1:1\n").unwrap();
+
+        write_default_config().unwrap();
+
+        assert!(hcom_dir.join("config.toml").exists());
+        assert_eq!(
+            std::fs::read_to_string(&env_path).unwrap(),
+            "ANTHROPIC_BASE_URL=http://127.0.0.1:1\n"
+        );
+    }
 
     /// Helper to set env var for test scope
     fn with_env<F>(key: &str, value: &str, f: F)
@@ -1969,6 +2011,22 @@ mod tests {
     }
 
     #[test]
+    fn test_load_from_sources_herdr_autostart_default_and_env_override() {
+        let file_config = HashMap::new();
+        let env = HashMap::new();
+        let (config, errors) = HcomConfig::load_from_sources(&file_config, Some(&env));
+        assert!(errors.is_empty());
+        assert!(config.herdr_autostart);
+
+        let mut env_override = HashMap::new();
+        env_override.insert("HCOM_HERDR_AUTOSTART".to_string(), "0".to_string());
+        let (config_override, errors) =
+            HcomConfig::load_from_sources(&file_config, Some(&env_override));
+        assert!(errors.is_empty());
+        assert!(!config_override.herdr_autostart);
+    }
+
+    #[test]
     fn test_load_from_sources_copilot_delivery() {
         let none = HashMap::new();
         let config = HcomConfig::load_from_sources(&none, Some(&HashMap::new())).0;
@@ -2255,6 +2313,7 @@ auto_approve = false
     /// A valid non-default value for each field, as `get_field` returns it.
     fn sample_value(field: &ConfigField) -> &'static str {
         match (field.kind, field.name) {
+            (_, "continue_last") => "10",
             (FieldKind::Int, _) => "123",
             (FieldKind::Bool, _) => "0",
             (_, "terminal") => "print",

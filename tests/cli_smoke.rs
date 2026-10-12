@@ -288,6 +288,20 @@ fn help_prints_and_exits_zero() {
 }
 
 #[test]
+fn config_terminal_accepts_here_mode() {
+    let h = Hcom::new();
+
+    let (code, stdout, stderr) = h.run(["config", "terminal", "here"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("Terminal set to: here"), "stdout={stdout}");
+
+    let (code, stdout, stderr) = h.run(["config", "terminal"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("Terminal: here"), "stdout={stdout}");
+    assert!(stdout.contains("here ← current"), "stdout={stdout}");
+}
+
+#[test]
 fn status_json_in_fresh_dir() {
     let h = Hcom::new();
     let (code, stdout, _stderr) = h.run(["status", "--json"]);
@@ -2251,4 +2265,34 @@ fn run_help_and_docs_flags_preserve_script_help() {
         stderr.contains("Unknown docs option: --scrpits"),
         "{stderr}"
     );
+}
+
+#[test]
+fn reset_and_config_help_describe_preserved_state() {
+    let h = Hcom::new();
+    let (code, stdout, stderr) = h.run(["reset", "--help"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("open TUI reconnects"), "stdout={stdout}");
+
+    let (code, stdout, stderr) = h.run(["config", "--help"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("existing HCOM_DIR/env survives"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn herdr_autostart_config_and_env() {
+    let h = Hcom::new();
+    let (code, stdout, _) = h.run(["config", "herdr_autostart"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "true");
+
+    let (code, _, _) = h.run(["config", "herdr_autostart", "false"]);
+    assert_eq!(code, 0);
+
+    let (code, stdout, _) = h.run(["config", "herdr_autostart"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "false");
 }
