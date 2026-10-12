@@ -963,6 +963,83 @@ fn unknown_command_errors() {
 }
 
 #[test]
+fn claude_clear_keeps_launch_name() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let h = Hcom::new();
+    let transcript = tempfile::NamedTempFile::new().expect("temp transcript");
+    let transcript_path = transcript.path().to_string_lossy().to_string();
+    let hook = |name: &str, payload: serde_json::Value| {
+        let mut cmd = h.cmd();
+        cmd.arg(name)
+            .env("HCOM_LAUNCHED", "1")
+            .env("HCOM_INSTANCE_NAME", "clear_keep")
+            .env("HCOM_PROCESS_ID", "pid-clear")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().expect("spawn claude hook");
+        child
+            .stdin
+            .take()
+            .expect("hook stdin")
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().expect("wait claude hook");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{name} stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    let session_of = || {
+        let (code, stdout, stderr) = h.run(["list", "clear_keep", "--json"]);
+        assert_eq!(code, 0, "stderr={stderr}");
+        let v: serde_json::Value = serde_json::from_str(&stdout).expect("list json");
+        v["session_id"].as_str().map(str::to_string)
+    };
+
+    // Stand-in for the launcher: the process binding exists before Claude starts.
+    let (code, _stdout, stderr) = h.run_as_process("pid-clear", ["start", "--as", "clear_keep"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+
+    hook(
+        "sessionstart",
+        serde_json::json!({
+            "session_id": "sess-before-clear",
+            "transcript_path": transcript_path,
+            "source": "startup",
+            "hook_event_name": "SessionStart",
+        }),
+    );
+    assert_eq!(session_of().as_deref(), Some("sess-before-clear"));
+
+    // /clear: SessionEnd stops the row, then SessionStart runs in the same
+    // live process with a new session id.
+    hook(
+        "sessionend",
+        serde_json::json!({
+            "session_id": "sess-before-clear",
+            "transcript_path": transcript_path,
+            "reason": "clear",
+            "hook_event_name": "SessionEnd",
+        }),
+    );
+    hook(
+        "sessionstart",
+        serde_json::json!({
+            "session_id": "sess-after-clear",
+            "transcript_path": transcript_path,
+            "source": "clear",
+            "hook_event_name": "SessionStart",
+        }),
+    );
+    assert_eq!(session_of().as_deref(), Some("sess-after-clear"));
+}
+
+#[test]
 fn antigravity_e2e_hook_dispatch() {
     let h = Hcom::new();
     let transcript = tempfile::NamedTempFile::new().expect("temp transcript");
