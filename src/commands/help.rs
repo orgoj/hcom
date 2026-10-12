@@ -561,6 +561,15 @@ const LISTEN_HELP: &[HelpEntry] = &[
         "",
         "Acknowledge it with: hcom ack <event-id> --name <identity>",
     ),
+    (
+        "  --missed",
+        "Print direct messages no session under your name received, then exit",
+    ),
+    (
+        "",
+        "(sent while a previous session was dead); exit 1 when there are none",
+    ),
+    ("", "Run it inside the agent's own hcom-launched session"),
     ("", ""),
     ("Filter flags:", ""),
     ("", "Supports all filter flags from 'events' command"),
