@@ -581,31 +581,110 @@ fn ensure_tool_config_env(tool: &LaunchTool, env: &mut HashMap<String, String>) 
     }
 }
 
-/// Get system prompt file path for Gemini/Codex.
-fn get_system_prompt_path(tool: &str) -> std::path::PathBuf {
-    let prompts_dir = paths::hcom_path(&["system-prompts"]);
-    fs::create_dir_all(&prompts_dir).ok();
-    prompts_dir.join(format!("{}.md", tool))
+/// Get the per-instance instruction file path for file-based transports.
+fn get_system_prompt_path(tool: &str, instance: &str) -> std::path::PathBuf {
+    paths::hcom_path(&["system-prompts", tool, instance, "instructions.md"])
 }
 
-/// Write system prompt to file (only if content differs).
-fn write_system_prompt_file(system_prompt: &str, tool: &str) -> String {
-    let filepath = get_system_prompt_path(tool);
+/// Atomically write an invocation-local instruction file.
+fn write_system_prompt_file(system_prompt: &str, tool: &str, instance: &str) -> String {
+    let filepath = get_system_prompt_path(tool, instance);
 
-    // Only write if content differs
-    if let Ok(existing) = fs::read_to_string(&filepath)
-        && existing == system_prompt
-    {
-        return filepath.to_string_lossy().to_string();
+    // Rewrite only if content differs; either way the file ends up private.
+    let unchanged = fs::read_to_string(&filepath).is_ok_and(|existing| existing == system_prompt);
+    let result = if unchanged {
+        Ok(())
+    } else {
+        paths::atomic_write_io(&filepath, system_prompt)
     }
-
-    if let Err(e) = fs::write(&filepath, system_prompt) {
+    .and_then(|_| crate::sys::fs::set_private(&filepath));
+    if let Err(e) = result {
         eprintln!(
             "[hcom] warn: failed to write system prompt to {}: {e}",
             filepath.display()
         );
     }
     filepath.to_string_lossy().to_string()
+}
+
+fn merge_instruction_config(env: &mut HashMap<String, String>, key: &str, path: &str) {
+    let existing = env.get(key).cloned().or_else(|| std::env::var(key).ok());
+    let mut value = existing
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .unwrap_or_else(|| json!({}));
+    if !value.is_object() {
+        value = json!({});
+    }
+    let object = value.as_object_mut().expect("object assigned above");
+    let instructions = object.entry("instructions").or_insert_with(|| json!([]));
+    if let Some(items) = instructions.as_array_mut() {
+        items.push(json!(path));
+    } else if let Some(existing) = instructions.as_str().map(str::to_owned) {
+        *instructions = json!([existing, path]);
+    } else {
+        *instructions = json!([path]);
+    }
+    env.insert(key.to_string(), value.to_string());
+}
+
+fn apply_agent_instructions(
+    tool: &LaunchTool,
+    instance: &str,
+    instructions: &str,
+    env: &mut HashMap<String, String>,
+    args: &mut Vec<String>,
+) {
+    match tool {
+        LaunchTool::Claude | LaunchTool::ClaudePty | LaunchTool::Pi => {
+            args.extend(["--append-system-prompt".into(), instructions.into()]);
+        }
+        LaunchTool::Omp => args.push(format!("--append-system-prompt={instructions}")),
+        LaunchTool::Gemini => {
+            let path = write_system_prompt_file(instructions, "gemini", instance);
+            env.insert("GEMINI_SYSTEM_MD".into(), path);
+        }
+        LaunchTool::OpenCode | LaunchTool::Kilo => {
+            let key = if matches!(tool, LaunchTool::OpenCode) {
+                "OPENCODE_CONFIG_CONTENT"
+            } else {
+                "KILO_CONFIG_CONTENT"
+            };
+            let path = write_system_prompt_file(instructions, tool.as_str(), instance);
+            merge_instruction_config(env, key, &path);
+        }
+        LaunchTool::Copilot => {
+            let path = write_system_prompt_file(instructions, "copilot", instance);
+            if let Some(dir) = Path::new(&path).parent() {
+                let dir = dir.to_string_lossy();
+                let value = env
+                    .get("COPILOT_CUSTOM_INSTRUCTIONS_DIRS")
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|existing| format!("{existing},{dir}"))
+                    .unwrap_or_else(|| dir.into_owned());
+                env.insert("COPILOT_CUSTOM_INSTRUCTIONS_DIRS".into(), value);
+            }
+        }
+        LaunchTool::Hermes => {
+            env.insert("HERMES_EPHEMERAL_SYSTEM_PROMPT".into(), instructions.into());
+        }
+        LaunchTool::Antigravity | LaunchTool::Cursor | LaunchTool::Kimi => {
+            env.insert(
+                "HCOM_AGENT_INSTRUCTIONS_FALLBACK".into(),
+                instructions.into(),
+            );
+        }
+        // Codex and Grok carry instructions in their launch bootstrap; Qoder's
+        // are applied by `qoder_preprocessing::apply_system_prompt`.
+        LaunchTool::Codex | LaunchTool::Qoder | LaunchTool::Grok => {}
+    }
+}
+
+fn append_codex_agent_instructions(bootstrap: &mut String, instructions: Option<&str>) {
+    if let Some(instructions) = instructions.filter(|value| !value.is_empty()) {
+        bootstrap.push_str("\n---\n");
+        bootstrap.push_str(instructions);
+    }
 }
 
 /// Generate a UUID v4-like process ID string.
@@ -1994,14 +2073,6 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         resolve_explicit_name_conflict(db, name)?;
     }
 
-    // System prompt file for Gemini/Codex
-    if let Some(ref sp) = params.system_prompt
-        && normalized == LaunchTool::Gemini
-    {
-        let path = write_system_prompt_file(sp, "gemini");
-        base_env.insert("GEMINI_SYSTEM_MD".to_string(), path);
-    }
-
     // Folder trust: on first run each tool shows a "do you trust this folder?"
     // prompt — the user accepts to continue or declines and it exits. When an
     // agent launches another agent via hcom, auto-approve the prompt for the
@@ -2126,6 +2197,17 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         };
         instance_env.insert("HCOM_INSTANCE_NAME".to_string(), instance_name.clone());
 
+        let mut instruction_args = params.args.clone();
+        if let Some(ref instructions) = params.system_prompt {
+            apply_agent_instructions(
+                &normalized,
+                &instance_name,
+                instructions,
+                &mut instance_env,
+                &mut instruction_args,
+            );
+        }
+
         // Process ID export: allow custom env var name
         if let Ok(export_var) = std::env::var("HCOM_PROCESS_ID_EXPORT")
             && !export_var.is_empty()
@@ -2176,11 +2258,11 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         );
 
         // Claude's background daemon keeps settings but not launch env; see
-        // `pin_launch_environment`.
-        let mut params = params.clone();
+        // `pin_launch_environment`. The Claude launch is built from
+        // `instruction_args`, so the pinned settings go there.
         if matches!(normalized, LaunchTool::Claude | LaunchTool::ClaudePty)
             && let Err(error) = crate::hooks::claude::pin_launch_environment(
-                &mut params.args,
+                &mut instruction_args,
                 &instance_env,
                 matches!(normalized, LaunchTool::ClaudePty),
             )
@@ -2211,7 +2293,7 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         let launch_result = (|| -> Result<bool> {
             match normalized {
                 LaunchTool::Claude => {
-                    let claude_cmd = build_claude_command(&params.args);
+                    let claude_cmd = build_claude_command(&instruction_args);
 
                     // Store launch_args
                     instances::update_instance_position(
@@ -2334,7 +2416,7 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                             handles: &mut handles,
                         },
                         &mut instance_env,
-                        &params.args,
+                        &instruction_args,
                         &params,
                         inside_ai_tool,
                     )
@@ -2362,7 +2444,7 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                             handles: &mut handles,
                         },
                         &mut instance_env,
-                        &params.args,
+                        &instruction_args,
                         &params,
                         inside_ai_tool,
                     )
@@ -2376,26 +2458,21 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                         &serde_json::Map::from_iter([("name_announced".to_string(), json!(true))]),
                     );
 
-                    // Build effective args: system_prompt + preprocessing
-                    let mut effective_args = params.args.clone();
-                    if let Some(ref sp) = params.system_prompt {
-                        let mut pre =
-                            vec!["-c".to_string(), format!("developer_instructions={}", sp)];
-                        pre.extend(effective_args);
-                        effective_args = pre;
-                    }
-
                     // Generate bootstrap text for preprocessing
-                    let bootstrap = build_codex_bootstrap(
+                    let mut bootstrap = build_codex_bootstrap(
                         db,
                         &paths::hcom_dir(),
                         &instance_name,
                         params.background,
                         &instance_env,
                     );
+                    append_codex_agent_instructions(
+                        &mut bootstrap,
+                        params.system_prompt.as_deref(),
+                    );
 
-                    effective_args = codex_preprocessing::preprocess_codex_args(
-                        &effective_args,
+                    let effective_args = codex_preprocessing::preprocess_codex_args(
+                        &instruction_args,
                         &bootstrap,
                         codex_home.as_ref().map(|(path, _)| path.as_path()),
                     );
@@ -2435,12 +2512,12 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                     );
                     let effective_args = if normalized == LaunchTool::OpenCode {
                         opencode_preprocessing::preprocess_opencode_args(
-                            &params.args,
+                            &instruction_args,
                             &mut instance_env,
                             std::path::Path::new(working_dir),
                         )?
                     } else {
-                        params.args.clone()
+                        instruction_args.clone()
                     };
 
                     instances::update_instance_position(
@@ -2496,7 +2573,7 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                             handles: &mut handles,
                         },
                         &mut instance_env,
-                        &params.args,
+                        &instruction_args,
                         &params,
                         inside_ai_tool,
                     )
@@ -2523,7 +2600,7 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                             handles: &mut handles,
                         },
                         &mut instance_env,
-                        &params.args,
+                        &instruction_args,
                         &params,
                         inside_ai_tool,
                     )
@@ -2551,7 +2628,7 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                             handles: &mut handles,
                         },
                         &mut instance_env,
-                        &params.args,
+                        &instruction_args,
                         &params,
                         inside_ai_tool,
                     )
@@ -2578,7 +2655,7 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                             handles: &mut handles,
                         },
                         &mut instance_env,
-                        &params.args,
+                        &instruction_args,
                         &params,
                         inside_ai_tool,
                     )
@@ -2605,7 +2682,7 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                             handles: &mut handles,
                         },
                         &mut instance_env,
-                        &params.args,
+                        &instruction_args,
                         &params,
                         inside_ai_tool,
                     )
@@ -2632,7 +2709,7 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                             handles: &mut handles,
                         },
                         &mut instance_env,
-                        &params.args,
+                        &instruction_args,
                         &params,
                         inside_ai_tool,
                     )
@@ -2806,6 +2883,133 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn inline_instruction_config_is_additive() {
+        let mut env = HashMap::from([(
+            "OPENCODE_CONFIG_CONTENT".into(),
+            r#"{"instructions":["/shared.md"],"theme":"dark"}"#.into(),
+        )]);
+        merge_instruction_config(&mut env, "OPENCODE_CONFIG_CONTENT", "/instance.md");
+        let value: serde_json::Value =
+            serde_json::from_str(&env["OPENCODE_CONFIG_CONTENT"]).unwrap();
+        assert_eq!(value["instructions"], json!(["/shared.md", "/instance.md"]));
+        assert_eq!(value["theme"], "dark");
+    }
+
+    #[test]
+    fn inline_instruction_config_preserves_scalar_source() {
+        let mut env = HashMap::from([(
+            "KILO_CONFIG_CONTENT".into(),
+            r#"{"instructions":"/shared.md","theme":"dark"}"#.into(),
+        )]);
+        merge_instruction_config(&mut env, "KILO_CONFIG_CONTENT", "/instance.md");
+        let value: serde_json::Value = serde_json::from_str(&env["KILO_CONFIG_CONTENT"]).unwrap();
+        assert_eq!(value["instructions"], json!(["/shared.md", "/instance.md"]));
+        assert_eq!(value["theme"], "dark");
+    }
+
+    #[test]
+    fn codex_current_instructions_lead_user_developer_instructions_on_resume() {
+        let mut bootstrap = "fresh hcom bootstrap".to_string();
+        append_codex_agent_instructions(&mut bootstrap, Some("current bundle instructions"));
+        let args = vec![
+            "resume".into(),
+            "thread".into(),
+            "-c".into(),
+            "developer_instructions=user".into(),
+        ];
+        let processed = codex_preprocessing::preprocess_codex_args(&args, &bootstrap, None);
+        let encoded = processed
+            .iter()
+            .find_map(|arg| arg.strip_prefix("developer_instructions="))
+            .expect("fresh developer instructions");
+        let decoded: toml::Value = toml::from_str(&format!("value = {encoded}")).unwrap();
+        let text = decoded["value"].as_str().unwrap();
+        // The bundle instructions ride in the rebuilt bootstrap; a user's own
+        // developer_instructions are preserved after it (upstream #147).
+        let bundle = text.find("current bundle instructions").unwrap();
+        assert!(text.starts_with("fresh hcom bootstrap"));
+        assert!(text.find("user").is_some_and(|user| user > bundle));
+    }
+
+    #[test]
+    fn system_prompt_paths_are_per_tool_and_instance() {
+        assert_eq!(
+            get_system_prompt_path("gemini", "luna"),
+            paths::hcom_path(&["system-prompts", "gemini", "luna", "instructions.md"])
+        );
+        assert_ne!(
+            get_system_prompt_path("gemini", "luna"),
+            get_system_prompt_path("gemini", "nova")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn instruction_file_is_replaced_and_kept_private() {
+        let (_dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
+        let path = std::path::PathBuf::from(write_system_prompt_file("first", "gemini", "luna"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first");
+
+        let again = write_system_prompt_file("second", "gemini", "luna");
+        assert_eq!(std::path::PathBuf::from(again), path);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "second");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&path), 0o600);
+            // Unchanged content still repairs a permissive file.
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+            write_system_prompt_file("second", "gemini", "luna");
+            assert_eq!(mode(&path), 0o600);
+        }
+    }
+
+    #[test]
+    fn native_and_fallback_instruction_transports_are_tool_specific() {
+        for tool in [LaunchTool::Claude, LaunchTool::ClaudePty, LaunchTool::Pi] {
+            let mut env = HashMap::new();
+            let mut args = vec!["user".into()];
+            apply_agent_instructions(&tool, "luna", "rules", &mut env, &mut args);
+            assert_eq!(args, ["user", "--append-system-prompt", "rules"]);
+        }
+
+        let mut env = HashMap::new();
+        let mut args = Vec::new();
+        apply_agent_instructions(&LaunchTool::Omp, "luna", "rules", &mut env, &mut args);
+        assert_eq!(args, ["--append-system-prompt=rules"]);
+
+        for tool in [
+            LaunchTool::Antigravity,
+            LaunchTool::Cursor,
+            LaunchTool::Kimi,
+        ] {
+            let mut env = HashMap::new();
+            apply_agent_instructions(&tool, "luna", "rules", &mut env, &mut Vec::new());
+            assert_eq!(
+                env.get("HCOM_AGENT_INSTRUCTIONS_FALLBACK")
+                    .map(String::as_str),
+                Some("rules")
+            );
+        }
+
+        let mut env = HashMap::new();
+        apply_agent_instructions(
+            &LaunchTool::Hermes,
+            "luna",
+            "rules",
+            &mut env,
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            env.get("HERMES_EPHEMERAL_SYSTEM_PROMPT")
+                .map(String::as_str),
+            Some("rules")
+        );
+    }
 
     struct EnvVarGuard {
         saved: BTreeMap<String, Option<String>>,
@@ -3285,6 +3489,9 @@ mod tests {
         assert!(strip.contains("CODEX_SANDBOX"));
         assert!(strip.contains("CODEX_THREAD_ID"));
         assert!(strip.contains("GEMINI_SYSTEM_MD"));
+        assert!(strip.contains("HCOM_AGENT_INSTRUCTIONS_FALLBACK"));
+        assert!(strip.contains("HERMES_EPHEMERAL_SYSTEM_PROMPT"));
+        assert!(strip.contains("COPILOT_CUSTOM_INSTRUCTIONS_DIRS"));
         assert!(strip.contains("HCOM_TOOL"));
         assert!(strip.contains("HCOM_PI"));
         assert!(!strip.contains("PI_CODING_AGENT_DIR"));

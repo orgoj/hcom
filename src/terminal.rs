@@ -3384,6 +3384,36 @@ mod tests {
         }
     }
 
+    /// The shell a new window keeps open after the tool exits must not keep
+    /// the previous agent's instruction transports.
+    #[test]
+    fn new_window_scripts_clear_instruction_transports_after_the_tool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = HashMap::new();
+        env.insert("GEMINI_SYSTEM_MD".to_string(), "/tmp/p.md".to_string());
+        env.insert(
+            "COPILOT_CUSTOM_INSTRUCTIONS_DIRS".to_string(),
+            "/tmp/p".to_string(),
+        );
+        let bash = tmp.path().join("launch.sh");
+        create_bash_script(&bash, &env, None, "agent-cmd", false, None, true).unwrap();
+        let ps = tmp.path().join("launch.ps1");
+        create_powershell_script(&ps, &env, None, "agent-cmd", false, None, true).unwrap();
+        let after_command = |path: &Path| {
+            let text = std::fs::read_to_string(path).unwrap();
+            let start = text.rfind("agent-cmd").unwrap();
+            text[start..].to_string()
+        };
+        let (bash_tail, ps_tail) = (after_command(&bash), after_command(&ps));
+        for var in ["GEMINI_SYSTEM_MD", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"] {
+            assert!(bash_tail.lines().any(|line| line.starts_with("unset ")
+                && line.split_whitespace().any(|word| word == var)));
+            assert!(ps_tail.lines().any(
+                |line| line.starts_with("Remove-Item ") && line.contains(&format!("Env:{var}"))
+            ));
+        }
+    }
+
     #[test]
     fn test_create_powershell_script_window_mode() {
         let tmp = tempfile::tempdir().unwrap();

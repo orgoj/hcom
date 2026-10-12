@@ -3011,4 +3011,91 @@ mod tests {
             .unwrap();
         assert_eq!(detail, "cargo test");
     }
+
+    #[test]
+    #[serial]
+    fn test_antigravity_recurring_preinvocation_omits_fallback_instructions() {
+        let (_dir, db) = make_test_db();
+        insert_test_instance(&db, "vago", "antigravity");
+        db.set_process_binding("proc-vago", "sess-vago", "vago")
+            .unwrap();
+
+        // Mark as announced and bind session to simulate turn 2+
+        db.conn()
+            .execute(
+                "UPDATE instances SET name_announced = 1, session_id = 'sess-vago' WHERE name = 'vago'",
+                [],
+            )
+            .unwrap();
+
+        let inst = db.get_instance_full("vago").unwrap().unwrap();
+        assert_eq!(inst.name_announced, 1);
+        assert_eq!(inst.session_id.as_deref(), Some("sess-vago"));
+
+        struct EnvVarGuard {
+            key: &'static str,
+            prev: Option<String>,
+        }
+        impl EnvVarGuard {
+            fn set(key: &'static str, val: &str) -> Self {
+                let prev = std::env::var(key).ok();
+                unsafe { std::env::set_var(key, val) };
+                Self { key, prev }
+            }
+        }
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    if let Some(ref prev) = self.prev {
+                        std::env::set_var(self.key, prev);
+                    } else {
+                        std::env::remove_var(self.key);
+                    }
+                }
+            }
+        }
+
+        let _guard = EnvVarGuard::set(
+            "HCOM_AGENT_INSTRUCTIONS_FALLBACK",
+            "MANDATORY RULE FROM SOUL",
+        );
+
+        let env: std::collections::HashMap<String, String> =
+            [("ANTIGRAVITY_AGENT", "1"), ("HCOM_PROCESS_ID", "proc-vago")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        let ctx = HcomContext::from_env(&env, PathBuf::from("/tmp"));
+
+        let payload = HookPayload {
+            session_id: Some("sess-vago".to_string()),
+            transcript_path: None,
+            hook_name: "gemini-sessionstart".to_string(),
+            tool: "antigravity".to_string(),
+            tool_name: String::new(),
+            tool_input: serde_json::Value::Null,
+            tool_result: String::new(),
+            notification_type: None,
+            raw: serde_json::Value::Null,
+        };
+
+        let result = handle_sessionstart(&db, &ctx, &payload);
+        match result {
+            HookResult::Allow {
+                additional_context: Some(ctx),
+                ..
+            } => {
+                assert!(ctx.contains("[HCOM SESSION]"));
+                assert!(
+                    !ctx.contains("## HCOM AGENT INSTRUCTIONS — SYSTEM-PROMPT FALLBACK"),
+                    "recurring context should not repeat fallback header: {ctx}"
+                );
+                assert!(
+                    !ctx.contains("MANDATORY RULE FROM SOUL"),
+                    "recurring context should not repeat fallback instruction: {ctx}"
+                );
+            }
+            other => panic!("expected Allow with context, got {other:?}"),
+        }
+    }
 }
