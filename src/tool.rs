@@ -24,6 +24,7 @@ pub enum Tool {
     Grok,
     Pi,
     Omp,
+    Hermes,
     Adhoc,
 }
 
@@ -97,6 +98,7 @@ impl Tool {
                 crate::hooks::cursor::verify_cursor_hooks_installed(include_permissions)
             }
             Tool::Kimi => crate::hooks::kimi::verify_kimi_hooks_installed(include_permissions),
+            Tool::Hermes => true,
             Tool::Adhoc => false,
         }
     }
@@ -125,6 +127,7 @@ impl Tool {
                 .map_err(|e| e.to_string()),
             Tool::Kimi => crate::hooks::kimi::try_setup_kimi_hooks(include_permissions)
                 .map_err(|e| e.to_string()),
+            Tool::Hermes => Ok(()),
             Tool::Adhoc => Err("Adhoc has no hooks to install".to_string()),
         }
     }
@@ -158,7 +161,7 @@ impl Tool {
             Tool::Pi => crate::hooks::pi::remove_pi_plugin().map_err(|e| e.to_string()),
             Tool::Omp => crate::hooks::omp::remove_omp_plugin().map_err(|e| format!("{e:#}")),
             // Per-run from the start: never installed anything globally.
-            Tool::Qoder | Tool::Grok => Ok(false),
+            Tool::Qoder | Tool::Grok | Tool::Hermes => Ok(false),
             Tool::Gemini => persistent(installed(), crate::hooks::gemini::remove_gemini_hooks),
             Tool::Antigravity => persistent(
                 installed(),
@@ -188,6 +191,7 @@ impl Tool {
             Tool::Antigravity => crate::hooks::antigravity::get_antigravity_hooks_path(),
             Tool::Cursor => crate::hooks::cursor::get_cursor_hooks_path(),
             Tool::Kimi => crate::hooks::kimi::get_kimi_settings_path(),
+            Tool::Hermes => return "built-in Hermes CLI lifecycle".to_string(),
             Tool::Adhoc => return String::new(),
         };
         path_buf.to_string_lossy().to_string()

@@ -300,6 +300,8 @@ const OMP_HOOKS: &[&str] = &[
     "omp-stop",
 ];
 
+const HERMES_HOOKS: &[&str] = &["hermes-start", "hermes-status", "hermes-stop"];
+
 const CURSOR_HOOKS: &[&str] = &[
     "cursor-sessionstart",
     "cursor-beforesubmitprompt",
@@ -1134,6 +1136,60 @@ pub static COPILOT: IntegrationSpec = IntegrationSpec {
     },
 };
 
+pub static HERMES: IntegrationSpec = IntegrationSpec {
+    tool: Tool::Hermes,
+    name: "hermes",
+    label: "Hermes",
+    aliases: &[],
+    cli_binary: "hermes",
+    tui_prefix: "her ",
+    adhoc_icon: None,
+    released: true,
+    ready_patterns: &[],
+    pty: PtySpec {
+        delivery_start_timeout_secs: 60,
+        console_input: ConsoleInput::Vt,
+    },
+    instance_state_env: &[],
+    hooks: HooksSpec {
+        names: HERMES_HOOKS,
+        shared_hooks_with: None,
+        invocation: HookInvocation::Argv,
+    },
+    gates: GatesSpec {
+        require_idle: true,
+        require_ready_prompt: false,
+        require_prompt_empty: false,
+        block_on_user_activity: true,
+        block_on_approval: true,
+        launch_requires_ready: false,
+        launch_ready_on_plugin_bind: false,
+    },
+    launch: LaunchSpec {
+        args_env: Some("HCOM_HERMES_ARGS"),
+        config_dir_env: None,
+        initial_prompt: InitialPromptShape::Unsupported {
+            reason: "Hermes classic interactive mode does not accept a launch prompt",
+        },
+        uses_pty_default: true,
+        max_launch_count: 10,
+        background: BackgroundMode::HeadlessPty,
+    },
+    resume: Some(ResumeSpec {
+        resume: ResumeArgs::Flag("--resume"),
+        fork: None,
+    }),
+    help: HelpSpec {
+        unique_examples: &[],
+        extra_env: &[],
+    },
+    status_detail: StatusDetailSpec {
+        bash: &[],
+        file: &[],
+        delegate: &[],
+    },
+};
+
 pub static QODER: IntegrationSpec = IntegrationSpec {
     tool: Tool::Qoder,
     name: "qoder",
@@ -1317,6 +1373,7 @@ pub static ALL: &[&IntegrationSpec] = &[
     &CURSOR,
     &KIMI,
     &COPILOT,
+    &HERMES,
     &QODER,
     &GROK,
     &ADHOC,
@@ -1337,6 +1394,7 @@ impl Tool {
             Tool::Cursor => &CURSOR,
             Tool::Kimi => &KIMI,
             Tool::Copilot => &COPILOT,
+            Tool::Hermes => &HERMES,
             Tool::Qoder => &QODER,
             Tool::Grok => &GROK,
             Tool::Adhoc => &ADHOC,
@@ -1458,7 +1516,8 @@ mod tests {
         assert!(names.contains(&"qoder"));
         assert!(names.contains(&"grok"));
         assert!(names.contains(&"omp"));
-        assert_eq!(names.len(), 13);
+        assert!(names.contains(&"hermes"));
+        assert_eq!(names.len(), 14);
     }
 
     #[test]

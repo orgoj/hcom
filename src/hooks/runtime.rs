@@ -139,7 +139,13 @@ pub fn adapter(tool: Tool) -> Option<&'static PerRunAdapter> {
         Tool::Grok => Some(&crate::delivery::grok::PER_RUN),
         // Cursor stays persistent: cursor-agent loads --plugin-dir hooks
         // asynchronously and beforeSubmitPrompt/stop often never fire from them.
-        Tool::Cursor | Tool::Gemini | Tool::Kimi | Tool::Antigravity | Tool::Adhoc => None,
+        // Hermes calls hcom lifecycle commands itself; it has no hooks to load.
+        Tool::Cursor
+        | Tool::Gemini
+        | Tool::Kimi
+        | Tool::Antigravity
+        | Tool::Hermes
+        | Tool::Adhoc => None,
     }
 }
 

@@ -23,9 +23,9 @@ use crate::shared::constants::HCOM_IDENTITY_VARS;
 use crate::shared::tool_detection::tool_marker_vars;
 use crate::terminal;
 use crate::tools::launch_arg_validation::{
-    ANTIGRAVITY_REJECTED_ARGS, GEMINI_REJECTED_ARGS, GROK_REJECTED_ARGS, KILO_REJECTED_ARGS,
-    KIMI_REJECTED_ARGS, OMP_REJECTED_ARGS, OPENCODE_REJECTED_ARGS, PI_REJECTED_ARGS,
-    QODER_REJECTED_ARGS, validate_rejected_args,
+    ANTIGRAVITY_REJECTED_ARGS, GEMINI_REJECTED_ARGS, GROK_REJECTED_ARGS, HERMES_REJECTED_ARGS,
+    KILO_REJECTED_ARGS, KIMI_REJECTED_ARGS, OMP_REJECTED_ARGS, OPENCODE_REJECTED_ARGS,
+    PI_REJECTED_ARGS, QODER_REJECTED_ARGS, validate_rejected_args,
 };
 use crate::tools::{
     codex_preprocessing, copilot_preprocessing, cursor_preprocessing, opencode_preprocessing,
@@ -49,6 +49,7 @@ pub enum LaunchTool {
     Qoder,
     Grok,
     Omp,
+    Hermes,
 }
 
 impl LaunchTool {
@@ -67,6 +68,7 @@ impl LaunchTool {
             "cursor" | "cursor-agent" => Ok(LaunchTool::Cursor),
             "kimi" => Ok(LaunchTool::Kimi),
             "copilot" => Ok(LaunchTool::Copilot),
+            "hermes" => Ok(LaunchTool::Hermes),
             "qoder" | "qodercli" => Ok(LaunchTool::Qoder),
             "grok" | "grok-build" => Ok(LaunchTool::Grok),
             _ => bail!("Unknown tool: {}", s),
@@ -87,6 +89,7 @@ impl LaunchTool {
             LaunchTool::Cursor => "cursor",
             LaunchTool::Kimi => "kimi",
             LaunchTool::Copilot => "copilot",
+            LaunchTool::Hermes => "hermes",
             LaunchTool::Qoder => "qoder",
             LaunchTool::Grok => "grok",
         }
@@ -109,6 +112,7 @@ impl LaunchTool {
             LaunchTool::Cursor => crate::tool::Tool::Cursor,
             LaunchTool::Kimi => crate::tool::Tool::Kimi,
             LaunchTool::Copilot => crate::tool::Tool::Copilot,
+            LaunchTool::Hermes => crate::tool::Tool::Hermes,
             LaunchTool::Qoder => crate::tool::Tool::Qoder,
             LaunchTool::Grok => crate::tool::Tool::Grok,
         }
@@ -182,7 +186,8 @@ impl LaunchBackend {
             | LaunchTool::Kimi
             | LaunchTool::Copilot
             | LaunchTool::Qoder
-            | LaunchTool::Grok => LaunchBackend::HeadlessPty,
+            | LaunchTool::Grok
+            | LaunchTool::Hermes => LaunchBackend::HeadlessPty,
         }
     }
 }
@@ -650,6 +655,9 @@ fn install_diag_context(tool: &LaunchTool, paths: &[(&str, std::path::PathBuf)])
 /// Strict gate: refuses to launch if hooks can't be installed.
 fn ensure_hooks_installed(tool: &LaunchTool, include_permissions: bool) -> Result<()> {
     match tool {
+        // Hermes invokes hcom lifecycle commands directly when HCOM_PROCESS_ID
+        // is present; there is no external hook configuration to install.
+        LaunchTool::Hermes => Ok(()),
         LaunchTool::Claude | LaunchTool::ClaudePty => unreachable!("Claude uses per-run hooks"),
         LaunchTool::Gemini => {
             if !crate::hooks::gemini::is_gemini_version_supported() {
@@ -2575,6 +2583,33 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                         inside_ai_tool,
                     )
                 }
+                LaunchTool::Hermes => {
+                    instances::update_instance_position(
+                        db,
+                        &instance_name,
+                        &serde_json::Map::from_iter([(
+                            "launch_args".to_string(),
+                            json!(&stored_launch_args),
+                        )]),
+                    );
+                    launch_pty_or_background(
+                        &mut BackgroundLaunchCtx {
+                            db,
+                            tool: "hermes",
+                            instance_name: &instance_name,
+                            process_id: &process_id,
+                            terminal_mode,
+                            tag: params.tag.as_deref().unwrap_or(""),
+                            working_dir,
+                            log_files: &mut log_files,
+                            handles: &mut handles,
+                        },
+                        &mut instance_env,
+                        &params.args,
+                        &params,
+                        inside_ai_tool,
+                    )
+                }
                 LaunchTool::Qoder => {
                     instances::update_instance_position(
                         db,
@@ -2743,6 +2778,9 @@ pub(crate) fn validate_tool_args(tool: &LaunchTool, args: &[String]) -> Vec<Stri
             ANTIGRAVITY_REJECTED_ARGS,
         ),
         LaunchTool::Copilot => crate::tools::copilot_preprocessing::validate_copilot_args(args),
+        LaunchTool::Hermes => {
+            validate_rejected_args("Hermes", "hcom hermes", args, HERMES_REJECTED_ARGS)
+        }
         LaunchTool::Qoder => {
             validate_rejected_args("Qoder", "hcom qoder", args, QODER_REJECTED_ARGS)
         }
@@ -3011,6 +3049,16 @@ mod tests {
     }
 
     #[test]
+    fn validate_hermes_rejects_noninteractive_modes_but_allows_resume() {
+        for flag in ["-q", "--query", "-z", "--oneshot", "--tui"] {
+            let errors = validate_tool_args(&LaunchTool::Hermes, &[flag.to_string()]);
+            assert_eq!(errors.len(), 1, "{flag}");
+            assert!(errors[0].contains(flag), "{flag}: {}", errors[0]);
+        }
+        assert!(validate_tool_args(&LaunchTool::Hermes, &["--resume".to_string()]).is_empty());
+    }
+
+    #[test]
     fn validate_antigravity_rejects_print_alias_but_allows_conversation() {
         let errors = validate_tool_args(&LaunchTool::Antigravity, &["--prompt".to_string()]);
         assert_eq!(errors.len(), 1);
@@ -3035,6 +3083,7 @@ mod tests {
         assert_eq!(LaunchTool::Gemini.as_str(), "gemini");
         assert_eq!(LaunchTool::Antigravity.as_str(), "antigravity");
         assert_eq!(LaunchTool::Copilot.as_str(), "copilot");
+        assert_eq!(LaunchTool::Hermes.as_str(), "hermes");
     }
 
     #[test]

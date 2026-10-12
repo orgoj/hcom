@@ -328,6 +328,15 @@ const SEND_HELP: &[HelpEntry] = &[
     ("  EOF", ""),
 ];
 
+const ACK_HELP: &[HelpEntry] = &[
+    (
+        "hcom ack <event-id> --name <identity>",
+        "Acknowledge the first unread message",
+    ),
+    ("", "Used with hcom listen --manual-ack --json."),
+    ("", "Stale and out-of-order event IDs are rejected."),
+];
+
 const BLANK: &[HelpEntry] = &[("", "")];
 
 const BUNDLE_DEFAULT: &[HelpEntry] = &[("bundle", "List recent bundles (same as bundle list)")];
@@ -506,6 +515,14 @@ const LISTEN_HELP: &[HelpEntry] = &[
     ("  [timeout]", "Timeout in seconds (alias for --timeout)"),
     ("  --timeout N", "Timeout in seconds (default: 86400)"),
     ("  --json", "Output messages as JSON"),
+    (
+        "  --manual-ack",
+        "Emit one full JSON envelope without advancing the cursor",
+    ),
+    (
+        "",
+        "Acknowledge it with: hcom ack <event-id> --name <identity>",
+    ),
     ("", ""),
     ("Filter flags:", ""),
     ("", "Supports all filter flags from 'events' command"),
@@ -1082,6 +1099,7 @@ fn format_entries(entries: &[HelpEntry]) -> Vec<String> {
 /// tail must include every released spec name plus public aliases (e.g. `agy`).
 /// The `command_names_covers_released_tools` test guards against drift.
 pub const COMMAND_NAMES: &[&str] = &[
+    "ack",
     "send",
     "list",
     "events",
@@ -1116,6 +1134,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "cursor-agent",
     "kimi",
     "copilot",
+    "hermes",
     "qoder",
     "qodercli",
     "grok",
@@ -1290,6 +1309,7 @@ fn command_help_raw(name: &str) -> String {
 
     let page: Option<&[&[HelpEntry]]> = match name {
         "list" => Some(&[LIST_HELP]),
+        "ack" => Some(&[ACK_HELP]),
         "send" => Some(&[SEND_HELP]),
         "events" => Some(EVENTS_PAGE),
         "bundle" => Some(BUNDLE_PAGE),

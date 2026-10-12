@@ -595,6 +595,73 @@ fn start_send_events_roundtrip() {
 }
 
 #[test]
+fn manual_ack_listen_redelivers_until_strict_ack() {
+    let h = Hcom::new();
+    let recipient = h.start_with_process_id("manual-ack-recipient");
+    let (code, stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "gateway-test",
+        &format!("@{recipient}"),
+        "--intent",
+        "request",
+        "--thread",
+        "bridge-test",
+        "--",
+        "deliver reliably",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+
+    let receive = || {
+        let (code, stdout, stderr) = h.run([
+            "listen",
+            "--name",
+            &recipient,
+            "--timeout",
+            "1",
+            "--json",
+            "--manual-ack",
+        ]);
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        serde_json::from_str::<serde_json::Value>(stdout.trim()).expect("manual ack envelope")
+    };
+    let first = receive();
+    assert_eq!(first["schema_version"], 1);
+    assert_eq!(first["from"], "gateway-test");
+    assert_eq!(first["to"], recipient);
+    assert_eq!(first["text"], "deliver reliably");
+    assert_eq!(first["intent"], "request");
+    assert_eq!(first["thread"], "bridge-test");
+    assert!(first["timestamp"].is_string());
+    let event_id = first["event_id"].as_i64().expect("event id");
+
+    let second = receive();
+    assert_eq!(second["event_id"].as_i64(), Some(event_id));
+
+    let (code, _stdout, stderr) = h.run(["ack", &(event_id + 1).to_string(), "--name", &recipient]);
+    assert_ne!(code, 0, "stderr={stderr}");
+    assert!(stderr.contains("first unread event"), "stderr={stderr}");
+
+    let (code, stdout, stderr) = h.run(["ack", &event_id.to_string(), "--name", &recipient]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+
+    let (code, stdout, stderr) = h.run([
+        "listen",
+        "--name",
+        &recipient,
+        "--timeout",
+        "1",
+        "--json",
+        "--manual-ack",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.trim().is_empty(),
+        "acked event redelivered: {stdout}"
+    );
+}
+
+#[test]
 fn intent_and_reply_to_roundtrip() {
     // Wiki contract (messaging.md §Intent + event-model.md `msg_intent`/`reply_to_local`):
     // request → ack with --reply-to flattens through `events_v` so threads/replies

@@ -21,6 +21,7 @@ fn is_hook(name: &str) -> bool {
 // ── Known CLI commands ──────────────────────────────────────────────────
 
 const COMMANDS: &[&str] = &[
+    "ack",
     "send",
     "list",
     "events",
@@ -144,6 +145,7 @@ fn dispatch_hook_for_tool(tool: Tool, hook: &str, args: &[String]) -> (i32, Stri
             crate::hooks::copilot::dispatch_copilot_hook_native(hook),
             String::new(),
         ),
+        Tool::Hermes => crate::hooks::hermes::dispatch_hermes_hook(hook, args),
         Tool::Qoder => (
             crate::hooks::qoder::dispatch_qoder_hook_native(hook),
             String::new(),
@@ -678,7 +680,8 @@ pub fn dispatch() -> anyhow::Result<()> {
         Action::Command { ref cmd, ref args }
             if matches!(
                 cmd.as_str(),
-                "send"
+                "ack"
+                    | "send"
                     | "list"
                     | "stop"
                     | "listen"
@@ -910,6 +913,9 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
 
     let result = match cmd {
         // Messaging
+        "ack" => clap_dispatch!(crate::commands::ack::AckArgs, cmd, &cmd_argv, |args| {
+            crate::commands::ack::cmd_ack(&db, &args, Some(&ctx))
+        }),
         "send" => match clap_parse!(crate::commands::send::SendArgs, cmd, &cmd_argv) {
             Ok(mut args) => {
                 args.had_separator = cmd_argv.iter().any(|a| a == "--");
@@ -1021,8 +1027,12 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
     // This appends unread hcom messages to the command's stdout — keep in mind
     // when changing output contracts or adding machine-readable modes.
     // Skipped when the command claimed delivery (send, listen). A failed write
-    // leaves the messages unread and fails the command.
-    if let Err(e) = crate::cli_context::maybe_deliver_pending_messages(&db, &ctx, has_json) {
+    // leaves the messages unread and fails the command. `ack` owns the unread
+    // cursor transactionally, so its human-readable output must not trigger
+    // this path either, including after a rejected out-of-order acknowledgement.
+    if let Err(e) =
+        crate::cli_context::maybe_deliver_pending_messages(&db, &ctx, has_json || cmd == "ack")
+    {
         eprintln!("hcom: {e}");
         return if result == 0 { 1 } else { result };
     }
