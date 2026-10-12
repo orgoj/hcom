@@ -3204,6 +3204,37 @@ fn handoff_relaunches_the_same_catalog_agent_under_its_instance_name() {
         "stderr={stderr}"
     );
 
+    // Without a recorded name, the agent's own HCOM_AGENT_NAME is used, but
+    // only when the environment belongs to the instance being handed off.
+    let handoff_with_env = |instance: &str| {
+        let output = h
+            .cmd()
+            .env("HCOM_PROCESS_ID", &solo_process_id)
+            .env("HCOM_INSTANCE_NAME", instance)
+            .env("HCOM_AGENT_NAME", "reviewer")
+            .args(["handoff", "--dry-run", "next"])
+            .output()
+            .expect("run handoff");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let (code, stdout, stderr) = handoff_with_env("solo");
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("kill solo"), "stdout={stdout}");
+    assert!(
+        stdout.contains("HCOM_AGENT_NAME=reviewer"),
+        "stdout={stdout}"
+    );
+    let (code, _stdout, stderr) = handoff_with_env("rev2");
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("'solo' has no recorded agent name"),
+        "stderr={stderr}"
+    );
+
     // A caller without an agent identity has nothing to hand off.
     let (code, _stdout, stderr) = h.run(["handoff", "--dry-run", "next"]);
     assert_eq!(code, 1);

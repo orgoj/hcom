@@ -52,6 +52,7 @@ fn run(args: &HandoffArgs, ctx: Option<&CommandContext>) -> anyhow::Result<i32> 
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .and_then(|ctx| ctx.get("agent_name")?.as_str().map(str::to_string))
         .filter(|n| !n.is_empty())
+        .or_else(|| env_agent_name(&name))
         .ok_or_else(|| {
             anyhow::anyhow!("'{name}' has no recorded agent name; relaunch it with hcom agent")
         })?;
@@ -107,6 +108,15 @@ fn run(args: &HandoffArgs, ctx: Option<&CommandContext>) -> anyhow::Result<i32> 
         log_path.display()
     );
     Ok(0)
+}
+
+/// The catalog name from the agent's own environment, for sessions whose
+/// recorded name is missing. Trusted only when the environment belongs to
+/// the instance being handed off.
+fn env_agent_name(name: &str) -> Option<String> {
+    let instance = std::env::var("HCOM_INSTANCE_NAME").ok()?;
+    let agent = std::env::var(crate::commands::agent::AGENT_NAME_ENV).ok()?;
+    (instance == name && !agent.is_empty()).then_some(agent)
 }
 
 fn read_prompt(words: &[String]) -> anyhow::Result<String> {
