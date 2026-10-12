@@ -37,6 +37,13 @@ pub use instances::InstanceRow;
 pub use instances::InstanceStatus;
 pub use instances::observe_pid_identity;
 
+/// Pragmas applied to every read-write connection. busy_timeout is 30s rather
+/// than SQLite's usual few seconds: with many agents' hooks writing at once, a
+/// 5s timeout failed the PTY launcher's PID write and killed a freshly spawned
+/// agent.
+const CONNECTION_PRAGMAS: &str =
+    "PRAGMA busy_timeout=30000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;";
+
 /// Schema version - bump on any schema change.
 const SCHEMA_VERSION: i32 = 18;
 pub const DEV_ROOT_KV_KEY: &str = "config:dev_root";
@@ -140,12 +147,8 @@ impl HcomDb {
         // busy_timeout first: converting a fresh db to WAL takes a brief
         // exclusive lock, so with a 0 timeout a concurrent first-open (or heavy
         // load) fails instantly with SQLITE_BUSY. Setting the timeout up front
-        // makes the WAL conversion retry instead. 30s rather than SQLite's usual
-        // few seconds: with many agents' hooks writing at once, a 5s timeout
-        // failed the PTY launcher's PID write and killed a freshly spawned agent.
-        conn.execute_batch(
-            "PRAGMA busy_timeout=30000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;",
-        )?;
+        // makes the WAL conversion retry instead.
+        conn.execute_batch(CONNECTION_PRAGMAS)?;
 
         Ok(conn)
     }
@@ -254,9 +257,7 @@ impl HcomDb {
         }
         match Connection::open(&self.db_path) {
             Ok(new_conn) => {
-                if let Err(e) = new_conn.execute_batch(
-                    "PRAGMA busy_timeout=30000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;",
-                ) {
+                if let Err(e) = new_conn.execute_batch(CONNECTION_PRAGMAS) {
                     use crate::log::log_warn;
                     log_warn(
                         "native",
