@@ -1706,6 +1706,7 @@ enum VerifyRecoveryDecision {
     Reinject,
     ForeignPrompt,
     WakeUnacknowledged,
+    Reset,
 }
 
 fn verify_timeout_decision(
@@ -1737,10 +1738,12 @@ fn verify_recovery_decision(
     match timeout {
         VerifyTimeoutDecision::DeliveredWithoutCursor => VerifyRecoveryDecision::Delivered,
         VerifyTimeoutDecision::FastFail => VerifyRecoveryDecision::WakeUnacknowledged,
-        VerifyTimeoutDecision::Reset => VerifyRecoveryDecision::Reinject,
+        VerifyTimeoutDecision::Reset => VerifyRecoveryDecision::Reset,
+        VerifyTimeoutDecision::Retry if !matches!(tool, Some(Tool::Codex)) => {
+            VerifyRecoveryDecision::Reinject
+        }
         VerifyTimeoutDecision::Retry
-            if matches!(tool, Some(Tool::Codex))
-                && prompt_ownership(input_text, injected_text) == PromptOwnership::Exclusive =>
+            if prompt_ownership(input_text, injected_text) == PromptOwnership::Exclusive =>
         {
             VerifyRecoveryDecision::RetryOwnedWake
         }
@@ -2812,7 +2815,7 @@ pub fn run_delivery_loop(
                             VerifyRecoveryDecision::WakeUnacknowledged => {
                                 inject_attempt = next_inject_attempt;
                                 let context = "tui:wake-unacknowledged".to_string();
-                                let detail = "delivery paused; wake was not acknowledged";
+                                let detail = "delivery paused; kill and resume this agent to retry";
                                 if let Err(e) = db.set_gate_status(&current_name, &context, detail)
                                 {
                                     log_warn(
@@ -2834,6 +2837,19 @@ pub fn run_delivery_loop(
                                 delivery_state = State::WakeUnacknowledged;
                                 attempt = 0;
                                 continue;
+                            }
+                            VerifyRecoveryDecision::Reset => {
+                                inject_attempt = next_inject_attempt;
+                                log_warn(
+                                    "native",
+                                    "delivery.failed",
+                                    &format!(
+                                        "Delivery failed after {} attempts, resetting",
+                                        inject_attempt
+                                    ),
+                                );
+                                delivery_state = State::Pending;
+                                attempt = 0;
                             }
                         }
                     }
@@ -3338,6 +3354,30 @@ mod tests {
                 VerifyRecoveryDecision::RetryOwnedWake
             );
         }
+    }
+
+    #[test]
+    fn non_codex_verify_recovery_keeps_retry_and_reset() {
+        for input in [Some("<hcom>"), Some("user draft"), None] {
+            assert_eq!(
+                verify_recovery_decision(
+                    Some(Tool::Gemini),
+                    VerifyTimeoutDecision::Retry,
+                    input,
+                    "<hcom>",
+                ),
+                VerifyRecoveryDecision::Reinject
+            );
+        }
+        assert_eq!(
+            verify_recovery_decision(
+                Some(Tool::Gemini),
+                VerifyTimeoutDecision::Reset,
+                None,
+                "<hcom>",
+            ),
+            VerifyRecoveryDecision::Reset
+        );
     }
 
     #[test]

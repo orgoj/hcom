@@ -654,8 +654,7 @@ impl ScreenTracker {
     }
 
     /// Check if text after a prompt character is dim (placeholder styling).
-    /// Returns `Some(true)` if all visible characters are dim (placeholder),
-    /// `Some(false)` if any non-dim characters exist (real user input) or no styled text.
+    /// Returns `Some(true)` if majority dim (placeholder), `Some(false)` if real input.
     /// Returns `None` if the prompt glyph can't be located on the row.
     fn is_dim_after_prompt(&self, row: u16, prompt_char: &str) -> Option<bool> {
         let screen = self.parser.screen();
@@ -673,8 +672,8 @@ impl ScreenTracker {
         }
         let prompt_col = prompt_col?;
 
-        // Scan cells after prompt glyph (skip prompt glyph itself; whitespace is skipped below)
-        let start_col = prompt_col + 1;
+        // Scan cells after prompt (skip prompt + space)
+        let start_col = prompt_col + 2;
         let mut dim_count: u32 = 0;
         let mut non_dim_count: u32 = 0;
 
@@ -696,7 +695,7 @@ impl ScreenTracker {
             }
         }
 
-        Some(dim_count > 0 && non_dim_count == 0)
+        Some(!(non_dim_count > 0 && non_dim_count > dim_count))
     }
 
     /// Render the non-whitespace cells after a prompt as char:style pairs for
@@ -892,10 +891,9 @@ impl ScreenTracker {
                 break;
             }
         }
+        // Unresolved styling fails safe: protect the text.
         let Some(prompt_col) = prompt_col else {
-            return self
-                .is_dim_after_prompt(row, &prompt_char.to_string())
-                .unwrap_or(false);
+            return false;
         };
 
         // Determine insertion column (where input text starts, skipping prompt + space)

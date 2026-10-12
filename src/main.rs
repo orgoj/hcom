@@ -247,10 +247,29 @@ pub fn run_pty(args: &[String]) -> Result<()> {
                 launch.stop_leader();
             }
             if let Some(name) = instance_name_for_failure.as_deref()
+                && let Ok(db) = db::HcomDb::open()
+                && let Ok(Some(instance)) = db.get_instance_full(name)
+            {
+                let fallback = format!("{err:#}");
+                if let Some(detail) = instance_lifecycle::finalize_launch_failure_detail(
+                    &db,
+                    &instance,
+                    Some(&fallback),
+                ) {
+                    let _ = db.emit_launch_failed_event(
+                        name,
+                        shared::ST_INACTIVE,
+                        "launch_failed",
+                        "spawn_failed",
+                        &detail,
+                    );
+                }
+            }
+            if let Some(name) = instance_name_for_failure.as_deref()
                 && let Ok(mut db) = db::HcomDb::open()
             {
                 let process_id = std::env::var("HCOM_PROCESS_ID").unwrap_or_default();
-                record_spawn_failure(&mut db, name, &format!("{err:#}"), &process_id);
+                cleanup_failed_spawn_binding(&mut db, name, &process_id);
             }
             return Err(err);
         }
@@ -269,30 +288,25 @@ pub fn run_pty(args: &[String]) -> Result<()> {
     std::process::exit(exit_code);
 }
 
-/// Report a failed PTY spawn for `name` and leave no live-looking row behind.
-fn record_spawn_failure(db: &mut db::HcomDb, name: &str, error: &str, process_id: &str) {
+/// Stop a row the child bound before its PTY spawn failed.
+///
+/// The child can bind its session before the spawn fails (e.g. a DB write
+/// after the fork). Its process is gone, so stop the bound row: left
+/// listening it goes stale, blocks a relaunch under the same name, and
+/// queues messages for a dead agent instead of autostarting a new one.
+/// A row already marked `launch_failed` is the reported failure: keep it.
+fn cleanup_failed_spawn_binding(db: &mut db::HcomDb, name: &str, process_id: &str) {
     let Ok(Some(instance)) = db.get_instance_full(name) else {
         return;
     };
-    let detail = instance_lifecycle::finalize_launch_failure_detail(db, &instance, Some(error));
-    let _ = db.emit_launch_failed_event(
-        name,
-        shared::ST_INACTIVE,
-        "launch_failed",
-        "spawn_failed",
-        detail.as_deref().unwrap_or(error),
-    );
-    // The child can bind its session before the spawn fails (e.g. a DB write
-    // after the fork). Its process is gone, so stop the bound row: left
-    // listening it goes stale, blocks a relaunch under the same name, and
-    // queues messages for a dead agent instead of autostarting a new one.
-    if detail.is_none() {
-        if delivery::instance_owns_process_binding(db, process_id, name) {
-            delivery::cleanup_deleted_instance(db, name);
-        }
-        if !process_id.is_empty() {
-            let _ = db.delete_process_binding(process_id);
-        }
+    if instance.status_context == "launch_failed" {
+        return;
+    }
+    if delivery::instance_owns_process_binding(db, process_id, name) {
+        delivery::cleanup_deleted_instance(db, name);
+    }
+    if !process_id.is_empty() {
+        let _ = db.delete_process_binding(process_id);
     }
 }
 
@@ -330,24 +344,46 @@ mod tests {
         // The row now belongs to another process: leave it alone.
         db.set_process_binding("other-proc", "bound-session", "luna")
             .unwrap();
-        super::record_spawn_failure(&mut db, "luna", "database is locked", "failed-proc");
+        super::cleanup_failed_spawn_binding(&mut db, "luna", "failed-proc");
         assert!(db.get_instance_full("luna").unwrap().is_some());
 
         db.set_process_binding("failed-proc", "bound-session", "luna")
             .unwrap();
-        super::record_spawn_failure(&mut db, "luna", "database is locked", "failed-proc");
+        super::cleanup_failed_spawn_binding(&mut db, "luna", "failed-proc");
         assert!(db.get_instance_full("luna").unwrap().is_none());
         assert!(db.get_process_binding("failed-proc").unwrap().is_none());
-        let failed: bool = db
+        let stopped: bool = db
             .conn()
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM events WHERE instance = 'luna'
-                 AND json_extract(data, '$.action') = 'launch_failed')",
+                 AND json_extract(data, '$.action') = 'stopped')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(failed);
+        assert!(stopped);
+    }
+
+    /// An unbound placeholder the spawn-failure path marked `launch_failed`
+    /// is the reported failure and must stay visible.
+    #[test]
+    #[serial_test::serial]
+    fn spawn_failure_cleanup_keeps_a_launch_failed_placeholder() {
+        let (_dir, hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
+        let mut db = crate::db::HcomDb::open_at(&hcom_dir.join("test.db")).unwrap();
+        db.save_instance_named(
+            "luna",
+            &serde_json::Map::from_iter([
+                ("tool".into(), serde_json::json!("claude")),
+                ("status".into(), serde_json::json!("inactive")),
+                ("status_context".into(), serde_json::json!("launch_failed")),
+                ("created_at".into(), serde_json::json!(1.0)),
+            ]),
+        )
+        .unwrap();
+
+        super::cleanup_failed_spawn_binding(&mut db, "luna", "");
+        assert!(db.get_instance_full("luna").unwrap().is_some());
     }
 
     /// Test that no args runs Rust TUI

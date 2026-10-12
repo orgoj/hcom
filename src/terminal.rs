@@ -2529,16 +2529,18 @@ fn launch_herdr_two_step(
     };
 
     // Step 2: run hcom's generated runner script in the new pane. `pane run`
-    // sends the text and presses Enter, so the platform-specific invocation is
-    // the whole line. On Unix, put HERDR_AGENT on this command only: the runner
-    // execs `hcom pty`, making the hint visible on Herdr's foreground process
-    // without leaking it into any other terminal preset.
+    // sends the text and presses Enter, so `bash <script>` is the whole line.
+    // The script path is shell-quoted: herdr types it into the pane's shell,
+    // and hcom's launch dir lives under $HOME, which can contain spaces.
+    // HERDR_AGENT is set on this command only: the runner execs `hcom pty`,
+    // making the hint visible on Herdr's foreground process without leaking it
+    // into any other terminal preset.
     let run_argv = vec![
         "herdr".to_string(),
         "pane".to_string(),
         "run".to_string(),
         pane_id.clone(),
-        herdr_pane_run_command(ctx.script, ctx.tool, cfg!(windows)),
+        herdr_pane_run_command(ctx.script, ctx.tool),
     ];
     // Don't `?`-propagate a step-2 failure directly: step 1 already opened the
     // pane, so bailing here would orphan an empty pane that looks like a live
@@ -2586,14 +2588,7 @@ pub(crate) fn herdr_agent_label(tool: &str) -> Option<&'static str> {
     }
 }
 
-fn herdr_pane_run_command(script: &str, tool: &str, windows: bool) -> String {
-    if windows {
-        return format!(
-            "powershell.exe -NoProfile -ExecutionPolicy Bypass -File {}",
-            ps_quote(script)
-        );
-    }
-
+fn herdr_pane_run_command(script: &str, tool: &str) -> String {
     match herdr_agent_label(tool) {
         Some(agent) => format!(
             "HERDR_AGENT={} bash {}",
@@ -3989,6 +3984,36 @@ mod tests {
         }
     }
 
+    /// The shell a new window keeps open after the tool exits must not keep
+    /// the previous agent's instruction transports.
+    #[test]
+    fn new_window_scripts_clear_instruction_transports_after_the_tool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = HashMap::new();
+        env.insert("GEMINI_SYSTEM_MD".to_string(), "/tmp/p.md".to_string());
+        env.insert(
+            "COPILOT_CUSTOM_INSTRUCTIONS_DIRS".to_string(),
+            "/tmp/p".to_string(),
+        );
+        let bash = tmp.path().join("launch.sh");
+        create_bash_script(&bash, &env, None, "agent-cmd", false, None, true).unwrap();
+        let ps = tmp.path().join("launch.ps1");
+        create_powershell_script(&ps, &env, None, "agent-cmd", false, None, true).unwrap();
+        let after_command = |path: &Path| {
+            let text = std::fs::read_to_string(path).unwrap();
+            let start = text.rfind("agent-cmd").unwrap();
+            text[start..].to_string()
+        };
+        let (bash_tail, ps_tail) = (after_command(&bash), after_command(&ps));
+        for var in ["GEMINI_SYSTEM_MD", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"] {
+            assert!(bash_tail.lines().any(|line| line.starts_with("unset ")
+                && line.split_whitespace().any(|word| word == var)));
+            assert!(ps_tail.lines().any(
+                |line| line.starts_with("Remove-Item ") && line.contains(&format!("Env:{var}"))
+            ));
+        }
+    }
+
     #[test]
     fn test_create_powershell_script_window_mode() {
         let tmp = tempfile::tempdir().unwrap();
@@ -4723,20 +4748,12 @@ mod tests {
     #[test]
     fn herdr_unix_pane_run_scopes_and_quotes_agent_hint() {
         assert_eq!(
-            herdr_pane_run_command("/tmp/launch dir/agent.sh", "antigravity", false),
+            herdr_pane_run_command("/tmp/launch dir/agent.sh", "antigravity"),
             "HERDR_AGENT=agy bash '/tmp/launch dir/agent.sh'"
         );
         assert_eq!(
-            herdr_pane_run_command("/tmp/launch dir/custom.sh", "future-tool", false),
+            herdr_pane_run_command("/tmp/launch dir/custom.sh", "future-tool"),
             "bash '/tmp/launch dir/custom.sh'"
-        );
-    }
-
-    #[test]
-    fn herdr_windows_pane_run_uses_powershell_without_agent_hint() {
-        assert_eq!(
-            herdr_pane_run_command("C:\\Users\\O'Brien\\launch.ps1", "claude", true),
-            "powershell.exe -NoProfile -ExecutionPolicy Bypass -File 'C:\\Users\\O''Brien\\launch.ps1'"
         );
     }
 
