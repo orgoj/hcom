@@ -263,12 +263,19 @@ pub(crate) fn ensure_private_db(db_path: &Path) -> std::io::Result<()> {
         Err(e) => return Err(e),
     }
     for suffix in ["-wal", "-shm"] {
-        let sidecar = sidecar_path(db_path, suffix);
-        if sidecar.exists() {
-            crate::sys::fs::set_private(&sidecar)?;
-        }
+        set_private_if_present(&sidecar_path(db_path, suffix))?;
     }
     Ok(())
+}
+
+/// Restrict a sidecar that may vanish at any moment: another process closing
+/// the last connection deletes `-wal`/`-shm`, so a check-then-chmod would
+/// race it and fail the whole open with NotFound.
+fn set_private_if_present(path: &Path) -> std::io::Result<()> {
+    match crate::sys::fs::set_private(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 /// Write content to file atomically (temp file + rename).
@@ -351,6 +358,24 @@ fn read_flag_file(path: &Path) -> i32 {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// A sidecar deleted between listing and chmod (another process closed the
+    /// last connection) must not fail opening the database.
+    #[test]
+    fn set_private_if_present_tolerates_vanished_sidecar() {
+        let tmp = TempDir::new().unwrap();
+        let wal = tmp.path().join("hcom.db-wal");
+        assert!(set_private_if_present(&wal).is_ok());
+
+        fs::write(&wal, b"").unwrap();
+        set_private_if_present(&wal).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&wal).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
 
     #[test]
     fn test_is_test_temp_path_accepts_temp_child() {
