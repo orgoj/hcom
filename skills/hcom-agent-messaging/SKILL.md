@@ -2,11 +2,26 @@
 name: hcom-agent-messaging
 description: >
   Multi-agent communication for AI coding tools. Agents message, watch,
-  and spawn each other across terminals. Use when setting up hcom or
-  troubleshooting.
+  and spawn each other across terminals. Use when sending or replying to
+  hcom messages, setting up hcom, or troubleshooting.
 ---
 
 # hcom — multi-agent communication for AI coding tools
+
+## send or reply (do this first, no other commands needed)
+
+Your name and the incoming message's sender and event id are in the message header.
+
+```bash
+# reply to message <id> from <sender>
+hcom send @<sender> --intent ack --reply-to <id> --name <your-name> -- 'reply text'
+# new message that expects an answer
+hcom send @<name> --intent request --name <your-name> -- 'message text'
+# text with backticks, code or markdown
+hcom send @<name> --intent inform --name <your-name> --file /abs/path/msg.md
+```
+
+All flags go before `--`; everything after `--` is the message. Intents: `request` (want reply), `inform` (no reply needed), `ack` (answer, requires `--reply-to`). No need to run `hcom status`, `hcom list` or `--help` before sending; use them only if the send fails.
 
 AI agents running in separate terminals are isolated. hcom connects them via hooks and a shared database so they can message, watch, and spawn each other in real-time.
 
@@ -74,7 +89,7 @@ Works with Claude Code, Gemini CLI, Codex, OpenCode, Kilo Code, Pi, Oh My Pi, An
 
 ## setup
 
-When this skill is invoked, first run:
+Only when setting up hcom or when a send fails, run:
 
 ```bash
 hcom status
