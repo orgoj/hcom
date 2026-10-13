@@ -6,8 +6,10 @@ Fork-only extras that run on top of the `hcom` CLI and do not touch its code.
 
 Tk window listing every catalog agent (`hcom agent list --all --json`) and every live
 instance (`hcom list --json`), including instances started with `--as`. Buttons run
-existing commands (`hcom agent`, `--as`, `attach`, `kill`) and log their output; others
-open the selected agent's directory in configured applications.
+existing commands (`hcom agent`, `attach`, `kill`) and log their output; others open the
+selected agent's directory in configured applications. The Start dialog sets `--as`,
+`--dir`, `--cli` (CLIs installed on PATH) and a resume checkbox: `--resume`, or
+`--continue` when another CLI is chosen.
 
 ```sh
 ln -s "$PWD/contrib/hcom-gui" ~/.local/bin/hcom-gui

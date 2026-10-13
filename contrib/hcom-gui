@@ -13,6 +13,7 @@ Window layout is kept in ~/.hcom/gui-state.json.
 
 import json
 import os
+import shutil
 import subprocess
 import threading
 import tkinter as tk
@@ -25,17 +26,20 @@ STATE_FILE = os.path.join(HCOM_DIR, "gui-state.json")
 
 # Toolbar. cmd placeholders: {agent} catalog name, {instance} live name, {dir} working
 # directory, {ask:X} asked in a dialog (an empty answer drops it and its preceding --flag).
+# An answer equal to its prefill (dir, cli) is treated as empty. {ask:resume} is a checkbox:
+# --resume, or --continue when another cli is chosen (a session cannot move between CLIs).
 # when: catalog | running | stopped | dir. Optional: confirm, key (Tk event), default
-# (double-click/Enter on a running row), detach (start without waiting), cwd.
+# (running | stopped: double-click/Enter on such a row), detach (start without waiting), cwd.
 BUTTONS = [
-    {"label": "Start", "cmd": ["hcom", "agent", "{agent}"], "when": "stopped"},
     {
-        "label": "Start as…",
-        "cmd": ["hcom", "agent", "{agent}", "--as", "{ask:name}", "--dir", "{ask:dir}"],
+        "label": "Start",
+        "cmd": ["hcom", "agent", "{agent}", "{ask:resume}", "--as", "{ask:name}", "--dir", "{ask:dir}",
+                "--cli", "{ask:cli}"],
         "when": "catalog",
+        "default": "stopped",
     },
     "---",
-    {"label": "Attach", "cmd": ["hcom", "agent", "attach", "{instance}"], "when": "running", "default": True},
+    {"label": "Attach", "cmd": ["hcom", "agent", "attach", "{instance}"], "when": "running", "default": "running"},
     "---",
     {"label": "Kill", "cmd": ["hcom", "kill", "{instance}"], "when": "running", "confirm": True, "key": "<Delete>"},
     "---",
@@ -46,6 +50,13 @@ DEFAULT_OPEN_WITH = [
     {"label": "Folder", "cmd": ["xdg-open", "{dir}"]},
     {"label": "Terminal", "cmd": ["x-terminal-emulator"], "cwd": "{dir}"},
 ]
+
+# hcom CLI key -> executable (src/integration_spec.rs cli_binary); offered when on PATH.
+CLI_BINARIES = {
+    "claude": "claude", "codex": "codex", "gemini": "gemini", "opencode": "opencode",
+    "kilo": "kilo", "agy": "agy", "cursor": "cursor-agent", "kimi": "kimi", "pi": "pi",
+    "omp": "omp", "copilot": "copilot", "hermes": "hermes", "qoder": "qodercli", "grok": "grok",
+}
 
 COLUMNS = [
     ("agent", "Agent", 140),
@@ -119,6 +130,7 @@ def build_rows(catalog, live):
             "agent": d["name"] if d else "",
             "instance": i["name"],
             "cli": i.get("tool") or "",
+            "catalog_cli": (d or {}).get("cli") or "",
             "status": f"{i.get('status', '')} {age(i.get('status_age_seconds'))}",
             "state": i.get("status", ""),
             "detail": i.get("status_detail") or "",
@@ -134,6 +146,7 @@ def build_rows(catalog, live):
             "agent": d["name"],
             "instance": "",
             "cli": d.get("cli") or "",
+            "catalog_cli": d.get("cli") or "",
             "status": "",
             "state": "",
             "detail": "",
@@ -329,7 +342,7 @@ class App(tk.Tk):
         row = self.selected()
         want = "running" if row and row["instance"] else "stopped"
         for b in self.buttons:
-            if b != "---" and b["when"] == want and (want == "stopped" or b.get("default")) and enabled(b, row):
+            if b != "---" and b.get("default") == want and enabled(b, row):
                 self.run_button(b)
                 return
 
@@ -344,10 +357,13 @@ class App(tk.Tk):
         }
         asks = [t[5:-1] for t in b["cmd"] if t.startswith("{ask:") and t.endswith("}")]
         if asks:
-            answers = self.ask(b["label"], asks, values)
+            prefill = {"dir": values["dir"], "cli": row["catalog_cli"]}
+            answers = self.ask(b["label"], asks, values["agent"], prefill)
             if answers is None:
                 return
-            values.update({f"ask:{k}": v for k, v in answers.items()})
+            values.update({f"ask:{k}": "" if v == prefill.get(k) else v for k, v in answers.items()})
+            if values.get("ask:resume"):
+                values["ask:resume"] = "--continue" if values.get("ask:cli") else "--resume"
         cmd = []
         for token in b["cmd"]:
             if token.startswith("{ask:"):
@@ -395,16 +411,25 @@ class App(tk.Tk):
         self.update_buttons()
         self.refresh()
 
-    def ask(self, title, keys, values):
-        """One entry per {ask:X}; "dir" is prefilled and browsable. None on cancel."""
+    def ask(self, title, keys, agent, prefill):
+        """One entry per {ask:X}, prefilled from prefill; "dir" is browsable, "cli" a
+        choice of installed CLIs, "resume" a checkbox ("1" when checked). None on cancel."""
         dlg = tk.Toplevel(self)
-        dlg.title(f"{title} {values['agent']}")
+        dlg.title(f"{title} {agent}")
         dlg.transient(self)
         entries, result = {}, {}
         for n, k in enumerate(keys):
             ttk.Label(dlg, text=k).grid(row=n, column=0, sticky=tk.W, padx=5, pady=5)
-            var = tk.StringVar(value=values["dir"] if k == "dir" else "")
-            ttk.Entry(dlg, textvariable=var, width=50).grid(row=n, column=1, sticky=tk.EW, padx=5, pady=5)
+            var = tk.StringVar(value=prefill.get(k, ""))
+            if k == "resume":
+                ttk.Checkbutton(dlg, variable=var, onvalue="1", offvalue="").grid(
+                    row=n, column=1, sticky=tk.W, padx=5, pady=5)
+            elif k == "cli":
+                choices = [c for c, exe in CLI_BINARIES.items() if c == var.get() or shutil.which(exe)]
+                ttk.Combobox(dlg, textvariable=var, values=choices, state="readonly", width=48).grid(
+                    row=n, column=1, sticky=tk.EW, padx=5, pady=5)
+            else:
+                ttk.Entry(dlg, textvariable=var, width=50).grid(row=n, column=1, sticky=tk.EW, padx=5, pady=5)
             if k == "dir":
                 def browse(var=var):
                     path = filedialog.askdirectory(parent=dlg, initialdir=var.get() or HOME)
