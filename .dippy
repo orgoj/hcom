@@ -1,0 +1,16 @@
+allow cargo *
+allow git *
+allow hcom *
+allow just *
+allow ruff *
+
+allow ./target/debug/hcom *
+allow ./target/release/hcom *
+allow /home/michael/.cargo/bin/hcom *
+
+# Runs on every release: awk over Cargo.toml plus the matching Cargo.lock edit.
+# No network, no rm. An allow on a script is an allow on whatever the script
+# becomes later, so this one is only as safe as review of that file.
+allow scripts/bump-fork-version.sh
+
+allow sqlite3 ~/.hcom/hcom.db *

@@ -2,7 +2,7 @@
 /bin/
 /.hcom/
 /node_modules/
-/.dippy
 /.omc/
 /AGENTS.local.md
 /tmp/
+__pycache__/
