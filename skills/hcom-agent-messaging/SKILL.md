@@ -23,6 +23,8 @@ hcom send @<name> --intent inform --name <your-name> --file /abs/path/msg.md
 
 All flags go before `--`; everything after `--` is the message. Intents: `request` (want reply), `inform` (no reply needed), `ack` (answer, requires `--reply-to`). No need to run `hcom status`, `hcom list` or `--help` before sending; use them only if the send fails.
 
+When the user tells you who to message (an agent or group, with or without `@`), send the user's request to that name right away. Do not research the content first (web, code, transcripts) and do not verify the name with `hcom list` or the catalog; the recipient does the analysis. Look the name up only if the send fails.
+
 AI agents running in separate terminals are isolated. hcom connects them via hooks and a shared database so they can message, watch, and spawn each other in real-time.
 
 Start an agent with `hcom` in front, then prompt normally.
