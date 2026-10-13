@@ -24,10 +24,13 @@ Requires Python 3 with tkinter. Optional `~/.hcom/gui.json`:
   "open_with": [
     {"label": "Zed",  "cmd": ["zed", "{dir}"]},
     {"label": "gitg", "cmd": ["gitg"], "cwd": "{dir}"},
-    {"label": "gitk", "cmd": ["gitk", "--all"], "cwd": "{dir}"}
+    {"label": "gitk", "cmd": ["gitk", "--all"], "cwd": "{dir}"},
+    {"label": "Backlog", "cmd": ["x-terminal-emulator", "backlog", "board"], "cwd": "{dir}",
+     "if_exists": "{dir}/backlog"}
   ]
 }
 ```
 
+`if_exists` enables a button only while that path exists (here a Backlog.md project).
 Without `open_with`, the toolbar offers `xdg-open` and `x-terminal-emulator`. Further hcom
 buttons go into `BUTTONS` at the top of the script.

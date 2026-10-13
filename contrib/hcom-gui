@@ -7,7 +7,9 @@ The GUI holds no hcom logic: the table comes from `hcom agent list --all --json`
 Optional ~/.hcom/gui.json:
   {"refresh_seconds": 5,
    "open_with": [{"label": "Zed", "cmd": ["zed", "{dir}"]},
-                 {"label": "gitg", "cmd": ["gitg"], "cwd": "{dir}"}]}
+                 {"label": "gitg", "cmd": ["gitg"], "cwd": "{dir}"},
+                 {"label": "Backlog", "cmd": ["x-terminal-emulator", "backlog", "board"], "cwd": "{dir}",
+                  "if_exists": "{dir}/backlog"}]}
 Window layout is kept in ~/.hcom/gui-state.json.
 """
 
@@ -29,7 +31,8 @@ STATE_FILE = os.path.join(HCOM_DIR, "gui-state.json")
 # An answer equal to its prefill (dir, cli) is treated as empty. {ask:resume} is a checkbox:
 # --resume, or --continue when another cli is chosen (a session cannot move between CLIs).
 # when: catalog | running | stopped | dir. Optional: confirm, key (Tk event), default
-# (running | stopped: double-click/Enter on such a row), detach (start without waiting), cwd.
+# (running | stopped: double-click/Enter on such a row), detach (start without waiting), cwd,
+# if_exists (a path with {dir}; the button is enabled only while it exists).
 BUTTONS = [
     {
         "label": "Start",
@@ -161,6 +164,9 @@ def build_rows(catalog, live):
 def enabled(button, row):
     if row is None:
         return False
+    if path := button.get("if_exists"):
+        if not row["dir"] or not os.path.exists(path.format(dir=os.path.expanduser(row["dir"]))):
+            return False
     return {
         "catalog": bool(row["agent"]),
         "running": bool(row["instance"]),
