@@ -1,10 +1,10 @@
 ---
 id: TASK-5
 title: Deliver wdt_main replies into kato's Hermes context
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-10-13 14:50'
-updated_date: '2026-10-13 15:07'
+updated_date: '2026-10-13 15:10'
 labels: []
 dependencies: []
 ordinal: 5000
@@ -30,3 +30,9 @@ Root cause (hermes_dev #155747): Hermes plugin, not hcom. /home/michael/projects
 
 Fixed by hermes_dev in hermes-hcom-plugin 5272695 (branch fix/thread-session-routing, not pushed): route capture required argv[1]==send while kato sends 'hcom --name kato send --thread X'; now every threaded send form is captured and unknown threads go to the root chat instead of blocking. Gateway restarted (PID 907121); #155815 delivered to kato session :30785 and acked. Regression test in the plugin not yet confirmed. Nothing needed in hcom.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Root cause in hermes-hcom-plugin thread route capture; fixed by hermes_dev (5272695). Verified: wdt_main threaded reply delivered into kato's context without manual read (#155815 acked). No hcom change; plugin regression test not confirmed, closed by user decision.
+<!-- SECTION:FINAL_SUMMARY:END -->
