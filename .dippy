@@ -1,3 +1,4 @@
+allow backlog *
 allow cargo *
 allow git *
 allow hcom *
