@@ -3843,6 +3843,86 @@ fn agent_agy_policy_cwd_uses_canonical_launch_directory() {
 }
 
 #[test]
+fn herdr_placement_belongs_to_one_launch_and_never_reaches_a_plain_child() {
+    let h = Hcom::new();
+    // The caller is itself a placed agent.
+    let run_placed = |args: &[&str]| -> (i32, String) {
+        let out = h
+            .cmd()
+            .env("HCOM_HERDR_WORKSPACE", "parent-space")
+            .env("HCOM_HERDR_TAB", "parent-tab")
+            .args(args)
+            .output()
+            .expect("spawn hcom");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"coach":{"cli":"claude","env":{"HCOM_HERDR_WORKSPACE":"child-space","HCOM_HERDR_TAB":"coach"}}}}"#,
+    )
+    .unwrap();
+    let launch_dir = h.path().join(".tmp/launch");
+    // The runner script exports the launch's HCOM_* values.
+    let env_files = || -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(&launch_dir)
+            .map(|dir| {
+                dir.map(|entry| entry.unwrap().path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "sh"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // Catalog launch: its own placement reaches the launch and its record.
+    let (code, stderr) = run_placed(&["agent", "coach", "--terminal", "print"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let catalog_env = env_files();
+    assert_eq!(catalog_env.len(), 1, "files={catalog_env:?}");
+    let script = std::fs::read_to_string(&catalog_env[0]).unwrap();
+    assert!(script.contains("child-space"), "env={script}");
+    assert!(!script.contains("parent-space") && !script.contains("parent-tab"));
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).unwrap();
+    let launch_context: String = conn
+        .query_row(
+            "SELECT launch_context FROM instances WHERE name='coach'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let launch_context: serde_json::Value = serde_json::from_str(&launch_context).unwrap();
+    assert_eq!(launch_context["herdr_workspace"], "child-space");
+    assert_eq!(launch_context["herdr_tab"], "coach");
+
+    // Plain nested launch: the caller's placement is dropped.
+    let (code, stderr) = run_placed(&["claude", "--terminal", "print", "--no-run-here"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let child_env: Vec<_> = env_files()
+        .into_iter()
+        .filter(|path| !catalog_env.contains(path))
+        .collect();
+    assert_eq!(child_env.len(), 1, "files={child_env:?}");
+    let script = std::fs::read_to_string(&child_env[0]).unwrap();
+    assert!(
+        !script.contains("HCOM_HERDR_WORKSPACE") && !script.contains("HCOM_HERDR_TAB"),
+        "env={script}"
+    );
+    let contexts: Vec<String> = conn
+        .prepare("SELECT COALESCE(launch_context, '') FROM instances WHERE name != 'coach'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert!(
+        contexts.iter().all(|ctx| !ctx.contains("herdr_")),
+        "contexts={contexts:?}"
+    );
+}
+
+#[test]
 fn agent_agy_policy_cwd_survives_tracked_resume_and_cli_switch() {
     let h = Hcom::new();
     h.set_launch_env("DIPPY_POLICY_CWD", "/ambient-policy");

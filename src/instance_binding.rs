@@ -98,6 +98,8 @@ pub fn capture_and_store_launch_context(db: &HcomDb, instance_name: &str) {
         // Written by the launcher for the stop snapshot, handoff and resume.
         "agent_name",
         "dippy_policy_cwd",
+        "herdr_workspace",
+        "herdr_tab",
     ];
     let missing: Vec<&str> = preserve_keys
         .iter()
@@ -1604,7 +1606,7 @@ mod tests {
                     "luna",
                     "claude",
                     1.0f64,
-                    r#"{"terminal_preset_effective":"herdr","pane_id":"p_7","process_id":"proc-1","pid_identity":"spawn-1","agent_name":"reviewer","dippy_policy_cwd":"/work"}"#
+                    r#"{"terminal_preset_effective":"herdr","pane_id":"p_7","process_id":"proc-1","pid_identity":"spawn-1","agent_name":"reviewer","dippy_policy_cwd":"/work","herdr_workspace":"ws","herdr_tab":"luna"}"#
                 ],
             )
             .unwrap();
@@ -1638,6 +1640,11 @@ mod tests {
             ctx.get("dippy_policy_cwd").and_then(|v| v.as_str()),
             Some("/work")
         );
+        assert_eq!(
+            ctx.get("herdr_workspace").and_then(|v| v.as_str()),
+            Some("ws")
+        );
+        assert_eq!(ctx.get("herdr_tab").and_then(|v| v.as_str()), Some("luna"));
 
         cleanup(path);
     }
@@ -1700,6 +1707,48 @@ mod tests {
 
         let inst = db.get_instance_full("miso").unwrap().unwrap();
         assert_eq!(inst.tag.as_deref(), Some("team"));
+
+        cleanup(path);
+    }
+
+    #[test]
+    fn test_bind_session_keeps_herdr_placement_through_stop_snapshot() {
+        crate::config::Config::init();
+        let (db, path) = setup_test_db();
+        let now = now_epoch_i64();
+
+        let mut canonical_data = serde_json::Map::new();
+        canonical_data.insert("name".into(), serde_json::json!("miso"));
+        canonical_data.insert("session_id".into(), serde_json::json!("sid-789"));
+        canonical_data.insert("created_at".into(), serde_json::json!(now));
+        canonical_data.insert("status".into(), serde_json::json!("listening"));
+        db.save_instance_named("miso", &canonical_data).unwrap();
+        db.rebind_session("sid-789", "miso").unwrap();
+
+        let mut ph_data = serde_json::Map::new();
+        ph_data.insert("name".into(), serde_json::json!("temp"));
+        ph_data.insert("created_at".into(), serde_json::json!(now));
+        ph_data.insert("status".into(), serde_json::json!("pending"));
+        ph_data.insert("status_context".into(), serde_json::json!("new"));
+        db.save_instance_named("temp", &ph_data).unwrap();
+        db.set_process_binding("pid-123", "", "temp").unwrap();
+        db.store_launch_context(
+            "temp",
+            r#"{"herdr_workspace":"ansible-wdt","herdr_tab":"miso"}"#,
+        )
+        .unwrap();
+
+        let result = bind_session_to_process(&db, "sid-789", Some("pid-123"));
+        assert_eq!(result, Some("miso".to_string()));
+
+        let inst = db.get_instance_full("miso").unwrap().unwrap();
+        let ctx: serde_json::Value =
+            serde_json::from_str(inst.launch_context.as_deref().unwrap_or("{}")).unwrap();
+        assert_eq!(ctx["herdr_workspace"], "ansible-wdt");
+        assert_eq!(ctx["herdr_tab"], "miso");
+        let snapshot = db.get_instance_snapshot("miso").unwrap().unwrap();
+        assert_eq!(snapshot["herdr_workspace"], "ansible-wdt");
+        assert_eq!(snapshot["herdr_tab"], "miso");
 
         cleanup(path);
     }

@@ -2247,6 +2247,7 @@ fn parse_herdr_pane_id(captured: &str) -> Option<String> {
 fn launch_herdr_two_step(
     create_template: &[String],
     ctx: TerminalCommandContext<'_>,
+    env: &HashMap<String, String>,
     inside_ai_tool: bool,
 ) -> Result<(bool, String)> {
     ensure_herdr_server_running()?;
@@ -2254,22 +2255,22 @@ fn launch_herdr_two_step(
     // Step 1: open the pane. `tab create` takes no script, so substitute
     // placeholders directly — the generic `substitute_open_argv` requires a
     // `{script}` slot this command intentionally lacks.
-    let create_argv = herdr_placement_argv(&ctx)
+    let placement = herdr_placement(env, ctx.instance_name);
+    let create_argv = placement
+        .and_then(|(workspace, tab)| herdr_placement_argv(&ctx, workspace, tab))
         .unwrap_or_else(|| substitute_herdr_create_argv(create_template, &ctx));
     let (created, captured) = spawn_terminal_process(&create_argv, inside_ai_tool)?;
     if create_argv.get(1).map(String::as_str) == Some("workspace")
         && create_argv.get(2).map(String::as_str) == Some("create")
-        && let (Some(tab_label), Some(tab_id)) = (
-            std::env::var("HCOM_HERDR_TAB").ok(),
-            parse_herdr_created_tab_id(captured.trim()),
-        )
+        && let (Some((_, tab_label)), Some(tab_id)) =
+            (placement, parse_herdr_created_tab_id(captured.trim()))
     {
         let rename_argv = vec![
             "herdr".to_string(),
             "tab".to_string(),
             "rename".to_string(),
             tab_id,
-            tab_label,
+            tab_label.to_string(),
         ];
         let _ = spawn_terminal_process(&rename_argv, inside_ai_tool);
     }
@@ -2419,13 +2420,12 @@ fn herdr_pane_run_command(script: &str, tool: &str, windows: bool) -> String {
 /// Resolve hcom's catalog placement onto Herdr's space/workspace -> tab -> pane
 /// hierarchy. The launcher process inherits the socket for the selected Herdr
 /// persistent session, while these two values select structure inside it.
-fn herdr_placement_argv(ctx: &TerminalCommandContext<'_>) -> Option<Vec<String>> {
-    let workspace_label = std::env::var("HCOM_HERDR_WORKSPACE").ok()?;
-    let tab_label = std::env::var("HCOM_HERDR_TAB").ok()?;
-    if workspace_label.is_empty() || tab_label.is_empty() {
-        return None;
-    }
-
+fn herdr_placement_argv(
+    ctx: &TerminalCommandContext<'_>,
+    workspace_label: &str,
+    tab_label: &str,
+) -> Option<Vec<String>> {
+    let (workspace_label, tab_label) = (workspace_label.to_string(), tab_label.to_string());
     let workspaces = herdr_json(&["workspace", "list"])?;
     let workspace_id = json_array(&workspaces, &["result", "workspaces"])
         .and_then(|items| find_labeled_id(items, &workspace_label, "workspace_id"));
@@ -2487,6 +2487,25 @@ fn herdr_placement_argv(ctx: &TerminalCommandContext<'_>) -> Option<Vec<String>>
         ctx.cwd.into(),
         "--no-focus".into(),
     ])
+}
+
+/// Placement of this launch: `(workspace, tab)` from the launch env, which
+/// carries only values this launch supplied (catalog or resume), never the
+/// caller's. A missing tab defaults to the instance's own name.
+fn herdr_placement<'a>(
+    env: &'a HashMap<String, String>,
+    instance_name: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    let workspace = env
+        .get(crate::commands::agent::HERDR_WORKSPACE_ENV)
+        .map(String::as_str)
+        .filter(|v| !v.is_empty())?;
+    let tab = env
+        .get(crate::commands::agent::HERDR_TAB_ENV)
+        .map(String::as_str)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(instance_name);
+    (!tab.is_empty()).then_some((workspace, tab))
 }
 
 fn parse_herdr_created_tab_id(captured: &str) -> Option<String> {
@@ -2844,7 +2863,7 @@ pub fn launch_terminal(
         // single-argv preset model, so handle it natively. Everything else is a
         // single spawn.
         let (success, captured_id) = if terminal_mode == "herdr" {
-            launch_herdr_two_step(&cmd_template, ctx, inside_ai_tool)?
+            launch_herdr_two_step(&cmd_template, ctx, env, inside_ai_tool)?
         } else if terminal_mode == "orca" {
             orca::launch_orca_terminal(ctx, inside_ai_tool)?
         } else {
@@ -3543,6 +3562,32 @@ mod tests {
             .collect();
         assert!(removed.contains(&"HERDR_PANE_ID".to_string()));
         assert!(!removed.contains(&"HERDR_SOCKET_PATH".to_string()));
+    }
+
+    #[test]
+    fn herdr_placement_needs_a_workspace_and_defaults_the_tab_to_the_instance() {
+        let env = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        assert_eq!(herdr_placement(&env(&[]), "luna"), None);
+        assert_eq!(
+            herdr_placement(&env(&[("HCOM_HERDR_TAB", "shared")]), "luna"),
+            None
+        );
+        assert_eq!(
+            herdr_placement(&env(&[("HCOM_HERDR_WORKSPACE", "ws")]), "luna"),
+            Some(("ws", "luna"))
+        );
+        assert_eq!(
+            herdr_placement(
+                &env(&[("HCOM_HERDR_WORKSPACE", "ws"), ("HCOM_HERDR_TAB", "shared")]),
+                "luna"
+            ),
+            Some(("ws", "shared"))
+        );
     }
 
     #[test]

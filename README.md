@@ -158,6 +158,8 @@ hcom events --idle luna --wait 600 && hcom send -b @nova -- "luna is done, revie
 
 Every agent runs in a real terminal you can see, scroll, and interrupt. Any emulator works for spawning. **kitty**, **wezterm**, **tmux**, **zellij**, **waveterm**, **cmux**, **herdr** also support closing panes from `hcom kill`.
 
+With **herdr**, each catalog agent is placed in its configured tab (default: a tab named after the agent; `hcom agent --help`). `hcom r` returns an agent to its recorded workspace and tab, `hcom f` opens a tab named after the fork, and no launch inherits the caller's tab.
+
 To configure a custom terminal open/close setup, tell an agent to run:
 
 ```bash

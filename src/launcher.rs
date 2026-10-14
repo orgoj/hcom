@@ -2037,6 +2037,10 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
     // This scope belongs to a single catalog launch. Do not pass a parent's
     // policy directory into a nested child or an unrelated resumed process.
     base_env.remove(crate::commands::agent::DIPPY_POLICY_CWD);
+    // Herdr placement is likewise per launch: a caller's own workspace and tab
+    // must not place a plain or resumed child into the caller's tab.
+    base_env.remove(crate::commands::agent::HERDR_WORKSPACE_ENV);
+    base_env.remove(crate::commands::agent::HERDR_TAB_ENV);
     if let Some(ref caller_env) = params.env {
         for (key, value) in caller_env {
             insert_effective_env(&mut base_env, key.clone(), value.clone(), cfg!(windows));
@@ -2383,6 +2387,13 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                     &instance_name,
                     &json!({ "dippy_policy_cwd": policy_cwd }).to_string(),
                 )?;
+            }
+            if let Some(workspace) = base_env.get(crate::commands::agent::HERDR_WORKSPACE_ENV) {
+                let mut placement = json!({ "herdr_workspace": workspace });
+                if let Some(tab) = base_env.get(crate::commands::agent::HERDR_TAB_ENV) {
+                    placement["herdr_tab"] = json!(tab);
+                }
+                db.store_launch_context(&instance_name, &placement.to_string())?;
             }
             db.set_process_binding(&process_id, "", &instance_name)?;
             Ok(())

@@ -567,6 +567,22 @@ fn prepare_resume_plan_from_source(
         );
     }
 
+    // The launcher drops a caller's inherited Herdr placement. A resume returns
+    // to its stored workspace and tab; a fork joins the workspace under a tab
+    // named after itself.
+    if !is_adoption
+        && !launch_env.contains_key(crate::commands::agent::HERDR_WORKSPACE_ENV)
+        && let Some((workspace, tab)) = load_herdr_placement(db, &display_name)?
+    {
+        launch_env.insert(
+            crate::commands::agent::HERDR_WORKSPACE_ENV.to_string(),
+            workspace,
+        );
+        if !fork && let Some(tab) = tab {
+            launch_env.insert(crate::commands::agent::HERDR_TAB_ENV.to_string(), tab);
+        }
+    }
+
     Ok(PreparedResume {
         output: ResumeOutputContext {
             action: if fork { "fork" } else { "resume" }.to_string(),
@@ -1125,6 +1141,52 @@ fn load_agent_name(db: &HcomDb, name: &str) -> Result<Option<String>> {
         .optional()?
         .flatten();
     Ok(stopped.filter(|n| !n.is_empty()))
+}
+
+/// Herdr `(workspace, tab)` of a live instance, else of its latest stopped
+/// snapshot.
+fn load_herdr_placement(db: &HcomDb, name: &str) -> Result<Option<(String, Option<String>)>> {
+    let live = db
+        .conn()
+        .query_row(
+            "SELECT CASE WHEN json_valid(launch_context)
+                         THEN json_extract(launch_context, '$.herdr_workspace') END,
+                    CASE WHEN json_valid(launch_context)
+                         THEN json_extract(launch_context, '$.herdr_tab') END
+             FROM instances WHERE name=?",
+            rusqlite::params![name],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .optional()?;
+    let (workspace, tab) = match live {
+        Some((Some(workspace), tab)) => (Some(workspace), tab),
+        _ => db
+            .conn()
+            .query_row(
+                "SELECT json_extract(data, '$.snapshot.herdr_workspace'),
+                        json_extract(data, '$.snapshot.herdr_tab') FROM events
+                 WHERE type='life' AND instance=?
+                   AND json_extract(data, '$.action')='stopped'
+                 ORDER BY id DESC LIMIT 1",
+                rusqlite::params![name],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )
+            .optional()?
+            .unwrap_or_default(),
+    };
+    Ok(workspace
+        .filter(|w| !w.is_empty())
+        .map(|w| (w, tab.filter(|t| !t.is_empty()))))
 }
 
 /// Fail before a catalog launcher creates a terminal for an impossible resume.
@@ -4079,6 +4141,55 @@ mod tests {
                 env.get(crate::commands::agent::AGENT_NAME_ENV)
                     .map(String::as_str),
                 Some("reviewer"),
+                "fork={fork}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_resume_restores_stored_herdr_placement_and_fork_takes_own_tab() {
+        let db = test_db();
+        let mut data = serde_json::Map::new();
+        data.insert("session_id".into(), json!("session-123"));
+        data.insert("tool".into(), json!("codex"));
+        data.insert("status".into(), json!(ST_INACTIVE));
+        data.insert("created_at".into(), json!(1.0));
+        db.save_instance_named("coach", &data).unwrap();
+        let snapshot = serde_json::json!({
+            "action": "stopped",
+            "snapshot": {
+                "tool": "codex",
+                "session_id": "session-123",
+                "launch_args": "[]",
+                "tag": "",
+                "background": 0,
+                "last_event_id": 0,
+                "directory": "/tmp",
+                "herdr_workspace": "ansible-wdt",
+                "herdr_tab": "coach"
+            }
+        });
+        db.conn()
+            .execute(
+                "INSERT INTO events (timestamp, type, instance, data) VALUES (?, 'life', 'coach', ?)",
+                rusqlite::params!["2026-01-01T00:00:00Z", snapshot.to_string()],
+            )
+            .unwrap();
+
+        for (fork, tab) in [(false, Some("coach")), (true, None)] {
+            let plan =
+                prepare_resume_plan(&db, "coach", fork, &[], &GlobalFlags::default()).unwrap();
+            let env = plan.launch.env.unwrap_or_default();
+            assert_eq!(
+                env.get(crate::commands::agent::HERDR_WORKSPACE_ENV)
+                    .map(String::as_str),
+                Some("ansible-wdt"),
+                "fork={fork}"
+            );
+            assert_eq!(
+                env.get(crate::commands::agent::HERDR_TAB_ENV)
+                    .map(String::as_str),
+                tab,
                 "fork={fork}"
             );
         }

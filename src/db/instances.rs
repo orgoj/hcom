@@ -514,6 +514,12 @@ impl HcomDb {
                          ELSE NULL END,
                     CASE WHEN json_valid(launch_context)
                          THEN json_extract(launch_context, '$.agent_name')
+                         ELSE NULL END,
+                    CASE WHEN json_valid(launch_context)
+                         THEN json_extract(launch_context, '$.herdr_workspace')
+                         ELSE NULL END,
+                    CASE WHEN json_valid(launch_context)
+                         THEN json_extract(launch_context, '$.herdr_tab')
                          ELSE NULL END
              FROM instances WHERE name = ?",
         )?;
@@ -539,6 +545,8 @@ impl HcomDb {
                 "last_event_id": row.get::<_, i64>(16).unwrap_or(0),
                 "dippy_policy_cwd": row.get::<_, Option<String>>(17).unwrap_or(None),
                 "agent_name": row.get::<_, Option<String>>(18).unwrap_or(None),
+                "herdr_workspace": row.get::<_, Option<String>>(19).unwrap_or(None),
+                "herdr_tab": row.get::<_, Option<String>>(20).unwrap_or(None),
             }))
         }) {
             Ok(snapshot) => Ok(Some(snapshot)),
@@ -1268,6 +1276,23 @@ mod tests {
 
         let snapshot = db.get_instance_snapshot("knowledge").unwrap().unwrap();
         assert_eq!(snapshot["dippy_policy_cwd"], "/home/michael/wiki");
+        cleanup_test_db(db_path);
+    }
+
+    #[test]
+    fn test_stopped_snapshot_keeps_herdr_placement() {
+        let (db, db_path) = setup_full_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, tool, created_at, launch_context) \
+                 VALUES ('coach', 'claude', 1, ?)",
+                params![r#"{"herdr_workspace":"ansible-wdt","herdr_tab":"coach"}"#],
+            )
+            .unwrap();
+
+        let snapshot = db.get_instance_snapshot("coach").unwrap().unwrap();
+        assert_eq!(snapshot["herdr_workspace"], "ansible-wdt");
+        assert_eq!(snapshot["herdr_tab"], "coach");
         cleanup_test_db(db_path);
     }
 

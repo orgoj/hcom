@@ -24,6 +24,9 @@ pub(crate) const DIPPY_POLICY_CWD: &str = "DIPPY_POLICY_CWD";
 /// under `--as` and for roaming agents. The launcher defaults it to the
 /// instance name for launches outside the catalog.
 pub(crate) const AGENT_NAME_ENV: &str = "HCOM_AGENT_NAME";
+/// Herdr workspace and tab one launch places its agent into.
+pub(crate) const HERDR_WORKSPACE_ENV: &str = "HCOM_HERDR_WORKSPACE";
+pub(crate) const HERDR_TAB_ENV: &str = "HCOM_HERDR_TAB";
 
 // ── CLI entry ───────────────────────────────────────────────────────────
 
@@ -173,6 +176,8 @@ Terminal strategy, in order:
 For Herdr, session selects the space (workspace), window selects the tab, and the agent
 runs in a split pane. Other presets ignore session and window.
 Configured-default Herdr launches use the catalog placement, not a parent agent's location.
+`hcom r` returns an agent to its recorded workspace and tab; `hcom f` opens a tab named
+after the fork in that workspace. No launch inherits its caller's placement.
 
 An instance name is unique: launching one that already runs prints its status and exits 0.
 Use --as <name> to launch the same catalog definition as another independent instance."
@@ -2508,9 +2513,9 @@ fn apply_herdr_placement(
     }
     if let Some(workspace) = &eff.session {
         eff.env
-            .insert("HCOM_HERDR_WORKSPACE".to_string(), workspace.clone());
+            .insert(HERDR_WORKSPACE_ENV.to_string(), workspace.clone());
         eff.env
-            .insert("HCOM_HERDR_TAB".to_string(), eff.window.clone());
+            .insert(HERDR_TAB_ENV.to_string(), eff.window.clone());
     }
 }
 
@@ -4399,6 +4404,8 @@ mod tests {
         assert!(help.contains("--reasoning <val>"));
         assert!(help.contains("model_reasoning_effort for Codex"));
         assert!(help.contains("not a parent agent's location"));
+        assert!(help.contains("`hcom r` returns an agent to its recorded workspace and tab"));
+        assert!(help.contains("No launch inherits its caller's placement."));
         assert!(help.contains("HCOM_AGENT_NAME (the catalog name it started from"));
     }
 }

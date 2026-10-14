@@ -79,7 +79,7 @@ tell any agent:
 
 **Subscribe** and notify on status changes, file edits, collisions, specific events. React automatically.
 
-**Spawn**, **fork**, **resume**, **kill** in any terminal emulator or headless.
+**Spawn**, **fork**, **resume**, **kill** in any terminal emulator or headless. In Herdr, `hcom r` returns an agent to its recorded tab and `hcom f` opens a tab named after the fork; neither inherits your tab.
 
 run `hcom --help` for full command syntax and flags.
 
