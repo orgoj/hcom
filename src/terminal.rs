@@ -681,6 +681,12 @@ pub fn resolve_windows_tool_launcher(tool: &str, resolved: &str) -> Option<(Stri
     Some((node, vec![entrypoint.to_string_lossy().into_owned()]))
 }
 
+fn remove_pane_identity_env(cmd: &mut Command) {
+    for var in crate::config::pane_identity_env_vars() {
+        cmd.env_remove(var);
+    }
+}
+
 /// Resolve the `bash` command to run on Unix, preferring a `PATH` match and
 /// falling back to `/bin/bash`. Shared by the background and run-here launch
 /// paths so they can't drift on which `bash` gets invoked.
@@ -2659,6 +2665,9 @@ pub fn launch_terminal(
             .stdin(std::process::Stdio::null())
             .stdout(log_handle.try_clone()?)
             .stderr(log_handle);
+        // A detached runner has no pane; the launcher's pane identity would
+        // make its delivery loop relabel and report agents on that pane.
+        remove_pane_identity_env(&mut cmd);
 
         // Detach child into its own session so it survives parent exit (no
         // SIGHUP), without leaking a captured caller's stdout/stderr handles
@@ -3521,6 +3530,19 @@ mod tests {
             env.get("HERDR_SOCKET_PATH").map(String::as_str),
             Some("/tmp/herdr.sock"),
         );
+    }
+
+    #[test]
+    fn test_background_runner_drops_launcher_pane_identity() {
+        let mut cmd = Command::new("true");
+        remove_pane_identity_env(&mut cmd);
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        assert!(removed.contains(&"HERDR_PANE_ID".to_string()));
+        assert!(!removed.contains(&"HERDR_SOCKET_PATH".to_string()));
     }
 
     #[test]

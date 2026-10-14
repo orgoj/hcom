@@ -168,13 +168,26 @@ fn resolve_instance_gemini(db: &HcomDb, payload: &HookPayload) -> Option<Instanc
 /// Returns None when no reliable directory is available — callers should leave
 /// the existing `instances.directory` field untouched rather than clobber it
 /// with agy's internal cwd (otherwise resume launches in the wrong folder).
-fn resolve_hook_directory(payload: &HookPayload, ctx: &HcomContext) -> Option<String> {
+/// `workspacePaths` also lists `--add-dir` directories (agent bundles), in no
+/// guaranteed order, so a recorded directory still among them is kept.
+fn resolve_hook_directory(
+    payload: &HookPayload,
+    ctx: &HcomContext,
+    current: Option<&str>,
+) -> Option<String> {
     if payload.tool == "antigravity" {
-        return payload
+        let paths = payload
             .raw
             .get("workspacePaths")
-            .and_then(|v| v.as_array())
-            .and_then(|arr| arr.iter().find_map(|v| v.as_str()))
+            .and_then(|v| v.as_array())?;
+        if let Some(current) = current
+            && paths.iter().any(|v| v.as_str() == Some(current))
+        {
+            return None;
+        }
+        return paths
+            .iter()
+            .find_map(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
     }
@@ -280,7 +293,8 @@ fn handle_sessionstart(db: &HcomDb, ctx: &HcomContext, payload: &HookPayload) ->
     instance_binding::capture_and_store_launch_context(db, &instance_name);
 
     let mut updates = serde_json::Map::new();
-    if let Some(dir) = resolve_hook_directory(payload, ctx) {
+    let current = instance.as_ref().map(|inst| inst.directory.as_str());
+    if let Some(dir) = resolve_hook_directory(payload, ctx, current) {
         updates.insert("directory".into(), Value::String(dir));
     }
     if let Some(ref tp) = payload.transcript_path {
@@ -334,7 +348,7 @@ fn handle_beforeagent(db: &HcomDb, ctx: &HcomContext, payload: &HookPayload) -> 
 
     // Keep directory current — but for agy, prefer workspacePaths over the
     // hook subprocess cwd (which is agy's internal config dir, not the project).
-    if let Some(dir) = resolve_hook_directory(payload, ctx) {
+    if let Some(dir) = resolve_hook_directory(payload, ctx, Some(&instance.directory)) {
         let mut dir_updates = serde_json::Map::new();
         dir_updates.insert("directory".into(), Value::String(dir));
         instances::update_instance_position(db, instance_name, &dir_updates);
@@ -2984,6 +2998,33 @@ mod tests {
         assert_eq!(result.exit_code(), 0);
         let instance = db.get_instance_full("vago").unwrap().unwrap();
         assert_eq!(instance.status, ST_LISTENING);
+    }
+
+    #[test]
+    fn test_antigravity_directory_keeps_project_over_added_bundle() {
+        let payload = HookPayload {
+            session_id: Some("sess-vago".to_string()),
+            transcript_path: None,
+            hook_name: "gemini-beforeagent".to_string(),
+            tool: "antigravity".to_string(),
+            tool_name: String::new(),
+            tool_input: serde_json::Value::Null,
+            tool_result: String::new(),
+            notification_type: None,
+            raw: serde_json::json!({
+                "workspacePaths": ["/home/u/.hcom/agents/sec", "/home/u/project"],
+            }),
+        };
+        let ctx = HcomContext::from_os();
+
+        assert_eq!(
+            resolve_hook_directory(&payload, &ctx, Some("/home/u/project")),
+            None
+        );
+        assert_eq!(
+            resolve_hook_directory(&payload, &ctx, Some("/elsewhere")).as_deref(),
+            Some("/home/u/.hcom/agents/sec")
+        );
     }
 
     #[test]
