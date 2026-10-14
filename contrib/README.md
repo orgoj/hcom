@@ -9,7 +9,9 @@ instance (`hcom list --json`), including instances started with `--as`. Buttons 
 existing commands (`hcom agent`, `attach`, `kill`) and log their output; others open the
 selected agent's directory in configured applications. The Start dialog sets `--as`,
 `--dir`, `--cli` (CLIs installed on PATH) and a resume checkbox: `--resume`, or
-`--continue` when another CLI is chosen.
+`--continue` when another CLI is chosen. `Kill group ▾` lists each catalog group with
+running members (`@persistent (3)`) and, after confirming the names, kills exactly those
+instances.
 
 ```sh
 ln -s "$PWD/contrib/hcom-gui" ~/.local/bin/hcom-gui
@@ -27,10 +29,17 @@ Requires Python 3 with tkinter. Optional `~/.hcom/gui.json`:
     {"label": "gitk", "cmd": ["gitk", "--all"], "cwd": "{dir}"},
     {"label": "Backlog", "cmd": ["x-terminal-emulator", "backlog", "board"], "cwd": "{dir}",
      "if_exists": "{dir}/backlog"}
+  ],
+  "commands": [
+    {"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": true},
+    {"label": "Kill WDT", "cmd": ["hcom", "kill", "@wdt_all"], "confirm": true, "cwd": "~/projects/wdt"}
   ]
 }
 ```
 
 `if_exists` enables a button only while that path exists (here a Backlog.md project).
+`commands` are toolbar buttons that run as written, without a selected row and with the
+output in the log; `cwd` (default `~`) decides which project catalogs `@group` resolves in,
+`confirm` asks first, `key` binds a Tk event.
 Without `open_with`, the toolbar offers `xdg-open` and `x-terminal-emulator`. Further hcom
 buttons go into `BUTTONS` at the top of the script.

@@ -12,7 +12,9 @@ Optional ~/.hcom/gui.json:
    "open_with": [{"label": "Zed", "cmd": ["zed", "{dir}"]},
                  {"label": "gitg", "cmd": ["gitg"], "cwd": "{dir}"},
                  {"label": "Backlog", "cmd": ["x-terminal-emulator", "backlog", "board"], "cwd": "{dir}",
-                  "if_exists": "{dir}/backlog"}]}
+                  "if_exists": "{dir}/backlog"}],
+   "commands": [{"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": true}]}
+"commands" run as written, without a selected row (optional: confirm, cwd, key).
 Window layout is kept in ~/.hcom/gui-state.json.
 """
 
@@ -48,6 +50,7 @@ BUTTONS = [
     {"label": "Attach", "cmd": ["hcom", "agent", "attach", "{instance}"], "when": "running", "default": "running"},
     "---",
     {"label": "Kill", "cmd": ["hcom", "kill", "{instance}"], "when": "running", "confirm": True, "key": "<Delete>"},
+    {"label": "Kill group", "menu": "groups"},  # running instances of each catalog group
     "---",
 ]
 
@@ -137,6 +140,7 @@ def build_rows(catalog, live):
             "instance": i["name"],
             "cli": i.get("tool") or "",
             "catalog_cli": (d or {}).get("cli") or "",
+            "groups": (d or {}).get("groups") or [],
             "status": f"{i.get('status', '')} {age(i.get('status_age_seconds'))}",
             "state": i.get("status", ""),
             "detail": i.get("status_detail") or "",
@@ -153,6 +157,7 @@ def build_rows(catalog, live):
             "instance": "",
             "cli": d.get("cli") or "",
             "catalog_cli": d.get("cli") or "",
+            "groups": d.get("groups") or [],
             "status": "",
             "state": "",
             "detail": "",
@@ -164,7 +169,19 @@ def build_rows(catalog, live):
     return rows
 
 
+def running_groups(rows):
+    """Catalog group -> sorted names of its running instances."""
+    groups = {}
+    for r in rows:
+        if r["instance"]:
+            for g in r["groups"]:
+                groups.setdefault(g, []).append(r["instance"])
+    return {g: sorted(names) for g, names in sorted(groups.items())}
+
+
 def enabled(button, row):
+    if button["when"] == "always":
+        return True
     if row is None:
         return False
     if path := button.get("if_exists"):
@@ -195,8 +212,11 @@ class App(tk.Tk):
         self.refresh_ms = int(float(config.get("refresh_seconds", 5)) * 1000)
         open_with = config.get("open_with", DEFAULT_OPEN_WITH)
         self.buttons = BUTTONS + [{**b, "when": "dir", "detach": True} for b in open_with]
+        if commands := config.get("commands"):
+            self.buttons += ["---"] + [{**b, "when": "always"} for b in commands]
 
         self.rows = {}
+        self.groups = {}
         self.sort_col, self.sort_reverse = None, False
         self.busy = self.refreshing = self.refresh_again = False
         self.timer = None
@@ -217,7 +237,12 @@ class App(tk.Tk):
             if b == "---":
                 ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
                 continue
-            b["widget"] = ttk.Button(toolbar, text=b["label"], command=lambda b=b: self.run_button(b))
+            if b.get("menu"):
+                b["widget"] = ttk.Menubutton(toolbar, text=f"{b['label']} ▾")
+                self.group_menu = tk.Menu(b["widget"], tearoff=False)
+                b["widget"]["menu"] = self.group_menu
+            else:
+                b["widget"] = ttk.Button(toolbar, text=b["label"], command=lambda b=b: self.run_button(b))
             b["widget"].pack(side=tk.LEFT, padx=2)
         ttk.Button(toolbar, text="Refresh", command=self.refresh).pack(side=tk.RIGHT, padx=2)
         self.running_only = tk.BooleanVar(value=False)
@@ -272,7 +297,8 @@ class App(tk.Tk):
         row = self.selected()
         for b in self.buttons:
             if b != "---":
-                b["widget"].configure(state=tk.NORMAL if not self.busy and enabled(b, row) else tk.DISABLED)
+                ok = bool(self.groups) if b.get("menu") else enabled(b, row)
+                b["widget"].configure(state=tk.NORMAL if not self.busy and ok else tk.DISABLED)
 
     def _on_select(self, _event):
         sel = self.tree.selection()
@@ -312,6 +338,13 @@ class App(tk.Tk):
         else:
             self.last_error = None
             self.rows = {f"{r['agent']}|{r['instance']}": r for r in result}
+            groups = running_groups(result)
+            if groups != self.groups:
+                self.groups = groups
+                self.group_menu.delete(0, tk.END)
+                for g, names in groups.items():
+                    self.group_menu.add_command(label=f"@{g} ({len(names)})",
+                                                command=lambda g=g, names=names: self.kill_group(g, names))
             self.render()
         if self.refresh_again:
             self.refresh_again = False
@@ -359,6 +392,11 @@ class App(tk.Tk):
         row = self.selected()
         if self.busy or not enabled(b, row):
             return
+        if b["when"] == "always":
+            if b.get("confirm") and not messagebox.askyesno(b["label"], f"{' '.join(b['cmd'])}?", parent=self):
+                return
+            self.run_command(b["cmd"], os.path.expanduser(b.get("cwd", HOME)))
+            return
         values = {
             "agent": row["agent"],
             "instance": row["instance"],
@@ -396,6 +434,13 @@ class App(tk.Tk):
             self.refresh()
             return
         self.run_command(cmd, row["cwd"])
+
+    def kill_group(self, group, names):
+        """Kill the running instances listed in the menu, by name: exactly what was confirmed,
+        independent of which catalogs are reachable from the GUI's cwd."""
+        if self.busy or not messagebox.askyesno("Kill group", f"Kill @{group}: {', '.join(names)}?", parent=self):
+            return
+        self.run_command(["hcom", "kill", *names], HOME)
 
     def run_command(self, cmd, cwd):
         self.busy = True
