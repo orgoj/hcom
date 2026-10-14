@@ -589,6 +589,19 @@ fn which_in_fallback_dirs(home: &Path, name: &str) -> Option<String> {
         .map(|candidate| candidate.to_string_lossy().to_string())
 }
 
+/// Bash lines that append each directory to PATH only when it is missing, so
+/// the user's PATH order is never changed. Checked when the script runs: a new
+/// terminal window builds its own PATH.
+pub fn bash_path_appends(dirs: &[String]) -> String {
+    dirs.iter()
+        .map(|dir| {
+            let dir = crate::tools::args_common::shell_quote(dir);
+            format!("case \":$PATH:\" in *:{dir}:*) ;; *) export PATH=\"${{PATH:+$PATH:}}\"{dir} ;; esac")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Simple `which` implementation — find binary in PATH.
 pub fn which_bin(name: &str) -> Option<String> {
     // `split_paths` uses the platform separator (`;` on Windows, `:` elsewhere),
@@ -1209,14 +1222,15 @@ pub fn create_bash_script(
         add_path(&mut paths_to_add, which_bin("node"));
     }
 
-    if !paths_to_add.is_empty() {
-        writeln!(f, "export PATH=\"{}:$PATH\"", paths_to_add.join(":"))?;
-    }
-
     // Write env exports
     let env_str = build_env_string(env, "bash_export");
     if !env_str.is_empty() {
         writeln!(f, "{}", env_str)?;
+    }
+
+    // After the env exports: they may carry PATH, which would undo the appends.
+    if !paths_to_add.is_empty() {
+        writeln!(f, "{}", bash_path_appends(&paths_to_add))?;
     }
 
     if let Some(dir) = cwd {
@@ -4951,6 +4965,50 @@ mod tests {
             Some(p) => assert_eq!(r, p),
             None => assert_eq!(r, "/bin/bash"),
         }
+    }
+
+    /// The runner never reorders or duplicates the user's PATH; it only
+    /// appends dirs that are missing.
+    #[cfg(unix)]
+    #[test]
+    fn bash_path_appends_keeps_order_and_adds_missing_dirs() {
+        let run = |path: &str, dirs: &[&str]| {
+            let dirs: Vec<String> = dirs.iter().map(ToString::to_string).collect();
+            let script = format!("{}\nprintf %s \"$PATH\"", bash_path_appends(&dirs));
+            let out = Command::new(resolve_bash_command())
+                .arg("-c")
+                .arg(script)
+                .env("PATH", path)
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap()
+        };
+
+        assert_eq!(
+            run("/h/bin:/shims:/local", &["/local", "/shims"]),
+            "/h/bin:/shims:/local"
+        );
+        assert_eq!(
+            run("/h/bin:/shims", &["/new dir", "/shims", "/x"]),
+            "/h/bin:/shims:/new dir:/x"
+        );
+        assert_eq!(run("", &["/x"]), "/x");
+    }
+
+    /// The launch env carries PATH; appending before its export would be undone.
+    #[cfg(unix)]
+    #[test]
+    fn create_bash_script_appends_path_after_env_exports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = HashMap::from([("PATH".to_string(), "/only".to_string())]);
+        let bash = tmp.path().join("launch.sh");
+        // `true` resolves on every unix PATH, so an append line is emitted.
+        create_bash_script(&bash, &env, None, "true", true, None, false).unwrap();
+        let text = std::fs::read_to_string(&bash).unwrap();
+        let export = text.find("export PATH=/only").unwrap();
+        let append = text.find("case \":$PATH:\"").unwrap();
+        assert!(export < append, "{text}");
+        assert!(!text.contains(":$PATH\""), "no prepend: {text}");
     }
 
     #[cfg(unix)]

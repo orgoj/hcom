@@ -979,10 +979,11 @@ fn resolve_runner_binaries(
 }
 
 /// Warn (once per process) when the `hcom` a launched agent resolves by name is
-/// not this binary. Runner dirs are prepended to PATH with the selected Node's
-/// dir first (#117), so a second hcom install next to that Node, or a launch
-/// by absolute path, silently routes every hook and agent command elsewhere.
-fn warn_if_agent_hcom_differs(runner_dirs: &[String]) {
+/// not this binary. The Windows runner prepends runner dirs to PATH with the
+/// selected Node's dir first (#117); the bash runner only appends missing ones.
+/// Either way a second hcom install, or a launch by absolute path, silently
+/// routes every hook and agent command elsewhere.
+fn warn_if_agent_hcom_differs(runner_dirs: &[String], env_path: Option<&str>, prepended: bool) {
     static WARNED: std::sync::Once = std::sync::Once::new();
     // Dev mode re-execs whichever hcom runs into the dev build; uvx hooks
     // never resolve `hcom` by name.
@@ -994,12 +995,11 @@ fn warn_if_agent_hcom_differs(runner_dirs: &[String]) {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
-    let inherited = std::env::var_os("PATH");
-    let dirs = runner_dirs
-        .iter()
-        .map(std::path::PathBuf::from)
-        .chain(inherited.iter().flat_map(std::env::split_paths));
-    let message = match first_hcom_in(dirs) {
+    let base = env_path
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
+    let dirs = agent_path_dirs(runner_dirs, base.as_deref(), prepended);
+    let message = match first_hcom_in(dirs.into_iter()) {
         Some(found) if same_binary(&found, &exe) => return,
         Some(found) => format!(
             "agents will run {} as `hcom`, not this hcom ({}). Remove the other install or put this one first on PATH.",
@@ -1015,6 +1015,22 @@ fn warn_if_agent_hcom_differs(runner_dirs: &[String]) {
         eprintln!("[hcom] warn: {message}");
         crate::log::log_warn("launch", "agent_hcom_mismatch", &message);
     });
+}
+
+/// PATH dirs the agent's shell searches: the runner env's PATH (`base`) with
+/// runner dirs either prepended or appended.
+fn agent_path_dirs(
+    runner_dirs: &[String],
+    base: Option<&std::ffi::OsStr>,
+    prepended: bool,
+) -> Vec<std::path::PathBuf> {
+    let base: Vec<std::path::PathBuf> = base.iter().flat_map(std::env::split_paths).collect();
+    let runner = runner_dirs.iter().map(std::path::PathBuf::from);
+    if prepended {
+        runner.chain(base).collect()
+    } else {
+        base.into_iter().chain(runner).collect()
+    }
 }
 
 /// First `hcom` a shell would run from `dirs`: shells skip non-executable files.
@@ -1164,7 +1180,11 @@ fn create_runner_script_windows(
         .map(|t| t.spec().cli_binary)
         .unwrap_or(tool);
     let binaries = resolve_runner_binaries(path_dirs, tool_bin, terminal::which_bin);
-    warn_if_agent_hcom_differs(&binaries.path_dirs);
+    warn_if_agent_hcom_differs(
+        &binaries.path_dirs,
+        effective_env_value(&ambient_env, "PATH", cfg!(windows)),
+        true,
+    );
     let path_dirs = binaries.path_dirs;
     let path_line = if path_dirs.is_empty() {
         String::new()
@@ -1353,7 +1373,7 @@ pub fn create_runner_script(
     // Resolve binary paths for minimal PATH environments
     let mut path_dirs: Vec<String> = Vec::new();
 
-    // Dev mode: prepend the worktree's Cargo output dir
+    // Dev mode: make the worktree's Cargo output dir available
     if let Ok(dev_root) = std::env::var("HCOM_DEV_ROOT")
         && let Some(bin) = crate::shared::dev_root_binary(Path::new(&dev_root))
         && let Some(dir) = bin.parent()
@@ -1366,14 +1386,15 @@ pub fn create_runner_script(
         .map(|t| t.spec().cli_binary)
         .unwrap_or(tool);
     let binaries = resolve_runner_binaries(path_dirs, tool_bin, terminal::which_bin);
-    warn_if_agent_hcom_differs(&binaries.path_dirs);
-    let path_dirs = binaries.path_dirs;
+    warn_if_agent_hcom_differs(
+        &binaries.path_dirs,
+        effective_env_value(&ambient_env, "PATH", cfg!(windows)),
+        false,
+    );
 
-    let path_export = if !path_dirs.is_empty() {
-        format!("export PATH=\"{}:$PATH\"", path_dirs.join(":"))
-    } else {
-        String::new()
-    };
+    // Unlike the Windows runner, only append missing dirs: the user's PATH
+    // order (e.g. wrappers in ~/bin, mise-selected Node) always wins.
+    let path_export = terminal::bash_path_appends(&binaries.path_dirs);
 
     let use_exec = if run_here { "" } else { "exec " };
     let tool_path_arg = binaries
@@ -4053,6 +4074,26 @@ mod tests {
             ["nvm/bin", "system/bin"].map(ToString::to_string)
         );
         assert_eq!(binaries.tool_path.as_deref(), Some("system/bin/codex"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_agent_path_dirs_start_from_runner_env_path() {
+        let runner = ["/node".to_string(), "/hcom".to_string()];
+        let to_strings = |dirs: Vec<std::path::PathBuf>| {
+            dirs.into_iter()
+                .map(|d| d.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let base = Some(std::ffi::OsStr::new("/h/bin:/shims"));
+        assert_eq!(
+            to_strings(agent_path_dirs(&runner, base, false)),
+            ["/h/bin", "/shims", "/node", "/hcom"]
+        );
+        assert_eq!(
+            to_strings(agent_path_dirs(&runner, base, true)),
+            ["/node", "/hcom", "/h/bin", "/shims"]
+        );
     }
 
     #[cfg(unix)]
