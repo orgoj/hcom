@@ -1,4 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
+# System Python on purpose: `env python3` can resolve to a mise shim, which adds the mise exec
+# env (CARGO_HOME, RUSTUP_*). hcom treats CARGO_* as a contaminated parent and replaces the
+# PATH of launched agents with one rebuilt from a clean login shell (no mise shims).
 """hcom-gui: catalog agents and live instances in one table, with buttons that run hcom.
 
 The GUI holds no hcom logic: the table comes from `hcom agent list --all --json` and
