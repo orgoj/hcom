@@ -18,7 +18,8 @@ ln -s "$PWD/contrib/hcom-gui" ~/.local/bin/hcom-gui
 hcom-gui
 ```
 
-Requires Python 3 with tkinter. Optional `~/.hcom/gui.json`:
+Requires Python 3 with tkinter. Tests: `contrib/test-hcom-gui` (needs `xvfb-run`; hcom is
+replaced by fixtures, commands are recorded, not run). Optional `~/.hcom/gui.json`:
 
 ```json
 {

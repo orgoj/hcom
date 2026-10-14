@@ -1,0 +1,147 @@
+#!/usr/bin/python3
+"""Tests for contrib/hcom-gui: `contrib/test-hcom-gui` (re-runs itself under xvfb-run).
+
+hcom is never called: hcom_json is replaced by fixtures, and commands are recorded
+instead of run. Config and window state point into a temporary directory under tmp/.
+"""
+
+import importlib.machinery
+import importlib.util
+import os
+import shutil
+import sys
+import tempfile
+import unittest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.dirname(HERE)
+
+if not os.environ.get("HCOM_GUI_TEST_XVFB"):
+    if not shutil.which("xvfb-run"):
+        sys.exit("test-hcom-gui: xvfb-run not found")
+    os.environ["HCOM_GUI_TEST_XVFB"] = "1"
+    os.execvp("xvfb-run", ["xvfb-run", "-a", sys.executable, "-I", os.path.abspath(__file__), *sys.argv[1:]])
+
+loader = importlib.machinery.SourceFileLoader("hcom_gui", os.path.join(HERE, "hcom-gui"))
+spec = importlib.util.spec_from_loader("hcom_gui", loader)
+gui = importlib.util.module_from_spec(spec)
+loader.exec_module(gui)
+
+CATALOG = [
+    {"name": "a1", "cli": "claude", "groups": ["persistent"], "source": "global", "dir": "/w"},
+    {"name": "a2", "cli": "codex", "groups": ["persistent", "wdt_all"], "source": "global", "dir": "/w"},
+    {"name": "a3", "cli": "claude", "groups": ["wdt_all"], "source": "global", "dir": "/w"},
+]
+LIVE = [
+    {"name": "a1", "tool": "claude", "status": "listening", "launch_context": {"agent_name": "a1"}},
+    {"name": "a2x", "tool": "codex", "status": "active", "launch_context": {"agent_name": "a2"}},
+    {"name": "solo", "tool": "claude", "status": "listening"},
+]
+COMMANDS = [{"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": True, "cwd": "~/proj"}]
+
+
+def fake_hcom_json(*args):
+    return CATALOG if args[:2] == ("agent", "list") else LIVE
+
+
+class SyncThreading:
+    """Runs a "thread" at once: Tk's after() from a real thread needs a running mainloop."""
+
+    class Thread:
+        def __init__(self, target, daemon=None):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+
+class RunningGroups(unittest.TestCase):
+    def test_groups_hold_only_running_instances(self):
+        rows = gui.build_rows(CATALOG, LIVE)
+        self.assertEqual(gui.running_groups(rows), {"persistent": ["a1", "a2x"], "wdt_all": ["a2x"]})
+
+    def test_always_buttons_need_no_row(self):
+        self.assertTrue(gui.enabled({"when": "always"}, None))
+        self.assertFalse(gui.enabled({"when": "running"}, None))
+
+
+class App(unittest.TestCase):
+    def setUp(self):
+        os.makedirs(os.path.join(REPO, "tmp"), exist_ok=True)
+        self.dir = tempfile.TemporaryDirectory(dir=os.path.join(REPO, "tmp"))
+        config = os.path.join(self.dir.name, "gui.json")
+        with open(config, "w") as f:
+            f.write(gui.json.dumps({"commands": COMMANDS}))
+        self.patch("CONFIG_FILE", config)
+        self.patch("STATE_FILE", os.path.join(self.dir.name, "gui-state.json"))
+        self.patch("hcom_json", fake_hcom_json)
+        self.patch("threading", SyncThreading)
+        self.asked, self.answer = [], True
+
+        def askyesno(title, text, **_):
+            self.asked.append((title, text))
+            return self.answer
+
+        self.patch("messagebox", type("Ask", (), {"askyesno": staticmethod(askyesno)}))
+        self.app = gui.App()
+        self.ran = []
+        self.app.run_command = lambda cmd, cwd: self.ran.append((cmd, cwd))
+        self.app.update()
+        self.assertTrue(self.app.rows, "first refresh did not finish")
+
+    def tearDown(self):
+        for job in self.app.tk.splitlist(self.app.tk.call("after", "info")):
+            self.app.after_cancel(job)
+        self.app.destroy()
+        self.dir.cleanup()
+
+    def patch(self, name, value):
+        old = getattr(gui, name)
+        setattr(gui, name, value)
+        self.addCleanup(setattr, gui, name, old)
+
+    def button(self, label):
+        return next(b for b in self.app.buttons if b != "---" and b["label"] == label)
+
+    def test_group_menu_lists_running_groups(self):
+        menu = self.app.group_menu
+        labels = [menu.entrycget(i, "label") for i in range(menu.index("end") + 1)]
+        self.assertEqual(labels, ["@persistent (2)", "@wdt_all (1)"])
+
+    def test_group_menu_kills_confirmed_names(self):
+        self.app.group_menu.invoke(0)
+        self.assertEqual(self.asked, [("Kill group", "Kill @persistent: a1, a2x?")])
+        self.assertEqual(self.ran, [(["hcom", "kill", "a1", "a2x"], gui.HOME)])
+
+    def test_group_menu_declined_kills_nothing(self):
+        self.answer = False
+        self.app.group_menu.invoke(0)
+        self.assertEqual(len(self.asked), 1)
+        self.assertEqual(self.ran, [])
+
+    def test_buttons_without_selection(self):
+        states = {b["label"]: str(b["widget"].cget("state")) for b in self.app.buttons if b != "---"}
+        self.assertEqual(states["Kill"], "disabled")
+        self.assertEqual(states["Kill group"], "normal")
+        self.assertEqual(states["Kill persistent"], "normal")
+
+    def test_command_runs_as_written_in_its_cwd(self):
+        self.app.run_button(self.button("Kill persistent"))
+        self.assertEqual(self.asked, [("Kill persistent", "hcom kill @persistent?")])
+        self.assertEqual(self.ran, [(["hcom", "kill", "@persistent"], os.path.expanduser("~/proj"))])
+
+    def test_command_declined_runs_nothing(self):
+        self.answer = False
+        self.app.run_button(self.button("Kill persistent"))
+        self.assertEqual(len(self.asked), 1)
+        self.assertEqual(self.ran, [])
+
+    def test_kill_runs_selected_instance(self):
+        self.app.tree.selection_set("a2|a2x")
+        self.app.update()
+        self.app.run_button(self.button("Kill"))
+        self.assertEqual(self.ran[0][0], ["hcom", "kill", "a2x"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -8,6 +8,7 @@ allow ruff *
 allow ./target/debug/hcom *
 allow ./target/release/hcom *
 allow /home/michael/.cargo/bin/hcom *
+allow contrib/test-hcom-gui *
 
 allow rm tmp/*+
 
