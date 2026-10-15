@@ -76,6 +76,7 @@ COLUMNS = [
     ("since", "Since", 70),
     ("age", "Age", 70),
     ("context", "Context", 90),
+    ("quota", "Quota", 70),
     ("detail", "Detail", 220),
     ("unread", "Unread", 70),
     ("dir", "Dir", 220),
@@ -103,8 +104,8 @@ def age(seconds):
 
 
 def cell(col, row):
-    """Display text of a row value; rows keep ages in seconds and context in tokens so
-    they sort numerically."""
+    """Display text of a row value; rows keep ages in seconds, context in tokens and quota
+    in percent so they sort numerically."""
     value = row[col]
     if col == "dir":
         return tilde(value)
@@ -112,6 +113,8 @@ def cell(col, row):
         return age(value)
     if col == "context" and value != "":
         return f"{round(value / 1000)}k {round(100 * value / row['context_window'])}%"
+    if col == "quota" and value != "":
+        return f"{round(value)}%"
     return value
 
 
@@ -183,23 +186,24 @@ def add_git(rows):
 # Claude transcripts do not record the context window; current Claude Code models run with 1M.
 CLAUDE_CONTEXT_WINDOW = 1_000_000
 TRANSCRIPT_TAIL_BYTES = 1 << 20
-_context_cache = {}  # transcript path -> ((mtime_ns, size), (tokens, window))
+_usage_cache = {}  # transcript path -> ((mtime_ns, size), usage)
 
 
-def context_usage(tool, path):
-    """(tokens, window) of the latest model call in a Claude or Codex transcript, read
-    from the file tail; None when unknown."""
+def transcript_usage(tool, path):
+    """Usage read from the tail of a Claude or Codex transcript: "context" (tokens, window)
+    of the latest model call and, for Codex, "quota" (used percent of the primary rate
+    limit). Unknown values are missing."""
     try:
         st = os.stat(path)
         key = (st.st_mtime_ns, st.st_size)
-        if path in _context_cache and _context_cache[path][0] == key:
-            return _context_cache[path][1]
+        if path in _usage_cache and _usage_cache[path][0] == key:
+            return _usage_cache[path][1]
         with open(path, "rb") as f:
             f.seek(max(0, st.st_size - TRANSCRIPT_TAIL_BYTES))
             lines = f.read().splitlines()
     except OSError:
-        return None
-    result = None
+        return {}
+    usage = {}
     marker = {"claude": b'"usage"', "codex": b'"token_count"'}.get(tool)
     for line in reversed(lines) if marker else ():
         if marker not in line:
@@ -214,23 +218,31 @@ def context_usage(tool, path):
             u = (e.get("message") or {}).get("usage") or {}
             tokens = sum(u.get(k) or 0 for k in
                          ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
-            window = max(CLAUDE_CONTEXT_WINDOW, tokens)
+            if tokens:
+                usage["context"] = (tokens, max(CLAUDE_CONTEXT_WINDOW, tokens))
+                break
         else:
-            info = (e.get("payload") or {}).get("info") or {}
+            payload = e.get("payload") or {}
+            info = payload.get("info") or {}
             tokens = (info.get("last_token_usage") or {}).get("input_tokens") or 0
             window = info.get("model_context_window") or 0
-        if tokens and window:
-            result = (tokens, window)
-            break
-    _context_cache[path] = (key, result)
-    return result
+            if tokens and window:
+                usage.setdefault("context", (tokens, window))
+            percent = ((payload.get("rate_limits") or {}).get("primary") or {}).get("used_percent")
+            if percent is not None:
+                usage.setdefault("quota", percent)
+            if len(usage) == 2:
+                break
+    _usage_cache[path] = (key, usage)
+    return usage
 
 
-def add_context(rows):
-    """Fill each row's context column from its transcript."""
+def add_usage(rows):
+    """Fill each row's context and quota columns from its transcript."""
     for r in rows:
-        usage = context_usage(r["cli"], r["transcript"]) if r["transcript"] else None
-        r["context"], r["context_window"] = usage or ("", 0)
+        usage = transcript_usage(r["cli"], r["transcript"]) if r["transcript"] else {}
+        r["context"], r["context_window"] = usage.get("context", ("", 0))
+        r["quota"] = usage.get("quota", "")
     return rows
 
 
@@ -435,7 +447,7 @@ class App(tk.Tk):
 
         def work():
             try:
-                result = add_context(add_git(build_rows(hcom_json("agent", "list", "--all", "--json"),
+                result = add_usage(add_git(build_rows(hcom_json("agent", "list", "--all", "--json"),
                                                         hcom_json("list", "--json"))))
             except Exception as e:  # shown in the log, next refresh retries
                 result = e

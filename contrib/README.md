@@ -14,7 +14,8 @@ running members (`@persistent (3)`) and, after confirming the names, kills exact
 instances. Since is the age of the current status, Age the time since the instance
 started; both sort numerically. Context is the input size of the latest model call
 and its share of the window, read from the tail of Claude and Codex transcripts (Claude
-transcripts lack the window, so 1M is assumed). The Branch and Git columns show each directory's current branch and its
+transcripts lack the window, so 1M is assumed). Quota is the used share of Codex's
+primary (5h) rate limit from the same transcript. The Branch and Git columns show each directory's current branch and its
 state: `*` uncommitted changes, `↑2 ↓1` commits ahead of/behind the upstream (one
 `git status` per directory on every refresh).
 

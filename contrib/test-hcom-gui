@@ -121,8 +121,11 @@ def claude_line(tokens, **extra):
     return {"type": "assistant", "message": {"model": "m", "usage": usage}, **extra}
 
 
-def codex_line(info):
-    return {"type": "event_msg", "payload": {"type": "token_count", "info": info}}
+def codex_line(info, used_percent=None):
+    payload = {"type": "token_count", "info": info}
+    if used_percent is not None:
+        payload["rate_limits"] = {"primary": {"used_percent": used_percent, "window_minutes": 300}}
+    return {"type": "event_msg", "payload": payload}
 
 
 class ContextUsage(unittest.TestCase):
@@ -142,28 +145,33 @@ class ContextUsage(unittest.TestCase):
             claude_line(50_000), claude_line(80_000),
             claude_line(5_000, isSidechain=True), {"type": "user", "message": {"content": "x"}},
         ])
-        self.assertEqual(gui.context_usage("claude", path), (80_000, gui.CLAUDE_CONTEXT_WINDOW))
+        self.assertEqual(gui.transcript_usage("claude", path), {"context": (80_000, gui.CLAUDE_CONTEXT_WINDOW)})
 
-    def test_codex_latest_token_count_with_info(self):
+    def test_codex_latest_context_and_quota(self):
         last = {"last_token_usage": {"input_tokens": 125_000}, "model_context_window": 258_400}
         path = self.transcript("x.jsonl", [
-            codex_line({"last_token_usage": {"input_tokens": 9}, "model_context_window": 258_400}),
-            codex_line(last), codex_line(None),
+            codex_line({"last_token_usage": {"input_tokens": 9}, "model_context_window": 258_400}, 10.0),
+            codex_line(last), codex_line(None, 49.0),
         ])
-        self.assertEqual(gui.context_usage("codex", path), (125_000, 258_400))
+        self.assertEqual(gui.transcript_usage("codex", path), {"context": (125_000, 258_400), "quota": 49.0})
+
+    def test_codex_without_rate_limits_has_no_quota(self):
+        info = {"last_token_usage": {"input_tokens": 5_000}, "model_context_window": 258_400}
+        path = self.transcript("x.jsonl", [codex_line(info)])
+        self.assertEqual(gui.transcript_usage("codex", path), {"context": (5_000, 258_400)})
 
     def test_tail_skips_cut_first_line(self):
         path = self.transcript("c.jsonl", [claude_line(1_000), {"type": "user", "pad": "x" * 500}])
         old = gui.TRANSCRIPT_TAIL_BYTES
         gui.TRANSCRIPT_TAIL_BYTES = os.path.getsize(path) - 20  # cuts into the usage line
         self.addCleanup(setattr, gui, "TRANSCRIPT_TAIL_BYTES", old)
-        self.assertIsNone(gui.context_usage("claude", path))
+        self.assertEqual(gui.transcript_usage("claude", path), {})
 
     def test_unknown_cli_missing_file_or_no_usage_is_none(self):
         path = self.transcript("c.jsonl", [{"type": "user", "message": {"content": "x"}}])
-        self.assertIsNone(gui.context_usage("claude", path))
-        self.assertIsNone(gui.context_usage("gemini", self.transcript("g.jsonl", [claude_line(1_000)])))
-        self.assertIsNone(gui.context_usage("claude", os.path.join(self.dir.name, "missing.jsonl")))
+        self.assertEqual(gui.transcript_usage("claude", path), {})
+        self.assertEqual(gui.transcript_usage("gemini", self.transcript("g.jsonl", [claude_line(1_000)])), {})
+        self.assertEqual(gui.transcript_usage("claude", os.path.join(self.dir.name, "missing.jsonl")), {})
 
 
 class App(unittest.TestCase):
@@ -177,7 +185,8 @@ class App(unittest.TestCase):
         self.patch("STATE_FILE", os.path.join(self.dir.name, "gui-state.json"))
         self.patch("hcom_json", fake_hcom_json)
         self.patch("git_state", lambda d: ("main", "* ↑1") if d == "/w" else ("", ""))
-        self.patch("context_usage", lambda tool, path: (62000, 1_000_000) if path == "/t/a1.jsonl" else None)
+        self.patch("transcript_usage", lambda tool, path: {"context": (62000, 1_000_000), "quota": 48.6}
+                   if path == "/t/a1.jsonl" else {})
         self.patch("threading", SyncThreading)
         self.asked, self.answer = [], True
 
@@ -263,6 +272,10 @@ class App(unittest.TestCase):
     def test_context_column_shows_tokens_and_percent(self):
         self.assertEqual(self.app.tree.set("a1|a1", "context"), "62k 6%")
         self.assertEqual(self.app.tree.set("|solo", "context"), "")
+
+    def test_quota_column_shows_percent(self):
+        self.assertEqual(self.app.tree.set("a1|a1", "quota"), "49%")
+        self.assertEqual(self.app.tree.set("|solo", "quota"), "")
 
     def test_kill_runs_selected_instance(self):
         self.app.tree.selection_set("a2|a2x")
