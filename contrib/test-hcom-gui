@@ -325,6 +325,35 @@ class App(unittest.TestCase):
     def test_start_without_prompt_omits_flag(self):
         self.assertEqual(self.start(""), ["hcom", "agent", "a3"])
 
+    def test_prompt_is_multiline_and_enter_confirms(self):
+        for enter in ("<Return>", "<KP_Enter>"):
+            self.assertEqual(self.type_prompt(enter), {"name": "", "prompt": "line 1\nline 2"}, enter)
+
+    def type_prompt(self, enter):
+        def type_prompt():
+            dlg = next(w for w in self.app.winfo_children() if isinstance(w, gui.tk.Toplevel))
+            text = next(w for w in dlg.winfo_children() if isinstance(w, gui.tk.Text))
+            text.focus_force()
+            text.update()
+            text.insert("end", "line 1")
+            text.event_generate("<Shift-Return>", when="now")
+            text.insert("end", "line 2")
+            text.event_generate(enter, when="now")
+
+        self.app.after(200, type_prompt)
+        return self.app.ask("Start", ["name", "prompt"], "a3", {})
+
+    def test_keypad_enter_confirms_dialog(self):
+        def press():
+            dlg = next(w for w in self.app.winfo_children() if isinstance(w, gui.tk.Toplevel))
+            entry = next(w for w in dlg.winfo_children() if isinstance(w, gui.ttk.Entry))
+            entry.focus_force()
+            entry.update()
+            entry.event_generate("<KP_Enter>", when="now")
+
+        self.app.after(200, press)
+        self.assertEqual(self.app.ask("Start", ["name"], "a3", {"name": "x"}), {"name": "x"})
+
     def test_kill_runs_selected_instance(self):
         self.app.tree.selection_set("a2|a2x")
         self.app.update()

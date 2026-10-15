@@ -9,9 +9,10 @@ instance (`hcom list --json`), including instances started with `--as`. Buttons 
 existing commands (`hcom agent`, `attach`, `kill`) and log their output; others open the
 selected agent's directory in configured applications. The Start dialog sets `--as`,
 `--dir`, `--cli` (CLIs installed on PATH), a resume checkbox (`--resume`, or
-`--continue` when another CLI is chosen) and a prompt: `--hcom-prompt`, the agent's
-first message, which replaces the catalog `prompt` for this launch and leaves
-`system_prompt` alone; left empty, the catalog `prompt` (if any) applies.
+`--continue` when another CLI is chosen) and a multi-line prompt (Shift+Enter for a new
+line, Enter or keypad Enter starts): `--hcom-prompt`, the agent's first message, which
+replaces the catalog `prompt` for this launch and leaves `system_prompt` alone; left
+empty, the catalog `prompt` (if any) applies.
 `Kill group ▾` lists each catalog group with running members (`@persistent (3)`) and,
 after confirming the names, kills exactly those instances. Since is the age of the
 current status, Age the time since the instance started; both sort numerically. Context is the input size of the latest model call

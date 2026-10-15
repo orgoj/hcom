@@ -605,7 +605,8 @@ class App(tk.Tk):
 
     def ask(self, title, keys, agent, prefill):
         """One entry per {ask:X}, prefilled from prefill; "dir" is browsable, "cli" a
-        choice of installed CLIs, "resume" a checkbox ("1" when checked). None on cancel."""
+        choice of installed CLIs, "resume" a checkbox ("1" when checked), "prompt" multi-line
+        (Shift+Enter: newline, Enter: OK). None on cancel."""
         dlg = tk.Toplevel(self)
         dlg.title(f"{title} {agent}")
         dlg.transient(self)
@@ -620,6 +621,14 @@ class App(tk.Tk):
                 choices = [c for c, exe in CLI_BINARIES.items() if c == var.get() or shutil.which(exe)]
                 ttk.Combobox(dlg, textvariable=var, values=choices, state="readonly", width=48).grid(
                     row=n, column=1, sticky=tk.EW, padx=5, pady=5)
+            elif k == "prompt":
+                text = tk.Text(dlg, width=50, height=6, wrap=tk.WORD)
+                text.grid(row=n, column=1, sticky=tk.EW, padx=5, pady=5)
+                text.bind("<Shift-Return>", lambda e, t=text: t.insert(tk.INSERT, "\n") or "break")
+                text.bind("<Return>", lambda e: ok() or "break")
+                text.bind("<KP_Enter>", lambda e: ok() or "break")
+                entries[k] = lambda t=text: t.get("1.0", "end-1c")
+                continue
             else:
                 ttk.Entry(dlg, textvariable=var, width=50).grid(row=n, column=1, sticky=tk.EW, padx=5, pady=5)
             if k == "dir":
@@ -628,10 +637,10 @@ class App(tk.Tk):
                     if path:
                         var.set(path)
                 ttk.Button(dlg, text="Browse…", command=browse).grid(row=n, column=2, padx=5, pady=5)
-            entries[k] = var
+            entries[k] = var.get
 
         def ok(_event=None):
-            result.update({k: v.get().strip() for k, v in entries.items()})
+            result.update({k: get().strip() for k, get in entries.items()})
             dlg.destroy()
 
         buttons = ttk.Frame(dlg)
@@ -639,6 +648,7 @@ class App(tk.Tk):
         ttk.Button(buttons, text="OK", command=ok).pack(side=tk.LEFT, padx=2)
         ttk.Button(buttons, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT, padx=2)
         dlg.bind("<Return>", ok)
+        dlg.bind("<KP_Enter>", ok)
         dlg.bind("<Escape>", lambda e: dlg.destroy())
         dlg.grid_columnconfigure(1, weight=1)
         dlg.wait_visibility()
