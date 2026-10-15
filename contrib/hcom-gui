@@ -75,6 +75,7 @@ COLUMNS = [
     ("status", "Status", 130),
     ("since", "Since", 70),
     ("age", "Age", 70),
+    ("context", "Context", 90),
     ("detail", "Detail", 220),
     ("unread", "Unread", 70),
     ("dir", "Dir", 220),
@@ -101,12 +102,16 @@ def age(seconds):
     return f"{s}s"
 
 
-def cell(col, value):
-    """Display text of a row value; rows keep ages in seconds so they sort numerically."""
+def cell(col, row):
+    """Display text of a row value; rows keep ages in seconds and context in tokens so
+    they sort numerically."""
+    value = row[col]
     if col == "dir":
         return tilde(value)
     if col in ("since", "age") and value != "":
         return age(value)
+    if col == "context" and value != "":
+        return f"{round(value / 1000)}k {round(100 * value / row['context_window'])}%"
     return value
 
 
@@ -175,6 +180,60 @@ def add_git(rows):
     return rows
 
 
+# Claude transcripts do not record the context window; current Claude Code models run with 1M.
+CLAUDE_CONTEXT_WINDOW = 1_000_000
+TRANSCRIPT_TAIL_BYTES = 1 << 20
+_context_cache = {}  # transcript path -> ((mtime_ns, size), (tokens, window))
+
+
+def context_usage(tool, path):
+    """(tokens, window) of the latest model call in a Claude or Codex transcript, read
+    from the file tail; None when unknown."""
+    try:
+        st = os.stat(path)
+        key = (st.st_mtime_ns, st.st_size)
+        if path in _context_cache and _context_cache[path][0] == key:
+            return _context_cache[path][1]
+        with open(path, "rb") as f:
+            f.seek(max(0, st.st_size - TRANSCRIPT_TAIL_BYTES))
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    result = None
+    marker = {"claude": b'"usage"', "codex": b'"token_count"'}.get(tool)
+    for line in reversed(lines) if marker else ():
+        if marker not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:  # the cut first line of the tail
+            continue
+        if tool == "claude":
+            if e.get("type") != "assistant" or e.get("isSidechain"):
+                continue
+            u = (e.get("message") or {}).get("usage") or {}
+            tokens = sum(u.get(k) or 0 for k in
+                         ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+            window = max(CLAUDE_CONTEXT_WINDOW, tokens)
+        else:
+            info = (e.get("payload") or {}).get("info") or {}
+            tokens = (info.get("last_token_usage") or {}).get("input_tokens") or 0
+            window = info.get("model_context_window") or 0
+        if tokens and window:
+            result = (tokens, window)
+            break
+    _context_cache[path] = (key, result)
+    return result
+
+
+def add_context(rows):
+    """Fill each row's context column from its transcript."""
+    for r in rows:
+        usage = context_usage(r["cli"], r["transcript"]) if r["transcript"] else None
+        r["context"], r["context_window"] = usage or ("", 0)
+    return rows
+
+
 def build_rows(catalog, live):
     defs = {d["name"]: d for d in catalog}
     rows = []
@@ -193,6 +252,7 @@ def build_rows(catalog, live):
             "state": i.get("status", ""),
             "since": int(i.get("status_age_seconds") or 0),
             "age": int(time.time() - i["created_at"]) if i.get("created_at") else "",
+            "transcript": i.get("transcript_path") or "",
             "detail": i.get("status_detail") or "",
             "unread": i.get("unread_count") or "",
             "dir": i.get("directory") or (d or {}).get("dir") or "",
@@ -212,6 +272,7 @@ def build_rows(catalog, live):
             "state": "",
             "since": "",
             "age": "",
+            "transcript": "",
             "detail": "",
             "unread": "",
             "dir": d.get("dir") or "",
@@ -374,8 +435,8 @@ class App(tk.Tk):
 
         def work():
             try:
-                result = add_git(build_rows(hcom_json("agent", "list", "--all", "--json"),
-                                            hcom_json("list", "--json")))
+                result = add_context(add_git(build_rows(hcom_json("agent", "list", "--all", "--json"),
+                                                        hcom_json("list", "--json"))))
             except Exception as e:  # shown in the log, next refresh retries
                 result = e
             self.after(0, self._apply, result)
@@ -424,7 +485,7 @@ class App(tk.Tk):
             if self.running_only.get() and not r["instance"]:
                 continue
             tag = r["state"] if r["state"] in ("active", "blocked", "error") else ("" if r["instance"] else "stopped")
-            values = [cell(c, r[c]) for c, _, _ in COLUMNS]
+            values = [cell(c, r) for c, _, _ in COLUMNS]
             self.tree.insert("", tk.END, iid=iid, values=values, tags=(tag,))
         if sel and self.tree.exists(sel[0]):
             self.tree.selection_set(sel[0])

@@ -12,7 +12,9 @@ selected agent's directory in configured applications. The Start dialog sets `--
 `--continue` when another CLI is chosen. `Kill group ▾` lists each catalog group with
 running members (`@persistent (3)`) and, after confirming the names, kills exactly those
 instances. Since is the age of the current status, Age the time since the instance
-started; both sort numerically. The Branch and Git columns show each directory's current branch and its
+started; both sort numerically. Context is the input size of the latest model call
+and its share of the window, read from the tail of Claude and Codex transcripts (Claude
+transcripts lack the window, so 1M is assumed). The Branch and Git columns show each directory's current branch and its
 state: `*` uncommitted changes, `↑2 ↓1` commits ahead of/behind the upstream (one
 `git status` per directory on every refresh).
 

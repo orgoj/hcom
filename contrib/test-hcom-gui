@@ -36,7 +36,7 @@ CATALOG = [
 ]
 LIVE = [
     {"name": "a1", "tool": "claude", "status": "listening", "launch_context": {"agent_name": "a1"},
-     "status_age_seconds": 7200, "created_at": time.time() - 90000},
+     "status_age_seconds": 7200, "created_at": time.time() - 90000, "transcript_path": "/t/a1.jsonl"},
     {"name": "a2x", "tool": "codex", "status": "active", "launch_context": {"agent_name": "a2"},
      "status_age_seconds": 30, "created_at": time.time() - 600},
     {"name": "solo", "tool": "claude", "status": "listening"},
@@ -116,6 +116,56 @@ class GitState(unittest.TestCase):
         self.assertEqual([(r["branch"], r["git"]) for r in rows], [("main", "*"), ("main", "*"), ("", "")])
 
 
+def claude_line(tokens, **extra):
+    usage = {"input_tokens": 2, "cache_creation_input_tokens": 8, "cache_read_input_tokens": tokens - 10}
+    return {"type": "assistant", "message": {"model": "m", "usage": usage}, **extra}
+
+
+def codex_line(info):
+    return {"type": "event_msg", "payload": {"type": "token_count", "info": info}}
+
+
+class ContextUsage(unittest.TestCase):
+    def setUp(self):
+        os.makedirs(os.path.join(REPO, "tmp"), exist_ok=True)
+        self.dir = tempfile.TemporaryDirectory(dir=os.path.join(REPO, "tmp"))
+        self.addCleanup(self.dir.cleanup)
+
+    def transcript(self, name, entries):
+        path = os.path.join(self.dir.name, name)
+        with open(path, "w") as f:
+            f.writelines(gui.json.dumps(e) + "\n" for e in entries)
+        return path
+
+    def test_claude_latest_main_assistant_usage(self):
+        path = self.transcript("c.jsonl", [
+            claude_line(50_000), claude_line(80_000),
+            claude_line(5_000, isSidechain=True), {"type": "user", "message": {"content": "x"}},
+        ])
+        self.assertEqual(gui.context_usage("claude", path), (80_000, gui.CLAUDE_CONTEXT_WINDOW))
+
+    def test_codex_latest_token_count_with_info(self):
+        last = {"last_token_usage": {"input_tokens": 125_000}, "model_context_window": 258_400}
+        path = self.transcript("x.jsonl", [
+            codex_line({"last_token_usage": {"input_tokens": 9}, "model_context_window": 258_400}),
+            codex_line(last), codex_line(None),
+        ])
+        self.assertEqual(gui.context_usage("codex", path), (125_000, 258_400))
+
+    def test_tail_skips_cut_first_line(self):
+        path = self.transcript("c.jsonl", [claude_line(1_000), {"type": "user", "pad": "x" * 500}])
+        old = gui.TRANSCRIPT_TAIL_BYTES
+        gui.TRANSCRIPT_TAIL_BYTES = os.path.getsize(path) - 20  # cuts into the usage line
+        self.addCleanup(setattr, gui, "TRANSCRIPT_TAIL_BYTES", old)
+        self.assertIsNone(gui.context_usage("claude", path))
+
+    def test_unknown_cli_missing_file_or_no_usage_is_none(self):
+        path = self.transcript("c.jsonl", [{"type": "user", "message": {"content": "x"}}])
+        self.assertIsNone(gui.context_usage("claude", path))
+        self.assertIsNone(gui.context_usage("gemini", self.transcript("g.jsonl", [claude_line(1_000)])))
+        self.assertIsNone(gui.context_usage("claude", os.path.join(self.dir.name, "missing.jsonl")))
+
+
 class App(unittest.TestCase):
     def setUp(self):
         os.makedirs(os.path.join(REPO, "tmp"), exist_ok=True)
@@ -127,6 +177,7 @@ class App(unittest.TestCase):
         self.patch("STATE_FILE", os.path.join(self.dir.name, "gui-state.json"))
         self.patch("hcom_json", fake_hcom_json)
         self.patch("git_state", lambda d: ("main", "* ↑1") if d == "/w" else ("", ""))
+        self.patch("context_usage", lambda tool, path: (62000, 1_000_000) if path == "/t/a1.jsonl" else None)
         self.patch("threading", SyncThreading)
         self.asked, self.answer = [], True
 
@@ -208,6 +259,10 @@ class App(unittest.TestCase):
             running = [self.app.rows[i]["instance"] for i in self.app.tree.get_children()
                        if self.app.rows[i]["instance"]]
             self.assertEqual(running, order, col)
+
+    def test_context_column_shows_tokens_and_percent(self):
+        self.assertEqual(self.app.tree.set("a1|a1", "context"), "62k 6%")
+        self.assertEqual(self.app.tree.set("|solo", "context"), "")
 
     def test_kill_runs_selected_instance(self):
         self.app.tree.selection_set("a2|a2x")
