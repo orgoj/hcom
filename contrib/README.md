@@ -21,7 +21,9 @@ transcripts lack the window, so 1M is assumed). Quota is the used share of Codex
 primary (5h) rate limit from the same transcript. The Branch and Git columns show each directory's current branch and its
 state: `*` uncommitted changes, `↑2 ↓1` commits ahead of/behind the upstream (one
 `git status` per directory on every refresh). Where is the Herdr workspace/tab an
-instance was launched in.
+instance was launched in. Clicking a column heading sorts ascending (▲), again descending
+(▼), a third time back to the default order (agent, then instance). Sort, window layout
+and the Running only filter are kept in `~/.hcom/gui-state.json`.
 
 ```sh
 ln -s "$PWD/contrib/hcom-gui" ~/.local/bin/hcom-gui

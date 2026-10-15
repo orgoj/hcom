@@ -19,7 +19,8 @@ Optional ~/.hcom/gui.json:
 "key" (any button) is a Tk event sequence bound in the table, e.g. "z" or "<F2>".
 "open_with" programs also start while an hcom command runs; a quick non-zero exit is logged.
 "columns" selects and orders the table columns (keys of COLUMNS; default: all).
-Window layout is kept in ~/.hcom/gui-state.json.
+Heading clicks cycle the sort: ascending, descending, default.
+Window layout, sort and filter are kept in ~/.hcom/gui-state.json.
 """
 
 import json
@@ -498,11 +499,20 @@ class App(tk.Tk):
             self.timer = self.after(self.refresh_ms, self.refresh)
 
     def sort_by(self, col):
-        self.sort_reverse = not self.sort_reverse if self.sort_col == col else False
-        self.sort_col = col
+        """Clicks on one heading cycle ascending, descending, default order."""
+        if self.sort_col != col:
+            self.sort_col, self.sort_reverse = col, False
+        elif not self.sort_reverse:
+            self.sort_reverse = True
+        else:
+            self.sort_col = None
+            self.sort_reverse = False
         self.render()
 
     def render(self):
+        for col, title, _ in self.columns:
+            arrow = (" ▼" if self.sort_reverse else " ▲") if col == self.sort_col else ""
+            self.tree.heading(col, text=title + arrow)
         if self.sort_col:
             def key(r):
                 v = r[self.sort_col]
@@ -701,6 +711,8 @@ class App(tk.Tk):
         state = self._load_json(STATE_FILE)
         self.geometry(state.get("geometry", "1200x700"))
         self.running_only.set(state.get("running_only", False))
+        if state.get("sort_col") in self.tree["columns"]:
+            self.sort_col, self.sort_reverse = state["sort_col"], bool(state.get("sort_reverse"))
 
         def layout():
             if "sash_pos" in state:
@@ -716,6 +728,8 @@ class App(tk.Tk):
             "geometry": self.geometry(),
             "sash_pos": self.paned.sashpos(0),
             "running_only": self.running_only.get(),
+            "sort_col": self.sort_col,
+            "sort_reverse": self.sort_reverse,
             "column_widths": {c: self.tree.column(c, "width") for c in self.tree["columns"]},
         }
         try:

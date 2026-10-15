@@ -279,6 +279,29 @@ class App(unittest.TestCase):
         shown = [self.app.tree.set(i, "status") for i in self.app.tree.get_children()]
         self.assertEqual([s for s in shown if s], ["active", "listening", "listening"])
 
+    def headings(self):
+        return {c: self.app.tree.heading(c, "text") for c in ("agent", "since")}
+
+    def test_sort_heading_cycles_up_down_and_default(self):
+        default = list(self.app.tree.get_children())
+        self.app.sort_by("since")
+        self.assertEqual(self.headings(), {"agent": "Agent", "since": "Since ▲"})
+        self.app.sort_by("since")
+        self.assertEqual(self.headings(), {"agent": "Agent", "since": "Since ▼"})
+        self.app.sort_by("since")
+        self.assertEqual(self.headings(), {"agent": "Agent", "since": "Since"})
+        self.assertEqual(list(self.app.tree.get_children()), default)
+
+    def test_sort_is_restored_on_start(self):
+        self.app.sort_by("since")
+        self.app.sort_by("since")
+        order = list(self.app.tree.get_children())
+        self.app._on_close()
+        self.app = gui.App()
+        self.app.update()
+        self.assertEqual(self.headings(), {"agent": "Agent", "since": "Since ▼"})
+        self.assertEqual(list(self.app.tree.get_children()), order)
+
     def test_context_column_shows_tokens_and_percent(self):
         self.assertEqual(self.app.tree.set("a1|a1", "context"), "62k 6%")
         self.assertEqual(self.app.tree.set("|solo", "context"), "")
