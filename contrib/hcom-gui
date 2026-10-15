@@ -415,6 +415,7 @@ class App(tk.Tk):
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Double-1>", lambda e: self.run_default())
         self.tree.bind("<Return>", lambda e: self.run_default())
+        self.tree.bind("<KP_Enter>", lambda e: self.run_default())
         self.bind("<F5>", lambda e: self.refresh())
         for b in self.buttons:
             if b != "---" and b.get("key"):

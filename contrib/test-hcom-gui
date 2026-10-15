@@ -354,6 +354,13 @@ class App(unittest.TestCase):
         self.app.after(200, press)
         self.assertEqual(self.app.ask("Start", ["name"], "a3", {"name": "x"}), {"name": "x"})
 
+    def test_keypad_enter_runs_default_on_row(self):
+        self.app.tree.selection_set("a2|a2x")
+        self.app.tree.focus_force()
+        self.app.update()
+        self.app.tree.event_generate("<KP_Enter>", when="now")
+        self.assertEqual(self.ran, [(["hcom", "agent", "attach", "a2x"], self.app.rows["a2|a2x"]["cwd"])])
+
     def test_kill_runs_selected_instance(self):
         self.app.tree.selection_set("a2|a2x")
         self.app.update()
