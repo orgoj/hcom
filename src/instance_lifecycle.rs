@@ -317,16 +317,11 @@ pub fn get_instance_status(data: &InstanceRow, db: &HcomDb) -> ComputedStatus {
                 HEARTBEAT_THRESHOLD_NO_TCP
             };
 
-            if heartbeat_age > threshold {
-                if wake_grace {
-                    age = 0;
-                } else {
-                    current_status = ST_INACTIVE.to_string();
-                    current_context = "stale:listening".to_string();
-                    age = heartbeat_age;
-                }
-            } else {
-                age = 0;
+            // A live listener keeps the status_time age: how long it has been idle.
+            if heartbeat_age > threshold && !wake_grace {
+                current_status = ST_INACTIVE.to_string();
+                current_context = "stale:listening".to_string();
+                age = heartbeat_age;
             }
         }
     } else if current_status != ST_INACTIVE {
@@ -376,9 +371,16 @@ pub fn get_instance_status(data: &InstanceRow, db: &HcomDb) -> ComputedStatus {
         current_context.clone()
     };
 
+    // Listening is always shown as "now"; its idle age is only in age_seconds.
+    let age_string = if current_status == ST_LISTENING {
+        "now".to_string()
+    } else {
+        format_age(age)
+    };
+
     ComputedStatus {
         status: current_status,
-        age_string: format_age(age),
+        age_string,
         description,
         age_seconds: age,
         context: simple_context,
@@ -1871,6 +1873,7 @@ WARNING: proceeding, even though we could not update PATH: Operation not permitt
         let result = get_instance_status(&data, &db);
         assert_eq!(result.status, ST_LISTENING);
         assert_eq!(result.age_string, "now");
+        assert!((5..=6).contains(&result.age_seconds));
         cleanup(path);
     }
 
