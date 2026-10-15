@@ -32,11 +32,11 @@ replaced by fixtures, commands are recorded, not run). Optional `~/.hcom/gui.jso
 {
   "refresh_seconds": 5,
   "open_with": [
-    {"label": "Zed",  "cmd": ["zed", "{dir}"]},
-    {"label": "gitg", "cmd": ["gitg"], "cwd": "{dir}"},
-    {"label": "gitk", "cmd": ["gitk", "--all"], "cwd": "{dir}"},
+    {"label": "Zed",  "cmd": ["zed", "{dir}"], "key": "z"},
+    {"label": "gitg", "cmd": ["gitg"], "cwd": "{dir}", "key": "g"},
+    {"label": "gitk", "cmd": ["gitk", "--all"], "cwd": "{dir}", "key": "h"},
     {"label": "Backlog", "cmd": ["x-terminal-emulator", "backlog", "board"], "cwd": "{dir}",
-     "if_exists": "{dir}/backlog"}
+     "if_exists": "{dir}/backlog", "key": "b"}
   ],
   "commands": [
     {"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": true},
@@ -53,6 +53,8 @@ replaced by fixtures, commands are recorded, not run). Optional `~/.hcom/gui.jso
 `if_exists` enables a button only while that path exists (here a Backlog.md project).
 `commands` are toolbar buttons that run as written, without a selected row and with the
 output in the log; `cwd` (default `~`) decides which project catalogs `@group` resolves in,
-`confirm` asks first, `key` binds a Tk event.
+`confirm` asks first. `key` on any `open_with` or `commands` entry is a keyboard shortcut
+in the table: a Tk event sequence such as `z` or `<F2>`; it runs the button only while
+the button is enabled.
 Without `open_with`, the toolbar offers `xdg-open` and `x-terminal-emulator`. Further hcom
 buttons go into `BUTTONS` at the top of the script.

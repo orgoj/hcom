@@ -9,13 +9,14 @@ The GUI holds no hcom logic: the table comes from `hcom agent list --all --json`
 
 Optional ~/.hcom/gui.json:
   {"refresh_seconds": 5,
-   "open_with": [{"label": "Zed", "cmd": ["zed", "{dir}"]},
+   "open_with": [{"label": "Zed", "cmd": ["zed", "{dir}"], "key": "z"},
                  {"label": "gitg", "cmd": ["gitg"], "cwd": "{dir}"},
                  {"label": "Backlog", "cmd": ["x-terminal-emulator", "backlog", "board"], "cwd": "{dir}",
                   "if_exists": "{dir}/backlog"}],
    "commands": [{"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": true}],
    "columns": ["agent", "instance", "status", "context", "git"]}
 "commands" run as written, without a selected row (optional: confirm, cwd, key).
+"key" (any button) is a Tk event sequence bound in the table, e.g. "z" or "<F2>".
 "columns" selects and orders the table columns (keys of COLUMNS; default: all).
 Window layout is kept in ~/.hcom/gui-state.json.
 """
