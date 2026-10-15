@@ -270,7 +270,7 @@ def build_rows(catalog, live):
             "cli": i.get("tool") or "",
             "catalog_cli": (d or {}).get("cli") or "",
             "groups": (d or {}).get("groups") or [],
-            "status": f"{i.get('status', '')} {age(i.get('status_age_seconds'))}",
+            "status": i.get("status", ""),
             "state": i.get("status", ""),
             "since": int(i.get("status_age_seconds") or 0),
             "age": int(time.time() - i["created_at"]) if i.get("created_at") else "",

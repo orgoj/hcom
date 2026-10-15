@@ -270,6 +270,15 @@ class App(unittest.TestCase):
                        if self.app.rows[i]["instance"]]
             self.assertEqual(running, order, col)
 
+    def test_status_column_shows_only_the_state(self):
+        self.assertEqual([self.app.tree.set(i, "status") for i in ("a1|a1", "a2|a2x", "a3|")],
+                         ["listening", "active", ""])
+
+    def test_status_sorts_by_state_name(self):
+        self.app.sort_by("status")
+        shown = [self.app.tree.set(i, "status") for i in self.app.tree.get_children()]
+        self.assertEqual([s for s in shown if s], ["active", "listening", "listening"])
+
     def test_context_column_shows_tokens_and_percent(self):
         self.assertEqual(self.app.tree.set("a1|a1", "context"), "62k 6%")
         self.assertEqual(self.app.tree.set("|solo", "context"), "")
