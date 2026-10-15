@@ -62,7 +62,8 @@ replaced by fixtures, commands are recorded, not run). Optional `~/.hcom/gui.jso
 output in the log; `cwd` (default `~`) decides which project catalogs `@group` resolves in,
 `confirm` asks first. `key` on any `open_with` or `commands` entry is a keyboard shortcut
 in the table: a Tk event sequence such as `z` or `<F2>`; it runs the button only while
-the button is enabled.
+the button is enabled. The button label shows it, e.g. `Zed (z)`, `Kill (Del)`,
+`Kill all (Ctrl+F2)`; built-in keys too: `Refresh (F5)`.
 `open_with` programs start independently, also while an hcom command runs; one that exits
 non-zero within 5 seconds writes its exit code and stderr to the log.
 Without `open_with`, the toolbar offers `xdg-open` and `x-terminal-emulator`. Further hcom

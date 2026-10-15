@@ -16,7 +16,8 @@ Optional ~/.hcom/gui.json:
    "commands": [{"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": true}],
    "columns": ["agent", "instance", "status", "context", "git"]}
 "commands" run as written, without a selected row (optional: confirm, cwd, key).
-"key" (any button) is a Tk event sequence bound in the table, e.g. "z" or "<F2>".
+"key" (any button) is a Tk event sequence bound in the table, e.g. "z" or "<F2>", shown
+in the button label ("Zed (z)").
 "open_with" programs also start while an hcom command runs; a quick non-zero exit is logged.
 "columns" selects and orders the table columns (keys of COLUMNS; default: all).
 Heading clicks cycle the sort: ascending, descending, default.
@@ -126,6 +127,14 @@ def cell(col, row):
     if col == "quota" and value != "":
         return f"{round(value)}%"
     return value
+
+
+def key_label(sequence):
+    """Short text of a Tk event sequence for a button label: "<Control-F2>" -> "Ctrl+F2"."""
+    text = sequence.strip("<>")
+    for tk_name, short in (("Delete", "Del"), ("Control-", "Ctrl+"), ("Shift-", "Shift+"), ("Alt-", "Alt+")):
+        text = text.replace(tk_name, short)
+    return text
 
 
 def catalog_files(source):
@@ -387,9 +396,11 @@ class App(tk.Tk):
                 self.group_menu = tk.Menu(b["widget"], tearoff=False)
                 b["widget"]["menu"] = self.group_menu
             else:
-                b["widget"] = ttk.Button(toolbar, text=b["label"], command=lambda b=b: self.run_button(b))
+                text = f"{b['label']} ({key_label(b['key'])})" if b.get("key") else b["label"]
+                b["widget"] = ttk.Button(toolbar, text=text, command=lambda b=b: self.run_button(b))
             b["widget"].pack(side=tk.LEFT, padx=2)
-        ttk.Button(toolbar, text="Refresh", command=self.refresh).pack(side=tk.RIGHT, padx=2)
+        self.refresh_button = ttk.Button(toolbar, text=f"Refresh ({key_label('<F5>')})", command=self.refresh)
+        self.refresh_button.pack(side=tk.RIGHT, padx=2)
         self.running_only = tk.BooleanVar(value=False)
         ttk.Checkbutton(toolbar, text="Running only", variable=self.running_only,
                         command=self.render).pack(side=tk.RIGHT, padx=10)

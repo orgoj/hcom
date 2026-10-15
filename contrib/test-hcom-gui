@@ -357,6 +357,19 @@ class App(unittest.TestCase):
         self.app.tree.event_generate("<KeyPress-z>", when="now")
         self.assertEqual(opened, [(["zed", "/w"], self.app.rows["a1|a1"]["cwd"])])
 
+    def test_button_labels_show_their_key(self):
+        with open(gui.CONFIG_FILE, "w") as f:
+            f.write(gui.json.dumps({"open_with": [{"label": "Zed", "cmd": ["zed"], "key": "z"},
+                                                  {"label": "gitg", "cmd": ["gitg"]}],
+                                    "commands": [{"label": "Kill all", "cmd": ["true"], "key": "<Control-F2>"}]}))
+        self.app.destroy()
+        self.app = gui.App()
+        self.app.update()
+        texts = {b["label"]: b["widget"].cget("text") for b in self.app.buttons if b != "---"}
+        self.assertEqual([texts[k] for k in ("Start", "Kill", "Zed", "gitg", "Kill all")],
+                         ["Start", "Kill (Del)", "Zed (z)", "gitg", "Kill all (Ctrl+F2)"])
+        self.assertEqual(self.app.refresh_button.cget("text"), "Refresh (F5)")
+
     def test_open_with_runs_while_a_command_runs(self):
         self.open_with(["zed", "{dir}"])
         opened = self.fake_popen()
