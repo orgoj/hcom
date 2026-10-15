@@ -29,6 +29,8 @@ its row, not greyed, with Status `running as <names>`. After Start with `--as`, 
 instance is selected once it appears, unless another row was selected meanwhile. Clicking a column heading sorts ascending (▲), again descending
 (▼), a third time back to the default order (agent, then instance). Running only hides
 catalog rows without an instance; Blocked only lists only instances in `blocked` status.
+The Filter field narrows the table as you type to rows whose agent, instance, directory
+or catalog groups contain the text (case-insensitive); it combines with both checkboxes.
 Sort, window layout and both filters are kept in `~/.hcom/gui-state.json`.
 
 ```sh

@@ -20,7 +20,8 @@ Optional ~/.hcom/gui.json:
 in the button label ("Zed (z)").
 "open_with" programs also start while an hcom command runs; a quick non-zero exit is logged.
 "columns" selects and orders the table columns (keys of COLUMNS; default: all).
-Heading clicks cycle the sort: ascending, descending, default.
+Heading clicks cycle the sort: ascending, descending, default. The Filter field matches
+agent, instance, dir and groups (case-insensitive).
 Window layout, sort and filters (Running only, Blocked only) are kept in ~/.hcom/gui-state.json.
 """
 
@@ -409,6 +410,11 @@ class App(tk.Tk):
         self.blocked_only = tk.BooleanVar(value=False)
         ttk.Checkbutton(toolbar, text="Blocked only", variable=self.blocked_only,
                         command=self.render).pack(side=tk.RIGHT, padx=10)
+        self.filter_text = tk.StringVar()
+        self.filter_text.trace_add("write", lambda *_: self.render())
+        self.filter_entry = ttk.Entry(toolbar, textvariable=self.filter_text, width=16)
+        self.filter_entry.pack(side=tk.RIGHT, padx=2)
+        ttk.Label(toolbar, text="Filter:").pack(side=tk.RIGHT, padx=2)
 
         self.paned = ttk.PanedWindow(self, orient=tk.VERTICAL)
         self.paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -539,12 +545,16 @@ class App(tk.Tk):
         else:
             def key(r):
                 return (not r["agent"], (r["agent"] or r["instance"]).lower(), not r["instance"], r["instance"])
+        needle = self.filter_text.get().strip().lower()
         sel = self.tree.selection()
         self.tree.delete(*self.tree.get_children())
         for iid, r in sorted(self.rows.items(), key=lambda kv: key(kv[1]), reverse=self.sort_reverse):
             if self.running_only.get() and not r["instance"]:
                 continue
             if self.blocked_only.get() and r["state"] != "blocked":
+                continue
+            if needle and needle not in " ".join([r["agent"], r["instance"], r["dir"], tilde(r["dir"]),
+                                                  *r["groups"]]).lower():
                 continue
             # A catalog row has a status only while the agent runs under other names.
             tag = r["state"] if r["state"] in ("active", "blocked", "error") else (

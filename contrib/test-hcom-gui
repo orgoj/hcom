@@ -575,6 +575,30 @@ class App(unittest.TestCase):
         self.assertEqual((self.app.running_only.get(), self.app.blocked_only.get()), (True, True))
         self.assertEqual(list(self.app.tree.get_children()), ["a3|b1"])
 
+    def shown(self):
+        return list(self.app.tree.get_children())
+
+    def test_text_filter_matches_agent_instance_dir_and_groups(self):
+        everything = self.shown()
+        self.app.filter_entry.insert("end", "WDT")  # the table narrows at once
+        self.assertEqual(sorted(self.shown()), ["a2|", "a2|a2x", "a3|"])
+        for text, rows in (("A2X", ["a2|a2x"]), ("sol", ["|solo"]), ("/w", ["a1|a1", "a2|", "a2|a2x", "a3|"])):
+            self.app.filter_text.set(text)
+            self.assertEqual(sorted(self.shown()), rows, text)
+        self.app.rows["|solo"]["dir"] = os.path.join(gui.HOME, "proj")
+        self.app.filter_text.set("~/PROJ")  # matches the shown ~ form too
+        self.assertEqual(self.shown(), ["|solo"])
+        self.app.filter_text.set("")
+        self.assertEqual(self.shown(), everything)
+
+    def test_text_filter_combines_with_checkboxes_and_survives_refresh(self):
+        self.app.filter_text.set("a2")
+        self.app.running_only.set(True)
+        self.app.render()
+        self.assertEqual(self.shown(), ["a2|a2x"])
+        self.refresh_with(LIVE)
+        self.assertEqual(self.shown(), ["a2|a2x"])
+
     def test_kill_runs_selected_instance(self):
         self.app.tree.selection_set("a2|a2x")
         self.app.update()
