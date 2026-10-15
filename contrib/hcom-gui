@@ -17,6 +17,7 @@ Optional ~/.hcom/gui.json:
    "columns": ["agent", "instance", "status", "context", "git"]}
 "commands" run as written, without a selected row (optional: confirm, cwd, key).
 "key" (any button) is a Tk event sequence bound in the table, e.g. "z" or "<F2>".
+"open_with" programs also start while an hcom command runs; a quick non-zero exit is logged.
 "columns" selects and orders the table columns (keys of COLUMNS; default: all).
 Window layout is kept in ~/.hcom/gui-state.json.
 """
@@ -25,6 +26,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -88,6 +90,9 @@ COLUMNS = [
     ("where", "Where", 160),
     ("config", "Config", 260),
 ]
+
+# A detached program that exits non-zero within this time gets its exit code and stderr logged.
+DETACH_WATCH_SECONDS = 5
 
 # Run hcom as the human, not as the agent whose terminal started the GUI.
 HCOM_ENV = {k: v for k, v in os.environ.items() if not k.startswith("HCOM_")}
@@ -436,7 +441,8 @@ class App(tk.Tk):
         for b in self.buttons:
             if b != "---":
                 ok = bool(self.groups) if b.get("menu") else enabled(b, row)
-                b["widget"].configure(state=tk.NORMAL if not self.busy and ok else tk.DISABLED)
+                idle = not self.busy or b.get("detach")
+                b["widget"].configure(state=tk.NORMAL if idle and ok else tk.DISABLED)
 
     def _on_select(self, _event):
         sel = self.tree.selection()
@@ -532,7 +538,7 @@ class App(tk.Tk):
 
     def run_button(self, b):
         row = self.selected()
-        if self.busy or not enabled(b, row):
+        if (self.busy and not b.get("detach")) or not enabled(b, row):  # detach runs beside a command
             return
         if b["when"] == "always":
             if b.get("confirm") and not messagebox.askyesno(b["label"], f"{' '.join(b['cmd'])}?", parent=self):
@@ -568,14 +574,33 @@ class App(tk.Tk):
         if b.get("detach"):
             cwd = b["cwd"].format_map(values) if b.get("cwd") else row["cwd"]
             self.write_log(f"$ {' '.join(cmd)}  (in {tilde(cwd)})")
+            # stderr goes to an unlinked file, not a pipe: a program outliving the GUI must not
+            # get SIGPIPE.
+            err = None
             try:
-                subprocess.Popen(cmd, cwd=cwd, env={**HCOM_ENV, "PWD": cwd}, start_new_session=True,
-                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                err = tempfile.TemporaryFile()
+                proc = subprocess.Popen(cmd, cwd=cwd, env={**HCOM_ENV, "PWD": cwd}, start_new_session=True,
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err)
             except OSError as e:
+                if err:
+                    err.close()
                 self.write_log(f"ERROR: {e}")
+            else:
+                threading.Thread(target=self._watch_detached, args=(b["label"], proc, err), daemon=True).start()
             self.refresh()
             return
         self.run_command(cmd, row["cwd"])
+
+    def _watch_detached(self, label, proc, err):
+        """Log the exit code and stderr of a detached program that fails right after start."""
+        with err:
+            try:
+                code = proc.wait(timeout=DETACH_WATCH_SECONDS)
+            except subprocess.TimeoutExpired:
+                return
+            if code:
+                err.seek(0)
+                self.after(0, self.write_log, f"{label}: {err.read().decode(errors='replace')}[exit {code}]")
 
     def kill_group(self, group, names):
         """Kill the running instances listed in the menu, by name: exactly what was confirmed,

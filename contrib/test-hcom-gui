@@ -53,11 +53,11 @@ class SyncThreading:
     """Runs a "thread" at once: Tk's after() from a real thread needs a running mainloop."""
 
     class Thread:
-        def __init__(self, target, daemon=None):
-            self.target = target
+        def __init__(self, target, args=(), daemon=None):
+            self.target, self.args = target, args
 
         def start(self):
-            self.target()
+            self.target(*self.args)
 
 
 class RunningGroups(unittest.TestCase):
@@ -297,20 +297,85 @@ class App(unittest.TestCase):
         self.assertEqual(self.app.tree.set("a1|a1", "quota"), "49%")
         self.assertEqual(self.app.tree.set("|solo", "quota"), "")
 
-    def test_open_with_key_opens_selected_dir(self):
+    def open_with(self, cmd):
         with open(gui.CONFIG_FILE, "w") as f:
-            f.write(gui.json.dumps({"open_with": [{"label": "Zed", "cmd": ["zed", "{dir}"], "key": "z"}]}))
+            f.write(gui.json.dumps({"open_with": [{"label": "Zed", "cmd": cmd, "key": "z"}]}))
         self.app.destroy()
         self.app = gui.App()
         self.app.update()
-        opened = []
-        self.patch("subprocess", type("Sub", (), {"Popen": lambda cmd, **kw: opened.append((cmd, kw["cwd"])),
-                                                  "DEVNULL": None}))
         self.app.tree.selection_set("a1|a1")
         self.app.tree.focus_force()
         self.app.update()
+
+    def fake_popen(self):
+        opened = []
+        real = gui.subprocess
+
+        def popen(cmd, **kw):
+            opened.append((cmd, kw["cwd"]))
+            return real.Popen(["true"])
+
+        self.patch("subprocess", type("Sub", (), {"Popen": popen, "DEVNULL": None,
+                                                  "TimeoutExpired": real.TimeoutExpired}))
+        return opened
+
+    def test_open_with_key_opens_selected_dir(self):
+        self.open_with(["zed", "{dir}"])
+        opened = self.fake_popen()
         self.app.tree.event_generate("<KeyPress-z>", when="now")
         self.assertEqual(opened, [(["zed", "/w"], self.app.rows["a1|a1"]["cwd"])])
+
+    def test_open_with_runs_while_a_command_runs(self):
+        self.open_with(["zed", "{dir}"])
+        opened = self.fake_popen()
+        self.app.busy = True
+        self.app.update_buttons()
+        self.assertEqual(str(self.button("Zed")["widget"].cget("state")), "normal")
+        self.assertEqual(str(self.button("Kill")["widget"].cget("state")), "disabled")
+        self.app.tree.event_generate("<KeyPress-z>", when="now")
+        self.app.run_button(self.button("Zed"))
+        self.assertEqual([cmd for cmd, _ in opened], [["zed", "/w"]] * 2)
+
+    def test_open_with_failure_logs_exit_code_and_stderr(self):
+        self.open_with(["sh", "-c", "echo no display >&2; exit 3", "{dir}"])
+        self.app.rows["a1|a1"]["cwd"] = gui.HOME
+        self.app.tree.event_generate("<KeyPress-z>", when="now")
+        self.app.update()
+        self.assertIn("Zed: no display\n[exit 3]", self.app.log.get("1.0", "end"))
+
+    def test_open_with_success_logs_only_the_command(self):
+        self.open_with(["sh", "-c", "echo noise >&2", "{dir}"])
+        self.app.rows["a1|a1"]["cwd"] = gui.HOME
+        self.app.tree.event_generate("<KeyPress-z>", when="now")
+        self.app.update()
+        self.assertEqual(self.app.log.get("1.0", "end"), "$ sh -c echo noise >&2 /w  (in ~)\n\n")
+
+    def test_open_with_outliving_the_watch_keeps_writing_stderr(self):
+        # A pipe closed after the watch would kill sh with SIGPIPE before it creates the marker.
+        marker = os.path.join(self.dir.name, "marker")
+        self.patch("DETACH_WATCH_SECONDS", 0.1)
+        self.open_with(["sh", "-c", f"sleep 0.5; echo late >&2; touch {marker}; exit 3", "{dir}"])
+        self.app.rows["a1|a1"]["cwd"] = gui.HOME
+        self.app.tree.event_generate("<KeyPress-z>", when="now")
+        for _ in range(50):
+            if os.path.exists(marker):
+                break
+            time.sleep(0.1)
+        self.app.update()
+        self.assertTrue(os.path.exists(marker))
+        self.assertNotIn("[exit", self.app.log.get("1.0", "end"))
+
+    def test_open_with_without_temp_file_logs_error(self):
+        self.open_with(["zed", "{dir}"])
+        opened = self.fake_popen()
+
+        def no_temp():
+            raise OSError("no space")
+
+        self.patch("tempfile", type("Tmp", (), {"TemporaryFile": staticmethod(no_temp)}))
+        self.app.tree.event_generate("<KeyPress-z>", when="now")
+        self.assertEqual(opened, [])
+        self.assertIn("ERROR: no space", self.app.log.get("1.0", "end"))
 
     def start(self, prompt):
         self.app.ask = lambda title, keys, agent, prefill: {**prefill, "resume": "", "name": "", "prompt": prompt}

@@ -59,5 +59,7 @@ output in the log; `cwd` (default `~`) decides which project catalogs `@group` r
 `confirm` asks first. `key` on any `open_with` or `commands` entry is a keyboard shortcut
 in the table: a Tk event sequence such as `z` or `<F2>`; it runs the button only while
 the button is enabled.
+`open_with` programs start independently, also while an hcom command runs; one that exits
+non-zero within 5 seconds writes its exit code and stderr to the log.
 Without `open_with`, the toolbar offers `xdg-open` and `x-terminal-emulator`. Further hcom
 buttons go into `BUTTONS` at the top of the script.
