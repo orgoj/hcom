@@ -560,6 +560,21 @@ class App(unittest.TestCase):
         started = {"name": "x", "tool": "claude", "status": "active", "launch_context": {"agent_name": "a3"}}
         self.assertEqual(self.refresh_with(LIVE + [started]), ("a1|a1",))
 
+    def test_blocked_only_lists_blocked_instances_and_is_restored(self):
+        blocked = {"name": "b1", "tool": "codex", "status": "blocked", "launch_context": {"agent_name": "a3"}}
+        self.refresh_with(LIVE + [blocked])
+        self.app.blocked_only.set(True)
+        self.app.render()
+        self.assertEqual(list(self.app.tree.get_children()), ["a3|b1"])
+        self.app.running_only.set(True)
+        self.app.render()
+        self.assertEqual(list(self.app.tree.get_children()), ["a3|b1"])
+        self.app._on_close()
+        self.app = gui.App()
+        self.app.update()
+        self.assertEqual((self.app.running_only.get(), self.app.blocked_only.get()), (True, True))
+        self.assertEqual(list(self.app.tree.get_children()), ["a3|b1"])
+
     def test_kill_runs_selected_instance(self):
         self.app.tree.selection_set("a2|a2x")
         self.app.update()

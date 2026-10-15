@@ -21,7 +21,7 @@ in the button label ("Zed (z)").
 "open_with" programs also start while an hcom command runs; a quick non-zero exit is logged.
 "columns" selects and orders the table columns (keys of COLUMNS; default: all).
 Heading clicks cycle the sort: ascending, descending, default.
-Window layout, sort and filter are kept in ~/.hcom/gui-state.json.
+Window layout, sort and filters (Running only, Blocked only) are kept in ~/.hcom/gui-state.json.
 """
 
 import json
@@ -406,6 +406,9 @@ class App(tk.Tk):
         self.running_only = tk.BooleanVar(value=False)
         ttk.Checkbutton(toolbar, text="Running only", variable=self.running_only,
                         command=self.render).pack(side=tk.RIGHT, padx=10)
+        self.blocked_only = tk.BooleanVar(value=False)
+        ttk.Checkbutton(toolbar, text="Blocked only", variable=self.blocked_only,
+                        command=self.render).pack(side=tk.RIGHT, padx=10)
 
         self.paned = ttk.PanedWindow(self, orient=tk.VERTICAL)
         self.paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -540,6 +543,8 @@ class App(tk.Tk):
         self.tree.delete(*self.tree.get_children())
         for iid, r in sorted(self.rows.items(), key=lambda kv: key(kv[1]), reverse=self.sort_reverse):
             if self.running_only.get() and not r["instance"]:
+                continue
+            if self.blocked_only.get() and r["state"] != "blocked":
                 continue
             # A catalog row has a status only while the agent runs under other names.
             tag = r["state"] if r["state"] in ("active", "blocked", "error") else (
@@ -741,6 +746,7 @@ class App(tk.Tk):
         state = self._load_json(STATE_FILE)
         self.geometry(state.get("geometry", "1200x700"))
         self.running_only.set(state.get("running_only", False))
+        self.blocked_only.set(state.get("blocked_only", False))
         if state.get("sort_col") in self.tree["columns"]:
             self.sort_col, self.sort_reverse = state["sort_col"], bool(state.get("sort_reverse"))
 
@@ -758,6 +764,7 @@ class App(tk.Tk):
             "geometry": self.geometry(),
             "sash_pos": self.paned.sashpos(0),
             "running_only": self.running_only.get(),
+            "blocked_only": self.blocked_only.get(),
             "sort_col": self.sort_col,
             "sort_reverse": self.sort_reverse,
             "column_widths": {c: self.tree.column(c, "width") for c in self.tree["columns"]},

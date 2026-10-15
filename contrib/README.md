@@ -27,8 +27,9 @@ state: `*` uncommitted changes, `↑2 ↓1` commits ahead of/behind the upstream
 instance was launched in. A catalog agent running only under other names (`--as`) keeps
 its row, not greyed, with Status `running as <names>`. After Start with `--as`, the new
 instance is selected once it appears, unless another row was selected meanwhile. Clicking a column heading sorts ascending (▲), again descending
-(▼), a third time back to the default order (agent, then instance). Sort, window layout
-and the Running only filter are kept in `~/.hcom/gui-state.json`.
+(▼), a third time back to the default order (agent, then instance). Running only hides
+catalog rows without an instance; Blocked only lists only instances in `blocked` status.
+Sort, window layout and both filters are kept in `~/.hcom/gui-state.json`.
 
 ```sh
 ln -s "$PWD/contrib/hcom-gui" ~/.local/bin/hcom-gui
