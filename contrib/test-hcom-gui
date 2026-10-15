@@ -439,7 +439,32 @@ class App(unittest.TestCase):
         for enter in ("<Return>", "<KP_Enter>"):
             self.assertEqual(self.type_prompt(enter), {"name": "", "prompt": "line 1\nline 2"}, enter)
 
-    def type_prompt(self, enter):
+    def test_message_is_multiline_and_enter_sends(self):
+        for enter in ("<Return>", "<KP_Enter>"):
+            self.assertEqual(self.type_prompt(enter, "message"), {"message": "line 1\nline 2"}, enter)
+
+    def send(self, row, message):
+        self.app.ask = lambda title, keys, agent, prefill: self.asked.append((title, keys, agent)) or {"message": message}
+        self.app.tree.selection_set(row)
+        self.app.update()
+        self.app.run_button(self.button("Send"))
+
+    def test_send_messages_the_selected_instance(self):
+        self.send("a2|a2x", "hi\nthere")
+        self.assertEqual(self.asked, [("Send", ["message"], "a2x")])  # dialog names the instance
+        self.assertEqual(self.ran, [(["hcom", "send", "-b", "@a2x", "--", "hi\nthere"], self.app.rows["a2|a2x"]["cwd"])])
+        self.assertEqual(str(self.button("Send")["widget"].cget("state")), "normal")
+
+    def test_send_empty_text_sends_nothing(self):
+        self.send("a2|a2x", "")
+        self.assertEqual(self.ran, [])
+
+    def test_send_needs_a_running_instance(self):
+        self.send("a3|", "hi")
+        self.assertEqual(self.ran, [])
+        self.assertEqual(str(self.button("Send")["widget"].cget("state")), "disabled")
+
+    def type_prompt(self, enter, key="prompt"):
         def type_prompt():
             dlg = next(w for w in self.app.winfo_children() if isinstance(w, gui.tk.Toplevel))
             text = next(w for w in dlg.winfo_children() if isinstance(w, gui.tk.Text))
@@ -451,7 +476,7 @@ class App(unittest.TestCase):
             text.event_generate(enter, when="now")
 
         self.app.after(200, type_prompt)
-        return self.app.ask("Start", ["name", "prompt"], "a3", {})
+        return self.app.ask("Start", ["name", "prompt"] if key == "prompt" else [key], "a3", {})
 
     def test_keypad_enter_confirms_dialog(self):
         def press():

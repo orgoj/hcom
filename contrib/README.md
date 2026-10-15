@@ -13,6 +13,9 @@ selected agent's directory in configured applications. The Start dialog sets `--
 line, Enter or keypad Enter starts): `--hcom-prompt`, the agent's first message, which
 replaces the catalog `prompt` for this launch and leaves `system_prompt` alone; left
 empty, the catalog `prompt` (if any) applies.
+Send (running instances) asks for a multi-line message the same way and runs
+`hcom send -b @<instance> -- <text>` (sender `bigboss`, the human); an empty text sends
+nothing.
 `Kill group ▾` lists each catalog group with running members (`@persistent (3)`) and,
 after confirming the names, kills exactly those instances. Since is the age of the
 current status, Age the time since the instance started; both sort numerically. Context is the input size of the latest model call

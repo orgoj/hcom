@@ -40,7 +40,8 @@ CONFIG_FILE = os.path.join(HCOM_DIR, "gui.json")
 STATE_FILE = os.path.join(HCOM_DIR, "gui-state.json")
 
 # Toolbar. cmd placeholders: {agent} catalog name, {instance} live name, {dir} working
-# directory, {ask:X} asked in a dialog (an empty answer drops it and its preceding --flag).
+# directory, {ask:X} asked in a dialog (an empty answer drops it and its preceding --flag;
+# after a bare "--" it is required: an empty answer runs nothing).
 # An answer equal to its prefill (dir, cli) is treated as empty. {ask:resume} is a checkbox:
 # --resume, or --continue when another cli is chosen (a session cannot move between CLIs).
 # when: catalog | running | stopped | dir. Optional: confirm, key (Tk event), default
@@ -56,6 +57,7 @@ BUTTONS = [
     },
     "---",
     {"label": "Attach", "cmd": ["hcom", "agent", "attach", "{instance}"], "when": "running", "default": "running"},
+    {"label": "Send", "cmd": ["hcom", "send", "-b", "@{instance}", "--", "{ask:message}"], "when": "running"},
     "---",
     {"label": "Kill", "cmd": ["hcom", "kill", "{instance}"], "when": "running", "confirm": True, "key": "<Delete>"},
     {"label": "Kill group", "menu": "groups"},  # running instances of each catalog group
@@ -581,10 +583,14 @@ class App(tk.Tk):
         asks = [t[5:-1] for t in b["cmd"] if t.startswith("{ask:") and t.endswith("}")]
         if asks:
             prefill = {"dir": values["dir"], "cli": row["catalog_cli"]}
-            answers = self.ask(b["label"], asks, values["agent"], prefill)
+            answers = self.ask(b["label"], asks, row["instance"] if b["when"] == "running" else row["agent"], prefill)
             if answers is None:
                 return
             values.update({f"ask:{k}": "" if v == prefill.get(k) else v for k, v in answers.items()})
+            required = [t for prev, t in zip(b["cmd"], b["cmd"][1:]) if prev == "--" and t.startswith("{ask:")]
+            if empty := [t[5:-1] for t in required if not values.get(t[1:-1])]:
+                self.write_log(f"{b['label']}: empty {', '.join(empty)}, nothing run")
+                return
             if values.get("ask:resume"):
                 values["ask:resume"] = "--continue" if values.get("ask:cli") else "--resume"
         cmd = []
@@ -668,8 +674,8 @@ class App(tk.Tk):
 
     def ask(self, title, keys, agent, prefill):
         """One entry per {ask:X}, prefilled from prefill; "dir" is browsable, "cli" a
-        choice of installed CLIs, "resume" a checkbox ("1" when checked), "prompt" multi-line
-        (Shift+Enter: newline, Enter: OK). None on cancel."""
+        choice of installed CLIs, "resume" a checkbox ("1" when checked), "prompt" and "message"
+        multi-line (Shift+Enter: newline, Enter: OK). None on cancel."""
         dlg = tk.Toplevel(self)
         dlg.title(f"{title} {agent}")
         dlg.transient(self)
@@ -684,7 +690,7 @@ class App(tk.Tk):
                 choices = [c for c, exe in CLI_BINARIES.items() if c == var.get() or shutil.which(exe)]
                 ttk.Combobox(dlg, textvariable=var, values=choices, state="readonly", width=48).grid(
                     row=n, column=1, sticky=tk.EW, padx=5, pady=5)
-            elif k == "prompt":
+            elif k in ("prompt", "message"):
                 text = tk.Text(dlg, width=50, height=6, wrap=tk.WORD)
                 text.grid(row=n, column=1, sticky=tk.EW, padx=5, pady=5)
                 text.bind("<Shift-Return>", lambda e, t=text: t.insert(tk.INSERT, "\n") or "break")
