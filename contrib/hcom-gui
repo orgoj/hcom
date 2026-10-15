@@ -13,8 +13,10 @@ Optional ~/.hcom/gui.json:
                  {"label": "gitg", "cmd": ["gitg"], "cwd": "{dir}"},
                  {"label": "Backlog", "cmd": ["x-terminal-emulator", "backlog", "board"], "cwd": "{dir}",
                   "if_exists": "{dir}/backlog"}],
-   "commands": [{"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": true}]}
+   "commands": [{"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": true}],
+   "columns": ["agent", "instance", "status", "context", "git"]}
 "commands" run as written, without a selected row (optional: confirm, cwd, key).
+"columns" selects and orders the table columns (keys of COLUMNS; default: all).
 Window layout is kept in ~/.hcom/gui-state.json.
 """
 
@@ -343,6 +345,11 @@ class App(tk.Tk):
         self.buttons = BUTTONS + [{**b, "when": "dir", "detach": True} for b in open_with]
         if commands := config.get("commands"):
             self.buttons += ["---"] + [{**b, "when": "always"} for b in commands]
+        known = {c[0]: c for c in COLUMNS}
+        keys = list(dict.fromkeys(config.get("columns") or known))
+        if unknown := [k for k in keys if k not in known]:
+            self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: unknown columns: {', '.join(unknown)}")
+        self.columns = [known[k] for k in keys if k in known] or COLUMNS
 
         self.rows = {}
         self.groups = {}
@@ -382,8 +389,8 @@ class App(tk.Tk):
         self.paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         frame = ttk.Frame(self.paned)
-        self.tree = ttk.Treeview(frame, columns=[c[0] for c in COLUMNS], show="headings", selectmode="browse")
-        for key, title, width in COLUMNS:
+        self.tree = ttk.Treeview(frame, columns=[c[0] for c in self.columns], show="headings", selectmode="browse")
+        for key, title, width in self.columns:
             self.tree.heading(key, text=title, command=lambda k=key: self.sort_by(k))
             self.tree.column(key, width=width, anchor=tk.W)
         scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -501,7 +508,7 @@ class App(tk.Tk):
             if self.running_only.get() and not r["instance"]:
                 continue
             tag = r["state"] if r["state"] in ("active", "blocked", "error") else ("" if r["instance"] else "stopped")
-            values = [cell(c, r) for c, _, _ in COLUMNS]
+            values = [cell(c, r) for c, _, _ in self.columns]
             self.tree.insert("", tk.END, iid=iid, values=values, tags=(tag,))
         if sel and self.tree.exists(sel[0]):
             self.tree.selection_set(sel[0])

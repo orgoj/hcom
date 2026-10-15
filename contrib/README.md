@@ -41,9 +41,14 @@ replaced by fixtures, commands are recorded, not run). Optional `~/.hcom/gui.jso
   "commands": [
     {"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": true},
     {"label": "Kill WDT", "cmd": ["hcom", "kill", "@wdt_all"], "confirm": true, "cwd": "~/projects/wdt"}
-  ]
+  ],
+  "columns": ["agent", "instance", "cli", "status", "since", "context", "quota", "dir", "git"]
 }
 ```
+
+`columns` selects and orders the table columns; without it all are shown. Keys: `agent`,
+`instance`, `cli`, `status`, `since`, `age`, `context`, `quota`, `detail`, `unread`, `dir`,
+`branch`, `git`, `where`, `config`. Unknown keys are reported in the log and skipped.
 
 `if_exists` enables a button only while that path exists (here a Backlog.md project).
 `commands` are toolbar buttons that run as written, without a selected row and with the

@@ -274,6 +274,20 @@ class App(unittest.TestCase):
         self.assertEqual(self.app.tree.set("a1|a1", "context"), "62k 6%")
         self.assertEqual(self.app.tree.set("|solo", "context"), "")
 
+    def test_default_shows_all_columns(self):
+        self.assertEqual(list(self.app.tree["columns"]), [c[0] for c in gui.COLUMNS])
+
+    def test_configured_columns_select_and_order(self):
+        with open(gui.CONFIG_FILE, "w") as f:
+            f.write(gui.json.dumps({"columns": ["git", "agent", "bogus", "context"]}))
+        self.app.destroy()
+        self.app = gui.App()
+        self.app.update()
+        self.assertEqual(list(self.app.tree["columns"]), ["git", "agent", "context"])
+        self.assertEqual([self.app.tree.set("a1|a1", c) for c in ("git", "agent", "context")],
+                         ["* ↑1", "a1", "62k 6%"])
+        self.assertIn("unknown columns: bogus", self.app.log.get("1.0", "end"))
+
     def test_where_column_shows_herdr_workspace_and_tab(self):
         self.assertEqual(self.app.tree.set("a2|a2x", "where"), "cc-w/a2x")
         self.assertEqual(self.app.tree.set("a1|a1", "where"), "")
