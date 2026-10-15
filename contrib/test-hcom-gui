@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -34,8 +35,10 @@ CATALOG = [
     {"name": "a3", "cli": "claude", "groups": ["wdt_all"], "source": "global", "dir": "/w"},
 ]
 LIVE = [
-    {"name": "a1", "tool": "claude", "status": "listening", "launch_context": {"agent_name": "a1"}},
-    {"name": "a2x", "tool": "codex", "status": "active", "launch_context": {"agent_name": "a2"}},
+    {"name": "a1", "tool": "claude", "status": "listening", "launch_context": {"agent_name": "a1"},
+     "status_age_seconds": 7200, "created_at": time.time() - 90000},
+    {"name": "a2x", "tool": "codex", "status": "active", "launch_context": {"agent_name": "a2"},
+     "status_age_seconds": 30, "created_at": time.time() - 600},
     {"name": "solo", "tool": "claude", "status": "listening"},
 ]
 COMMANDS = [{"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": True, "cwd": "~/proj"}]
@@ -191,6 +194,20 @@ class App(unittest.TestCase):
         self.assertEqual(shown("a1|a1"), ["main", "* ↑1"])
         self.assertEqual(shown("|solo"), ["", ""])
         self.assertLess(cols.index("dir"), cols.index("branch"))
+
+    def test_age_columns_show_status_and_instance_age(self):
+        shown = lambda iid: [self.app.tree.set(iid, c) for c in ("since", "age")]
+        self.assertEqual(shown("a1|a1"), ["2h", "1d"])
+        self.assertEqual(shown("a2|a2x"), ["30s", "10m"])
+        self.assertEqual(shown("|solo"), ["0s", ""])
+        self.assertEqual(shown("a3|"), ["", ""])
+
+    def test_age_columns_sort_numerically(self):
+        for col, order in (("since", ["solo", "a2x", "a1"]), ("age", ["a2x", "a1", "solo"])):
+            self.app.sort_by(col)
+            running = [self.app.rows[i]["instance"] for i in self.app.tree.get_children()
+                       if self.app.rows[i]["instance"]]
+            self.assertEqual(running, order, col)
 
     def test_kill_runs_selected_instance(self):
         self.app.tree.selection_set("a2|a2x")

@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -72,6 +73,8 @@ COLUMNS = [
     ("instance", "Instance", 140),
     ("cli", "CLI", 80),
     ("status", "Status", 130),
+    ("since", "Since", 70),
+    ("age", "Age", 70),
     ("detail", "Detail", 220),
     ("unread", "Unread", 70),
     ("dir", "Dir", 220),
@@ -96,6 +99,15 @@ def age(seconds):
         if s >= size:
             return f"{s // size}{unit}"
     return f"{s}s"
+
+
+def cell(col, value):
+    """Display text of a row value; rows keep ages in seconds so they sort numerically."""
+    if col == "dir":
+        return tilde(value)
+    if col in ("since", "age") and value != "":
+        return age(value)
+    return value
 
 
 def catalog_files(source):
@@ -179,6 +191,8 @@ def build_rows(catalog, live):
             "groups": (d or {}).get("groups") or [],
             "status": f"{i.get('status', '')} {age(i.get('status_age_seconds'))}",
             "state": i.get("status", ""),
+            "since": int(i.get("status_age_seconds") or 0),
+            "age": int(time.time() - i["created_at"]) if i.get("created_at") else "",
             "detail": i.get("status_detail") or "",
             "unread": i.get("unread_count") or "",
             "dir": i.get("directory") or (d or {}).get("dir") or "",
@@ -196,6 +210,8 @@ def build_rows(catalog, live):
             "groups": d.get("groups") or [],
             "status": "",
             "state": "",
+            "since": "",
+            "age": "",
             "detail": "",
             "unread": "",
             "dir": d.get("dir") or "",
@@ -408,7 +424,7 @@ class App(tk.Tk):
             if self.running_only.get() and not r["instance"]:
                 continue
             tag = r["state"] if r["state"] in ("active", "blocked", "error") else ("" if r["instance"] else "stopped")
-            values = [tilde(r[c]) if c == "dir" else r[c] for c, _, _ in COLUMNS]
+            values = [cell(c, r[c]) for c, _, _ in COLUMNS]
             self.tree.insert("", tk.END, iid=iid, values=values, tags=(tag,))
         if sel and self.tree.exists(sel[0]):
             self.tree.selection_set(sel[0])
