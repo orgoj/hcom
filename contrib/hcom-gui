@@ -46,7 +46,7 @@ BUTTONS = [
     {
         "label": "Start",
         "cmd": ["hcom", "agent", "{agent}", "{ask:resume}", "--as", "{ask:name}", "--dir", "{ask:dir}",
-                "--cli", "{ask:cli}"],
+                "--cli", "{ask:cli}", "--hcom-prompt", "{ask:prompt}"],
         "when": "catalog",
         "default": "stopped",
     },

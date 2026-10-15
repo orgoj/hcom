@@ -8,11 +8,13 @@ Tk window listing every catalog agent (`hcom agent list --all --json`) and every
 instance (`hcom list --json`), including instances started with `--as`. Buttons run
 existing commands (`hcom agent`, `attach`, `kill`) and log their output; others open the
 selected agent's directory in configured applications. The Start dialog sets `--as`,
-`--dir`, `--cli` (CLIs installed on PATH) and a resume checkbox: `--resume`, or
-`--continue` when another CLI is chosen. `Kill group ▾` lists each catalog group with
-running members (`@persistent (3)`) and, after confirming the names, kills exactly those
-instances. Since is the age of the current status, Age the time since the instance
-started; both sort numerically. Context is the input size of the latest model call
+`--dir`, `--cli` (CLIs installed on PATH), a resume checkbox (`--resume`, or
+`--continue` when another CLI is chosen) and a prompt: `--hcom-prompt`, the agent's
+first message, which replaces the catalog `prompt` for this launch and leaves
+`system_prompt` alone; left empty, the catalog `prompt` (if any) applies.
+`Kill group ▾` lists each catalog group with running members (`@persistent (3)`) and,
+after confirming the names, kills exactly those instances. Since is the age of the
+current status, Age the time since the instance started; both sort numerically. Context is the input size of the latest model call
 and its share of the window, read from the tail of Claude and Codex transcripts (Claude
 transcripts lack the window, so 1M is assumed). Quota is the used share of Codex's
 primary (5h) rate limit from the same transcript. The Branch and Git columns show each directory's current branch and its

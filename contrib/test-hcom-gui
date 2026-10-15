@@ -312,6 +312,19 @@ class App(unittest.TestCase):
         self.app.tree.event_generate("<KeyPress-z>", when="now")
         self.assertEqual(opened, [(["zed", "/w"], self.app.rows["a1|a1"]["cwd"])])
 
+    def start(self, prompt):
+        self.app.ask = lambda title, keys, agent, prefill: {**prefill, "resume": "", "name": "", "prompt": prompt}
+        self.app.tree.selection_set("a3|")
+        self.app.update()
+        self.app.run_button(self.button("Start"))
+        return self.ran[-1][0]
+
+    def test_start_passes_prompt(self):
+        self.assertEqual(self.start("review the diff"), ["hcom", "agent", "a3", "--hcom-prompt", "review the diff"])
+
+    def test_start_without_prompt_omits_flag(self):
+        self.assertEqual(self.start(""), ["hcom", "agent", "a3"])
+
     def test_kill_runs_selected_instance(self):
         self.app.tree.selection_set("a2|a2x")
         self.app.update()
