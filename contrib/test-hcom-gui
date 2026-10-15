@@ -198,7 +198,7 @@ class App(unittest.TestCase):
         self.patch("messagebox", type("Ask", (), {"askyesno": staticmethod(askyesno)}))
         self.app = gui.App()
         self.ran = []
-        self.app.run_command = lambda cmd, cwd: self.ran.append((cmd, cwd))
+        self.app.run_command = lambda cmd, cwd, select=None: self.ran.append((cmd, cwd))
         self.app.update()
         self.assertTrue(self.app.rows, "first refresh did not finish")
 
@@ -277,7 +277,7 @@ class App(unittest.TestCase):
     def test_status_sorts_by_state_name(self):
         self.app.sort_by("status")
         shown = [self.app.tree.set(i, "status") for i in self.app.tree.get_children()]
-        self.assertEqual([s for s in shown if s], ["active", "listening", "listening"])
+        self.assertEqual([s for s in shown if s], ["active", "listening", "listening", "running as a2x"])
 
     def headings(self):
         return {c: self.app.tree.heading(c, "text") for c in ("agent", "since")}
@@ -474,6 +474,53 @@ class App(unittest.TestCase):
         self.app.tree.selection_set("a2|a2x")
         self.app.update()
         self.assertEqual(self.refresh_with([i for i in LIVE if i["name"] != "a2x"]), ("a2|",))
+
+    def test_catalog_row_of_agent_running_under_another_name(self):
+        self.assertEqual(self.app.tree.set("a2|", "status"), "running as a2x")
+        self.assertEqual(self.app.tree.item("a2|", "tags"), ("",))
+        self.assertEqual(self.app.tree.item("a3|", "tags"), ("stopped",))
+
+    def test_selection_moves_to_instance_started_with_as(self):
+        self.app.ask = lambda title, keys, agent, prefill: {**prefill, "resume": "", "name": "x", "prompt": ""}
+        self.app.tree.selection_set("a3|")
+        self.app.update()
+        self.app.run_button(self.button("Start"))
+        self.assertEqual(self.ran[-1][0], ["hcom", "agent", "a3", "--as", "x"])
+        self.assertEqual(self.refresh_with(LIVE), ("a3|",))  # not listed yet
+        started = {"name": "x", "tool": "claude", "status": "active", "launch_context": {"agent_name": "a3"}}
+        self.assertEqual(self.refresh_with(LIVE + [started]), ("a3|x",))
+
+    def test_failed_or_plain_start_cancels_the_jump(self):
+        started = {"name": "x", "tool": "claude", "status": "active", "launch_context": {"agent_name": "a3"}}
+        for name, cmd in (("x", ["false"]), ("", ["true"])):
+            self.app.ask = lambda title, keys, agent, prefill: {**prefill, "resume": "", "name": name, "prompt": ""}
+            self.app.run_command = lambda _cmd, cwd, select: gui.App.run_command(self.app, cmd, gui.HOME, select)
+            self.app.select_next = "a3|x"  # left over from an earlier Start --as x
+            self.app.tree.selection_set("a3|")
+            self.app.update()
+            self.app.run_button(self.button("Start"))
+            self.app.update()
+            self.assertEqual(self.refresh_with(LIVE + [started]), ("a3|",), cmd)
+
+    def test_unrelated_failed_command_keeps_the_jump(self):
+        self.app.ask = lambda title, keys, agent, prefill: {**prefill, "resume": "", "name": "x", "prompt": ""}
+        self.app.tree.selection_set("a3|")
+        self.app.update()
+        self.app.run_button(self.button("Start"))
+        gui.App.run_command(self.app, ["false"], gui.HOME)
+        self.app.update()
+        started = {"name": "x", "tool": "claude", "status": "active", "launch_context": {"agent_name": "a3"}}
+        self.assertEqual(self.refresh_with(LIVE + [started]), ("a3|x",))
+
+    def test_selecting_another_row_cancels_the_jump(self):
+        self.app.ask = lambda title, keys, agent, prefill: {**prefill, "resume": "", "name": "x", "prompt": ""}
+        self.app.tree.selection_set("a3|")
+        self.app.update()
+        self.app.run_button(self.button("Start"))
+        self.app.tree.selection_set("a1|a1")
+        self.app.update()
+        started = {"name": "x", "tool": "claude", "status": "active", "launch_context": {"agent_name": "a3"}}
+        self.assertEqual(self.refresh_with(LIVE + [started]), ("a1|a1",))
 
     def test_kill_runs_selected_instance(self):
         self.app.tree.selection_set("a2|a2x")

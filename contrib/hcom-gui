@@ -259,12 +259,12 @@ def add_usage(rows):
 def build_rows(catalog, live):
     defs = {d["name"]: d for d in catalog}
     rows = []
-    running_defs = set()
+    running = {}  # catalog name -> its running instance names
     for i in live:
         lc = i.get("launch_context") or {}
         d = defs.get(lc.get("agent_name") or "")
         if d:
-            running_defs.add((d["name"], i["name"]))
+            running.setdefault(d["name"], []).append(i["name"])
         rows.append({
             "agent": d["name"] if d else "",
             "instance": i["name"],
@@ -284,7 +284,8 @@ def build_rows(catalog, live):
             "cwd": catalog_cwd(d["source"]) if d else HOME,
         })
     for d in catalog:
-        if (d["name"], d["name"]) in running_defs:
+        names = running.get(d["name"], [])
+        if d["name"] in names:
             continue
         rows.append({
             "agent": d["name"],
@@ -292,7 +293,7 @@ def build_rows(catalog, live):
             "cli": d.get("cli") or "",
             "catalog_cli": d.get("cli") or "",
             "groups": d.get("groups") or [],
-            "status": "",
+            "status": f"running as {', '.join(names)}" if names else "",
             "state": "",
             "since": "",
             "age": "",
@@ -365,6 +366,7 @@ class App(tk.Tk):
         self.timer = None
         self.last_error = None
         self.last_selected = None
+        self.select_next = None  # row id selected once it appears (an instance started with --as)
 
         self._create_widgets()
         self._restore_state()
@@ -448,6 +450,7 @@ class App(tk.Tk):
     def _on_select(self, _event):
         sel = self.tree.selection()
         if sel and sel[0] != self.last_selected:  # render() re-selects on every refresh
+            self.select_next = None  # another row chosen: do not jump to a started instance
             row = self.rows[sel[0]]
             if row["detail"]:
                 self.write_log(f"{row['instance']}: {row['detail']}")
@@ -525,9 +528,13 @@ class App(tk.Tk):
         for iid, r in sorted(self.rows.items(), key=lambda kv: key(kv[1]), reverse=self.sort_reverse):
             if self.running_only.get() and not r["instance"]:
                 continue
-            tag = r["state"] if r["state"] in ("active", "blocked", "error") else ("" if r["instance"] else "stopped")
+            # A catalog row has a status only while the agent runs under other names.
+            tag = r["state"] if r["state"] in ("active", "blocked", "error") else (
+                "" if r["instance"] or r["status"] else "stopped")
             values = [cell(c, r) for c, _, _ in self.columns]
             self.tree.insert("", tk.END, iid=iid, values=values, tags=(tag,))
+        if self.select_next and self.tree.exists(self.select_next):  # started with --as
+            sel, self.select_next = [self.select_next], None
         if sel and not self.tree.exists(sel[0]):  # start/kill changes the id: keep the agent
             agent = sel[0].split("|")[0]
             sel = [i for i in self.tree.get_children() if agent and self.rows[i]["agent"] == agent][:1]
@@ -599,7 +606,10 @@ class App(tk.Tk):
                 threading.Thread(target=self._watch_detached, args=(b["label"], proc, err), daemon=True).start()
             self.refresh()
             return
-        self.run_command(cmd, row["cwd"])
+        select = f"{row['agent']}|{values['ask:name']}" if values.get("ask:name") else None
+        if asks:  # a Start replaces the pending selection of an earlier one
+            self.select_next = select
+        self.run_command(cmd, row["cwd"], select)
 
     def _watch_detached(self, label, proc, err):
         """Log the exit code and stderr of a detached program that fails right after start."""
@@ -619,7 +629,8 @@ class App(tk.Tk):
             return
         self.run_command(["hcom", "kill", *names], HOME)
 
-    def run_command(self, cmd, cwd):
+    def run_command(self, cmd, cwd, select=None):
+        """select: the pending row id this command creates; dropped if the command fails."""
         self.busy = True
         self.update_buttons()
         self.config(cursor="watch")
@@ -628,14 +639,16 @@ class App(tk.Tk):
         def work():
             try:
                 out = subprocess.run(cmd, cwd=cwd, env=HCOM_ENV, capture_output=True, text=True, timeout=120)
-                text = f"{out.stdout}{out.stderr}[exit {out.returncode}]"
+                text, ok = f"{out.stdout}{out.stderr}[exit {out.returncode}]", out.returncode == 0
             except Exception as e:
-                text = f"ERROR: {e}"
-            self.after(0, self._command_done, text)
+                text, ok = f"ERROR: {e}", False
+            self.after(0, self._command_done, text, ok, select)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _command_done(self, text):
+    def _command_done(self, text, ok, select):
+        if not ok and select and self.select_next == select:
+            self.select_next = None
         self.write_log(text)
         self.busy = False
         self.config(cursor="")
