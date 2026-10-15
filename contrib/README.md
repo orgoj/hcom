@@ -17,7 +17,8 @@ and its share of the window, read from the tail of Claude and Codex transcripts 
 transcripts lack the window, so 1M is assumed). Quota is the used share of Codex's
 primary (5h) rate limit from the same transcript. The Branch and Git columns show each directory's current branch and its
 state: `*` uncommitted changes, `↑2 ↓1` commits ahead of/behind the upstream (one
-`git status` per directory on every refresh).
+`git status` per directory on every refresh). Where is the Herdr workspace/tab an
+instance was launched in.
 
 ```sh
 ln -s "$PWD/contrib/hcom-gui" ~/.local/bin/hcom-gui

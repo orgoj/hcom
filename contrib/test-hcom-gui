@@ -37,7 +37,8 @@ CATALOG = [
 LIVE = [
     {"name": "a1", "tool": "claude", "status": "listening", "launch_context": {"agent_name": "a1"},
      "status_age_seconds": 7200, "created_at": time.time() - 90000, "transcript_path": "/t/a1.jsonl"},
-    {"name": "a2x", "tool": "codex", "status": "active", "launch_context": {"agent_name": "a2"},
+    {"name": "a2x", "tool": "codex", "status": "active",
+     "launch_context": {"agent_name": "a2", "herdr_workspace": "cc-w", "herdr_tab": "a2x"},
      "status_age_seconds": 30, "created_at": time.time() - 600},
     {"name": "solo", "tool": "claude", "status": "listening"},
 ]
@@ -272,6 +273,11 @@ class App(unittest.TestCase):
     def test_context_column_shows_tokens_and_percent(self):
         self.assertEqual(self.app.tree.set("a1|a1", "context"), "62k 6%")
         self.assertEqual(self.app.tree.set("|solo", "context"), "")
+
+    def test_where_column_shows_herdr_workspace_and_tab(self):
+        self.assertEqual(self.app.tree.set("a2|a2x", "where"), "cc-w/a2x")
+        self.assertEqual(self.app.tree.set("a1|a1", "where"), "")
+        self.assertEqual(self.app.tree.set("a3|", "where"), "")
 
     def test_quota_column_shows_percent(self):
         self.assertEqual(self.app.tree.set("a1|a1", "quota"), "49%")

@@ -82,6 +82,7 @@ COLUMNS = [
     ("dir", "Dir", 220),
     ("branch", "Branch", 120),
     ("git", "Git", 80),
+    ("where", "Where", 160),
     ("config", "Config", 260),
 ]
 
@@ -251,7 +252,8 @@ def build_rows(catalog, live):
     rows = []
     running_defs = set()
     for i in live:
-        d = defs.get((i.get("launch_context") or {}).get("agent_name") or "")
+        lc = i.get("launch_context") or {}
+        d = defs.get(lc.get("agent_name") or "")
         if d:
             running_defs.add((d["name"], i["name"]))
         rows.append({
@@ -265,6 +267,7 @@ def build_rows(catalog, live):
             "since": int(i.get("status_age_seconds") or 0),
             "age": int(time.time() - i["created_at"]) if i.get("created_at") else "",
             "transcript": i.get("transcript_path") or "",
+            "where": "/".join(lc[k] for k in ("herdr_workspace", "herdr_tab") if lc.get(k)),
             "detail": i.get("status_detail") or "",
             "unread": i.get("unread_count") or "",
             "dir": i.get("directory") or (d or {}).get("dir") or "",
@@ -285,6 +288,7 @@ def build_rows(catalog, live):
             "since": "",
             "age": "",
             "transcript": "",
+            "where": "",
             "detail": "",
             "unread": "",
             "dir": d.get("dir") or "",
