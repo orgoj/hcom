@@ -512,6 +512,9 @@ class App(tk.Tk):
             tag = r["state"] if r["state"] in ("active", "blocked", "error") else ("" if r["instance"] else "stopped")
             values = [cell(c, r) for c, _, _ in self.columns]
             self.tree.insert("", tk.END, iid=iid, values=values, tags=(tag,))
+        if sel and not self.tree.exists(sel[0]):  # start/kill changes the id: keep the agent
+            agent = sel[0].split("|")[0]
+            sel = [i for i in self.tree.get_children() if agent and self.rows[i]["agent"] == agent][:1]
         if sel and self.tree.exists(sel[0]):
             self.tree.selection_set(sel[0])
             self.tree.focus(sel[0])

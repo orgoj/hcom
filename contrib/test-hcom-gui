@@ -361,6 +361,23 @@ class App(unittest.TestCase):
         self.app.tree.event_generate("<KP_Enter>", when="now")
         self.assertEqual(self.ran, [(["hcom", "agent", "attach", "a2x"], self.app.rows["a2|a2x"]["cwd"])])
 
+    def refresh_with(self, live):
+        self.patch("hcom_json", lambda *args: CATALOG if args[:2] == ("agent", "list") else live)
+        self.app.refresh()
+        self.app.update()
+        return self.app.tree.selection()
+
+    def test_selection_follows_agent_after_start(self):
+        self.app.tree.selection_set("a3|")
+        self.app.update()
+        started = {"name": "a3", "tool": "claude", "status": "active", "launch_context": {"agent_name": "a3"}}
+        self.assertEqual(self.refresh_with(LIVE + [started]), ("a3|a3",))
+
+    def test_selection_follows_agent_after_kill(self):
+        self.app.tree.selection_set("a2|a2x")
+        self.app.update()
+        self.assertEqual(self.refresh_with([i for i in LIVE if i["name"] != "a2x"]), ("a2|",))
+
     def test_kill_runs_selected_instance(self):
         self.app.tree.selection_set("a2|a2x")
         self.app.update()
