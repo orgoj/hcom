@@ -75,6 +75,8 @@ COLUMNS = [
     ("detail", "Detail", 220),
     ("unread", "Unread", 70),
     ("dir", "Dir", 220),
+    ("branch", "Branch", 120),
+    ("git", "Git", 80),
     ("config", "Config", 260),
 ]
 
@@ -125,6 +127,40 @@ def hcom_json(*args):
     if out.returncode != 0:
         raise RuntimeError(f"hcom {' '.join(args)}: {out.stderr.strip() or out.returncode}")
     return json.loads(out.stdout or "[]")
+
+
+def git_state(path):
+    """(branch, state) of the worktree at path, e.g. ("main", "* ↑2 ↓1"): * uncommitted
+    changes, ↑/↓ commits ahead of/behind the upstream. ("", "") outside a git repo."""
+    try:
+        # --no-optional-locks: never take index.lock away from an agent's own git command.
+        out = subprocess.run(["git", "--no-optional-locks", "-C", path, "status", "--porcelain=v2", "--branch"],
+                             capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return "", ""
+    if out.returncode != 0:
+        return "", ""
+    branch, dirty, ahead, behind = "", False, 0, 0
+    for line in out.stdout.splitlines():
+        if line.startswith("# branch.head "):
+            branch = line.split(" ", 2)[2]
+        elif line.startswith("# branch.ab "):  # "# branch.ab +2 -1", only with an upstream
+            ahead, behind = (abs(int(n)) for n in line.split()[2:4])
+        elif not line.startswith("#"):
+            dirty = True
+    state = ("*" if dirty else "", f"↑{ahead}" if ahead else "", f"↓{behind}" if behind else "")
+    return branch, " ".join(s for s in state if s)
+
+
+def add_git(rows):
+    """Fill each row's branch and git columns; one git call per distinct directory."""
+    states = {}
+    for r in rows:
+        d = os.path.expanduser(r["dir"]) if r["dir"] else ""
+        if d not in states:
+            states[d] = git_state(d) if d else ("", "")
+        r["branch"], r["git"] = states[d]
+    return rows
 
 
 def build_rows(catalog, live):
@@ -322,7 +358,8 @@ class App(tk.Tk):
 
         def work():
             try:
-                result = build_rows(hcom_json("agent", "list", "--all", "--json"), hcom_json("list", "--json"))
+                result = add_git(build_rows(hcom_json("agent", "list", "--all", "--json"),
+                                            hcom_json("list", "--json")))
             except Exception as e:  # shown in the log, next refresh retries
                 result = e
             self.after(0, self._apply, result)

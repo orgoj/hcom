@@ -11,7 +11,9 @@ selected agent's directory in configured applications. The Start dialog sets `--
 `--dir`, `--cli` (CLIs installed on PATH) and a resume checkbox: `--resume`, or
 `--continue` when another CLI is chosen. `Kill group ▾` lists each catalog group with
 running members (`@persistent (3)`) and, after confirming the names, kills exactly those
-instances.
+instances. The Branch and Git columns show each directory's current branch and its
+state: `*` uncommitted changes, `↑2 ↓1` commits ahead of/behind the upstream (one
+`git status` per directory on every refresh).
 
 ```sh
 ln -s "$PWD/contrib/hcom-gui" ~/.local/bin/hcom-gui
