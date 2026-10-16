@@ -11,6 +11,7 @@
 ## Layout
 
 - `src/` is the `hcom` binary. `contrib/` holds extras that only call the `hcom` CLI (e.g. `contrib/hcom-gui`, a Python/Tk GUI documented in `contrib/README.md`); changes there do not affect the binary.
+- hcom-gui: `~/.hcom/gui.json` is user-edited configuration only; choices made in the GUI (columns, sort, layout) persist in `~/.hcom/gui-state.json`.
 - Working files go to the gitignored `tmp/`.
 
 ## Gotchas
@@ -26,6 +27,6 @@
 
 ## Definition of done
 
-- User-facing commands, flags, configuration, or behavior: update built-in help, `README.md`, relevant `docs/`, `skills/hcom-agent-messaging/`, and help tests in the same change set.
+- User-facing commands, flags, configuration, or behavior: update built-in help (the command topic and the top-level `hcom --help` overview, both in `src/commands/help.rs`), `README.md`, relevant `docs/`, `skills/hcom-agent-messaging/`, and help tests in the same change set.
 - Run the applicable test and lint commands above for binary changes, inspect the full diff, and remove your artifacts. Never ignore, commit, or delete pre-existing untracked files without asking.
 - How a build is installed, and whether one is expected, is local setup, not a repository rule.
