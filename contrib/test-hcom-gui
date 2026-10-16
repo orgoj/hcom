@@ -35,10 +35,12 @@ CATALOG = [
     {"name": "a3", "cli": "claude", "groups": ["wdt_all"], "source": "global", "dir": "/w"},
 ]
 LIVE = [
-    {"name": "a1", "tool": "claude", "status": "listening", "launch_context": {"agent_name": "a1"},
+    {"name": "a1", "tool": "claude", "status": "listening",
+     "launch_context": {"agent_name": "a1", "terminal_preset_effective": "kitty"},
      "status_age_seconds": 7200, "created_at": time.time() - 90000, "transcript_path": "/t/a1.jsonl"},
     {"name": "a2x", "tool": "codex", "status": "active",
-     "launch_context": {"agent_name": "a2", "herdr_workspace": "cc-w", "herdr_tab": "a2x"},
+     "launch_context": {"agent_name": "a2", "herdr_workspace": "cc-w", "herdr_tab": "a2x",
+                        "terminal_preset_effective": "herdr"},
      "status_age_seconds": 30, "created_at": time.time() - 600},
     {"name": "solo", "tool": "claude", "status": "listening"},
 ]
@@ -395,10 +397,12 @@ class App(unittest.TestCase):
         self.app.set_columns(["agent", "instance"])
         self.assertIsNone(self.app.sort_col)
 
-    def test_where_column_shows_herdr_workspace_and_tab(self):
-        self.assertEqual(self.app.tree.set("a2|a2x", "where"), "cc-w/a2x")
-        self.assertEqual(self.app.tree.set("a1|a1", "where"), "")
+    def test_where_column_shows_terminal_and_herdr_workspace_and_tab(self):
+        self.assertEqual(self.app.tree.set("a2|a2x", "where"), "herdr: cc-w/a2x")
+        self.assertEqual(self.app.tree.set("a1|a1", "where"), "kitty")
+        self.assertEqual(self.app.tree.set("|solo", "where"), "")
         self.assertEqual(self.app.tree.set("a3|", "where"), "")
+        self.assertEqual(gui.where({"herdr_workspace": "cc-w", "herdr_tab": "a2x"}), "")
 
     def test_quota_column_shows_percent(self):
         self.assertEqual(self.app.tree.set("a1|a1", "quota"), "49%")

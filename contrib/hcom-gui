@@ -270,6 +270,13 @@ def add_usage(rows):
     return rows
 
 
+def where(lc):
+    """Terminal of an instance's launch_context, with the Herdr workspace/tab: "herdr: ws/tab"."""
+    terminal = lc.get("terminal_preset_effective") or ""
+    place = "/".join(lc[k] for k in ("herdr_workspace", "herdr_tab") if lc.get(k))
+    return f"{terminal}: {place}" if terminal and place else terminal
+
+
 def build_rows(catalog, live):
     defs = {d["name"]: d for d in catalog}
     rows = []
@@ -290,7 +297,7 @@ def build_rows(catalog, live):
             "since": int(i.get("status_age_seconds") or 0),
             "age": int(time.time() - i["created_at"]) if i.get("created_at") else "",
             "transcript": i.get("transcript_path") or "",
-            "where": "/".join(lc[k] for k in ("herdr_workspace", "herdr_tab") if lc.get(k)),
+            "where": where(lc),
             "detail": i.get("status_detail") or "",
             "unread": i.get("unread_count") or "",
             "dir": i.get("directory") or (d or {}).get("dir") or "",

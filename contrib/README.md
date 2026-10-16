@@ -24,8 +24,8 @@ and its share of the window, read from the tail of Claude and Codex transcripts 
 transcripts lack the window, so 1M is assumed). Quota is the used share of Codex's
 primary (5h) rate limit from the same transcript. The Branch and Git columns show each directory's current branch and its
 state: `*` uncommitted changes, `↑2 ↓1` commits ahead of/behind the upstream (one
-`git status` per directory on every refresh). Where is the Herdr workspace/tab an
-instance was launched in. A catalog agent running only under other names (`--as`) keeps
+`git status` per directory on every refresh). Where is the terminal an
+instance was launched in, with the Herdr workspace/tab (`herdr: cc-hcom/hcom_dev`, `kitty`). A catalog agent running only under other names (`--as`) keeps
 its row, not greyed, with Status `running as <names>`. After Start with `--as`, the new
 instance is selected once it appears, unless another row was selected meanwhile. Clicking a column heading sorts ascending (▲), again descending
 (▼), a third time back to the default order (agent, then instance). Running only hides
