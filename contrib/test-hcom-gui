@@ -330,6 +330,71 @@ class App(unittest.TestCase):
                          ["* ↑1", "a1", "62k 6%"])
         self.assertIn("unknown columns: bogus", self.app.log.get("1.0", "end"))
 
+    def columns_dialog(self, *steps):
+        """Run the Columns dialog; each step is (column key to select, event) or a button label."""
+        def drive():
+            dlg = next(w for w in self.app.winfo_children() if isinstance(w, gui.tk.Toplevel))
+            lb = next(w for w in dlg.winfo_children() if isinstance(w, gui.tk.Listbox))
+            titles = {t: k for k, t, _ in gui.COLUMNS}
+            lb.focus_force()
+            lb.update()
+            for step in steps:
+                if isinstance(step, tuple):
+                    keys = [titles[lb.get(i)[2:]] for i in range(lb.size())]
+                    lb.selection_clear(0, "end")
+                    lb.selection_set(keys.index(step[0]))
+                    lb.event_generate(step[1], when="now")
+                else:
+                    buttons = [w for f in [dlg, *dlg.winfo_children()] for w in f.winfo_children()
+                               if isinstance(w, gui.ttk.Button)]
+                    next(b for b in buttons if b.cget("text") == step).invoke()
+                    if not dlg.winfo_exists():
+                        return
+            if dlg.winfo_exists():
+                dlg.destroy()
+
+        self.app.after(200, drive)
+        self.app.choose_columns()
+
+    def restart(self):
+        self.app._on_close()
+        self.app = gui.App()
+        self.app.update()
+
+    def test_columns_dialog_hides_moves_and_saves(self):
+        self.columns_dialog(("agent", "<space>"), ("git", "<Control-Up>"), "OK")
+        cols = list(self.app.tree["columns"])
+        self.assertNotIn("agent", cols)
+        self.assertLess(cols.index("git"), cols.index("branch"))
+        with open(gui.STATE_FILE) as f:
+            self.assertEqual(gui.json.load(f)["columns"], cols)
+        self.restart()
+        self.assertEqual(list(self.app.tree["columns"]), cols)
+
+    def test_state_columns_override_config_and_reset_returns_to_it(self):
+        with open(gui.CONFIG_FILE, "w") as f:
+            f.write(gui.json.dumps({"columns": ["agent", "status"]}))
+        with open(gui.STATE_FILE, "w") as f:
+            f.write(gui.json.dumps({"columns": ["instance", "agent"]}))
+        self.app.destroy()
+        self.app = gui.App()
+        self.app.update()
+        self.assertEqual(list(self.app.tree["columns"]), ["instance", "agent"])
+        self.columns_dialog("Reset")
+        self.assertEqual(list(self.app.tree["columns"]), ["agent", "status"])
+        self.restart()
+        self.assertEqual(list(self.app.tree["columns"]), ["agent", "status"])
+
+    def test_columns_dialog_keeps_one_column_and_cancel_changes_nothing(self):
+        self.app.set_columns(["agent"])
+        self.columns_dialog(("agent", "<space>"), "OK", "Cancel")
+        self.assertEqual(list(self.app.tree["columns"]), ["agent"])
+
+    def test_hiding_the_sort_column_resets_the_sort(self):
+        self.app.sort_by("since")
+        self.app.set_columns(["agent", "instance"])
+        self.assertIsNone(self.app.sort_col)
+
     def test_where_column_shows_herdr_workspace_and_tab(self):
         self.assertEqual(self.app.tree.set("a2|a2x", "where"), "cc-w/a2x")
         self.assertEqual(self.app.tree.set("a1|a1", "where"), "")

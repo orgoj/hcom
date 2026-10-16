@@ -63,6 +63,10 @@ replaced by fixtures, commands are recorded, not run). Optional `~/.hcom/gui.jso
 `columns` selects and orders the table columns; without it all are shown. Keys: `agent`,
 `instance`, `cli`, `status`, `since`, `age`, `context`, `quota`, `detail`, `unread`, `dir`,
 `branch`, `git`, `where`, `config`. Unknown keys are reported in the log and skipped.
+The `Columns…` button opens a dialog to choose the visible columns and their order
+(Space or double-click toggles a column, Up/Down or Ctrl+Up/Down moves it, at least one
+stays visible). That choice is a per-user preference saved right away in
+`~/.hcom/gui-state.json`; it takes precedence over `columns` here, and Reset drops it.
 
 `if_exists` enables a button only while that path exists (here a Backlog.md project).
 `commands` are toolbar buttons that run as written, without a selected row and with the
