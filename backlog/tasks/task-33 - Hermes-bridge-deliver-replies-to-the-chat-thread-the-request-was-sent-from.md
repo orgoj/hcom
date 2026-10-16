@@ -4,6 +4,7 @@ title: 'Hermes bridge: deliver replies to the chat thread the request was sent f
 status: To Do
 assignee: []
 created_date: '2026-10-16 15:58'
+updated_date: '2026-10-16 16:02'
 labels: []
 dependencies: []
 type: bug
@@ -19,12 +20,11 @@ Root cause: src/hermes_plugin/__init__.py Bridge.hand_off injects every batch wi
 
 Scope: fixable in hcom alone (the hcom-owned plugin plus the binary); no Hermes change. inject_message(origin=...) already accepts any origin; the injection grant is per profile (hermes::grant_injection), not per thread.
 
-Options:
-A) Binary stamps the sender's Hermes session on the send event (needs HERMES_SESSION_ID/THREAD_ID in the gateway terminal subprocess env; unverified, ask hermes_dev). The plugin resolves reply_to/thread to that session and its origin_json in state.db. Robust, no command parsing.
-B) Plugin only: GatewayHost.pre_tool_call runs in the per-chat context; on a terminal hcom send using a bridge name it records session_env() origin keyed by bridge+thread. Fragile (parses shell command strings, event id unknown at that time).
-C) No code: /hcom start in each topic as a separate participant. Workaround only, splits identity.
+Chosen approach (user decision): hcom send by a bridge stamps the sender's Hermes session on the message event. On delivery the plugin resolves reply_to, or the hcom thread the bridge last sent to, to that session and injects with its origin (sessions.origin_json in the profile state.db). No match falls back to the /hcom start origin. Rejected: parsing hcom send commands in the plugin's pre_tool_call (fragile); one /hcom start per topic (workaround, splits identity).
 
-Recommendation: A, fallback to the start origin when no stamp matches. Upstream file (Hermes integration is upstream 471f442): keep the hook minimal or offer upstream.
+Open question before implementing: does Hermes pass HERMES_SESSION_ID / HERMES_SESSION_THREAD_ID into the gateway terminal subprocess env? Ask hermes_dev, do not read Hermes source.
+
+Hermes integration is upstream code (471f442): keep the touch minimal or offer it upstream.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
