@@ -302,6 +302,7 @@ Anything else is forwarded to the tool: `--model sonnet`, `--yolo`, etc.
 ```bash
 hcom                           # TUI dashboard
 hcom send -b @luna -- hey      # one-off message to an agent
+hcom send -b @review -- hey    # catalog group: its in-scope members, started if stopped
 hcom list                      # show all active agents
 hcom term [name]               # view/inject into an agent's PTY screen
 hcom events --wait <filters>   # Block until match for scripting

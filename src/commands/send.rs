@@ -1156,6 +1156,37 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         }
     };
 
+    // An explicit @target that no running agent holds may name a catalog
+    // group: it stands for the group's in-scope members, which then route
+    // (and autostart) like named targets.
+    if !effective_targets.is_empty() {
+        let running = deliverable_instances(db).unwrap_or_default();
+        let mut expanded: Vec<String> = Vec::new();
+        for target in std::mem::take(&mut effective_targets) {
+            let members = if target.contains(':')
+                || target.ends_with('-')
+                || running
+                    .iter()
+                    .any(|inst| inst.name.eq_ignore_ascii_case(&target))
+            {
+                Vec::new()
+            } else {
+                super::agent::catalog_send_group_members(&target).unwrap_or_default()
+            };
+            let names = if members.is_empty() {
+                vec![target]
+            } else {
+                members
+            };
+            for name in names {
+                if !expanded.iter().any(|t| t.eq_ignore_ascii_case(&name)) {
+                    expanded.push(name);
+                }
+            }
+        }
+        effective_targets = expanded;
+    }
+
     // Self-delivery is always filtered out, so an all-self target list would
     // otherwise "succeed" with no recipients.
     if !effective_targets.is_empty()

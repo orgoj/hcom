@@ -21,7 +21,7 @@ hcom send @<name> --intent request --name <your-name> -- 'message text'
 hcom send @<name> --intent inform --name <your-name> --file /abs/path/msg.md
 ```
 
-All flags go before `--`; everything after `--` is the message. Intents: `request` (want reply), `inform` (no reply needed), `ack` (answer, requires `--reply-to`). No need to run `hcom status`, `hcom list` or `--help` before sending; use them only if the send fails.
+All flags go before `--`; everything after `--` is the message. `@<group>` reaches every catalog agent of that group in your scope and starts stopped ones. Intents: `request` (want reply), `inform` (no reply needed), `ack` (answer, requires `--reply-to`). No need to run `hcom status`, `hcom list` or `--help` before sending; use them only if the send fails.
 
 When the user tells you who to message (an agent or group, with or without `@`), send the user's request to that name right away. Do not research the content first (web, code, transcripts) and do not verify the name with `hcom list` or the catalog; the recipient does the analysis. Look the name up only if the send fails.
 

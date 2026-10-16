@@ -273,6 +273,10 @@ const SEND_HELP: &[HelpEntry] = &[
     ("  @luna", "exact base name"),
     ("  @api-luna", "exact full name"),
     ("  @api-", "all local agents with exact tag 'api'"),
+    (
+        "  @review",
+        "catalog group 'review': its in-scope members (a name no agent holds)",
+    ),
     ("  @luna:BOXE", "exact or uniquely prefixed remote agent"),
     (
         "",
@@ -1252,7 +1256,7 @@ Launch:\n\
 \x20 hcom's own flags. Use --dry-run to see the command without running it.\n\
 \n\
 Commands:\n\
-\x20 send         Send message to your buddies\n\
+\x20 send         Send message (@name, @tag-, @group)\n\
 \x20 listen       Block until message or event arrives\n\
 \x20 list         Show agents, status, unread counts\n\
 \x20 events       Query event stream, manage subscriptions\n\

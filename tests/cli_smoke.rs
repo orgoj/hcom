@@ -4639,6 +4639,13 @@ fn send_help_explains_autostart_acknowledgement() {
         stdout.contains("Running agents route first"),
         "stdout={stdout}"
     );
+    assert!(stdout.contains("catalog group 'review'"), "stdout={stdout}");
+    let (code, stdout, stderr) = h.run(["--help"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("send         Send message (@name, @tag-, @group)"),
+        "stdout={stdout}"
+    );
 }
 
 #[test]
@@ -4728,6 +4735,81 @@ fn targeted_send_starts_catalog_agent_and_reports_unacknowledged_message_pending
         .and_then(|items| items.iter().find(|item| item["name"] == "reviewer"))
         .expect("autostarted reviewer instance");
     assert_eq!(reviewer["unread_count"], 1);
+}
+
+#[test]
+fn targeted_send_to_catalog_group_starts_only_in_scope_members() {
+    let h = Hcom::new();
+    let imported = h.path().join("project-agents.json");
+    std::fs::write(
+        &imported,
+        r#"{"agents":{
+            "public":{"dir":"/tmp","cli":"codex","groups":["crew"],
+                "terminal_command":"sh -c true {script}"},
+            "private":{"dir":"/tmp","cli":"codex","groups":["crew"],
+                "terminal_command":"sh -c true {script}"}
+        }}"#,
+    )
+    .expect("write imported catalog");
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["public"]}}]}}"#,
+            serde_json::to_string(&imported).unwrap()
+        ),
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run([
+        "send",
+        "--from",
+        "bigboss",
+        "@crew",
+        "--intent",
+        "request",
+        "--",
+        "check this",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("public"), "stdout={stdout}");
+    assert!(
+        !stdout.contains("private") && !stderr.contains("private"),
+        "stdout={stdout} stderr={stderr}"
+    );
+
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
+    assert_eq!(event["data"]["text"], "check this");
+    let names = |h: &Hcom| {
+        let (code, instances, stderr) = h.run(["list", "--json"]);
+        assert_eq!(code, 0, "instances={instances} stderr={stderr}");
+        let instances: serde_json::Value =
+            serde_json::from_str(&instances).expect("instance list JSON");
+        let mut names: Vec<String> = instances
+            .as_array()
+            .expect("instance array")
+            .iter()
+            .filter_map(|item| item["name"].as_str().map(str::to_string))
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(&h), vec!["public"]);
+
+    // A catalog agent named like the group keeps precedence.
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{
+            "team":{"dir":"/tmp","cli":"codex","terminal_command":"sh -c true {script}"},
+            "member":{"dir":"/tmp","cli":"codex","groups":["team"],
+                "terminal_command":"sh -c true {script}"}
+        }}"#,
+    )
+    .expect("write catalog");
+    let (code, stdout, stderr) = h.run(["send", "--from", "bigboss", "@team", "--", "hi"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert_eq!(names(&h), vec!["public", "team"]);
 }
 
 #[test]

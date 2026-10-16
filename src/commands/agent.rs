@@ -117,9 +117,11 @@ Roaming agents:
   policy use \"env\": {{\"DIPPY_CONFIG_ONLY\": \"/path/to/policy.dippy\"}}.
 
 Catalog groups:
-  \"groups\": [\"review\", \"all\"] assigns launch-only groups independently of the
-  runtime messaging \"tag\". Group launch traverses all recursively reachable
-  imports, including agents omitted by a selective import's \"agents\" list.
+  \"groups\": [\"review\", \"all\"] assigns groups independently of the runtime
+  messaging \"tag\". Group launch traverses all recursively reachable imports,
+  including agents omitted by a selective import's \"agents\" list.
+  hcom send @<group> -- <text> reaches only the group's members in scope and
+  starts stopped ones; a running or catalog agent with that name wins.
 
 Listing:
   @<group>                  Show only members of one catalog group
@@ -1240,6 +1242,17 @@ pub(crate) fn catalog_message_targets(
         }
     }
     Ok(CatalogTargets { routes, unroutable })
+}
+
+/// Members of a catalog group in the sender's scope, for `hcom send @<group>`.
+/// A catalog agent with the group's name keeps precedence, and members hidden
+/// by a selective import stay out, so the send reveals no out-of-scope agent.
+pub(crate) fn catalog_send_group_members(group: &str) -> Result<Vec<String>> {
+    let catalogs = Catalogs::load(false, None)?;
+    if catalogs.names().contains_key(group) {
+        return Ok(Vec::new());
+    }
+    Ok(catalogs.group_members(group))
 }
 
 /// How long autostart waits for the launched agent's instance row to appear.
