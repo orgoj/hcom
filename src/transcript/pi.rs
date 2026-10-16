@@ -6,8 +6,9 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use super::shared::{
-    Exchange, ToolUse, capture_tool_output, dedup_sorted_capped, extract_content_text,
-    finalize_action_text, normalize_tool_name, read_file_lossy, truncate_str,
+    Exchange, TokenUsage, ToolUse, Transcript, UsageCollector, capture_tool_output,
+    dedup_sorted_capped, display_path, extract_content_text, final_segment, finalize_action_text,
+    normalize_tool_name, read_file_lossy, token_counter, tool_input_file, truncate_str,
 };
 
 fn message_text(message: &Value) -> String {
@@ -38,24 +39,6 @@ fn tool_input(message: &Value) -> Value {
         .unwrap_or_default()
 }
 
-fn tool_file(input: &Value) -> Option<String> {
-    let obj = input.as_object()?;
-    for field in ["path", "file_path", "file"] {
-        if let Some(val) = obj.get(field).and_then(Value::as_str)
-            && !val.is_empty()
-        {
-            return Some(
-                Path::new(val)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(val)
-                    .to_string(),
-            );
-        }
-    }
-    None
-}
-
 fn tool_command(input: &Value) -> Option<String> {
     input
         .get("command")
@@ -64,11 +47,22 @@ fn tool_command(input: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
+#[cfg(test)]
 pub(crate) fn parse_pi_jsonl(
     path: &Path,
     last: usize,
     _detailed: bool,
 ) -> Result<Vec<Exchange>, String> {
+    let mut transcript = parse_pi_jsonl_with_usage(path, _detailed)?;
+    transcript.truncate(last);
+    Ok(transcript.exchanges)
+}
+
+pub(crate) fn parse_pi_jsonl_with_usage(
+    path: &Path,
+    _detailed: bool,
+) -> Result<Transcript, String> {
+    let mut usage = UsageCollector::default();
     let content = read_file_lossy(path)?;
     let mut exchanges: Vec<Exchange> = Vec::new();
     let mut current_user = String::new();
@@ -82,6 +76,10 @@ pub(crate) fn parse_pi_jsonl(
     // back by `toolCallId`. Map id → arguments so we can recover the command.
     let mut call_args: HashMap<String, Value> = HashMap::new();
     let mut timestamp = String::new();
+    // Where the text after the latest tool call starts in `current_action`.
+    let mut final_start = 0usize;
+    let mut tool_since_text = false;
+    let mut cwd: Option<String> = None;
     let mut position = 0usize;
 
     let flush = |exchanges: &mut Vec<Exchange>,
@@ -92,16 +90,20 @@ pub(crate) fn parse_pi_jsonl(
                  files: &mut Vec<String>,
                  errors: &mut Vec<Value>,
                  last_was_error: &mut bool,
-                 ts: &mut String| {
+                 ts: &mut String,
+                 final_start: &mut usize,
+                 tool_since_text: &mut bool| {
         if user.is_empty() && action.is_empty() && tools.is_empty() {
             return;
         }
         *position += 1;
         let final_action = finalize_action_text(action, tools, errors, *last_was_error);
         exchanges.push(Exchange {
+            usage: None,
             position: *position,
             user: std::mem::take(user),
             action: final_action,
+            final_text: final_segment(action, *final_start),
             files: dedup_sorted_capped(files, 5),
             timestamp: std::mem::take(ts),
             tools: std::mem::take(tools),
@@ -112,6 +114,8 @@ pub(crate) fn parse_pi_jsonl(
         action.clear();
         files.clear();
         *last_was_error = false;
+        *final_start = 0;
+        *tool_since_text = false;
     };
 
     for line in content.lines() {
@@ -119,7 +123,11 @@ pub(crate) fn parse_pi_jsonl(
             Ok(v) => v,
             Err(_) => continue,
         };
-        if entry.get("type").and_then(Value::as_str) != Some("message") {
+        let entry_type = entry.get("type").and_then(Value::as_str);
+        if entry_type == Some("session") {
+            cwd = entry.get("cwd").and_then(Value::as_str).map(str::to_string);
+        }
+        if entry_type != Some("message") {
             continue;
         }
         let message = entry.get("message").unwrap_or(&entry);
@@ -136,6 +144,8 @@ pub(crate) fn parse_pi_jsonl(
                     &mut current_errors,
                     &mut current_last_was_error,
                     &mut timestamp,
+                    &mut final_start,
+                    &mut tool_since_text,
                 );
                 current_user = message_text(message);
                 timestamp = entry
@@ -146,6 +156,27 @@ pub(crate) fn parse_pi_jsonl(
                     .to_string();
             }
             "assistant" => {
+                if let Some(raw) = message.get("usage").filter(|v| v.is_object()) {
+                    let tokens = TokenUsage {
+                        input: token_counter(raw, "input"),
+                        output: token_counter(raw, "output"),
+                        cache_read: token_counter(raw, "cacheRead"),
+                        cache_write: token_counter(raw, "cacheWrite"),
+                        reasoning: raw.get("reasoning").and_then(Value::as_u64),
+                    };
+                    usage.record(
+                        tokens,
+                        Some(
+                            tokens
+                                .input
+                                .saturating_add(tokens.cache_read)
+                                .saturating_add(tokens.cache_write),
+                        ),
+                        raw.pointer("/cost/total").and_then(Value::as_f64),
+                        message.get("model").and_then(Value::as_str),
+                        (!current_user.is_empty()).then_some(exchanges.len()),
+                    );
+                }
                 if let Some(blocks) = message.get("content").and_then(Value::as_array) {
                     for block in blocks {
                         if block.get("type").and_then(Value::as_str) != Some("toolCall") {
@@ -163,6 +194,9 @@ pub(crate) fn parse_pi_jsonl(
                 if !text.is_empty() {
                     if !current_action.is_empty() {
                         current_action.push_str("\n\n");
+                    }
+                    if std::mem::take(&mut tool_since_text) {
+                        final_start = current_action.len();
                     }
                     current_action.push_str(&text);
                 }
@@ -186,7 +220,8 @@ pub(crate) fn parse_pi_jsonl(
                 {
                     input = args.clone();
                 }
-                let file = tool_file(&input);
+                tool_since_text = true;
+                let file = tool_input_file(&name, &input).map(|f| display_path(f, cwd.as_deref()));
                 if let Some(file) = &file {
                     current_files.push(file.clone());
                 }
@@ -225,13 +260,11 @@ pub(crate) fn parse_pi_jsonl(
         &mut current_errors,
         &mut current_last_was_error,
         &mut timestamp,
+        &mut final_start,
+        &mut tool_since_text,
     );
 
-    if last > 0 && exchanges.len() > last {
-        Ok(exchanges.split_off(exchanges.len() - last))
-    } else {
-        Ok(exchanges)
-    }
+    Ok(usage.attach(exchanges))
 }
 
 #[cfg(test)]

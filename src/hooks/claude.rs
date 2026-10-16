@@ -2108,17 +2108,16 @@ fn cleanup_sessionend_scoped_state(db: &HcomDb, session_id: &str) {
     // it (see `subagent_stop_inflight_key`). Inflight stop records are
     // transient and self-recover when their owning process dies, but
     // sweeping them here avoids retaining unreachable session data.
-    for (label, prefix) in [(
-        "subagent_stop_inflight",
-        subagent_stop_inflight_prefix(session_id),
-    )] {
-        if let Err(e) = db.kv_delete_prefix(&prefix) {
-            log::log_warn(
-                "hooks",
-                "sessionend.kv_cleanup_failed",
-                &format!("kind={} session_id={} err={}", label, session_id, e),
-            );
-        }
+    let prefix = subagent_stop_inflight_prefix(session_id);
+    if let Err(e) = db.kv_delete_prefix(&prefix) {
+        log::log_warn(
+            "hooks",
+            "sessionend.kv_cleanup_failed",
+            &format!(
+                "kind=subagent_stop_inflight session_id={} err={}",
+                session_id, e
+            ),
+        );
     }
 }
 
@@ -4650,7 +4649,12 @@ mod tests {
         (dir, guard, db)
     }
 
+    /// Bind like a launched Claude: session plus `make_ctx`'s process token.
     fn bind_validated_session(db: &HcomDb, session_id: &str, instance_name: &str) {
+        if db.get_process_binding("process-test").unwrap().is_none() {
+            db.set_process_binding("process-test", session_id, instance_name)
+                .unwrap();
+        }
         db.set_session_binding(session_id, instance_name).unwrap();
         db.mark_claude_session_validated(session_id, instance_name)
             .unwrap();

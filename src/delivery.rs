@@ -2044,9 +2044,10 @@ pub fn run_delivery_loop(
     // push the initial label, subsequent iterations only push on change.
     let mut host_label = host_label::HostLabel::resolve();
 
-    // Plugin tools (OpenCode, Kilo, Pi, OMP): the plugin delivers once it has a
-    // session. Pi and OMP bind theirs at startup; OpenCode and Kilo create one on
-    // the first prompt, so mail that waits before then needs a session started.
+    // Plugin tools (OpenCode, Kilo, Pi, OMP, Hermes): the plugin delivers once it
+    // has a session. Pi, OMP and Hermes bind theirs at startup; OpenCode and Kilo
+    // create one on the first prompt, so mail that waits before then needs a
+    // session started.
     use crate::tool::Tool;
     use std::str::FromStr;
     if let Some(launch) = state.grok_acp.as_ref() {
@@ -2066,8 +2067,10 @@ pub fn run_delivery_loop(
             &mut launch_outcome,
         );
     } else if let Ok(tool) = Tool::from_str(&config.tool)
-        && (matches!(tool, Tool::OpenCode | Tool::Kilo | Tool::Pi | Tool::Omp)
-            || claude_mod
+        && (matches!(
+            tool,
+            Tool::OpenCode | Tool::Kilo | Tool::Pi | Tool::Omp | Tool::Hermes
+        ) || claude_mod
             || copilot_extension)
     {
         log_info(
@@ -2106,6 +2109,13 @@ pub fn run_delivery_loop(
                 tool: &config.tool,
                 host_label: &mut host_label,
             });
+            // Stopped (or mid session switch): the name may now belong to
+            // another launch, so leave its row, endpoints and terminal alone.
+            if !instance_owns_process_binding(db, &process_id, &current_name) {
+                notify.wait(RETRY_DELAY);
+                db.reconnect_if_stale();
+                continue;
+            }
             drive_launch_outcome(
                 db,
                 state,
@@ -2137,6 +2147,10 @@ pub fn run_delivery_loop(
             }
             if !running.load(Ordering::Acquire) {
                 break;
+            }
+            // A stop + resume may have happened during the wait.
+            if !instance_owns_process_binding(db, &process_id, &current_name) {
+                continue;
             }
             if copilot_extension {
                 watch_extension_stall(db, &current_name, &mut stall_since, &mut stall_warned);
@@ -2236,6 +2250,15 @@ pub fn run_delivery_loop(
                 tool: &config.tool,
                 host_label: &mut host_label,
             });
+            // Stopped (or mid session switch): the name may now belong to
+            // another launch, so leave its row, endpoints and terminal alone.
+            if !instance_owns_process_binding(db, &process_id, &current_name) {
+                delivery_state = State::Idle;
+                endpoints_name.clear();
+                notify.wait(RETRY_DELAY);
+                db.reconnect_if_stale();
+                continue;
+            }
             drive_launch_outcome(
                 db,
                 state,
@@ -2307,6 +2330,11 @@ pub fn run_delivery_loop(
 
                     // Detect DB file replacement (hcom reset / schema bump) and reconnect
                     db.reconnect_if_stale();
+
+                    // A stop + resume may have happened during the wait.
+                    if !instance_owns_process_binding(db, &process_id, &current_name) {
+                        continue;
+                    }
 
                     // Heartbeat (also re-asserts tcp_mode=true) + wake state.
                     refresh_liveness(db, &current_name);
@@ -2509,63 +2537,37 @@ pub fn run_delivery_loop(
                             if let Some(since) = block_since
                                 && since.elapsed().as_secs_f64() >= 2.0
                             {
-                                match db.get_status(&current_name) {
-                                    Ok(Some((status, _))) if status == ST_LISTENING => {
-                                        let context = "tui:not-idle".to_string();
-                                        if context != last_block_context {
-                                            if let Err(e) = db.set_gate_status(
-                                                &current_name,
-                                                &context,
-                                                "waiting for idle status",
-                                            ) {
-                                                log_warn(
-                                                    "native",
-                                                    "delivery.gate_status_fail",
-                                                    &format!("{}", e),
-                                                );
-                                            }
-                                            last_block_context = context;
-                                        }
-                                    }
-                                    Ok(Some(_)) | Ok(None) => {
-                                        // Status not "listening" or not found - skip
-                                    }
-                                    Err(e) => {
-                                        log_error(
+                                let context = "tui:not-idle".to_string();
+                                if context != last_block_context {
+                                    match db.set_gate_status(
+                                        &current_name,
+                                        &context,
+                                        "waiting for idle status",
+                                    ) {
+                                        Ok(true) => last_block_context = context,
+                                        Ok(false) => {}
+                                        Err(e) => log_warn(
                                             "native",
-                                            "delivery.tui_status_update",
-                                            &format!("DB error checking status: {}", e),
-                                        );
+                                            "delivery.gate_status_fail",
+                                            &format!("{e}"),
+                                        ),
                                     }
                                 }
                             }
                         } else if let Some(since) = block_since {
                             // After 2 seconds of blocking, update TUI status context
                             if since.elapsed().as_secs_f64() >= 2.0 {
-                                // Only update if status is "listening" (don't overwrite active/blocked)
-                                match db.get_status(&current_name) {
-                                    Ok(Some((status, _))) if status == ST_LISTENING => {
-                                        // Format context: tui:not-ready, tui:user-active, etc.
-                                        let reason_formatted = gate.reason.replace("_", "-");
-                                        let context = format!("tui:{}", reason_formatted);
-
-                                        // Only update if context changed
-                                        if context != last_block_context {
-                                            let detail = gate_block_detail(gate.reason);
-                                            let _ =
-                                                db.set_gate_status(&current_name, &context, detail);
-                                            last_block_context = context;
-                                        }
-                                    }
-                                    Ok(Some(_)) | Ok(None) => {
-                                        // Status not "listening" or not found - skip
-                                    }
-                                    Err(e) => {
-                                        log_error(
+                                let context = format!("tui:{}", gate.reason.replace('_', "-"));
+                                if context != last_block_context {
+                                    let detail = gate_block_detail(gate.reason);
+                                    match db.set_gate_status(&current_name, &context, detail) {
+                                        Ok(true) => last_block_context = context,
+                                        Ok(false) => {}
+                                        Err(e) => log_warn(
                                             "native",
-                                            "delivery.gate_status_update",
-                                            &format!("DB error checking status: {}", e),
-                                        );
+                                            "delivery.gate_status_fail",
+                                            &format!("{e}"),
+                                        ),
                                     }
                                 }
                             }
@@ -2820,7 +2822,8 @@ pub fn run_delivery_loop(
                     if current_cursor > cursor_before {
                         // Success! Clear gate block status
                         if !last_block_context.is_empty() {
-                            if let Err(e) = db.set_gate_status(&current_name, "", "") {
+                            if let Err(e) = db.clear_gate_status(&current_name, &last_block_context)
+                            {
                                 log_warn("native", "delivery.gate_clear_fail", &format!("{}", e));
                             }
                             last_block_context.clear();
@@ -2892,7 +2895,9 @@ pub fn run_delivery_loop(
                                 // wedging when hook delivery succeeded but
                                 // cursor bookkeeping did not advance.
                                 if !last_block_context.is_empty() {
-                                    if let Err(e) = db.set_gate_status(&current_name, "", "") {
+                                    if let Err(e) =
+                                        db.clear_gate_status(&current_name, &last_block_context)
+                                    {
                                         log_warn(
                                             "native",
                                             "delivery.gate_clear_fail",
@@ -3027,7 +3032,7 @@ pub fn run_delivery_loop(
                     let current_cursor = db.get_cursor(&current_name);
                     let has_pending = db.has_pending(&current_name);
                     if current_cursor > cursor_before || !has_pending {
-                        if let Err(e) = db.set_gate_status(&current_name, "", "") {
+                        if let Err(e) = db.clear_gate_status(&current_name, &last_block_context) {
                             log_warn("native", "delivery.gate_clear_fail", &format!("{}", e));
                         }
                         last_block_context.clear();
@@ -3984,8 +3989,8 @@ mod tests {
         assert!(gemini.require_ready_prompt);
         assert!(!gemini.require_prompt_empty);
 
-        // Codex: same as Claude (ready pattern unreliable in narrow terminals)
-        assert!(!codex.require_ready_prompt);
+        // Codex: composer glyph must be visible (a modal over it is not_ready)
+        assert!(codex.require_ready_prompt);
         assert!(codex.require_prompt_empty);
 
         // All require idle

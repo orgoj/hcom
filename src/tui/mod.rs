@@ -12,6 +12,7 @@ pub mod rpc_async;
 pub mod state;
 pub mod status;
 pub mod theme;
+mod usage;
 
 use std::io::{Write, stdout};
 
@@ -107,9 +108,17 @@ fn run_app(app: &mut App, viewport_height: u16, in_alt_screen: &mut bool) -> Res
                 };
 
                 app.run(&mut terminal, viewport_height)?;
+                // Ratatui anchors the inline viewport at the cursor row, not the
+                // screen bottom, so take its real origin before dropping it.
+                let viewport_top = terminal.get_frame().area().y;
                 drop(terminal);
 
                 if app.ui.should_quit {
+                    // Erase the box so the shell prompt starts below the timeline
+                    // instead of drawing over the last frame.
+                    let mut out = stdout();
+                    write!(out, "\x1b[r\x1b[{};1H\x1b[J", viewport_top + 1)?;
+                    out.flush()?;
                     break;
                 }
 
@@ -324,6 +333,7 @@ pub mod test_helpers {
             sync_age: None,
             headless: false,
             session_id: None,
+            transcript_path: None,
             pid: None,
             terminal_preset: None,
         }

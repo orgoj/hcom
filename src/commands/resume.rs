@@ -1241,7 +1241,7 @@ fn merge_resume_args(tool: &str, original: &[String], resume: &[String]) -> Vec<
         .expect("resume tool must be validated before argument merging");
 
     match tool {
-        crate::tool::Tool::Claude | crate::tool::Tool::Gemini | crate::tool::Tool::Hermes => {
+        crate::tool::Tool::Claude | crate::tool::Tool::Gemini => {
             let mut merged = original.to_vec();
             merged.extend_from_slice(resume);
             merged
@@ -1258,6 +1258,9 @@ fn merge_resume_args(tool: &str, original: &[String], resume: &[String]) -> Vec<
         crate::tool::Tool::Grok => merge_grok_args(original, resume),
         crate::tool::Tool::Pi => merge_pi_args(original, resume),
         crate::tool::Tool::Omp => merge_omp_args(original, resume),
+        crate::tool::Tool::Hermes => {
+            crate::tools::hermes_preprocessing::merge_resume_args(original, resume)
+        }
         crate::tool::Tool::Adhoc => {
             unreachable!("Adhoc sessions do not support resume argument merging")
         }

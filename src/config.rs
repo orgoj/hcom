@@ -202,11 +202,11 @@ pub(crate) const FIELDS: &[ConfigField] = &[
     f("kilo_args", "HCOM_KILO_ARGS", "launch.kilo.args", Str, "Default args for kilo on launch"),
     f("pi_args", "HCOM_PI_ARGS", "launch.pi.args", Str, "Default args for pi on launch"),
     f("omp_args", "HCOM_OMP_ARGS", "launch.omp.args", Str, "Default args for omp on launch"),
-    f("hermes_args", "HCOM_HERMES_ARGS", "launch.hermes.args", Str, "Default args for hermes on launch"),
     f("cursor_args", "HCOM_CURSOR_ARGS", "launch.cursor.args", Str, "Default args for cursor-agent on launch"),
     f("kimi_args", "HCOM_KIMI_ARGS", "launch.kimi.args", Str, "Default args for kimi on launch"),
     f("qoder_args", "HCOM_QODER_ARGS", "launch.qoder.args", Str, "Default args for qodercli on launch"),
     f("grok_args", "HCOM_GROK_ARGS", "launch.grok.args", Str, "Default args for grok on launch"),
+    f("hermes_args", "HCOM_HERMES_ARGS", "launch.hermes.args", Str, "Default args for hermes chat on launch"),
     f("timeout", "HCOM_TIMEOUT", "preferences.timeout", Int, "Idle timeout in seconds (default: 86400)"),
     f("auto_approve", "HCOM_AUTO_APPROVE", "preferences.auto_approve", Bool, "Auto-approve safe hcom commands"),
     f("name_export", "HCOM_NAME_EXPORT", "preferences.name_export", Str, "Export instance name to custom env var"),
@@ -284,12 +284,12 @@ pub struct HcomConfig {
     pub pi_args: String,
     /// Oh My Pi specific launch arguments
     pub omp_args: String,
-    pub hermes_args: String,
     pub cursor_args: String,
     pub kimi_args: String,
     pub copilot_args: String,
     pub qoder_args: String,
     pub grok_args: String,
+    pub hermes_args: String,
     pub gemini_system_prompt: String,
     pub codex_system_prompt: String,
     pub relay: String,
@@ -332,12 +332,12 @@ impl Default for HcomConfig {
             kilo_args: String::new(),
             pi_args: String::new(),
             omp_args: String::new(),
-            hermes_args: String::new(),
             cursor_args: String::new(),
             kimi_args: String::new(),
             copilot_args: String::new(),
             qoder_args: String::new(),
             grok_args: String::new(),
+            hermes_args: String::new(),
             gemini_system_prompt: String::new(),
             codex_system_prompt: String::new(),
             relay: String::new(),
@@ -479,12 +479,12 @@ impl HcomConfig {
             ("kilo_args", &self.kilo_args),
             ("pi_args", &self.pi_args),
             ("omp_args", &self.omp_args),
-            ("hermes_args", &self.hermes_args),
             ("cursor_args", &self.cursor_args),
             ("kimi_args", &self.kimi_args),
             ("copilot_args", &self.copilot_args),
             ("qoder_args", &self.qoder_args),
             ("grok_args", &self.grok_args),
+            ("hermes_args", &self.hermes_args),
         ] {
             if !value.is_empty()
                 && let Err(e) = shell_words::split(value)
@@ -532,12 +532,12 @@ impl HcomConfig {
             "kilo_args" => Some(self.kilo_args.clone()),
             "pi_args" => Some(self.pi_args.clone()),
             "omp_args" => Some(self.omp_args.clone()),
-            "hermes_args" => Some(self.hermes_args.clone()),
             "cursor_args" => Some(self.cursor_args.clone()),
             "kimi_args" => Some(self.kimi_args.clone()),
             "copilot_args" => Some(self.copilot_args.clone()),
             "qoder_args" => Some(self.qoder_args.clone()),
             "grok_args" => Some(self.grok_args.clone()),
+            "hermes_args" => Some(self.hermes_args.clone()),
             "gemini_system_prompt" => Some(self.gemini_system_prompt.clone()),
             "codex_system_prompt" => Some(self.codex_system_prompt.clone()),
             "relay" => Some(self.relay.clone()),
@@ -588,12 +588,12 @@ impl HcomConfig {
             "kilo_args" => self.kilo_args = value.to_string(),
             "pi_args" => self.pi_args = value.to_string(),
             "omp_args" => self.omp_args = value.to_string(),
-            "hermes_args" => self.hermes_args = value.to_string(),
             "cursor_args" => self.cursor_args = value.to_string(),
             "kimi_args" => self.kimi_args = value.to_string(),
             "copilot_args" => self.copilot_args = value.to_string(),
             "qoder_args" => self.qoder_args = value.to_string(),
             "grok_args" => self.grok_args = value.to_string(),
+            "hermes_args" => self.hermes_args = value.to_string(),
             "gemini_system_prompt" => self.gemini_system_prompt = value.to_string(),
             "codex_system_prompt" => self.codex_system_prompt = value.to_string(),
             "relay" => self.relay = value.to_string(),
@@ -1439,7 +1439,7 @@ pub fn write_config_toml_path(path: &std::path::Path, content: &str) -> std::io:
 }
 
 #[cfg(unix)]
-fn lock_down_config_permissions(path: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn lock_down_config_permissions(path: &std::path::Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let mut perms = std::fs::metadata(path)?.permissions();
@@ -1448,7 +1448,7 @@ fn lock_down_config_permissions(path: &std::path::Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn lock_down_config_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+pub(crate) fn lock_down_config_permissions(_path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -2652,5 +2652,14 @@ active = "default"
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+
+        // Edit mode also tightens permissions on an existing config.
+        let path = paths::config_toml_path();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        lock_down_config_permissions(&path).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

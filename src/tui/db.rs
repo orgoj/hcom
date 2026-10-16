@@ -220,7 +220,11 @@ impl DbDataSource {
 
 impl DataSource for DbDataSource {
     fn set_timeline_limit(&mut self, limit: usize) {
-        self.timeline_limit = limit;
+        if self.timeline_limit != limit {
+            self.timeline_limit = limit;
+            // Force the next load to re-query; the cached window used the old limit.
+            self.last_data_version = 0;
+        }
     }
 
     fn last_error(&self) -> Option<String> {
@@ -341,9 +345,9 @@ fn parse_tool(s: &str) -> Tool {
         Ok(crate::tool::Tool::Cursor) => Tool::Cursor,
         Ok(crate::tool::Tool::Kimi) => Tool::Kimi,
         Ok(crate::tool::Tool::Copilot) => Tool::Copilot,
-        Ok(crate::tool::Tool::Hermes) => Tool::Hermes,
         Ok(crate::tool::Tool::Qoder) => Tool::Qoder,
         Ok(crate::tool::Tool::Grok) => Tool::Grok,
+        Ok(crate::tool::Tool::Hermes) => Tool::Hermes,
         Ok(crate::tool::Tool::Adhoc) => Tool::Adhoc,
         Err(_) => Tool::Unknown(s.to_string()),
     }
@@ -368,7 +372,7 @@ fn load_instances(conn: &Connection, device_uuid: &str, now: f64) -> (Vec<Agent>
         "SELECT name, tool, status, status_context, status_detail,
                 created_at, status_time, last_stop, tcp_mode,
                 directory, tag, last_event_id, origin_device_id,
-                pid, session_id, background, terminal_preset_effective
+                pid, session_id, background, terminal_preset_effective, transcript_path
          FROM instances ORDER BY created_at DESC",
     ) {
         Ok(s) => s,
@@ -394,6 +398,7 @@ fn load_instances(conn: &Connection, device_uuid: &str, now: f64) -> (Vec<Agent>
             row.get::<_, Option<String>>(14)?, // session_id
             row.get::<_, Option<i64>>(15)?,    // background (headless)
             row.get::<_, Option<String>>(16)?, // terminal_preset_effective
+            row.get::<_, Option<String>>(17)?, // transcript_path
         ))
     }) {
         Ok(r) => r,
@@ -426,6 +431,7 @@ fn load_instances(conn: &Connection, device_uuid: &str, now: f64) -> (Vec<Agent>
             session_id,
             background,
             terminal_preset,
+            transcript_path,
         ) = row;
 
         let ctx = ctx.unwrap_or_default();
@@ -504,6 +510,7 @@ fn load_instances(conn: &Connection, device_uuid: &str, now: f64) -> (Vec<Agent>
             sync_age,
             pid: pid.map(|p| p as u32),
             session_id: session_id.filter(|s| !s.is_empty()),
+            transcript_path: transcript_path.filter(|s| !s.is_empty()),
             headless: background != 0,
             terminal_preset,
         };
@@ -519,7 +526,7 @@ fn load_instances(conn: &Connection, device_uuid: &str, now: f64) -> (Vec<Agent>
 
         // Apply stale detection for local agents
         if !is_remote {
-            let computed = status::compute_status(&agent, now, None);
+            let computed = status::compute_status(&agent, now);
             agent.status = computed.status;
             agent.status_context = computed.status_context;
             agent.status_detail = computed.status_detail;
@@ -697,7 +704,8 @@ fn load_stopped(conn: &Connection, now: f64, max_age_secs: Option<f64>) -> Vec<A
     let mut stopped = Vec::new();
 
     for (name, data, ts) in &rows {
-        if parse_iso_to_epoch(ts) < cutoff as f64 {
+        let stopped_at = parse_iso_to_epoch(ts);
+        if stopped_at < cutoff as f64 {
             continue;
         }
         if !seen.insert(name.clone()) {
@@ -729,8 +737,8 @@ fn load_stopped(conn: &Connection, now: f64, max_age_secs: Option<f64>) -> Vec<A
             status_context: action.to_string(),
             status_detail: String::new(),
             created_at,
-            status_time: now,
-            last_heartbeat: now,
+            status_time: stopped_at,
+            last_heartbeat: stopped_at,
             has_tcp: false,
             directory: directory.to_string(),
             tag: tag.to_string(),
@@ -739,7 +747,16 @@ fn load_stopped(conn: &Connection, now: f64, max_age_secs: Option<f64>) -> Vec<A
             device_name: None,
             sync_age: None,
             headless: false,
-            session_id: None,
+            session_id: snapshot
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            transcript_path: snapshot
+                .get("transcript_path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
             pid: None,
             terminal_preset: None,
         });
@@ -969,7 +986,11 @@ fn parse_message_row(id: i64, timestamp: &str, data: &str) -> Option<Message> {
         .get("intent")
         .and_then(|v| v.as_str())
         .map(String::from);
-    let reply_to = json.get("reply_to").and_then(|v| v.as_u64());
+    // Imported event IDs belong to the origin device, not this database.
+    let reply_to = json
+        .get("reply_to_local")
+        .filter(|_| json.get("_relay").is_none())
+        .and_then(|v| v.as_u64());
 
     Some(Message {
         event_id: id as u64,
@@ -1293,212 +1314,15 @@ pub fn read_launch_defaults() -> LaunchDefaults {
 
 // ── Dynamic terminal preset detection ────────────────────────────
 
-/// Built-in preset: name, binary to check (None = macOS app bundle), app name, platforms.
-struct PresetDef {
-    name: &'static str,
-    binary: Option<&'static str>,
-    app_name: &'static str,
-    platforms: &'static [&'static str],
-}
-
-/// All built-in presets (canonical list in shared/constants.rs TERMINAL_PRESETS).
-/// Order here determines display order in the TUI.
-const BUILTIN_PRESETS: &[PresetDef] = &[
-    // macOS native
-    PresetDef {
-        name: "terminal.app",
-        binary: None,
-        app_name: "Terminal",
-        platforms: &["Darwin"],
-    },
-    PresetDef {
-        name: "iterm",
-        binary: None,
-        app_name: "iTerm",
-        platforms: &["Darwin"],
-    },
-    PresetDef {
-        name: "ghostty",
-        binary: None,
-        app_name: "Ghostty",
-        platforms: &["Darwin"],
-    },
-    // Cross-platform
-    PresetDef {
-        name: "kitty",
-        binary: Some("kitty"),
-        app_name: "kitty",
-        platforms: &["Darwin", "Linux"],
-    },
-    PresetDef {
-        name: "wezterm",
-        binary: Some("wezterm"),
-        app_name: "WezTerm",
-        platforms: &["Darwin", "Linux", "Windows"],
-    },
-    PresetDef {
-        name: "alacritty",
-        binary: Some("alacritty"),
-        app_name: "Alacritty",
-        platforms: &["Darwin", "Linux", "Windows"],
-    },
-    // Multiplexer
-    PresetDef {
-        name: "tmux",
-        binary: Some("tmux"),
-        app_name: "",
-        platforms: &["Darwin", "Linux"],
-    },
-    // Tab utilities
-    PresetDef {
-        name: "ttab",
-        binary: Some("ttab"),
-        app_name: "",
-        platforms: &["Darwin"],
-    },
-    // Linux-only
-    PresetDef {
-        name: "gnome-terminal",
-        binary: Some("gnome-terminal"),
-        app_name: "",
-        platforms: &["Linux"],
-    },
-    PresetDef {
-        name: "ptyxis",
-        binary: Some("ptyxis"),
-        app_name: "",
-        platforms: &["Linux"],
-    },
-    PresetDef {
-        name: "konsole",
-        binary: Some("konsole"),
-        app_name: "",
-        platforms: &["Linux"],
-    },
-    PresetDef {
-        name: "xterm",
-        binary: Some("xterm"),
-        app_name: "",
-        platforms: &["Linux"],
-    },
-    PresetDef {
-        name: "tilix",
-        binary: Some("tilix"),
-        app_name: "",
-        platforms: &["Linux"],
-    },
-    PresetDef {
-        name: "terminator",
-        binary: Some("terminator"),
-        app_name: "",
-        platforms: &["Linux"],
-    },
-    // Windows
-    PresetDef {
-        name: "windows-terminal",
-        binary: Some("wt"),
-        app_name: "",
-        platforms: &["Windows"],
-    },
-];
-
-fn current_platform() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Darwin"
-    } else if cfg!(target_os = "linux") {
-        "Linux"
-    } else if cfg!(target_os = "windows") {
-        "Windows"
-    } else {
-        "Unknown"
-    }
-}
-
-/// Check if a binary is on PATH.
-fn binary_available(name: &str) -> bool {
-    crate::terminal::which_bin(name).is_some()
-}
-
-/// Check if a macOS .app bundle exists in standard locations.
-fn macos_app_available(app_name: &str) -> bool {
-    if !cfg!(target_os = "macos") {
-        return false;
-    }
-    let bundle = if app_name.ends_with(".app") {
-        app_name.to_string()
-    } else {
-        format!("{}.app", app_name)
-    };
-    let static_dirs = [
-        "/Applications",
-        "/System/Applications",
-        "/System/Applications/Utilities",
-    ];
-    if static_dirs
-        .iter()
-        .any(|d| std::path::Path::new(d).join(&bundle).exists())
-    {
-        return true;
-    }
-    std::env::var("HOME")
-        .ok()
-        .map(|home| {
-            std::path::Path::new(&home)
-                .join("Applications")
-                .join(&bundle)
-                .exists()
-        })
-        .unwrap_or(false)
-}
-
 /// Get terminal presets available on this system.
 /// Always starts with "default", then lists detected presets.
 /// Also includes user-defined presets from config.toml.
 pub fn get_available_presets() -> Vec<String> {
-    let platform = current_platform();
-    let mut result = vec!["default".to_string()];
-
-    for preset in BUILTIN_PRESETS {
-        if !preset.platforms.contains(&platform) {
-            continue;
-        }
-        let available = match preset.binary {
-            Some(bin) => {
-                binary_available(bin)
-                    || (cfg!(target_os = "macos")
-                        && !preset.app_name.is_empty()
-                        && macos_app_available(preset.app_name))
-            }
-            None => {
-                // macOS app bundle check only
-                if cfg!(target_os = "macos") {
-                    macos_app_available(preset.app_name)
-                } else {
-                    true
-                }
-            }
-        };
-        if available {
-            result.push(preset.name.to_string());
-        }
-    }
-
-    // User-defined presets from config.toml [terminal.presets.*]
-    if let Some(table) = read_config_toml()
-        && let Some(presets_table) = table
-            .get("terminal")
-            .and_then(|v| v.as_table())
-            .and_then(|t| t.get("presets"))
-            .and_then(|v| v.as_table())
-    {
-        for name in presets_table.keys() {
-            if !result.iter().any(|r| r == name) {
-                result.push(name.clone());
-            }
-        }
-    }
-
-    result
+    crate::terminal::get_available_presets()
+        .into_iter()
+        .filter(|(name, available)| *available && name != "custom")
+        .map(|(name, _)| name)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1670,6 +1494,7 @@ mod tests {
             sync_age: None,
             headless: false,
             session_id: None,
+            transcript_path: None,
             pid: None,
             terminal_preset: None,
         }
@@ -1708,6 +1533,8 @@ mod tests {
         let stopped = load_recently_stopped(&conn, now);
         assert_eq!(stopped.len(), 1);
         assert_eq!(stopped[0].name, "reca");
+        assert_eq!(stopped[0].status_time, now - 30.0);
+        assert_eq!(stopped[0].last_heartbeat, now - 30.0);
     }
 
     #[test]
@@ -1807,7 +1634,8 @@ mod tests {
                 pid INTEGER,
                 session_id TEXT,
                 background INTEGER,
-                terminal_preset_effective TEXT
+                terminal_preset_effective TEXT,
+                transcript_path TEXT
             );
             CREATE TABLE kv (key TEXT, value TEXT);
             ",
@@ -1864,7 +1692,7 @@ mod tests {
         let msg = parse_message_row(
             8,
             "2026-02-18T00:09:30+00:00",
-            r#"{"from":"sys","text":"hi","scope":"mentions","sender_kind":"human","mentions":["nova"],"delivered_to":["nova"],"intent":"request","reply_to":42}"#,
+            r#"{"from":"sys","text":"hi","scope":"mentions","sender_kind":"human","mentions":["nova"],"delivered_to":["nova"],"intent":"request","reply_to":"7:BOXE","reply_to_local":42}"#,
         )
         .unwrap();
 
@@ -1872,6 +1700,16 @@ mod tests {
         assert_eq!(msg.recipients, vec!["nova"]);
         assert_eq!(msg.intent.as_deref(), Some("request"));
         assert_eq!(msg.reply_to, Some(42));
+    }
+
+    #[test]
+    fn imported_reply_does_not_use_origin_local_id() {
+        let msg = parse_message_row(
+            100,
+            "2026-02-18T00:09:30+00:00",
+            r#"{"from":"nova:BOXE","text":"reply","reply_to":"7:BOXE","reply_to_local":42,"_relay":{"device":"remote","short":"BOXE","id":8}}"#,
+        ).unwrap();
+        assert!(msg.reply_to.is_none());
     }
 
     #[test]

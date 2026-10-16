@@ -67,6 +67,8 @@ pub struct UiState {
     pub should_quit: bool,
     pub switch_viewport: bool,
     pub msg_scroll: usize,
+    /// Rendered fullscreen lines in the previous frame, for scroll anchoring.
+    pub last_msg_total: usize,
     pub scroll_max: usize,
     pub search_filter: Option<String>,
     pub help_open: bool,
@@ -85,7 +87,6 @@ pub struct UiState {
     pub remote_expanded: bool,
     pub stopped_expanded: bool,
     pub show_all_stopped: bool,
-    pub show_events: bool,
     pub orphans_expanded: bool,
     pub eject_filter: Option<BTreeSet<String>>,
     pub inline_filter_changed: bool,
@@ -141,6 +142,7 @@ impl Confirm {
 }
 
 pub enum ConfirmAction {
+    Reset(String),
     KillAgents(Vec<String>),
     ForkAgents(Vec<String>),
     ResumeAgents(Vec<String>),

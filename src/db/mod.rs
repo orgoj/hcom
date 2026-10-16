@@ -45,7 +45,7 @@ const CONNECTION_PRAGMAS: &str =
     "PRAGMA busy_timeout=30000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;";
 
 /// Schema version - bump on any schema change.
-const SCHEMA_VERSION: i32 = 18;
+const SCHEMA_VERSION: i32 = 20;
 pub const DEV_ROOT_KV_KEY: &str = "config:dev_root";
 const MIGRATIONS: &[(i32, &str)] = &[
     (
@@ -74,6 +74,24 @@ const MIGRATIONS: &[(i32, &str)] = &[
              ON claude_actor_capabilities(expires_at);
          CREATE INDEX IF NOT EXISTS idx_claude_actor_session
              ON claude_actor_capabilities(session_id);",
+    ),
+    (
+        19,
+        "CREATE TRIGGER IF NOT EXISTS events_fts_delete
+         AFTER DELETE ON events BEGIN
+             DELETE FROM events_fts WHERE rowid = old.id;
+         END;
+         DELETE FROM events_fts WHERE rowid NOT IN (SELECT id FROM events);",
+    ),
+    (
+        20,
+        "UPDATE instances
+         SET terminal_preset_effective = json_extract(launch_context, '$.terminal_preset_effective')
+         WHERE COALESCE(terminal_preset_effective, '') = ''
+           AND CASE WHEN json_valid(launch_context) THEN
+               json_type(launch_context, '$.terminal_preset_effective') = 'text'
+               AND json_extract(launch_context, '$.terminal_preset_effective') != ''
+               ELSE 0 END;",
     ),
 ];
 
@@ -468,6 +486,10 @@ impl HcomDb {
                     COALESCE(json_extract(new.data, '$.action'), '') || ' ' ||
                     COALESCE(json_extract(new.data, '$.reason'), '')
                 );
+            END;
+            CREATE TRIGGER IF NOT EXISTS events_fts_delete
+            AFTER DELETE ON events BEGIN
+                DELETE FROM events_fts WHERE rowid = old.id;
             END;
             ",
         )?;
@@ -1389,6 +1411,49 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn test_v19_migration_removes_orphans_and_tracks_deletes_in_place() {
+        let (mut db, db_path) = setup_full_test_db();
+        db.conn
+            .execute_batch("DROP TRIGGER events_fts_delete; PRAGMA user_version = 18;")
+            .unwrap();
+        db.log_event(
+            "message",
+            "sender",
+            &serde_json::json!({"text": "purgedword"}),
+        )
+        .unwrap();
+        db.conn.execute("DELETE FROM events", []).unwrap();
+        db.log_event(
+            "message",
+            "sender",
+            &serde_json::json!({"text": "retainedword"}),
+        )
+        .unwrap();
+        db.kv_set("migration_sentinel", Some("preserved")).unwrap();
+        let inode = get_inode(&db_path);
+        db.ensure_schema().unwrap();
+        assert_eq!(get_inode(&db_path), inode);
+        assert_eq!(
+            db.kv_get("migration_sentinel").unwrap().as_deref(),
+            Some("preserved")
+        );
+        let count = |word: &str| {
+            db.conn
+                .query_row(
+                    "SELECT count(*) FROM events_fts WHERE events_fts MATCH ?",
+                    [word],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(count("purgedword"), 0);
+        assert_eq!(count("retainedword"), 1);
+        db.conn.execute("DELETE FROM events", []).unwrap();
+        assert_eq!(count("retainedword"), 0);
+        cleanup_test_db(db_path);
+    }
+
+    #[test]
     fn test_check_schema_compat_fresh_db() {
         let (db, db_path) = setup_full_test_db();
         match db.check_schema_compat().unwrap() {
@@ -1503,6 +1568,7 @@ pub(super) mod tests {
                  CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);
                  CREATE TABLE notify_endpoints (instance TEXT, kind TEXT, port INTEGER, updated_at REAL, PRIMARY KEY(instance, kind));
                  CREATE TABLE session_bindings (session_id TEXT PRIMARY KEY, instance_name TEXT NOT NULL, created_at REAL NOT NULL);
+                 CREATE VIRTUAL TABLE events_fts USING fts5(searchable);
                  PRAGMA user_version = 16;",
             )
             .unwrap();
@@ -1587,6 +1653,7 @@ pub(super) mod tests {
                  CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT);
                  CREATE TABLE notify_endpoints (instance TEXT, kind TEXT, port INTEGER, updated_at REAL, PRIMARY KEY(instance, kind));
                  CREATE TABLE session_bindings (session_id TEXT PRIMARY KEY, instance_name TEXT NOT NULL, created_at REAL NOT NULL);
+                 CREATE VIRTUAL TABLE events_fts USING fts5(searchable);
                  PRAGMA user_version = 17;",
             )
             .unwrap();
@@ -1732,6 +1799,7 @@ pub(super) mod tests {
                  CREATE TABLE notify_endpoints (instance TEXT NOT NULL, kind TEXT NOT NULL, port INTEGER NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY(instance, kind));
                  CREATE TABLE session_bindings (session_id TEXT PRIMARY KEY, instance_name TEXT NOT NULL, created_at REAL NOT NULL);
                  CREATE TABLE process_bindings (process_id TEXT PRIMARY KEY, session_id TEXT, instance_name TEXT, updated_at REAL NOT NULL);
+                 CREATE VIRTUAL TABLE events_fts USING fts5(searchable);
                  PRAGMA user_version = 17;",
             )
             .unwrap();

@@ -2543,7 +2543,8 @@ fn build_continue_prompt(
         allow_codex_retry: true,
     };
     let exchanges = crate::transcript::read(Path::new(&path), backend, &opts)
-        .map_err(|e| anyhow::anyhow!("failed to read transcript for '{agent_name}': {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to read transcript for '{agent_name}': {e}"))?
+        .exchanges;
     if exchanges.is_empty() {
         bail!("cannot continue '{agent_name}': transcript has no conversation history");
     }

@@ -139,6 +139,12 @@ pub(super) const INSTANCE_COLUMNS: &str =
      idle_since, pid, launch_context";
 
 impl InstanceRow {
+    /// `launch_context[section][field]` as a string, if present.
+    pub fn launch_context_value(&self, section: &str, field: &str) -> Option<String> {
+        let ctx: serde_json::Value = serde_json::from_str(self.launch_context.as_deref()?).ok()?;
+        ctx.get(section)?.get(field)?.as_str().map(str::to_string)
+    }
+
     /// Process identity recorded with this snapshot's PID, if any.
     pub fn pid_identity(&self) -> Option<String> {
         let ctx: serde_json::Value = serde_json::from_str(self.launch_context.as_deref()?).ok()?;
@@ -261,15 +267,25 @@ impl HcomDb {
     /// Update gate blocking status WITHOUT logging a status event.
     ///
     /// Used for transient PTY gate states (tui:*) that shouldn't pollute the events table.
-    /// Only updates the instance row; TUI reads this for display but no event is created.
+    /// Updates only listening rows; returns whether the gate was installed.
+    /// TUI reads the row for display but no event is created.
     ///
     /// Args:
     ///   context: Gate context like "tui:not-ready", "tui:user-active", etc.
     ///   detail: Human-readable description like "user is typing"
-    pub fn set_gate_status(&self, name: &str, context: &str, detail: &str) -> Result<()> {
+    pub fn set_gate_status(&self, name: &str, context: &str, detail: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE instances SET status_context = ?, status_detail = ? WHERE name = ? AND status = ?",
+            params![context, detail, name, ST_LISTENING],
+        )? > 0)
+    }
+
+    /// Clear only the gate context this caller last installed.
+    pub fn clear_gate_status(&self, name: &str, expected_context: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE instances SET status_context = ?, status_detail = ? WHERE name = ?",
-            params![context, detail, name],
+            "UPDATE instances SET status_context = '', status_detail = ''
+             WHERE name = ? AND status_context = ? AND status = ?",
+            params![name, expected_context, ST_LISTENING],
         )?;
         Ok(())
     }
@@ -374,6 +390,34 @@ impl HcomDb {
              WHERE name = ?",
             params![name],
         )?;
+        Ok(())
+    }
+
+    /// Promote presets captured before the dedicated column was populated.
+    /// An explicit launcher decision in the column remains authoritative.
+    pub fn promote_terminal_presets(&self, name: Option<&str>) -> Result<()> {
+        let predicate = "COALESCE(terminal_preset_effective, '') = ''
+            AND (?1 IS NULL OR name = ?1)
+            AND CASE WHEN json_valid(launch_context) THEN
+                json_type(launch_context, '$.terminal_preset_effective') = 'text'
+                AND json_extract(launch_context, '$.terminal_preset_effective') != ''
+                ELSE 0 END";
+        // Most opens have nothing to repair. Avoid taking a write lock then.
+        let needed: bool = self.conn.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM instances WHERE {predicate})"),
+            params![name],
+            |row| row.get(0),
+        )?;
+        if needed {
+            self.conn.execute(
+                &format!(
+                    "UPDATE instances SET terminal_preset_effective =
+                    json_extract(launch_context, '$.terminal_preset_effective')
+                    WHERE {predicate}"
+                ),
+                params![name],
+            )?;
+        }
         Ok(())
     }
 
@@ -1024,15 +1068,22 @@ impl HcomDb {
     }
 
     /// Forward-only cursor advance, optionally marking the name announced, in
-    /// one statement.
-    pub fn ack_hook_delivery(&self, name: &str, event_id: i64, announce: bool) -> Result<()> {
-        self.conn.execute(
+    /// one statement. With `created_at`, only that row incarnation advances;
+    /// returns whether a row was updated.
+    pub fn ack_hook_delivery(
+        &self,
+        name: &str,
+        event_id: i64,
+        announce: bool,
+        created_at: Option<f64>,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
             "UPDATE instances SET last_event_id = MAX(COALESCE(last_event_id, 0), ?),
              name_announced = CASE WHEN ? THEN 1 ELSE name_announced END
-             WHERE name = ?",
-            params![event_id, announce, name],
+             WHERE name = ? AND (? IS NULL OR created_at = ?)",
+            params![event_id, announce, name, created_at, created_at],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     /// Update specific fields on an instance row.
@@ -1170,6 +1221,77 @@ mod tests {
     fn reopen_broken_schema(db_path: &std::path::Path) -> HcomDb {
         // Use open_raw here: open_at would repair the table we deliberately dropped.
         HcomDb::open_raw(db_path).unwrap()
+    }
+
+    #[test]
+    fn test_v20_migration_promotes_captured_terminal_presets() {
+        let (db, path) = setup_full_test_db();
+        for (name, preset, context) in [
+            ("captured", "", r#"{"terminal_preset_effective":"kitty"}"#),
+            (
+                "explicit",
+                "herdr",
+                r#"{"terminal_preset_effective":"kitty"}"#,
+            ),
+            ("invalid", "", "invalid JSON"),
+            ("numeric", "", r#"{"terminal_preset_effective":42}"#),
+            ("empty", "", r#"{"terminal_preset_effective":""}"#),
+        ] {
+            db.conn.execute("INSERT INTO instances (name, created_at, terminal_preset_effective, launch_context) VALUES (?, 1.0, ?, ?)", params![name, preset, context]).unwrap();
+        }
+        db.conn.execute_batch("PRAGMA user_version = 19").unwrap();
+        drop(db);
+        let db = HcomDb::open_at(&path).unwrap();
+        for (name, expected) in [
+            ("captured", Some("kitty")),
+            ("explicit", Some("herdr")),
+            ("invalid", None),
+            ("numeric", None),
+            ("empty", None),
+        ] {
+            assert_eq!(
+                db.get_instance_full(name)
+                    .unwrap()
+                    .unwrap()
+                    .terminal_preset_effective
+                    .as_deref(),
+                expected
+            );
+        }
+        // Repeated repair is harmless and doesn't erase an explicit decision.
+        db.promote_terminal_presets(None).unwrap();
+        assert_eq!(
+            db.get_instance_full("explicit")
+                .unwrap()
+                .unwrap()
+                .terminal_preset_effective
+                .as_deref(),
+            Some("herdr")
+        );
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    fn test_gate_writes_preserve_approval_and_newer_contexts() {
+        let (db, path) = setup_full_test_db();
+        db.conn.execute("INSERT INTO instances (name, created_at, status) VALUES ('luna', 1.0, 'listening')", []).unwrap();
+        db.set_gate_status("luna", "tui:not-ready", "waiting")
+            .unwrap();
+        db.clear_gate_status("luna", "tui:user-active").unwrap();
+        assert_eq!(db.get_status("luna").unwrap().unwrap().1, "tui:not-ready");
+        db.clear_gate_status("luna", "tui:not-ready").unwrap();
+        assert_eq!(db.get_status("luna").unwrap().unwrap().1, "");
+        for context in ["pty:approval", "approval"] {
+            db.set_status("luna", "blocked", context).unwrap();
+            db.clear_gate_status("luna", "tui:not-ready").unwrap();
+            db.set_gate_status("luna", "tui:wake-unacknowledged", "paused")
+                .unwrap();
+            assert_eq!(
+                db.get_status("luna").unwrap().unwrap(),
+                ("blocked".into(), context.into())
+            );
+        }
+        cleanup_test_db(path);
     }
 
     #[test]

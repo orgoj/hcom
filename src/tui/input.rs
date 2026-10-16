@@ -10,6 +10,13 @@ use crate::tui::theme::Theme;
 
 impl App {
     pub fn handle_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        self.handle_key_inner(code, modifiers);
+        if self.ui.mode != InputMode::CommandOutput && !self.ui.pending_eject_cmd {
+            self.ui.command_result = None;
+        }
+    }
+
+    fn handle_key_inner(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         // AltGr on non-US keyboards sends Ctrl+Alt — exclude from Ctrl shortcut matching
         // so characters like @ (AltGr+Q on German) and \ (AltGr on many layouts) pass through.
         let ctrl =
@@ -169,6 +176,12 @@ impl App {
             return;
         }
 
+        // Unhandled Ctrl combos must not fall through as plain letters
+        // (Ctrl+K would open kill, Ctrl+V would type 'v').
+        if ctrl && matches!(code, KeyCode::Char(_)) {
+            return;
+        }
+
         // ── Mode dispatch ──
         match self.ui.mode {
             InputMode::Relay => self.handle_relay(code),
@@ -212,7 +225,7 @@ impl App {
                     insert_at(&mut self.ui.input, &mut self.ui.input_cursor, c);
                 }
             }
-        } else if self.ui.mode == InputMode::Compose {
+        } else if matches!(self.ui.mode, InputMode::Compose | InputMode::Launch) {
             for c in clean.chars() {
                 insert_at(&mut self.ui.input, &mut self.ui.input_cursor, c);
             }
@@ -768,30 +781,18 @@ impl App {
             OverlayKind::Command => {
                 if !overlay.input.is_empty() {
                     let cmd = overlay.input;
-                    let is_inline = self.ui.view_mode == ViewMode::Inline;
-                    if let Err(e) = self.enqueue_rpc(RpcOp::Command { cmd: cmd.clone() }) {
-                        self.ui.command_result = Some(CommandResult {
-                            label: cmd,
-                            output: vec![format!("Error: {}", e)],
-                        });
-                        if is_inline {
-                            self.ui.pending_eject_cmd = true;
-                        } else {
-                            self.ui.mode = InputMode::CommandOutput;
-                        }
-                    } else {
-                        self.ui.command_result = Some(CommandResult {
-                            label: cmd,
-                            output: vec!["(running...)".into()],
-                        });
-                        if is_inline {
-                            self.ui.flash =
-                                Some(Flash::new("Running...".into(), Theme::flash_info()));
-                        } else {
-                            self.ui.mode = InputMode::CommandOutput;
-                        }
+                    if crate::tui::rpc::parse_command_argv(&cmd).is_ok_and(|args| {
+                        matches!(crate::router::resolve_action(&args),
+                            crate::router::Action::Command { cmd, .. } if cmd == "reset")
+                    }) {
+                        self.ui.confirm = Some(Confirm::new(
+                            "Stop all agents and archive the database?".into(),
+                            ConfirmAction::Reset(cmd),
+                            false,
+                        ));
+                        return;
                     }
-                    self.ui.msg_scroll = 0;
+                    self.run_palette_command(cmd);
                 }
             }
             OverlayKind::Tag => {
@@ -819,6 +820,32 @@ impl App {
                 }
             }
         }
+    }
+
+    pub(crate) fn run_palette_command(&mut self, cmd: String) {
+        let is_inline = self.ui.view_mode == ViewMode::Inline;
+        if let Err(e) = self.enqueue_rpc(RpcOp::Command { cmd: cmd.clone() }) {
+            self.ui.command_result = Some(CommandResult {
+                label: cmd,
+                output: vec![format!("Error: {}", e)],
+            });
+            if is_inline {
+                self.ui.pending_eject_cmd = true;
+            } else {
+                self.ui.mode = InputMode::CommandOutput;
+            }
+        } else {
+            self.ui.command_result = Some(CommandResult {
+                label: cmd,
+                output: vec!["(running...)".into()],
+            });
+            if is_inline {
+                self.ui.flash = Some(Flash::new("Running...".into(), Theme::flash_info()));
+            } else {
+                self.ui.mode = InputMode::CommandOutput;
+            }
+        }
+        self.ui.msg_scroll = 0;
     }
 
     fn cancel_overlay(&mut self) {
@@ -878,7 +905,7 @@ impl App {
         });
         s.push(CommandSuggestion {
             command: "archive".into(),
-            description: "archive stopped",
+            description: "list archives",
         });
         s.push(CommandSuggestion {
             command: "reset".into(),
@@ -956,11 +983,6 @@ impl App {
 
     fn send_message(&mut self) {
         let (recipients, body) = parse_outbound_message(&self.ui.input);
-        let recipients = if recipients.is_empty() {
-            vec!["all".to_string()]
-        } else {
-            recipients
-        };
         if let Err(e) = self.enqueue_rpc(RpcOp::Send {
             recipients,
             body,
@@ -1085,23 +1107,19 @@ impl App {
                 let tag = self.ui.launch.tag.clone();
                 let headless = self.ui.launch.headless;
                 let headless_pty = self.ui.launch.headless_pty;
-                let terminal = self
-                    .ui
-                    .launch
-                    .terminal_presets
-                    .get(self.ui.launch.terminal)
-                    .map(|s| s.as_str())
-                    .unwrap_or("auto");
+                let terminal = self.ui.launch.terminal_override().to_string();
                 let prompt = self.ui.input.clone();
                 let tool_name = tool.name().to_string();
 
+                let settings = Box::new(self.ui.launch.clone());
                 if let Err(e) = self.enqueue_rpc(RpcOp::Launch {
+                    settings,
                     tool,
                     count,
                     tag,
                     headless,
                     headless_pty,
-                    terminal: terminal.into(),
+                    terminal,
                     prompt,
                 }) {
                     self.ui.flash = Some(Flash::new(
@@ -1113,11 +1131,11 @@ impl App {
                         format!("Launching {} {}", count, tool_name),
                         Theme::flash_info(),
                     ));
+                    self.ui.input.clear();
+                    self.ui.input_cursor = 0;
+                    self.ui.launch = LaunchState::new();
+                    self.ui.mode = InputMode::Navigate;
                 }
-                self.ui.input.clear();
-                self.ui.input_cursor = 0;
-                self.ui.launch = LaunchState::new();
-                self.ui.mode = InputMode::Navigate;
             }
 
             KeyCode::Backspace => delete_back(&mut self.ui.input, &mut self.ui.input_cursor),
@@ -1144,7 +1162,7 @@ impl App {
                 }
                 KeyCode::Enter if !popup.token_input.is_empty() => {
                     let token = popup.token_input.clone();
-                    let cmd = format!("relay connect {}", token);
+                    let cmd = "relay connect".to_string();
                     if let Err(e) = self.enqueue_rpc(RpcOp::RelayConnect {
                         token: token.clone(),
                     }) {
@@ -1253,7 +1271,7 @@ fn push_agent_command_suggestions(s: &mut Vec<CommandSuggestion>, agent: &Agent)
     });
     s.push(CommandSuggestion {
         command: format!("transcript {} --full", name),
-        description: "full transcript",
+        description: "last 10 exchanges, full text",
     });
     if agent.can_resume() {
         s.push(CommandSuggestion {
@@ -1295,6 +1313,69 @@ mod tests {
         app.handle_key(KeyCode::Char(c), KeyModifiers::CONTROL);
     }
 
+    #[test]
+    fn unhandled_ctrl_letters_do_nothing() {
+        let mut app = test_app();
+        app.data.agents = vec![crate::tui::test_helpers::make_test_agent("nova", 0.0)];
+        ctrl(&mut app, 'k');
+        assert!(app.ui.confirm.is_none());
+        app.ui.mode = InputMode::Compose;
+        ctrl(&mut app, 'v');
+        assert!(app.ui.input.is_empty());
+    }
+
+    #[test]
+    fn reset_commands_require_confirmation() {
+        for command in [
+            "reset",
+            "reset --force",
+            "  reset  ",
+            "'reset'",
+            "--go reset",
+        ] {
+            let mut app = test_app();
+            key(&mut app, KeyCode::Char('!'));
+            let overlay = app.ui.overlay.as_mut().unwrap();
+            overlay.input = command.into();
+            overlay.palette = None;
+            key(&mut app, KeyCode::Enter);
+            let confirm = app.ui.confirm.as_ref().expect("reset confirmation");
+            assert!(matches!(confirm.action, ConfirmAction::Reset(_)));
+            assert!(!confirm.selected);
+            assert!(app.ui.command_result.is_none());
+            key(&mut app, KeyCode::Esc);
+            assert!(app.ui.confirm.is_none());
+        }
+    }
+
+    #[test]
+    fn selected_reset_suggestion_requires_confirmation() {
+        let mut app = test_app();
+        key(&mut app, KeyCode::Char('!'));
+        app.handle_paste("reset");
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            app.ui.confirm.as_ref().unwrap().action,
+            ConfirmAction::Reset(_)
+        ));
+        assert!(app.ui.command_result.is_none());
+    }
+
+    #[test]
+    fn paste_launch_prompt_and_preserve_on_enqueue_failure() {
+        let mut app = test_app();
+        app.ui.mode = InputMode::Launch;
+        app.ui.launch.count = 3;
+        app.ui.input = "ab".into();
+        app.ui.input_cursor = 1;
+        app.handle_paste("你好");
+        assert_eq!(app.ui.input, "a你好b");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.ui.input, "a你好b");
+        assert_eq!(app.ui.launch.count, 3);
+        assert_eq!(app.ui.mode, InputMode::Launch);
+    }
+
     fn make_agent(name: &str) -> Agent {
         crate::tui::test_helpers::make_test_agent(name, 60.0)
     }
@@ -1323,6 +1404,35 @@ mod tests {
             .as_ref()
             .map(|f| f.text.clone())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn leaving_command_output_for_relay_clears_result() {
+        let mut app = test_app();
+        app.ui.mode = InputMode::CommandOutput;
+        app.ui.command_result = Some(CommandResult {
+            label: "test".into(),
+            output: vec!["output".into()],
+        });
+        app.handle_key(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert_eq!(app.ui.mode, InputMode::Relay);
+        assert!(app.ui.command_result.is_none());
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(app.ui.mode, InputMode::Navigate);
+        assert!(app.ui.command_result.is_none());
+    }
+
+    #[test]
+    fn inline_command_output_survives_until_ejection() {
+        let mut app = test_app();
+        app.ui.mode = InputMode::Navigate;
+        app.ui.pending_eject_cmd = true;
+        app.ui.command_result = Some(CommandResult {
+            label: "test".into(),
+            output: vec!["output".into()],
+        });
+        key(&mut app, KeyCode::Null);
+        assert!(app.ui.command_result.is_some());
     }
 
     #[test]
@@ -1494,6 +1604,23 @@ mod tests {
 
         assert_eq!(app.resolve_kill_targets(), vec!["nova"]);
         assert_eq!(app.resolve_tag_targets(), vec!["nova"]);
+    }
+
+    #[test]
+    fn relay_connect_enqueue_error_label_omits_token() {
+        let mut app = test_app();
+        ctrl(&mut app, 'r');
+        let popup = app.ui.relay_popup.as_mut().expect("relay popup");
+        popup.editing_token = true;
+        popup.token_input = "secret-token".into();
+        popup.token_cursor = popup.token_input.len();
+
+        key(&mut app, KeyCode::Enter);
+
+        assert_eq!(
+            app.ui.command_result.as_ref().unwrap().label,
+            "relay connect"
+        );
     }
 
     #[test]

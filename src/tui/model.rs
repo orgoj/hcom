@@ -161,6 +161,7 @@ impl Tool {
     pub fn prev(&self) -> Self {
         match self {
             Self::Claude => Self::Hermes,
+            Self::Hermes => Self::Grok,
             Self::Gemini => Self::Claude,
             Self::Codex => Self::Gemini,
             Self::OpenCode => Self::Codex,
@@ -171,7 +172,6 @@ impl Tool {
             Self::Cursor => Self::Antigravity,
             Self::Kimi => Self::Cursor,
             Self::Copilot => Self::Kimi,
-            Self::Hermes => Self::Grok,
             Self::Grok => Self::Qoder,
             Self::Qoder => Self::Copilot,
             Self::Adhoc => Self::Adhoc,
@@ -199,6 +199,7 @@ pub struct Agent {
     pub sync_age: Option<String>,
     pub headless: bool,
     pub session_id: Option<String>,
+    pub transcript_path: Option<String>,
     pub pid: Option<u32>,
     pub terminal_preset: Option<String>,
 }
@@ -596,6 +597,7 @@ pub enum LaunchField {
     Terminal,
 }
 
+#[derive(Clone)]
 pub struct LaunchState {
     pub tool: Tool,
     pub count: u8,
@@ -608,6 +610,7 @@ pub struct LaunchState {
     pub headless_pty: bool,
     pub terminal: usize,
     pub terminal_presets: Vec<String>,
+    pub configured_terminal: String,
     pub editing: Option<LaunchField>,
     pub edit_cursor: usize,
     pub edit_snapshot: Option<String>,
@@ -623,11 +626,17 @@ impl LaunchState {
     pub fn new() -> Self {
         use crate::tui::db::{get_available_presets, read_launch_defaults};
         let defaults = read_launch_defaults();
-        let presets = get_available_presets();
+        Self::with_defaults(defaults, get_available_presets())
+    }
+
+    fn with_defaults(defaults: crate::tui::db::LaunchDefaults, mut presets: Vec<String>) -> Self {
         let terminal_idx = presets
             .iter()
             .position(|p| p == &defaults.terminal)
-            .unwrap_or(0);
+            .unwrap_or_else(|| {
+                presets.push(defaults.terminal.clone());
+                presets.len() - 1
+            });
         Self {
             tool: Tool::Claude,
             count: 1,
@@ -637,10 +646,20 @@ impl LaunchState {
             headless_pty: false,
             terminal: terminal_idx,
             terminal_presets: presets,
+            configured_terminal: defaults.terminal,
             editing: None,
             edit_cursor: 0,
             edit_snapshot: None,
         }
+    }
+
+    /// Omit the terminal override until the selection differs from config.
+    pub fn terminal_override(&self) -> &str {
+        self.terminal_presets
+            .get(self.terminal)
+            .filter(|preset| **preset != self.configured_terminal)
+            .map(String::as_str)
+            .unwrap_or("")
     }
 
     /// Height of the inline panel.
@@ -949,6 +968,7 @@ mod tests {
             sync_age: None,
             headless: false,
             session_id: None,
+            transcript_path: None,
             pid: None,
             terminal_preset: None,
         }
@@ -1384,6 +1404,21 @@ mod tests {
 
     // ── LaunchState navigation ────────────────────────────────────
 
+    #[test]
+    fn configured_custom_terminal_is_preserved_without_override() {
+        let mut launch = LaunchState::with_defaults(
+            crate::tui::db::LaunchDefaults {
+                terminal: "custom command".into(),
+                tag: String::new(),
+            },
+            vec!["default".into(), "kitty".into()],
+        );
+        assert_eq!(launch.terminal_presets[launch.terminal], "custom command");
+        assert_eq!(launch.terminal_override(), "");
+        launch.terminal = 1;
+        assert_eq!(launch.terminal_override(), "kitty");
+    }
+
     fn test_launch() -> LaunchState {
         LaunchState {
             tool: Tool::Claude,
@@ -1394,6 +1429,7 @@ mod tests {
             headless_pty: false,
             terminal: 0,
             terminal_presets: vec!["default".into(), "kitty".into()],
+            configured_terminal: "default".into(),
             editing: None,
             edit_cursor: 0,
             edit_snapshot: None,

@@ -1,4 +1,4 @@
-//! Shared hook infrastructure for all tools (Claude, Gemini, Codex, OpenCode, Kilo, Pi, Oh My Pi, Antigravity, Cursor, Kimi, Copilot, Qoder). Grok has none (see `delivery/grok.rs`).
+//! Shared hook infrastructure for all tools (Claude, Gemini, Codex, OpenCode, Kilo, Pi, Oh My Pi, Hermes, Antigravity, Cursor, Kimi, Copilot, Qoder). Grok has none (see `delivery/grok.rs`).
 
 pub mod antigravity;
 pub mod claude;
@@ -10,6 +10,7 @@ pub mod cursor;
 pub mod family;
 pub mod gemini;
 pub mod hermes;
+pub mod hermes_bridge;
 pub mod kimi;
 pub mod opencode;
 pub mod pi;
@@ -78,6 +79,7 @@ pub mod test_helpers {
                 "PI_CONFIG_DIR",
                 "OMP_PROFILE",
                 "PI_PROFILE",
+                "HERMES_HOME",
             ]
             .into_iter()
             .map(|key| (key, std::env::var_os(key)))
@@ -177,9 +179,12 @@ pub use family::extract_tool_detail;
 pub use utils::{HOOK_REGISTRY, HookCategory, HookInfo};
 
 /// Delivery cursor/status update to apply after hook output is written.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DeliveryAck {
     pub instance_name: String,
+    /// Row the batch was read from, when it was read by a hook whose output
+    /// may block. A stop + resume recreates the row and voids the ack.
+    pub created_at: Option<f64>,
     pub last_event_id: i64,
     pub status_context: String,
     pub msg_ts: String,
@@ -202,7 +207,7 @@ pub struct HookPayload {
     pub transcript_path: Option<String>,
     /// Hook name (e.g., "Stop", "PostToolUse", "PreToolUse").
     pub hook_name: String,
-    /// Tool type string ("claude", "gemini", "codex", "opencode", "kilo", "pi", "omp", "antigravity", "cursor", "kimi", "copilot", "qoder", "grok").
+    /// Tool type string ("claude", "gemini", "codex", "opencode", "kilo", "pi", "omp", "hermes", "antigravity", "cursor", "kimi", "copilot", "qoder", "grok").
     pub tool: String,
     /// Tool name from hook (e.g., "Bash", "Write" for PostToolUse).
     pub tool_name: String,

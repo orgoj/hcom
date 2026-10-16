@@ -1,7 +1,7 @@
 //! Transcript reading: per-tool parsers and a unified read API.
 //!
 //! Tool-specific adapters normalize JSON, JSONL, and SQLite transcripts into
-//! a tool-agnostic `Vec<Exchange>`. Canonical [`Tool`](crate::tool::Tool)
+//! tool-agnostic exchanges and recorded session usage. Canonical [`Tool`](crate::tool::Tool)
 //! identity is kept separate from parser backend so aliases and shared formats
 //! cannot drift into a second tool registry.
 
@@ -11,6 +11,7 @@ pub mod copilot;
 pub mod cursor;
 pub mod gemini;
 pub mod grok;
+pub mod hermes;
 pub mod kimi;
 pub mod opencode;
 pub mod pi;
@@ -20,7 +21,11 @@ use std::path::{Path, PathBuf};
 
 use crate::tool::Tool;
 
-pub use shared::{Exchange, ToolUse, flag_hint, format_exchanges, summarize_action};
+pub use shared::{
+    Exchange, SessionUsage, TokenUsage, ToolUse, Transcript, flag_hint, format_context,
+    format_exchanges, format_transcript_exchanges, format_usage, summarize_action,
+    summarize_exchange,
+};
 
 pub(crate) use opencode::TranscriptSearchMatch;
 
@@ -40,6 +45,15 @@ pub enum TranscriptBackend {
     CopilotJsonl,
     PiJsonl,
     GrokUpdatesJsonl,
+    HermesSqlite,
+}
+
+impl TranscriptBackend {
+    /// One database file holds every session, so a transcript is the
+    /// (path, session_id) pair rather than the path alone.
+    pub fn is_shared_database(self) -> bool {
+        matches!(self, Self::OpenCodeSqlite | Self::HermesSqlite)
+    }
 }
 
 /// Where `transcript search --all` discovers sessions for a tool.
@@ -61,6 +75,7 @@ enum TranscriptDiscovery {
     PiSessions,
     OmpSessions,
     GrokSessions,
+    HermesDatabase,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -105,6 +120,11 @@ static TRANSCRIPT_PROFILES: &[TranscriptProfile] = &[
         tool: Tool::Omp,
         backend: TranscriptBackend::PiJsonl,
         discovery: TranscriptDiscovery::OmpSessions,
+    },
+    TranscriptProfile {
+        tool: Tool::Hermes,
+        backend: TranscriptBackend::HermesSqlite,
+        discovery: TranscriptDiscovery::HermesDatabase,
     },
     TranscriptProfile {
         tool: Tool::Antigravity,
@@ -204,56 +224,62 @@ impl Default for ReadOptions {
     }
 }
 
-/// Read exchanges from a transcript at `path` using the selected backend.
+/// Read exchanges and whole-session usage using the selected backend.
 pub fn read(
     path: &Path,
     backend: TranscriptBackend,
     opts: &ReadOptions,
-) -> Result<Vec<Exchange>, String> {
+) -> Result<Transcript, String> {
     if !path.exists() {
         return Err(format!("Transcript not found: {}", path.display()));
     }
 
-    let mut exchanges = match backend {
+    let mut transcript = match backend {
         TranscriptBackend::ClaudeJsonl => {
-            claude::parse_claude_jsonl(path, opts.last, opts.detailed)
+            claude::parse_claude_jsonl_with_usage(path, opts.detailed)
         }
-        TranscriptBackend::GeminiJson => gemini::parse_gemini_json(path, opts.last),
-        TranscriptBackend::CodexJsonl => codex::parse_codex_jsonl(path, opts.last, opts.detailed),
+        TranscriptBackend::GeminiJson => gemini::parse_gemini_json_with_usage(path),
+        TranscriptBackend::CodexJsonl => codex::parse_codex_jsonl_with_usage(path, opts.detailed),
         TranscriptBackend::CursorJsonl => {
-            cursor::parse_cursor_jsonl(path, opts.last, opts.detailed)
+            cursor::parse_cursor_jsonl_with_usage(path, opts.detailed)
         }
         TranscriptBackend::KimiWireJsonl => {
-            kimi::parse_kimi_wire_jsonl(path, opts.last, opts.detailed)
+            kimi::parse_kimi_wire_jsonl_with_usage(path, opts.detailed)
         }
         TranscriptBackend::CopilotJsonl => {
-            copilot::parse_copilot_jsonl(path, opts.last, opts.detailed)
+            copilot::parse_copilot_jsonl_with_usage(path, opts.detailed)
         }
-        TranscriptBackend::PiJsonl => pi::parse_pi_jsonl(path, opts.last, opts.detailed),
+        TranscriptBackend::PiJsonl => pi::parse_pi_jsonl_with_usage(path, opts.detailed),
         TranscriptBackend::GrokUpdatesJsonl => {
-            grok::parse_grok_updates_jsonl(path, opts.last, opts.detailed)
+            grok::parse_grok_updates_jsonl_with_usage(path, opts.detailed)
         }
         TranscriptBackend::OpenCodeSqlite => {
             let sid = opts.session_id.as_deref().unwrap_or("");
             if sid.is_empty() {
                 return Err("OpenCode transcript requires a session_id".to_string());
             }
-            opencode::parse_opencode_sqlite(path, sid, opts.last)
+            opencode::parse_opencode_sqlite_with_usage(path, sid)
+        }
+        TranscriptBackend::HermesSqlite => {
+            let sid = opts.session_id.as_deref().unwrap_or("");
+            if sid.is_empty() {
+                return Err("Hermes transcript requires a session_id".to_string());
+            }
+            hermes::parse_hermes_sqlite_with_usage(path, sid)
         }
     }?;
 
-    if backend == TranscriptBackend::CodexJsonl
-        && opts.allow_codex_retry
-        && codex::should_retry_codex_transcript(&exchanges)
-    {
-        // Codex rollout JSONL can briefly contain the user turn before the
-        // assistant text for that same turn lands. Local transcript reads do a
-        // short retry; RPC handlers opt out so they do not block the relay
-        // reader thread.
-        exchanges = codex::retry_codex_transcript(path, opts.last, opts.detailed, exchanges)?;
+    if backend == TranscriptBackend::CodexJsonl && opts.allow_codex_retry {
+        for _ in 0..4 {
+            if !codex::should_retry_codex_transcript(&transcript.exchanges) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            transcript = codex::parse_codex_jsonl_with_usage(path, opts.detailed)?;
+        }
     }
-
-    Ok(exchanges)
+    transcript.truncate(opts.last);
+    Ok(transcript)
 }
 
 /// Detect canonical tool identity from a transcript path.
@@ -275,6 +301,10 @@ pub fn detect_tool_from_path(path: &str) -> Option<Tool> {
         // Only Grok writes `updates.jsonl` (`$GROK_HOME/sessions/<cwd>/<id>/`,
         // and GROK_HOME may be anywhere).
         Some(Tool::Grok)
+    } else if file_name == "state.db" && lower.contains("/.hermes/") {
+        // The default root and `profiles/<name>/` under it; a custom
+        // HERMES_HOME is attributed by persisted agent identity instead.
+        Some(Tool::Hermes)
     } else if lower.contains("/agent-transcripts/") {
         Some(Tool::Cursor)
     } else if lower.contains("/.copilot/session-state/")
@@ -591,7 +621,9 @@ pub fn disk_search_roots(tool: Tool) -> Vec<PathBuf> {
         TranscriptDiscovery::GrokSessions => {
             vec![crate::transcript::grok::grok_config_dir().join("sessions")]
         }
-        TranscriptDiscovery::OpenCodeDatabase | TranscriptDiscovery::KiloDatabase => Vec::new(),
+        TranscriptDiscovery::OpenCodeDatabase
+        | TranscriptDiscovery::KiloDatabase
+        | TranscriptDiscovery::HermesDatabase => Vec::new(),
     }
 }
 
@@ -600,6 +632,7 @@ pub(crate) fn database_search_path(tool: Tool) -> Option<PathBuf> {
     match profile_for_tool(tool)?.discovery {
         TranscriptDiscovery::OpenCodeDatabase => opencode::get_opencode_db_path(),
         TranscriptDiscovery::KiloDatabase => opencode::get_kilo_db_path(),
+        TranscriptDiscovery::HermesDatabase => hermes::get_hermes_db_path(),
         _ => None,
     }
 }
@@ -618,6 +651,9 @@ pub(crate) fn search_database_sessions(
         }
         Some(TranscriptDiscovery::KiloDatabase) => {
             opencode::search_kilo_sessions(db_path, pattern, limit)
+        }
+        Some(TranscriptDiscovery::HermesDatabase) => {
+            hermes::search_hermes_sessions(db_path, pattern, limit)
         }
         _ => Err(format!("Tool '{}' is not database-backed", tool)),
     }
@@ -648,6 +684,10 @@ mod tests {
         assert_eq!(
             detect_tool_from_path("/h/.omp/agent/sessions/r/u.jsonl"),
             Some(Tool::Omp)
+        );
+        assert_eq!(
+            detect_tool_from_path("/h/.hermes/profiles/work/state.db"),
+            Some(Tool::Hermes)
         );
         assert_eq!(
             detect_tool_from_path("/h/.kimi-code/sessions/wd/u/agents/main/wire.jsonl"),
@@ -713,11 +753,7 @@ mod tests {
             seen.push(profile.tool);
         }
         for spec in crate::integration_spec::ALL {
-            // Hermes' canonical transcript boundary is its profile-aware
-            // `sessions export` command, not a stable file format. Until this
-            // module supports command-backed readers, managed Hermes sessions
-            // still use PTY capture but are intentionally absent here.
-            if spec.released && spec.tool != Tool::Hermes {
+            if spec.released {
                 assert!(
                     profile_for_tool(spec.tool).is_some(),
                     "missing transcript profile for {}",
@@ -731,7 +767,7 @@ mod tests {
     fn every_transcript_tool_has_a_disk_or_database_discovery_source() {
         for tool in transcript_tools() {
             let roots = disk_search_roots(tool);
-            if matches!(tool, Tool::OpenCode | Tool::Kilo) {
+            if matches!(tool, Tool::OpenCode | Tool::Kilo | Tool::Hermes) {
                 assert!(
                     roots.is_empty(),
                     "database tool {tool} should not expose disk roots"
@@ -1003,10 +1039,240 @@ mod tests {
             detailed: true,
             ..Default::default()
         };
-        let exchanges = read(&path, TranscriptBackend::ClaudeJsonl, &opts).unwrap();
+        let exchanges = read(&path, TranscriptBackend::ClaudeJsonl, &opts)
+            .unwrap()
+            .exchanges;
         assert_eq!(exchanges.len(), 1);
         assert_eq!(exchanges[0].user, "Run echo hi, then say ok");
         assert!(exchanges[0].action.contains("ok"));
         assert_eq!(exchanges[0].tools.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn read_fixture(backend: TranscriptBackend, entries: &[Value], last: usize) -> Transcript {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let content = if backend == TranscriptBackend::GeminiJson {
+            json!({"messages": entries}).to_string()
+        } else {
+            entries
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        std::fs::write(file.path(), content).unwrap();
+        read(
+            file.path(),
+            backend,
+            &ReadOptions {
+                last,
+                allow_codex_retry: false,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn claude_deduplicates_calls_and_keeps_session_total_with_last() {
+        let call = json!({"type":"assistant","message":{"id":"a","model":"haiku","content":[{"type":"text","text":"answer"}],"usage":{"input_tokens":10,"output_tokens":3,"cache_read_input_tokens":20,"cache_creation_input_tokens":5,"output_tokens_details":{"thinking_tokens":2}}}});
+        let entries = vec![
+            json!({"type":"user","message":{"content":"first"}}),
+            call.clone(),
+            call.clone(),
+            call,
+            json!({"type":"user","message":{"content":"second"}}),
+            json!({"type":"assistant","message":{"id":"b","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":7,"output_tokens":4}}}),
+        ];
+        let all = read_fixture(TranscriptBackend::ClaudeJsonl, &entries, 100);
+        let last = read_fixture(TranscriptBackend::ClaudeJsonl, &entries, 1);
+        assert_eq!(all.usage, last.usage);
+        assert_eq!(last.exchanges.len(), 1);
+        let usage = all.usage.unwrap();
+        assert_eq!(
+            usage.tokens,
+            TokenUsage {
+                input: 17,
+                output: 7,
+                cache_read: 20,
+                cache_write: 5,
+                reasoning: Some(2)
+            }
+        );
+        assert_eq!(usage.context_tokens, Some(7));
+        assert_eq!(all.exchanges[0].usage.unwrap().input, 10);
+        assert_eq!(last.exchanges[0].usage.unwrap().input, 7);
+    }
+
+    #[test]
+    fn codex_uses_cumulative_deltas_and_disjoint_input() {
+        let count = |input, cached, output| json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":input,"cached_input_tokens":cached,"cache_write_input_tokens":2,"output_tokens":output,"reasoning_output_tokens":1},"last_token_usage":{"input_tokens":50,"total_tokens":60},"model_context_window":1000}}});
+        let entries = vec![
+            count(20, 5, 2),
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"first"}}),
+            count(100, 30, 10),
+            count(100, 30, 10),
+            json!({"type":"event_msg","payload":{"type":"agent_message","message":"done"}}),
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"second"}}),
+            count(150, 40, 15),
+            json!({"type":"event_msg","payload":{"type":"agent_message","message":"finished"}}),
+        ];
+        let all = read_fixture(TranscriptBackend::CodexJsonl, &entries, 100);
+        assert_eq!(
+            all.usage,
+            read_fixture(TranscriptBackend::CodexJsonl, &entries, 1).usage
+        );
+        let usage = all.usage.unwrap();
+        assert_eq!(usage.tokens.input, 108);
+        assert_eq!(usage.tokens.output, 15);
+        assert_eq!(usage.context_tokens, Some(60));
+        assert_eq!(usage.context_window, Some(1000));
+        assert_eq!(all.exchanges[0].usage.unwrap().input, 55);
+        assert_eq!(all.exchanges[0].usage.unwrap().output, 8);
+        assert_eq!(all.exchanges[1].usage.unwrap().input, 40);
+    }
+
+    #[test]
+    fn pi_keeps_cost_cache_and_zero_usage() {
+        let entries = vec![
+            json!({"type":"message","message":{"role":"user","content":"hello"}}),
+            json!({"type":"message","message":{"role":"assistant","model":"test","content":"done","usage":{"input":10,"output":8,"cacheRead":20,"cacheWrite":5,"reasoning":3,"cost":{"total":0.25}}}}),
+            json!({"type":"message","message":{"role":"assistant","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"cost":{"total":0}}}}),
+        ];
+        let transcript = read_fixture(TranscriptBackend::PiJsonl, &entries, 1);
+        let usage = transcript.usage.unwrap();
+        assert_eq!(
+            usage.tokens,
+            TokenUsage {
+                input: 10,
+                output: 8,
+                cache_read: 20,
+                cache_write: 5,
+                reasoning: Some(3)
+            }
+        );
+        assert_eq!(usage.cost_usd, Some(0.25));
+        assert_eq!(usage.context_tokens, Some(0));
+        assert_eq!(transcript.exchanges[0].usage, Some(usage.tokens));
+    }
+
+    #[test]
+    fn gemini_normalizes_cache_and_thoughts() {
+        let entries = vec![
+            json!({"type":"user","content":"hello"}),
+            json!({"type":"gemini","content":"done","tokens":{"input":30,"cached":20,"output":5,"thoughts":7,"tool":4}}),
+        ];
+        let transcript = read_fixture(TranscriptBackend::GeminiJson, &entries, 1);
+        let usage = transcript.usage.unwrap();
+        assert_eq!(
+            usage.tokens,
+            TokenUsage {
+                input: 14,
+                output: 12,
+                cache_read: 20,
+                cache_write: 0,
+                reasoning: Some(7)
+            }
+        );
+        assert_eq!(usage.context_tokens, Some(30));
+        assert_eq!(transcript.exchanges[0].usage, Some(usage.tokens));
+    }
+
+    #[test]
+    fn codex_prefers_per_response_records_over_totals() {
+        // Thread totals also count an earlier rollout segment (1000 input).
+        let record = |id: &str, input, thread| json!({"type":"token_usage_record","payload":{"response_id":id,"usage":{"input_tokens":input,"cached_input_tokens":10,"output_tokens":2},"thread_token_usage":{"input_tokens":thread,"cached_input_tokens":20,"output_tokens":4}}});
+        // Totals miss the compaction call; records include it.
+        let count = json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":2},"last_token_usage":{"total_tokens":80},"model_context_window":1000}}});
+        let entries = vec![
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"first"}}),
+            record("r1", 100, 1100),
+            count,
+            record("compact", 50, 1150),
+            record("compact", 50, 1150),
+            json!({"type":"event_msg","payload":{"type":"agent_message","message":"done"}}),
+        ];
+        let t = read_fixture(TranscriptBackend::CodexJsonl, &entries, 100);
+        let usage = t.usage.unwrap();
+        assert_eq!(usage.tokens.input, 1130);
+        assert_eq!(usage.tokens.cache_read, 20);
+        assert_eq!(usage.tokens.output, 4);
+        assert_eq!(usage.context_tokens, Some(80));
+        assert_eq!(usage.context_window, Some(1000));
+        let exchange = t.exchanges[0].usage.unwrap();
+        assert_eq!((exchange.input, exchange.cache_read), (130, 20));
+    }
+
+    #[test]
+    fn codex_keeps_window_and_skips_zero_delta_exchanges() {
+        let count = |input, window: Option<u64>| {
+            let mut info = json!({"total_token_usage":{"input_tokens":input,"output_tokens":1},"last_token_usage":{"total_tokens":input}});
+            if let Some(window) = window {
+                info["model_context_window"] = json!(window);
+            }
+            json!({"type":"event_msg","payload":{"type":"token_count","info":info}})
+        };
+        let entries = vec![
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"first"}}),
+            count(100, Some(1000)),
+            json!({"type":"event_msg","payload":{"type":"agent_message","message":"done"}}),
+            json!({"type":"event_msg","payload":{"type":"user_message","message":"second"}}),
+            count(100, None),
+            json!({"type":"event_msg","payload":{"type":"agent_message","message":"again"}}),
+        ];
+        let t = read_fixture(TranscriptBackend::CodexJsonl, &entries, 100);
+        let usage = t.usage.unwrap();
+        assert_eq!(usage.context_window, Some(1000));
+        assert_eq!(usage.context_tokens, Some(100));
+        assert!(t.exchanges[0].usage.is_some());
+        assert!(
+            t.exchanges[1].usage.is_none(),
+            "unchanged totals add no exchange usage"
+        );
+    }
+
+    #[test]
+    fn claude_ratio_call_replaces_earlier_token_context() {
+        let entries = vec![
+            json!({"type":"user","message":{"content":"hello"}}),
+            json!({"type":"assistant","message":{"id":"a","content":[{"type":"text","text":"x"}],"usage":{"input_tokens":50,"output_tokens":1}}}),
+            json!({"type":"assistant","message":{"id":"b","content":[{"type":"text","text":"y"}],"usage":{"input_tokens":0,"output_tokens":0,"context_usage_ratio":0.4}}}),
+        ];
+        let usage = read_fixture(TranscriptBackend::ClaudeJsonl, &entries, 1)
+            .usage
+            .unwrap();
+        assert_eq!(usage.context_tokens, None);
+        assert_eq!(format_context(&usage).as_deref(), Some("40%"));
+    }
+
+    #[test]
+    fn missing_usage_is_none() {
+        for backend in [
+            TranscriptBackend::ClaudeJsonl,
+            TranscriptBackend::CodexJsonl,
+            TranscriptBackend::PiJsonl,
+            TranscriptBackend::GeminiJson,
+        ] {
+            let entries = match backend {
+                TranscriptBackend::ClaudeJsonl => {
+                    vec![json!({"type":"user","message":{"content":"hello"}})]
+                }
+                TranscriptBackend::CodexJsonl => vec![
+                    json!({"type":"event_msg","payload":{"type":"user_message","message":"hello"}}),
+                ],
+                TranscriptBackend::PiJsonl => {
+                    vec![json!({"type":"message","message":{"role":"user","content":"hello"}})]
+                }
+                _ => vec![json!({"type":"user","content":"hello"})],
+            };
+            let transcript = read_fixture(backend, &entries, 1);
+            assert!(transcript.usage.is_none());
+            assert!(transcript.exchanges[0].usage.is_none());
+        }
     }
 }

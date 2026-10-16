@@ -974,9 +974,12 @@ pub(super) fn run(
         }
         if heartbeat.elapsed() >= Duration::from_secs(5) {
             db.reconnect_if_stale();
-            let _ = db.update_heartbeat(current_name);
-            let _ = db.register_notify_port(current_name, notify.port());
-            let _ = db.register_inject_port(current_name, state.inject_port);
+            // A stopped launch must not republish ports for a resumed name.
+            if super::instance_owns_process_binding(db, process_id, current_name) {
+                let _ = db.update_heartbeat(current_name);
+                let _ = db.register_notify_port(current_name, notify.port());
+                let _ = db.register_inject_port(current_name, state.inject_port);
+            }
             heartbeat = Instant::now();
         }
         let instance = match db.get_instance_full(current_name) {
@@ -1021,7 +1024,17 @@ pub(super) fn run(
                         "grok.acp.connect_failed",
                         &format!("attempt={connect_failures} retry_in={backoff:?}: {detail}"),
                     );
-                    let _ = db.set_gate_status(current_name, "acp_disconnected", &detail);
+                    // Connection diagnostics also apply while launching/active.
+                    let _ = db.update_instance_fields(
+                        current_name,
+                        &serde_json::Map::from_iter([
+                            (
+                                "status_context".into(),
+                                serde_json::json!("acp_disconnected"),
+                            ),
+                            ("status_detail".into(), serde_json::json!(detail)),
+                        ]),
+                    );
                     if launched_at.elapsed() >= SETUP_TIMEOUT {
                         block_launch(
                             db,
@@ -1245,6 +1258,7 @@ pub(super) fn run(
                         &flight.ack.instance_name,
                         flight.ack.last_event_id,
                         flight.ack.mark_announced,
+                        None,
                     ) {
                         log_warn("native", "grok.acp.ack_failed", &format!("{error}"));
                     }
@@ -1382,6 +1396,7 @@ mod tests {
             transcript: std::path::PathBuf::new(),
             ack: DeliveryAck {
                 instance_name: "nova".into(),
+                created_at: None,
                 last_event_id: 7,
                 status_context: "deliver:luna".into(),
                 msg_ts: String::new(),

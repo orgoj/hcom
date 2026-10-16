@@ -567,8 +567,10 @@ fn render_vertical(frame: &mut Frame, app: &mut App, area: Rect) {
     let body_right = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(body[2]);
 
     render_messages_heading(frame, body_right[0], app);
-    let max_scroll = messages::render_messages(frame, body_right[1], app);
-    app.ui.scroll_max = max_scroll;
+    let scroll = messages::render_messages(frame, body_right[1], app);
+    app.ui.scroll_max = scroll.max;
+    app.ui.msg_scroll = scroll.offset;
+    app.ui.last_msg_total = scroll.total;
     update_input_scroll(app, false, area.width);
     render_bottom_section(
         frame,
@@ -754,11 +756,7 @@ fn render_messages_heading(frame: &mut Frame, area: Rect, app: &App) {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let label = if app.ui.show_events && !app.ui.selected.is_empty() {
-        format!("events: {}", selected_names())
-    } else if app.ui.show_events {
-        "events".to_string()
-    } else if !app.ui.selected.is_empty() {
+    let label = if !app.ui.selected.is_empty() {
         selected_names()
     } else {
         "messages".to_string()
@@ -1566,7 +1564,7 @@ fn render_confirm(frame: &mut Frame, confirm: &Confirm) {
     } else {
         let is_destructive = matches!(
             confirm.action,
-            ConfirmAction::KillAgents(_) | ConfirmAction::KillOrphan(_)
+            ConfirmAction::KillAgents(_) | ConfirmAction::KillOrphan(_) | ConfirmAction::Reset(_)
         );
         let accent = if is_destructive {
             palette::RED
@@ -1622,6 +1620,7 @@ fn render_confirm(frame: &mut Frame, confirm: &Confirm) {
         ConfirmAction::ResumeAgents(ref names) if names.len() > 1 => " Batch Resume ",
         ConfirmAction::ResumeAgents(_) => " Resume ",
         ConfirmAction::OrphanAction(_) => " Orphan ",
+        ConfirmAction::Reset(_) => " Reset ",
     };
     let block = Block::default()
         .title(Span::styled(title, Style::default().fg(border_accent)))
@@ -1702,7 +1701,10 @@ fn render_relay_popup(frame: &mut Frame, relay: &RelayPopupState) {
         let display = if relay.token_input.is_empty() {
             Span::styled("paste token\u{2026}", Style::default().fg(palette::FG_DARK))
         } else {
-            Span::styled(relay.token_input.clone(), Style::default().fg(palette::FG))
+            Span::styled(
+                "•".repeat(relay.token_input.chars().count()),
+                Style::default().fg(palette::FG),
+            )
         };
         lines.push(Line::from(vec![
             Span::raw("  "),
@@ -1722,9 +1724,9 @@ fn render_relay_popup(frame: &mut Frame, relay: &RelayPopupState) {
 
     // Position cursor in token input
     if relay.editing_token {
-        let display_width = unicode_width::UnicodeWidthStr::width(
-            &relay.token_input[..relay.token_cursor.min(relay.token_input.len())],
-        );
+        let display_width = relay.token_input[..relay.token_cursor.min(relay.token_input.len())]
+            .chars()
+            .count();
         let cursor_x = popup.x + 2 + 2 + display_width as u16;
         let cursor_y = popup.y + h - 2;
         frame.set_cursor_position(Position::new(

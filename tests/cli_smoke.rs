@@ -11,6 +11,33 @@ use support::{Hcom, parse_hcom_marker};
 
 #[cfg(unix)]
 #[test]
+fn fixture_pins_cargo_target_before_dev_root_reexec() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = Hcom::new();
+    let foreign_root = h.root_path().join("foreign-checkout");
+    let foreign_bin = foreign_root.join("target/debug/hcom");
+    std::fs::create_dir_all(foreign_bin.parent().unwrap()).unwrap();
+    std::fs::write(&foreign_bin, "#!/bin/sh\nprintf 'foreign binary\\n'\n").unwrap();
+    std::fs::set_permissions(&foreign_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = h
+        .cmd()
+        .env("HCOM_DEV_ROOT", &foreign_root)
+        .args(["config", "HCOM_DIR"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        h.hcom_dir.to_string_lossy(),
+    );
+    let log = std::fs::read_to_string(h.hcom_dir.join(".tmp/logs/hcom.log")).unwrap_or_default();
+    assert!(!log.contains("\"event\":\"dev_root_reexec\""), "{log}");
+}
+
+#[cfg(unix)]
+#[test]
 fn pty_defaults_missing_term_and_preserves_explicit_term() {
     let h = Hcom::new();
     for term in [None, Some("xterm-kitty"), Some("dumb"), Some("")] {
@@ -605,73 +632,6 @@ fn start_send_events_roundtrip() {
         after_by_name.get(&recipient).copied(),
         Some(0),
         "listen should advance recipient cursor; list={list_after_listen_out}"
-    );
-}
-
-#[test]
-fn manual_ack_listen_redelivers_until_strict_ack() {
-    let h = Hcom::new();
-    let recipient = h.start_with_process_id("manual-ack-recipient");
-    let (code, stdout, stderr) = h.run([
-        "send",
-        "--from",
-        "gateway-test",
-        &format!("@{recipient}"),
-        "--intent",
-        "request",
-        "--thread",
-        "bridge-test",
-        "--",
-        "deliver reliably",
-    ]);
-    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-
-    let receive = || {
-        let (code, stdout, stderr) = h.run([
-            "listen",
-            "--name",
-            &recipient,
-            "--timeout",
-            "1",
-            "--json",
-            "--manual-ack",
-        ]);
-        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-        serde_json::from_str::<serde_json::Value>(stdout.trim()).expect("manual ack envelope")
-    };
-    let first = receive();
-    assert_eq!(first["schema_version"], 1);
-    assert_eq!(first["from"], "gateway-test");
-    assert_eq!(first["to"], recipient);
-    assert_eq!(first["text"], "deliver reliably");
-    assert_eq!(first["intent"], "request");
-    assert_eq!(first["thread"], "bridge-test");
-    assert!(first["timestamp"].is_string());
-    let event_id = first["event_id"].as_i64().expect("event id");
-
-    let second = receive();
-    assert_eq!(second["event_id"].as_i64(), Some(event_id));
-
-    let (code, _stdout, stderr) = h.run(["ack", &(event_id + 1).to_string(), "--name", &recipient]);
-    assert_ne!(code, 0, "stderr={stderr}");
-    assert!(stderr.contains("first unread event"), "stderr={stderr}");
-
-    let (code, stdout, stderr) = h.run(["ack", &event_id.to_string(), "--name", &recipient]);
-    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-
-    let (code, stdout, stderr) = h.run([
-        "listen",
-        "--name",
-        &recipient,
-        "--timeout",
-        "1",
-        "--json",
-        "--manual-ack",
-    ]);
-    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-    assert!(
-        stdout.trim().is_empty(),
-        "acked event redelivered: {stdout}"
     );
 }
 
@@ -1837,7 +1797,7 @@ fn pi_e2e_hook_dispatch() {
     let status = run_argv_hook(
         &h,
         "pi-status",
-        None,
+        Some(pid),
         &[
             "--name",
             &me,
@@ -1859,7 +1819,7 @@ fn pi_e2e_hook_dispatch() {
     let before_tool = run_argv_hook(
         &h,
         "pi-beforetool",
-        None,
+        Some(pid),
         &[
             "--name",
             &me,
@@ -1897,13 +1857,14 @@ fn pi_e2e_hook_dispatch() {
     ]);
     assert_eq!(send_code, 0, "send stderr={send_stderr}");
 
-    let check = h.run(["pi-read", "--name", &me, "--check"]);
-    assert_eq!(check.0, 0, "pi-read --check stderr={}", check.2);
-    assert_eq!(check.1.trim(), "true");
+    let check = run_argv_hook(&h, "pi-read", Some(pid), &["--name", &me, "--check"]);
+    assert_eq!(check, serde_json::json!(true));
 
-    let read = h.run(["pi-read", "--name", &me]);
-    assert_eq!(read.0, 0, "pi-read stderr={}", read.2);
-    let batch: serde_json::Value = serde_json::from_str(&read.1).expect("pi-read json");
+    // Another launch (e.g. this one after stop + resume elsewhere) cannot read the inbox.
+    let stale = run_argv_hook(&h, "pi-read", Some("pid-stale"), &["--name", &me]);
+    assert!(stale.get("error").is_some(), "stale read: {stale}");
+
+    let batch = run_argv_hook(&h, "pi-read", Some(pid), &["--name", &me]);
     assert_eq!(batch["has_more"], false, "pi-read batch: {batch}");
     let ping = batch["messages"]
         .as_array()
@@ -1914,16 +1875,20 @@ fn pi_e2e_hook_dispatch() {
     let ack = run_argv_hook(
         &h,
         "pi-read",
-        None,
+        Some(pid),
         &["--name", &me, "--ack", "--up-to", &ping_id],
     );
     assert_eq!(ack["acked_to"].to_string(), ping_id);
-    let check = h.run(["pi-read", "--name", &me, "--check"]);
-    assert_eq!(check.0, 0, "pi-read --check after ack stderr={}", check.2);
-    assert_eq!(check.1.trim(), "false");
+    let check = run_argv_hook(&h, "pi-read", Some(pid), &["--name", &me, "--check"]);
+    assert_eq!(check, serde_json::json!(false));
 
     // 5. pi-stop finalizes the session.
-    let stop = run_argv_hook(&h, "pi-stop", None, &["--name", &me, "--reason", "done"]);
+    let stop = run_argv_hook(
+        &h,
+        "pi-stop",
+        Some(pid),
+        &["--name", &me, "--reason", "done"],
+    );
     assert_eq!(stop, serde_json::json!({ "ok": true }));
     let (code, stdout, _) = h.run([
         "events", "--agent", &me, "--action", "stopped", "--last", "5",
@@ -5538,4 +5503,24 @@ printf '%s\n' '{"id":"cli:terminal:close","ok":true,"result":{"close":{"handle":
             .any(|line| line == "terminal close --terminal term:cleanup:42 --json"),
         "calls={calls}"
     );
+}
+
+#[test]
+fn config_reports_file_parse_errors_in_get_and_list_modes() {
+    let h = Hcom::new();
+    std::fs::write(h.hcom_dir.join("config.toml"), "timeout = [broken\n").unwrap();
+    for args in [
+        vec!["config", "timeout"],
+        vec!["config", "terminal"],
+        vec!["config", "dev_root"],
+        vec!["config"],
+        vec!["config", "--json"],
+    ] {
+        let (code, stdout, stderr) = h.run(args);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(
+            stderr.contains("Invalid config.toml"),
+            "stdout={stdout} stderr={stderr}"
+        );
+    }
 }

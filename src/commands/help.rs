@@ -219,10 +219,13 @@ const LIST_HELP: &[HelpEntry] = &[
     ),
     ("", "  launch_context"),
     ("", ""),
-    ("list [self|<name>]", "Single agent details"),
+    (
+        "list [self|<name>]",
+        "Single agent details, including recorded session usage",
+    ),
     (
         "  [field]",
-        "Print specific field (status, directory, session_id, ...)",
+        "Print specific field (status, directory, session_id, usage, ...)",
     ),
     ("  --json", "Output as JSON"),
     ("  --sh", "Shell exports: eval \"$(hcom list self --sh)\""),
@@ -346,15 +349,6 @@ const SEND_HELP: &[HelpEntry] = &[
     ("  hcom send @luna <<'EOF'", ""),
     ("  Multi-line message with special chars", ""),
     ("  EOF", ""),
-];
-
-const ACK_HELP: &[HelpEntry] = &[
-    (
-        "hcom ack <event-id> --name <identity>",
-        "Acknowledge the first unread message",
-    ),
-    ("", "Used with hcom listen --manual-ack --json."),
-    ("", "Stale and out-of-order event IDs are rejected."),
 ];
 
 const BLANK: &[HelpEntry] = &[("", "")];
@@ -558,14 +552,6 @@ const LISTEN_HELP: &[HelpEntry] = &[
     ("  --timeout N", "Timeout in seconds (default: 86400)"),
     ("  --json", "Output messages as JSON"),
     (
-        "  --manual-ack",
-        "Emit one full JSON envelope without advancing the cursor",
-    ),
-    (
-        "",
-        "Acknowledge it with: hcom ack <event-id> --name <identity>",
-    ),
-    (
         "  --missed",
         "Print direct messages no session under your name received, then exit",
     ),
@@ -658,7 +644,7 @@ const CONFIG_KEYS_HELP: &[HelpEntry] = &[
         "Subagent keep-alive seconds after task",
     ),
     (
-        "  claude_args / gemini_args / codex_args / opencode_args / kilo_args / pi_args / omp_args / cursor_args / kimi_args / copilot_args / qoder_args / grok_args",
+        "  claude_args / gemini_args / codex_args / opencode_args / kilo_args / pi_args / omp_args / cursor_args / kimi_args / copilot_args / qoder_args / grok_args / hermes_args",
         "Default launch args per tool",
     ),
     (
@@ -739,23 +725,32 @@ const RELAY_PAGE: &[&[HelpEntry]] = &[RELAY_MAIN, RELAY_DAEMON];
 const TRANSCRIPT_HELP: &[HelpEntry] = &[
     ("transcript <name>", "View agent's conversation (last 10)"),
     ("transcript <name> N", "Show exchange N"),
-    ("transcript <name> N-M", "Show exchanges N through M"),
+    (
+        "transcript <name> N-M",
+        "Show exchanges N through M (N- = to the end)",
+    ),
     (
         "transcript timeline",
         "User prompts across all agents by time",
     ),
-    ("  --last N", "Limit to last N exchanges (default: 10)"),
+    ("  --last N", "Show the last N exchanges (default: 10)"),
     ("  --full", "Show complete assistant responses"),
-    ("  --detailed", "Show tool I/O, file edits, errors"),
+    (
+        "  --detailed",
+        "Show tool I/O, file edits, errors, token usage",
+    ),
     ("  --json", "JSON output"),
     ("", ""),
     (
         "transcript search \"pattern\"",
-        "Search hcom-tracked transcripts (rg/grep)",
+        "Search hcom agents' conversations (regex), newest first",
     ),
     ("  --live", "Only currently alive agents"),
-    ("  --all", "All transcripts (includes non-hcom sessions)"),
-    ("  --limit N", "Max results (default: 20)"),
+    (
+        "  --all",
+        "Raw search of all transcripts on disk (needs rg)",
+    ),
+    ("  --limit N", "Max matching exchanges shown (default: 20)"),
     ("  --agent TYPE", "Filter: {transcript_agents}"),
     (
         "  --exclude-self",
@@ -821,7 +816,11 @@ const UPDATE_HELP: &[HelpEntry] = &[
 
 const HOOKS_STATUS: &[HelpEntry] = &[
     ("hooks", "Show how each tool loads hcom's hooks"),
-    ("hooks status", "Same as above"),
+    ("hooks status [tool]", "Same as above, for one tool"),
+    (
+        "",
+        "  hermes: also asks Hermes whether the plugin is enabled (slow)",
+    ),
 ];
 
 const HOOKS_ADD: &[HelpEntry] = &[
@@ -1062,6 +1061,10 @@ fn generate_tool_help(spec: &crate::integration_spec::IntegrationSpec) -> String
     for (u, d) in spec.help.extra_env {
         lines.push(format!("    {:<28} {}", u.trim(), d));
     }
+    if !spec.help.notes.is_empty() {
+        lines.push(String::new());
+        lines.extend(spec.help.notes.iter().map(|l| l.to_string()));
+    }
 
     // Resume / Fork
     lines.push(String::new());
@@ -1171,7 +1174,6 @@ fn format_entries(entries: &[HelpEntry]) -> Vec<String> {
 /// tail must include every released spec name plus public aliases (e.g. `agy`).
 /// The `command_names_covers_released_tools` test guards against drift.
 pub const COMMAND_NAMES: &[&str] = &[
-    "ack",
     "send",
     "list",
     "events",
@@ -1207,11 +1209,11 @@ pub const COMMAND_NAMES: &[&str] = &[
     "cursor-agent",
     "kimi",
     "copilot",
-    "hermes",
     "qoder",
     "qodercli",
     "grok",
     "grok-build",
+    "hermes",
 ];
 
 fn forkable_tool_names() -> String {
@@ -1399,7 +1401,6 @@ fn command_help_raw(name: &str) -> String {
 
     let page: Option<&[&[HelpEntry]]> = match name {
         "list" => Some(&[LIST_HELP]),
-        "ack" => Some(&[ACK_HELP]),
         "send" => Some(&[SEND_HELP]),
         "events" => Some(EVENTS_PAGE),
         "bundle" => Some(BUNDLE_PAGE),

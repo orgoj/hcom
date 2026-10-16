@@ -14,7 +14,8 @@ function harness() {
     session: { id: async () => 'session-1' },
     process: { run: async () => ({ exitCode: 0, stdout: JSON.stringify(response) }) },
     prompt: { submit: (value: any) => { prompts.push(value); return new Promise(resolve => { resolvePrompt = resolve }) } },
-    ui: { log: async () => {} },
+    // Claude's $.ui.log is synchronous and returns undefined.
+    ui: { log: (_: string) => {} },
   }
   register((event: string, fn: Function) => { handlers[event] = fn })
   return {
@@ -128,7 +129,7 @@ test('invalid mod command reports startup failure without blocking the hook', as
     const logs = [] as string[]
     const get = h.api.env.get
     h.api.env.get = async (key: string) => key === 'HCOM_MOD_COMMAND' ? value as any : get(key)
-    h.api.ui.log = async (text: string) => { logs.push(text) }
+    h.api.ui.log = (text: string) => { logs.push(text) }
     const result = await h.handlers['session.start'](h.api, interactive, next)
     expect(result).toEqual(interactive)
     expect(logs.length).toBe(1)
@@ -167,21 +168,86 @@ test('a failed poll backs off instead of respawning every tick', async () => {
   expect(polls).toBe(2)
 })
 
-test('every failed poll is reported so a cleared error is set again', async () => {
+// One failure is a tick plus the 20 backoff ticks that follow it.
+async function fail(h: ReturnType<typeof harness>, n: number) {
+  for (let i = 0; i < n * 21; i++) await h.tick()
+}
+
+test('an isolated failed poll, as after host sleep, stays silent', async () => {
   const h = harness()
   const reports = [] as string[][]
+  const logs = [] as string[]
   let ok = false
+  h.api.ui.log = (text: string) => { logs.push(text) }
+  h.api.process.run = async (argv: string[]) => {
+    if (argv.includes('--event')) { reports.push(argv); return { exitCode: 0, stdout: '{"wake":false}' } }
+    return ok ? { exitCode: 0, stdout: '{"wake":false}' } : { exitCode: 1, stdout: '', stderr: 'aborted: still running after 30000ms' }
+  }
+  await h.handlers['session.start'](h.api, interactive, next)
+  for (let round = 0; round < 3; round++) {
+    ok = false
+    await fail(h, 2)
+    ok = true
+    await h.tick()
+  }
+  expect(reports.length).toBe(0)
+  expect(logs.length).toBe(0)
+})
+
+test('repeated failed polls are reported every time and logged once', async () => {
+  const h = harness()
+  const reports = [] as string[][]
+  const logs = [] as string[]
+  let ok = false
+  h.api.ui.log = (text: string) => { logs.push(text) }
   h.api.process.run = async (argv: string[]) => {
     if (argv.includes('--event')) { reports.push(argv); return { exitCode: 0, stdout: '{"wake":false}' } }
     return ok ? { exitCode: 0, stdout: '{"wake":false}' } : { exitCode: 1, stdout: '', stderr: 'notify bind failed' }
   }
   await h.handlers['session.start'](h.api, interactive, next)
-  for (let i = 0; i < 22; i++) await h.tick()
+  await fail(h, 4)
+  // hcom clears the error after one good cycle, so each repeat must set it again.
   expect(reports.length).toBe(2)
-  ok = true
-  for (let i = 0; i < 21; i++) await h.tick()
-  ok = false
-  await h.tick()
-  expect(reports.length).toBe(3)
   expect(reports.every(r => r.includes('poll-failed'))).toBe(true)
+  expect(logs.length).toBe(1)
+  expect(logs[0].includes('notify bind failed')).toBe(true)
+  ok = true
+  await h.tick()
+  ok = false
+  await fail(h, 3)
+  expect(reports.length).toBe(3)
+  expect(logs.length).toBe(2)
+})
+
+test('hcom runs outside the session directory, which a Bash command may delete', async () => {
+  const h = harness()
+  const inits = [] as any[]
+  h.api.process.run = async (argv: string[], init?: any) => {
+    inits.push(init)
+    if (argv.includes('--event')) return { exitCode: 0, stdout: '{}' }
+    return { exitCode: 0, stdout: '{"wake":true}' }
+  }
+  h.api.prompt.submit = () => Promise.resolve(undefined) as any
+  await h.handlers['session.start'](h.api, interactive, next)
+  await h.tick()
+  for (let i = 0; i < 20; i++) await Promise.resolve()
+  expect(inits.length).toBe(2)
+  expect(inits.every(init => init.cwd === '/')).toBe(true)
+})
+
+test('a poll that cannot record its failure still logs and backs off', async () => {
+  const h = harness()
+  const logs = [] as string[]
+  let polls = 0
+  h.api.ui.log = (text: string) => { logs.push(text) }
+  h.api.process.run = async (argv: string[]) => {
+    if (!argv.includes('--event')) polls++
+    throw new Error('failed to start: ENOENT')
+  }
+  await h.handlers['session.start'](h.api, interactive, next)
+  await fail(h, 3)
+  expect(polls).toBe(3)
+  expect(logs.length).toBe(2)
+  expect(logs[0].includes('could not record poll-failed')).toBe(true)
+  expect(logs[1].includes('poll failed; messages remain queued')).toBe(true)
 })

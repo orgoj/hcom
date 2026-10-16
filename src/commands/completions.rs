@@ -65,7 +65,7 @@ pub fn bash_completion_script() -> &'static str {
         if [[ "$cur" == -* ]]; then
             COMPREPLY=( $(compgen -W "--name --go --help -h --version -v --new-terminal" -- "$cur") )
         else
-            local cmds="ack agent archive bundle completions completion config events handoff hooks kill list listen relay reset run send start status stop term transcript update r f claude gemini codex opencode kilo pi omp antigravity agy cursor kimi copilot hermes"
+            local cmds="agent archive bundle completions completion config events handoff hooks kill list listen relay reset run send start status stop term transcript update r f claude gemini codex opencode kilo pi omp antigravity agy cursor kimi copilot hermes"
             COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
         fi
         return 0
@@ -428,7 +428,6 @@ _hcom() {
 
     local -a commands
     commands=(
-        'ack:Acknowledge messages'
         'agent:Launch named agents from a JSON catalog'
         'archive:Query past hcom sessions'
         'bundle:Structured context packages for handoffs'
@@ -627,7 +626,7 @@ compdef _hcom hcom
 pub fn fish_completion_script() -> &'static str {
     r#"# Fish completion for hcom
 
-set -l commands ack agent archive bundle completions completion config events handoff hooks kill list listen relay reset run send start status stop term transcript update r f claude gemini codex opencode kilo pi omp antigravity agy cursor kimi copilot hermes
+set -l commands agent archive bundle completions completion config events handoff hooks kill list listen relay reset run send start status stop term transcript update r f claude gemini codex opencode kilo pi omp antigravity agy cursor kimi copilot hermes
 
 # Top-level commands
 complete -c hcom -f -n '__fish_use_subcommand' -a "$commands"
@@ -721,7 +720,7 @@ mod tests {
         let script = bash_completion_script();
         assert!(script.contains("_hcom()"));
         assert!(script.contains("complete -F _hcom hcom"));
-        assert!(script.contains("ack agent archive"));
+        assert!(script.contains("agent archive"));
     }
 
     #[test]

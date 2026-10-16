@@ -1,6 +1,6 @@
-//! Hook RPC dispatch shared by Pi and its fork Oh My Pi. Both extensions call
-//! `hcom <tool>-{start,status,read,beforetool,stop}` with the same argv shape;
-//! only the tool name and OMP's soft-stop recovery differ.
+//! Hook RPC dispatch shared by Pi, its fork Oh My Pi, and Hermes. Their plugins
+//! call `hcom <tool>-{start,status,read,beforetool,stop}` with the same argv
+//! shape; only the tool name and OMP's soft-stop recovery differ.
 
 use std::time::Instant;
 
@@ -33,6 +33,11 @@ pub(crate) const PI: PiFamily = PiFamily {
 pub(crate) const OMP: PiFamily = PiFamily {
     tool: Tool::Omp,
     recover_soft_stopped: true,
+};
+
+pub(crate) const HERMES: PiFamily = PiFamily {
+    tool: Tool::Hermes,
+    recover_soft_stopped: false,
 };
 
 impl PiFamily {
@@ -168,7 +173,7 @@ impl PiFamily {
                 return plugin_rpc::error(format!("DB open failed: {}", e));
             }
         };
-        if !common::hook_gate_check(&ctx, &db) {
+        if !common::hook_gate_check(&ctx) {
             return (0, String::new());
         }
         let handler_argv = argv.strip_prefix(&[hook_name.to_string()]).unwrap_or(argv);
@@ -176,6 +181,11 @@ impl PiFamily {
             .strip_prefix(self.name())
             .and_then(|s| s.strip_prefix('-'))
             .unwrap_or("");
+        if matches!(hook, "status" | "read" | "beforetool" | "stop")
+            && let Err(reply) = plugin_rpc::require_attached(&ctx, &db, handler_argv)
+        {
+            return reply;
+        }
         let handler_start = Instant::now();
         let (exit_code, output) = common::dispatch_with_panic_guard(
             self.name(),

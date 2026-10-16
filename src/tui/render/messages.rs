@@ -22,114 +22,27 @@ const DISPLAY_LIMIT: usize = 5000; // vertical mode loads up to 5000 from DB
 
 use super::truncate_display;
 
-pub fn render_messages(frame: &mut Frame, area: Rect, app: &App) -> usize {
-    if app.ui.show_events {
-        let agents = if app.ui.selected.is_empty() {
-            None
-        } else {
-            Some(&app.ui.selected)
-        };
-        render_events_timeline(frame, area, app, agents)
-    } else if let Some(ref cr) = app.ui.command_result {
-        render_command_output(frame, area, &cr.output, app.ui.msg_scroll)
+#[derive(Default)]
+pub struct ScrollMetrics {
+    pub max: usize,
+    pub total: usize,
+    pub offset: usize,
+}
+
+pub fn render_messages(frame: &mut Frame, area: Rect, app: &App) -> ScrollMetrics {
+    if let Some(ref cr) = app.ui.command_result {
+        render_command_output(
+            frame,
+            area,
+            &cr.output,
+            app.ui.msg_scroll,
+            app.ui.last_msg_total,
+        )
     } else if !app.ui.selected.is_empty() {
         render_agent_feed(frame, area, app, &app.ui.selected)
     } else {
         render_all_messages(frame, area, app)
     }
-}
-
-// ── Events timeline: all events + messages merged ────────────────────
-
-fn render_events_timeline(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    agents: Option<&BTreeSet<String>>,
-) -> usize {
-    let mut items: Vec<FeedItem> = Vec::new();
-    for ev in &app.data.events {
-        if agents.is_none_or(|a| a.contains(&ev.agent)) {
-            items.push(FeedItem::Ev(ev));
-        }
-    }
-    for msg in &app.data.messages {
-        if agents.is_none_or(|a| {
-            a.contains(&msg.sender)
-                || msg.recipients.iter().any(|r| a.contains(r))
-                || (msg.recipients.is_empty() && !msg.is_system())
-        }) {
-            items.push(FeedItem::Msg(msg));
-        }
-    }
-    items.sort_by(|a, b| a.time().total_cmp(&b.time()));
-
-    // Keep only the most recent items up to the display limit
-    if items.len() > DISPLAY_LIMIT {
-        items.drain(..items.len() - DISPLAY_LIMIT);
-    }
-
-    // Filter by search query if present
-    let query = app.active_search_query();
-    if let Some(q) = query {
-        items.retain(|item| match item {
-            FeedItem::Ev(ev) => event_matches(ev, q),
-            FeedItem::Msg(msg) => msg_matches(msg, q),
-        });
-    }
-
-    if items.is_empty() {
-        let msg = if query.is_some() {
-            "  No matches"
-        } else {
-            "  No events yet"
-        };
-        let empty = vec![
-            Line::raw(""),
-            Line::from(Span::styled(msg, Style::default().fg(palette::FG_DIM))),
-        ];
-        frame.render_widget(Paragraph::new(empty), area);
-        return 0;
-    }
-
-    let resolve_name = |name: &str| app.data.resolve_display_name(name);
-    let wl = build_waterlines(app);
-    let mut lines: Vec<Line> = Vec::new();
-    let mut prev_group: Option<(String, String)> = None;
-    for item in &items {
-        match item {
-            FeedItem::Ev(ev) => {
-                let time_str = format_time(ev.time);
-                let same = prev_group
-                    .as_ref()
-                    .is_some_and(|(a, t)| a == &ev.agent && t == &time_str);
-                prev_group = Some((ev.agent.clone(), time_str.clone()));
-                lines.push(event_line(
-                    ev,
-                    &time_str,
-                    same,
-                    true,
-                    area.width,
-                    query,
-                    &resolve_name,
-                ));
-                push_sub_lines(&mut lines, ev);
-            }
-            FeedItem::Msg(msg) => {
-                prev_group = None;
-                push_feed_message(
-                    &mut lines,
-                    msg,
-                    area.width as usize,
-                    query,
-                    &resolve_name,
-                    Some(&wl),
-                );
-            }
-        }
-    }
-
-    render_scrolled(frame, area, lines, app.ui.msg_scroll)
 }
 
 // ── Shared feed rendering helpers ───────────────────────────────────
@@ -317,7 +230,12 @@ fn push_feed_message(
 
 // ── Agent feed: merged tool events + messages ──────────────────────
 
-fn render_agent_feed(frame: &mut Frame, area: Rect, app: &App, agents: &BTreeSet<String>) -> usize {
+fn render_agent_feed(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    agents: &BTreeSet<String>,
+) -> ScrollMetrics {
     let resolve_name = |name: &str| app.data.resolve_display_name(name);
     // Collect relevant items
     let mut items: Vec<FeedItem> = Vec::new();
@@ -366,7 +284,7 @@ fn render_agent_feed(frame: &mut Frame, area: Rect, app: &App, agents: &BTreeSet
             Line::from(Span::styled(msg, Style::default().fg(palette::FG_DIM))),
         ];
         frame.render_widget(Paragraph::new(empty), area);
-        return 0;
+        return ScrollMetrics::default();
     }
 
     let show_agent_name = agents.len() > 1;
@@ -407,12 +325,12 @@ fn render_agent_feed(frame: &mut Frame, area: Rect, app: &App, agents: &BTreeSet
         }
     }
 
-    render_scrolled(frame, area, lines, app.ui.msg_scroll)
+    render_scrolled(frame, area, lines, app.ui.msg_scroll, app.ui.last_msg_total)
 }
 
 // ── All messages view ──────────────────────────────────────────────
 
-fn render_all_messages(frame: &mut Frame, area: Rect, app: &App) -> usize {
+fn render_all_messages(frame: &mut Frame, area: Rect, app: &App) -> ScrollMetrics {
     let resolve_name = |name: &str| app.data.resolve_display_name(name);
 
     // Use FTS search results when available (vertical mode with active query).
@@ -446,7 +364,7 @@ fn render_all_messages(frame: &mut Frame, area: Rect, app: &App) -> usize {
             Line::from(Span::styled(label, Style::default().fg(palette::FG_DIM))),
         ];
         frame.render_widget(Paragraph::new(empty), area);
-        return 0;
+        return ScrollMetrics::default();
     }
 
     // search_query drives highlight spans; filtering is skipped for FTS results.
@@ -516,7 +434,7 @@ fn render_all_messages(frame: &mut Frame, area: Rect, app: &App) -> usize {
         }
     }
 
-    render_scrolled(frame, area, lines, app.ui.msg_scroll)
+    render_scrolled(frame, area, lines, app.ui.msg_scroll, app.ui.last_msg_total)
 }
 
 fn push_msg_header(
@@ -660,56 +578,9 @@ fn search_counts(app: &App) -> (usize, usize) {
     }
 }
 
-/// Counts for events timeline: (search_matched, total) respecting agent selection.
-/// When no search query, matched == total.
-fn events_search_counts(app: &App) -> (usize, usize) {
-    let agents = if app.ui.selected.is_empty() {
-        None
-    } else {
-        Some(&app.ui.selected)
-    };
-    let agent_ev = |e: &&Event| agents.is_none_or(|a| a.contains(&e.agent));
-    let agent_msg = |m: &&Message| {
-        agents.is_none_or(|a| {
-            a.contains(&m.sender)
-                || m.recipients.iter().any(|r| a.contains(r))
-                || (m.recipients.is_empty() && !m.is_system())
-        })
-    };
-    let total = (app.data.events.iter().filter(agent_ev).count()
-        + app.data.messages.iter().filter(agent_msg).count())
-    .min(DISPLAY_LIMIT);
-    let query = match app.active_search_query() {
-        Some(q) => q,
-        None => return (total, total),
-    };
-    let matched = app
-        .data
-        .events
-        .iter()
-        .filter(agent_ev)
-        .filter(|e| event_matches(e, query))
-        .count()
-        + app
-            .data
-            .messages
-            .iter()
-            .filter(agent_msg)
-            .filter(|m| msg_matches(m, query))
-            .count();
-    (matched.min(total), total)
-}
-
 /// Returns a short count string like "[42]" or "[3/42]" for the panel heading and inline separator.
 pub fn display_count_str(app: &App) -> String {
-    if app.ui.show_events {
-        let (matched, total) = events_search_counts(app);
-        if app.active_search_query().is_some() {
-            format!("[{}/{}]", matched, total)
-        } else {
-            format!("[{}]", total)
-        }
-    } else if !app.ui.selected.is_empty() {
+    if !app.ui.selected.is_empty() {
         let (matched, total) = search_counts(app);
         if app.active_search_query().is_some() {
             format!("[{}/{}]", matched, total)
@@ -732,7 +603,8 @@ fn render_command_output(
     area: Rect,
     output: &[String],
     msg_scroll: usize,
-) -> usize {
+    last_total: usize,
+) -> ScrollMetrics {
     let mut lines: Vec<Line> = Vec::new();
     for line in output {
         lines.push(Line::from(vec![
@@ -741,21 +613,22 @@ fn render_command_output(
         ]));
     }
 
-    render_scrolled(frame, area, lines, msg_scroll)
+    render_scrolled(frame, area, lines, msg_scroll, last_total)
 }
 
 /// Render lines with bottom-anchored scroll and an auto-hiding scrollbar.
-/// Returns `max_scroll` so callers can clamp `msg_scroll`.
+/// Return the total and adjusted offset for the next frame.
 fn render_scrolled(
     frame: &mut Frame,
     area: Rect,
     lines: Vec<Line<'_>>,
     scroll_from_bottom: usize,
-) -> usize {
+    last_total: usize,
+) -> ScrollMetrics {
     let total = lines.len();
     let visible = area.height as usize;
     let max_scroll = total.saturating_sub(visible);
-    let effective = scroll_from_bottom.min(max_scroll);
+    let effective = anchored_offset(scroll_from_bottom, last_total, total).min(max_scroll);
     let scroll_pos = max_scroll - effective;
 
     let paragraph = Paragraph::new(lines).scroll((scroll_pos.min(u16::MAX as usize) as u16, 0));
@@ -774,5 +647,30 @@ fn render_scrolled(
         );
     }
 
-    max_scroll
+    ScrollMetrics {
+        max: max_scroll,
+        total,
+        offset: effective,
+    }
+}
+
+fn anchored_offset(offset: usize, last_total: usize, total: usize) -> usize {
+    if offset > 0 {
+        offset.saturating_add(total.saturating_sub(last_total))
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::anchored_offset;
+
+    #[test]
+    fn new_lines_keep_scrolled_view_in_place() {
+        assert_eq!(anchored_offset(5, 100, 103), 8);
+        assert_eq!(anchored_offset(0, 100, 103), 0);
+        assert_eq!(anchored_offset(5, 100, 90), 5);
+        assert_eq!(anchored_offset(8, 103, 103), 8);
+    }
 }

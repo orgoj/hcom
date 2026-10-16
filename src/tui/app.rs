@@ -21,6 +21,7 @@ pub struct App {
     pub ejector: Ejector,
     pub(crate) source: Box<dyn DataSource>,
     pub(crate) rpc_client: Option<RpcClient>,
+    pub(crate) usage: crate::tui::usage::UsageWorker,
 }
 
 impl Default for App {
@@ -39,6 +40,7 @@ impl App {
             data,
             source,
             rpc_client,
+            usage: Default::default(),
             ejector: Ejector::new(),
             ui: UiState {
                 cursor: 0,
@@ -53,6 +55,7 @@ impl App {
                 should_quit: false,
                 switch_viewport: false,
                 msg_scroll: 0,
+                last_msg_total: 0,
                 scroll_max: 0,
                 search_filter: None,
                 help_open: false,
@@ -67,7 +70,6 @@ impl App {
                 remote_expanded: false,
                 stopped_expanded: false,
                 show_all_stopped: false,
-                show_events: false,
                 orphans_expanded: false,
                 eject_filter: None,
                 inline_filter_changed: false,
@@ -213,6 +215,13 @@ impl App {
         let mut resize_cooldown: u8 = 0;
 
         loop {
+            if is_inline {
+                let agent = match self.cursor_target() {
+                    CursorTarget::Agent(idx) => self.data.agents.get(idx),
+                    _ => None,
+                };
+                dirty |= self.usage.poll(agent);
+            }
             if self.drain_rpc_results() {
                 dirty = true;
             }
@@ -391,6 +400,7 @@ mod tests {
             sync_age: None,
             headless: false,
             session_id: None,
+            transcript_path: None,
             pid: None,
             terminal_preset: None,
         }
@@ -437,6 +447,7 @@ mod tests {
                     headless_pty: false,
                     terminal: 0,
                     terminal_presets: vec!["default".into()],
+                    configured_terminal: "default".into(),
                     editing: None,
                     edit_cursor: 0,
                     edit_snapshot: None,
@@ -444,6 +455,7 @@ mod tests {
                 should_quit: false,
                 switch_viewport: false,
                 msg_scroll: 0,
+                last_msg_total: 0,
                 scroll_max: 0,
                 search_filter: None,
                 help_open: false,
@@ -458,7 +470,6 @@ mod tests {
                 remote_expanded: false,
                 stopped_expanded: false,
                 show_all_stopped: false,
-                show_events: false,
                 orphans_expanded: false,
                 eject_filter: None,
                 inline_filter_changed: false,
@@ -471,6 +482,7 @@ mod tests {
             ejector: Ejector::new(),
             source: Box::new(NullSource),
             rpc_client: None,
+            usage: Default::default(),
         }
     }
 

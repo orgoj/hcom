@@ -4,7 +4,6 @@
 //! Supports: message-wait mode, --timeout, --json, --sql filter mode.
 //! Uses TCP notify socket for instant wake on local messages.
 
-use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -32,11 +31,8 @@ pub struct ListenArgs {
     /// JSON output
     #[arg(long)]
     pub json: bool,
-    /// Emit one full JSON envelope without advancing the delivery cursor
-    #[arg(long)]
-    pub manual_ack: bool,
     /// Print direct messages no session under your name received, then exit
-    #[arg(long, conflicts_with_all = ["json", "manual_ack", "sql", "timeout", "timeout_positional"])]
+    #[arg(long, conflicts_with_all = ["json", "sql", "timeout", "timeout_positional"])]
     pub missed: bool,
     /// SQL WHERE filter
     #[arg(long)]
@@ -219,10 +215,6 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
     }
 
     let json_output = args.json;
-    if args.manual_ack && !json_output {
-        eprintln!("Error: --manual-ack requires --json");
-        return 1;
-    }
 
     // Convert clap filter args to FilterMap
     let mut filters = args.filters.to_filter_map();
@@ -325,7 +317,6 @@ pub fn cmd_listen(db: &HcomDb, args: &ListenArgs, ctx: Option<&CommandContext>) 
         &instance_name,
         timeout,
         json_output,
-        args.manual_ack,
         instance_data.unwrap(),
         start_time,
         notify_server.as_ref(),
@@ -370,7 +361,6 @@ fn missed_messages(
             intent: row.get(3)?,
             thread: row.get(4)?,
             relay_ref: row.get(5)?,
-            reply_to: None,
             timestamp: None,
             delivered_to: None,
             bundle_id: None,
@@ -416,7 +406,6 @@ fn listen_loop(
     instance_name: &str,
     timeout: f64,
     json_output: bool,
-    manual_ack: bool,
     instance_data: &serde_json::Value,
     start_time: std::time::Instant,
     notify_server: Option<&NotifyServer>,
@@ -442,29 +431,7 @@ fn listen_loop(
         }
 
         // Check for unread messages
-        // Manual-ack mode hands out one envelope and leaves the cursor alone;
-        // the caller acknowledges the event id once it has processed it.
-        if manual_ack {
-            if let Some(msg) = db.get_unread_messages(instance_name).first() {
-                crate::cli_context::claim_inline_delivery();
-                let envelope = serde_json::json!({
-                    "schema_version": 1,
-                    "event_id": msg.event_id,
-                    "from": msg.from,
-                    "to": instance_name,
-                    "text": msg.text,
-                    "intent": msg.intent,
-                    "thread": msg.thread,
-                    "reply_to": msg.reply_to,
-                    "timestamp": msg.timestamp,
-                    "bundle_id": msg.bundle_id,
-                });
-                println!("{}", serde_json::to_string(&envelope).unwrap_or_default());
-                let _ = std::io::stdout().flush();
-                set_listen_done_status(db, instance_name, instance_data, "message received");
-                return 0;
-            }
-        } else if let Some(batch) = InlineBatch::take(db, instance_name) {
+        if let Some(batch) = InlineBatch::take(db, instance_name) {
             // listen delivers this batch itself (or leaves it unread on a failed
             // write); the router must not deliver another one after it.
             crate::cli_context::claim_inline_delivery();

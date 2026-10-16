@@ -192,7 +192,13 @@ impl App {
                 }
                 other => self.ui.flash = Some(rpc_error_flash("Tag failed", other)),
             },
-            RpcOp::Launch { tool, count, .. } => match result.result {
+            RpcOp::Launch {
+                tool,
+                count,
+                settings,
+                prompt,
+                ..
+            } => match result.result {
                 Ok(resp) if resp.ok() => {
                     self.ui.flash = Some(Flash::new(
                         format!("Launched {} {}", count, tool.name()),
@@ -200,7 +206,21 @@ impl App {
                     ));
                     self.reload_data_force();
                 }
-                other => self.ui.flash = Some(rpc_error_flash("Launch failed", other)),
+                other => {
+                    // Reopen the wizard for a retry only if the user hasn't
+                    // moved on; never clobber a draft or another mode.
+                    if self.ui.mode == InputMode::Navigate
+                        && self.ui.input.is_empty()
+                        && self.ui.overlay.is_none()
+                        && self.ui.confirm.is_none()
+                    {
+                        self.ui.launch = *settings;
+                        self.ui.input = prompt;
+                        self.ui.input_cursor = self.ui.input.len();
+                        self.ui.mode = InputMode::Launch;
+                    }
+                    self.ui.flash = Some(rpc_error_flash("Launch failed", other));
+                }
             },
             RpcOp::RelayToggle { enable } => {
                 let ok = matches!(&result.result, Ok(resp) if resp.ok());
@@ -230,16 +250,26 @@ impl App {
             RpcOp::RelayNew => {
                 self.show_command_output("relay new", rpc_output_lines(result.result));
             }
-            RpcOp::RelayConnect { token } => {
+            RpcOp::RelayConnect { .. } => {
                 let success = matches!(&result.result, Ok(resp) if resp.ok());
-                let output = rpc_output_lines(result.result);
+                let output = rpc_output_lines(result.result)
+                    .into_iter()
+                    .map(|line| {
+                        // Switching groups prints a rejoin command containing the old token.
+                        if let Some((prefix, _)) = line.split_once("hcom relay connect ") {
+                            format!("{prefix}hcom relay connect [hidden]")
+                        } else {
+                            line
+                        }
+                    })
+                    .collect();
                 if !success {
                     self.ui.flash = Some(Flash::new(
                         "Relay connect failed".into(),
                         Theme::flash_err(),
                     ));
                 }
-                self.show_command_output(&format!("relay connect {}", token), output);
+                self.show_command_output("relay connect", output);
                 self.reload_data_force();
             }
             RpcOp::Command { cmd } => {
@@ -265,6 +295,7 @@ impl App {
 
     pub fn execute_confirm(&mut self, action: ConfirmAction) {
         match action {
+            ConfirmAction::Reset(cmd) => self.run_palette_command(cmd),
             ConfirmAction::KillAgents(ref names) => {
                 for name in names {
                     if let Err(e) = self.enqueue_rpc(RpcOp::KillAgent { name: name.clone() }) {
@@ -436,6 +467,43 @@ mod tests {
     }
 
     #[test]
+    fn failed_launch_restores_submitted_prompt_and_settings() {
+        let mut app = test_app();
+        let mut settings = app.ui.launch.clone();
+        settings.count = 4;
+        settings.tag = "retry".into();
+        let failed = |settings: &LaunchState| RpcResult {
+            op: RpcOp::Launch {
+                tool: settings.tool.clone(),
+                count: settings.count,
+                tag: settings.tag.clone(),
+                headless: settings.headless,
+                headless_pty: settings.headless_pty,
+                terminal: String::new(),
+                prompt: "try again".into(),
+                settings: Box::new(settings.clone()),
+            },
+            result: Err("failed".into()),
+        };
+        app.apply_rpc_result(failed(&settings));
+        assert_eq!(app.ui.mode, InputMode::Launch);
+        assert_eq!(app.ui.input, "try again");
+        assert_eq!(app.ui.input_cursor, app.ui.input.len());
+        assert_eq!(app.ui.launch.count, 4);
+        assert_eq!(app.ui.launch.tag, "retry");
+
+        // A draft typed while the launch ran is left alone.
+        app.ui.mode = InputMode::Compose;
+        app.ui.input = "draft".into();
+        app.ui.launch = LaunchState::new();
+        app.apply_rpc_result(failed(&settings));
+        assert_eq!(app.ui.mode, InputMode::Compose);
+        assert_eq!(app.ui.input, "draft");
+        assert_eq!(app.ui.launch.count, 1);
+        assert!(app.ui.flash.is_some());
+    }
+
+    #[test]
     fn execute_confirm_kill_orphan_missing_pid_sets_error_flash() {
         let mut app = test_app();
         app.execute_confirm(ConfirmAction::KillOrphan(4242));
@@ -496,6 +564,34 @@ mod tests {
 
         assert_eq!(app.ui.mode, InputMode::CommandOutput);
         assert!(!app.ui.pending_eject_cmd);
+    }
+
+    #[test]
+    fn relay_connect_result_hides_tokens() {
+        let mut app = test_app();
+        app.apply_rpc_result(RpcResult {
+            op: RpcOp::RelayConnect {
+                token: "secret-token".into(),
+            },
+            result: Ok(Response {
+                exit_code: 0,
+                stdout: "Leaving group old. To rejoin: hcom relay connect old-secret\nconnected"
+                    .into(),
+                stderr: String::new(),
+            }),
+        });
+        assert_eq!(
+            app.ui.command_result.as_ref().unwrap().label,
+            "relay connect"
+        );
+        let output = &app.ui.command_result.as_ref().unwrap().output;
+        assert_eq!(
+            output,
+            &vec![
+                "Leaving group old. To rejoin: hcom relay connect [hidden]".to_string(),
+                "connected".to_string(),
+            ]
+        );
     }
 
     #[test]

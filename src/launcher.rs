@@ -23,9 +23,9 @@ use crate::shared::constants::HCOM_IDENTITY_VARS;
 use crate::shared::tool_detection::tool_marker_vars;
 use crate::terminal;
 use crate::tools::launch_arg_validation::{
-    ANTIGRAVITY_REJECTED_ARGS, GEMINI_REJECTED_ARGS, GROK_REJECTED_ARGS, HERMES_REJECTED_ARGS,
-    KILO_REJECTED_ARGS, KIMI_REJECTED_ARGS, OMP_REJECTED_ARGS, OPENCODE_REJECTED_ARGS,
-    PI_REJECTED_ARGS, QODER_REJECTED_ARGS, validate_rejected_args,
+    ANTIGRAVITY_REJECTED_ARGS, GEMINI_REJECTED_ARGS, GROK_REJECTED_ARGS, KILO_REJECTED_ARGS,
+    KIMI_REJECTED_ARGS, OMP_REJECTED_ARGS, OPENCODE_REJECTED_ARGS, PI_REJECTED_ARGS,
+    QODER_REJECTED_ARGS, validate_rejected_args,
 };
 use crate::tools::{
     codex_preprocessing, copilot_preprocessing, cursor_preprocessing, opencode_preprocessing,
@@ -68,9 +68,9 @@ impl LaunchTool {
             "cursor" | "cursor-agent" => Ok(LaunchTool::Cursor),
             "kimi" => Ok(LaunchTool::Kimi),
             "copilot" => Ok(LaunchTool::Copilot),
-            "hermes" => Ok(LaunchTool::Hermes),
             "qoder" | "qodercli" => Ok(LaunchTool::Qoder),
             "grok" | "grok-build" => Ok(LaunchTool::Grok),
+            "hermes" => Ok(LaunchTool::Hermes),
             _ => bail!("Unknown tool: {}", s),
         }
     }
@@ -89,9 +89,9 @@ impl LaunchTool {
             LaunchTool::Cursor => "cursor",
             LaunchTool::Kimi => "kimi",
             LaunchTool::Copilot => "copilot",
-            LaunchTool::Hermes => "hermes",
             LaunchTool::Qoder => "qoder",
             LaunchTool::Grok => "grok",
+            LaunchTool::Hermes => "hermes",
         }
     }
 
@@ -112,9 +112,9 @@ impl LaunchTool {
             LaunchTool::Cursor => crate::tool::Tool::Cursor,
             LaunchTool::Kimi => crate::tool::Tool::Kimi,
             LaunchTool::Copilot => crate::tool::Tool::Copilot,
-            LaunchTool::Hermes => crate::tool::Tool::Hermes,
             LaunchTool::Qoder => crate::tool::Tool::Qoder,
             LaunchTool::Grok => crate::tool::Tool::Grok,
+            LaunchTool::Hermes => crate::tool::Tool::Hermes,
         }
     }
 
@@ -275,12 +275,16 @@ fn is_tool_installed(tool: &str) -> bool {
     find_tool_path(tool).is_some()
 }
 
+/// Whether a launch replaces the current process instead of opening a new
+/// terminal. Without an interactive stdin (TUI RPC, pipes, scripts) there is no
+/// terminal to take over, so only an explicit `--run-here`/`here` does it.
 pub fn will_run_in_current_terminal(
     count: usize,
     background: bool,
     run_here: Option<bool>,
     terminal: Option<&str>,
     inside_ai_tool: bool,
+    stdin_is_terminal: bool,
 ) -> bool {
     if let Some(rh) = run_here {
         return rh;
@@ -292,7 +296,7 @@ pub fn will_run_in_current_terminal(
     if inside_ai_tool {
         return false;
     }
-    if background {
+    if background || !stdin_is_terminal {
         return false;
     }
     count == 1
@@ -751,9 +755,6 @@ fn install_diag_context(tool: &LaunchTool, paths: &[(&str, std::path::PathBuf)])
 /// Strict gate: refuses to launch if hooks can't be installed.
 fn ensure_hooks_installed(tool: &LaunchTool, include_permissions: bool) -> Result<()> {
     match tool {
-        // Hermes invokes hcom lifecycle commands directly when HCOM_PROCESS_ID
-        // is present; there is no external hook configuration to install.
-        LaunchTool::Hermes => Ok(()),
         LaunchTool::Claude | LaunchTool::ClaudePty => unreachable!("Claude uses per-run hooks"),
         LaunchTool::Gemini => {
             if !crate::hooks::gemini::is_gemini_version_supported() {
@@ -851,6 +852,7 @@ fn ensure_hooks_installed(tool: &LaunchTool, include_permissions: bool) -> Resul
         LaunchTool::Copilot => unreachable!("Copilot uses per-run hooks"),
         LaunchTool::Qoder => unreachable!("Qoder uses per-run hooks"),
         LaunchTool::Grok => unreachable!("Grok has no hooks"),
+        LaunchTool::Hermes => unreachable!("Hermes installs into the launch's profile"),
     }
 }
 
@@ -1718,6 +1720,7 @@ fn launch_pty_or_background(
             params.run_here,
             ctx.terminal_mode,
             inside_ai_tool,
+            std::io::IsTerminal::is_terminal(&std::io::stdin()),
         );
         let ok = launch_pty(
             ctx.tool,
@@ -2026,6 +2029,7 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         params.run_here,
         terminal_mode,
         inside_ai_tool,
+        std::io::IsTerminal::is_terminal(&std::io::stdin()),
     );
 
     // Build base environment for the current launch regime, then overlay
@@ -2105,6 +2109,17 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                 insert_effective_env(&mut base_env, key.clone(), value.clone(), cfg!(windows));
             }
             Some(injection)
+        }
+        None if normalized == LaunchTool::Hermes => {
+            // Installed per profile, so it needs the launch's args and env.
+            crate::hooks::hermes::ensure_installed(&crate::hooks::runtime::LaunchCtx {
+                tool: normalized.tool(),
+                env: base_env.clone(),
+                cwd: canonical_dir.clone(),
+                args: params.args.clone(),
+                auto_approve: hcom_config.auto_approve,
+            })?;
+            None
         }
         None => {
             ensure_hooks_installed(&normalized, hcom_config.auto_approve)?;
@@ -2188,6 +2203,12 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
             Err(_) => "api".to_string(),
         }
     });
+
+    if normalized == LaunchTool::Hermes {
+        params.args = crate::tools::hermes_preprocessing::with_chat_subcommand(std::mem::take(
+            &mut params.args,
+        ));
+    }
 
     // Inject --hcom-prompt into tool args (translated per-tool).
     // When a real hcom participant launched us, append a reply instruction so
@@ -2471,6 +2492,7 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                             params.run_here,
                             terminal_mode,
                             inside_ai_tool,
+                            std::io::IsTerminal::is_terminal(&std::io::stdin()),
                         );
                         let (launch_result, effective_preset) = terminal::launch_terminal(
                             &claude_cmd,
@@ -2618,7 +2640,11 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                     )
                 }
 
-                LaunchTool::OpenCode | LaunchTool::Kilo | LaunchTool::Pi | LaunchTool::Omp => {
+                LaunchTool::OpenCode
+                | LaunchTool::Kilo
+                | LaunchTool::Pi
+                | LaunchTool::Omp
+                | LaunchTool::Hermes => {
                     opencode_preprocessing::preprocess_opencode_env(
                         &mut instance_env,
                         &instance_name,
@@ -2759,33 +2785,6 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                         &mut BackgroundLaunchCtx {
                             db,
                             tool: "copilot",
-                            instance_name: &instance_name,
-                            process_id: &process_id,
-                            terminal_mode,
-                            tag: params.tag.as_deref().unwrap_or(""),
-                            working_dir,
-                            log_files: &mut log_files,
-                            handles: &mut handles,
-                        },
-                        &mut instance_env,
-                        &instruction_args,
-                        &params,
-                        inside_ai_tool,
-                    )
-                }
-                LaunchTool::Hermes => {
-                    instances::update_instance_position(
-                        db,
-                        &instance_name,
-                        &serde_json::Map::from_iter([(
-                            "launch_args".to_string(),
-                            json!(&stored_launch_args),
-                        )]),
-                    );
-                    launch_pty_or_background(
-                        &mut BackgroundLaunchCtx {
-                            db,
-                            tool: "hermes",
                             instance_name: &instance_name,
                             process_id: &process_id,
                             terminal_mode,
@@ -2961,6 +2960,7 @@ pub(crate) fn validate_tool_args(tool: &LaunchTool, args: &[String]) -> Vec<Stri
         LaunchTool::Kilo => validate_rejected_args("Kilo", "hcom kilo", args, KILO_REJECTED_ARGS),
         LaunchTool::Pi => validate_rejected_args("Pi", "hcom pi", args, PI_REJECTED_ARGS),
         LaunchTool::Omp => validate_rejected_args("Oh My Pi", "hcom omp", args, OMP_REJECTED_ARGS),
+        LaunchTool::Hermes => crate::tools::hermes_preprocessing::validate_hermes_args(args),
         LaunchTool::Antigravity => validate_rejected_args(
             "Antigravity",
             "hcom antigravity",
@@ -2968,9 +2968,6 @@ pub(crate) fn validate_tool_args(tool: &LaunchTool, args: &[String]) -> Vec<Stri
             ANTIGRAVITY_REJECTED_ARGS,
         ),
         LaunchTool::Copilot => crate::tools::copilot_preprocessing::validate_copilot_args(args),
-        LaunchTool::Hermes => {
-            validate_rejected_args("Hermes", "hcom hermes", args, HERMES_REJECTED_ARGS)
-        }
         LaunchTool::Qoder => {
             validate_rejected_args("Qoder", "hcom qoder", args, QODER_REJECTED_ARGS)
         }
@@ -3125,41 +3122,21 @@ mod tests {
     }
 
     struct EnvVarGuard {
-        saved: BTreeMap<String, Option<String>>,
+        saved: BTreeMap<String, Option<std::ffi::OsString>>,
     }
 
     impl EnvVarGuard {
         fn clean_detection_env() -> Self {
-            let mut keys: Vec<String> = [
-                "CLAUDECODE",
-                "CLAUDE_ENV_FILE",
-                "ANTIGRAVITY_AGENT",
-                "GEMINI_CLI",
-                "CODEX_SANDBOX",
-                "CODEX_SANDBOX_NETWORK_DISABLED",
-                "CODEX_MANAGED_BY_NPM",
-                "CODEX_MANAGED_BY_BUN",
-                "CODEX_THREAD_ID",
-                "CODEX_SESSION_ID",
-                "OPENCODE",
-                "KILO",
-                "CURSOR_AGENT",
-                "CURSOR_PROJECT_DIR",
-                "KIMI_CODE_CLI",
-                "KIMI_SESSION_ID",
-                "HCOM_TOOL",
-                "HCOM_LAUNCHED",
-                "HCOM_PI",
-                "CI",
-                "GITHUB_ACTIONS",
-                "CARGO_TEST_PARENT",
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect();
+            let mut keys: Vec<String> = tool_marker_vars()
+                .iter()
+                .copied()
+                .chain(["HCOM_LAUNCHED", "CI", "GITHUB_ACTIONS", "CARGO_TEST_PARENT"])
+                .map(str::to_string)
+                .collect();
             keys.extend(
-                std::env::vars()
+                std::env::vars_os()
                     .map(|(key, _)| key)
+                    .filter_map(|key| key.into_string().ok())
                     .filter(|key| key.starts_with("CARGO_")),
             );
             Self::remove(keys)
@@ -3173,7 +3150,7 @@ mod tests {
             for key in keys {
                 saved
                     .entry(key.clone())
-                    .or_insert_with(|| std::env::var(&key).ok());
+                    .or_insert_with(|| std::env::var_os(&key));
                 unsafe { std::env::remove_var(key) };
             }
             Self { saved }
@@ -3366,16 +3343,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_hermes_rejects_noninteractive_modes_but_allows_resume() {
-        for flag in ["-q", "--query", "-z", "--oneshot", "--tui"] {
-            let errors = validate_tool_args(&LaunchTool::Hermes, &[flag.to_string()]);
-            assert_eq!(errors.len(), 1, "{flag}");
-            assert!(errors[0].contains(flag), "{flag}: {}", errors[0]);
-        }
-        assert!(validate_tool_args(&LaunchTool::Hermes, &["--resume".to_string()]).is_empty());
-    }
-
-    #[test]
     fn validate_antigravity_rejects_print_alias_but_allows_conversation() {
         let errors = validate_tool_args(&LaunchTool::Antigravity, &["--prompt".to_string()]);
         assert_eq!(errors.len(), 1);
@@ -3493,6 +3460,7 @@ mod tests {
             false,
             Some(true),
             None,
+            false,
             false
         ));
         assert!(!will_run_in_current_terminal(
@@ -3500,7 +3468,8 @@ mod tests {
             false,
             Some(false),
             None,
-            false
+            false,
+            true
         ));
 
         // terminal=here
@@ -3509,18 +3478,32 @@ mod tests {
             false,
             None,
             Some("here"),
+            false,
             false
         ));
 
         // Inside AI tool → always new window
-        assert!(!will_run_in_current_terminal(1, false, None, None, true));
+        assert!(!will_run_in_current_terminal(
+            1, false, None, None, true, true
+        ));
 
         // Background → never run here
-        assert!(!will_run_in_current_terminal(1, true, None, None, false));
+        assert!(!will_run_in_current_terminal(
+            1, true, None, None, false, true
+        ));
+
+        // No interactive stdin (TUI RPC, pipes) → new window
+        assert!(!will_run_in_current_terminal(
+            1, false, None, None, false, false
+        ));
 
         // Single → run here, multiple → new window
-        assert!(will_run_in_current_terminal(1, false, None, None, false));
-        assert!(!will_run_in_current_terminal(2, false, None, None, false));
+        assert!(will_run_in_current_terminal(
+            1, false, None, None, false, true
+        ));
+        assert!(!will_run_in_current_terminal(
+            2, false, None, None, false, true
+        ));
     }
 
     #[test]
@@ -3613,21 +3596,60 @@ mod tests {
 
     #[test]
     #[serial]
+    fn test_clean_detection_env_clears_and_restores_all_markers() {
+        let _original = EnvVarGuard::clean_detection_env();
+        for var in tool_marker_vars() {
+            unsafe { std::env::set_var(var, "1") };
+        }
+        assert!(contaminated_parent());
+
+        {
+            let _clean = EnvVarGuard::clean_detection_env();
+            for var in tool_marker_vars() {
+                assert!(std::env::var_os(var).is_none(), "{var} was not cleared");
+            }
+            assert!(!contaminated_parent());
+        }
+
+        for var in tool_marker_vars() {
+            assert_eq!(
+                std::env::var(var).as_deref(),
+                Ok("1"),
+                "{var} was not restored"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
     fn test_contaminated_parent_detection() {
         let _guard = EnvVarGuard::clean_detection_env();
         assert!(!contaminated_parent());
 
-        unsafe { std::env::set_var("CLAUDECODE", "1") };
-        assert!(contaminated_parent());
-        unsafe { std::env::remove_var("CLAUDECODE") };
+        for rule in crate::shared::tool_detection::TOOL_DETECTION_RULES {
+            for predicate in rule.predicates {
+                let value = match predicate.condition {
+                    crate::shared::tool_detection::EnvMatch::Equals(value) => value,
+                    _ => "1",
+                };
+                unsafe { std::env::set_var(predicate.var, value) };
+                assert!(contaminated_parent(), "{}={value}", predicate.var);
+                unsafe { std::env::remove_var(predicate.var) };
+                assert!(!contaminated_parent(), "after removing {}", predicate.var);
+            }
+        }
 
-        unsafe { std::env::set_var("CODEX_THREAD_ID", "thread") };
+        unsafe { std::env::set_var("HCOM_LAUNCHED", "1") };
         assert!(contaminated_parent());
-        unsafe { std::env::remove_var("CODEX_THREAD_ID") };
+        unsafe { std::env::remove_var("HCOM_LAUNCHED") };
 
         unsafe { std::env::set_var("CI", "1") };
         assert!(contaminated_parent());
         unsafe { std::env::remove_var("CI") };
+
+        unsafe { std::env::set_var("GITHUB_ACTIONS", "true") };
+        assert!(contaminated_parent());
+        unsafe { std::env::remove_var("GITHUB_ACTIONS") };
 
         unsafe { std::env::set_var("CARGO_TEST_PARENT", "1") };
         assert!(contaminated_parent());
@@ -4436,7 +4458,8 @@ mod tests {
             assert_eq!(unread.len(), 1);
             assert_eq!(unread[0].event_id, Some(queued_id));
 
-            db.ack_hook_delivery("luna", queued_id, false).unwrap();
+            db.ack_hook_delivery("luna", queued_id, false, None)
+                .unwrap();
             assert!(db.get_unread_messages("luna").is_empty());
         }
     }

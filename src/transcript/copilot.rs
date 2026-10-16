@@ -10,8 +10,9 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use super::shared::{
-    Exchange, ToolUse, capture_tool_output, dedup_sorted_capped, finalize_action_text,
-    normalize_tool_name, read_file_lossy, same_trimmed_text, truncate_str,
+    Exchange, TokenUsage, ToolUse, Transcript, UsageCollector, capture_tool_output,
+    dedup_sorted_capped, display_path, final_segment, finalize_action_text, normalize_tool_name,
+    read_file_lossy, same_trimmed_text, tool_input_file, truncate_str,
 };
 
 fn data_text(data: &Value) -> String {
@@ -41,24 +42,6 @@ fn tool_input(data: &Value) -> Value {
         .unwrap_or_default()
 }
 
-fn tool_file(input: &Value) -> Option<String> {
-    let obj = input.as_object()?;
-    for field in ["path", "file_path", "file"] {
-        if let Some(val) = obj.get(field).and_then(Value::as_str)
-            && !val.is_empty()
-        {
-            return Some(
-                Path::new(val)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(val)
-                    .to_string(),
-            );
-        }
-    }
-    None
-}
-
 fn tool_command(input: &Value) -> Option<String> {
     input
         .get("command")
@@ -68,13 +51,24 @@ fn tool_command(input: &Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
+#[cfg(test)]
 pub(crate) fn parse_copilot_jsonl(
     path: &Path,
     last: usize,
     _detailed: bool,
 ) -> Result<Vec<Exchange>, String> {
+    let mut transcript = parse_copilot_jsonl_with_usage(path, _detailed)?;
+    transcript.truncate(last);
+    Ok(transcript.exchanges)
+}
+
+pub(crate) fn parse_copilot_jsonl_with_usage(
+    path: &Path,
+    _detailed: bool,
+) -> Result<Transcript, String> {
     let content = read_file_lossy(path)?;
 
+    let mut usage = UsageCollector::default();
     let mut exchanges: Vec<Exchange> = Vec::new();
     let mut current_user = String::new();
     let mut current_action = String::new();
@@ -86,6 +80,9 @@ pub(crate) fn parse_copilot_jsonl(
     let mut timestamp = String::new();
     let mut position = 0usize;
     let mut in_exchange = false;
+    // Where the text after the latest tool call starts in `current_action`.
+    let mut final_start = 0usize;
+    let mut tool_since_text = false;
 
     let flush = |exchanges: &mut Vec<Exchange>,
                  position: &mut usize,
@@ -97,14 +94,18 @@ pub(crate) fn parse_copilot_jsonl(
                  errors: &mut Vec<Value>,
                  last_was_error: &mut bool,
                  call_index: &mut HashMap<String, usize>,
-                 ts: &mut String| {
+                 ts: &mut String,
+                 final_start: &mut usize,
+                 tool_since_text: &mut bool| {
         if !user.is_empty() || !action.is_empty() {
             *position += 1;
             let final_action = finalize_action_text(action, tools, errors, *last_was_error);
             exchanges.push(Exchange {
+                usage: None,
                 position: *position,
                 user: std::mem::take(user),
                 action: final_action,
+                final_text: final_segment(action, *final_start),
                 files: dedup_sorted_capped(files, 5),
                 timestamp: std::mem::take(ts),
                 tools: std::mem::take(tools),
@@ -116,6 +117,8 @@ pub(crate) fn parse_copilot_jsonl(
             files.clear();
             call_index.clear();
             *last_was_error = false;
+            *final_start = 0;
+            *tool_since_text = false;
         }
         *in_exchange = false;
     };
@@ -128,6 +131,38 @@ pub(crate) fn parse_copilot_jsonl(
         let event_type = entry.get("type").and_then(Value::as_str).unwrap_or("");
         let data = entry.get("data").unwrap_or(&entry);
         match event_type {
+            "session.usage_record" => {
+                if let Some(u) = data.get("usage").filter(|u| u.is_object()) {
+                    let n = |key: &str| u.get(key).and_then(Value::as_u64).unwrap_or(0);
+                    let tokens = TokenUsage {
+                        input: n("inputTokens")
+                            .saturating_sub(n("cacheReadTokens"))
+                            .saturating_sub(n("cacheWriteTokens")),
+                        output: n("outputTokens"),
+                        cache_read: n("cacheReadTokens"),
+                        cache_write: n("cacheWriteTokens"),
+                        reasoning: u.get("reasoningTokens").and_then(Value::as_u64),
+                    };
+                    let session = usage.record(
+                        tokens,
+                        u.get("inputTokens").and_then(Value::as_u64),
+                        None,
+                        data.get("model")
+                            .or_else(|| u.get("model"))
+                            .and_then(Value::as_str),
+                        in_exchange.then_some(exchanges.len()),
+                    );
+                    // Copilot persists the prompt capacity alongside each call.
+                    if let Some(window) = u
+                        .get("maxPromptTokens")
+                        .and_then(Value::as_u64)
+                        .filter(|window| *window > 0)
+                    {
+                        session.context_window = Some(window);
+                    }
+                }
+            }
+
             "user.message" => {
                 let text = data_text(data);
                 if text.is_empty() {
@@ -151,6 +186,8 @@ pub(crate) fn parse_copilot_jsonl(
                     &mut current_last_was_error,
                     &mut call_index,
                     &mut timestamp,
+                    &mut final_start,
+                    &mut tool_since_text,
                 );
                 current_user = text;
                 timestamp = entry
@@ -166,6 +203,9 @@ pub(crate) fn parse_copilot_jsonl(
                     if !current_action.is_empty() {
                         current_action.push_str("\n\n");
                     }
+                    if std::mem::take(&mut tool_since_text) {
+                        final_start = current_action.len();
+                    }
                     current_action.push_str(&text);
                     in_exchange = true;
                 }
@@ -177,7 +217,8 @@ pub(crate) fn parse_copilot_jsonl(
                 }
                 let input = tool_input(data);
                 let normalized = normalize_tool_name(&name).to_string();
-                let file = tool_file(&input);
+                tool_since_text = true;
+                let file = tool_input_file(&name, &input).map(|f| display_path(f, None));
                 if let Some(file) = &file {
                     current_files.push(file.clone());
                 }
@@ -240,13 +281,11 @@ pub(crate) fn parse_copilot_jsonl(
         &mut current_last_was_error,
         &mut call_index,
         &mut timestamp,
+        &mut final_start,
+        &mut tool_since_text,
     );
 
-    if last > 0 && exchanges.len() > last {
-        Ok(exchanges.split_off(exchanges.len() - last))
-    } else {
-        Ok(exchanges)
-    }
+    Ok(usage.attach(exchanges))
 }
 
 #[cfg(test)]
@@ -278,5 +317,58 @@ mod tests {
         assert_eq!(exchanges[0].tools[0].name, "Bash");
         assert_eq!(exchanges[0].tools[0].command.as_deref(), Some("pwd"));
         assert_eq!(exchanges[0].tools[0].output.as_deref(), Some("/work\n"));
+    }
+    #[test]
+    fn normalizes_usage_without_treating_premium_units_as_dollars() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let usage = json!({"type":"session.usage_record","data":{"model":"gpt", "usage":{"inputTokens":100,"outputTokens":12,"cacheReadTokens":70,"cacheWriteTokens":5,"reasoningTokens":4,"maxPromptTokens":200,"cost":1}}});
+        std::fs::write(
+            f.path(),
+            [
+                json!({"type":"user.message","data":{"text":"first"}}),
+                usage.clone(),
+                usage.clone(),
+                json!({"type":"user.message","data":{"text":"second"}}),
+                usage,
+            ]
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        )
+        .unwrap();
+        let t = parse_copilot_jsonl_with_usage(f.path(), false).unwrap();
+        let u = t.usage.unwrap();
+        assert_eq!(u.tokens.input, 75);
+        assert_eq!(u.tokens.cache_read, 210);
+        assert_eq!(u.tokens.output, 36);
+        assert_eq!(u.tokens.reasoning, Some(12));
+        assert_eq!(u.context_tokens, Some(100));
+        assert_eq!(u.context_window, Some(200));
+        assert_eq!(u.cost_usd, None);
+        assert_eq!(t.exchanges[0].usage.unwrap().input, 50);
+        assert_eq!(
+            parse_copilot_jsonl(f.path(), 1, false).unwrap()[0]
+                .usage
+                .unwrap()
+                .input,
+            25
+        );
+        std::fs::write(f.path(), json!({"type":"session.usage_record","data":{"usage":{"inputTokens":0,"outputTokens":0}}}).to_string()).unwrap();
+        assert_eq!(
+            parse_copilot_jsonl_with_usage(f.path(), false)
+                .unwrap()
+                .usage
+                .unwrap()
+                .tokens,
+            TokenUsage::default()
+        );
+        std::fs::write(f.path(), "{}").unwrap();
+        assert!(
+            parse_copilot_jsonl_with_usage(f.path(), false)
+                .unwrap()
+                .usage
+                .is_none()
+        );
     }
 }
