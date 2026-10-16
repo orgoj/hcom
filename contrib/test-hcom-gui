@@ -65,6 +65,10 @@ class RunningGroups(unittest.TestCase):
         rows = gui.build_rows(CATALOG, LIVE)
         self.assertEqual(gui.running_groups(rows), {"persistent": ["a1", "a2x"], "wdt_all": ["a2x"]})
 
+    def test_tools_hold_only_running_instances(self):
+        rows = gui.build_rows(CATALOG, LIVE)
+        self.assertEqual(gui.running_tools(rows), {"claude": ["a1", "solo"], "codex": ["a2x"]})
+
     def test_always_buttons_need_no_row(self):
         self.assertTrue(gui.enabled({"when": "always"}, None))
         self.assertFalse(gui.enabled({"when": "running"}, None))
@@ -218,8 +222,14 @@ class App(unittest.TestCase):
 
     def test_group_menu_lists_running_groups(self):
         menu = self.app.group_menu
-        labels = [menu.entrycget(i, "label") for i in range(menu.index("end") + 1)]
-        self.assertEqual(labels, ["@persistent (2)", "@wdt_all (1)"])
+        labels = [menu.entrycget(i, "label") if menu.type(i) == "command" else "---"
+                  for i in range(menu.index("end") + 1)]
+        self.assertEqual(labels, ["@persistent (2)", "@wdt_all (1)", "---", "tool:claude (2)", "tool:codex (1)"])
+
+    def test_tool_menu_kills_confirmed_names(self):
+        self.app.group_menu.invoke(3)
+        self.assertEqual(self.asked, [("Kill group", "Kill tool:claude: a1, solo?")])
+        self.assertEqual(self.ran, [(["hcom", "kill", "a1", "solo"], gui.HOME)])
 
     def test_group_menu_kills_confirmed_names(self):
         self.app.group_menu.invoke(0)

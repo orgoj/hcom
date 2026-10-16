@@ -1,4 +1,4 @@
-//! Kill command: `hcom kill <name(s)|@<group>|all|tag:X>`
+//! Kill command: `hcom kill <name(s)|@<group>|all|tag:X|tool:X>`
 //!
 //!
 //! Sends SIGTERM to process groups and optionally closes terminal panes.
@@ -19,7 +19,7 @@ use anyhow::{Result, bail};
 #[derive(clap::Parser, Debug)]
 #[command(name = "kill", about = "Kill agent processes")]
 pub struct KillArgs {
-    /// Targets to kill (names, "@<group>", "all", or "tag:X")
+    /// Targets to kill (names, "@<group>", "all", "tag:X", or "tool:X")
     pub targets: Vec<String>,
 }
 
@@ -284,6 +284,8 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     for target in &targets {
         let exit = if let Some(tag) = target.strip_prefix("tag:") {
             kill_by_tag(&db, &hcom_dir, tag, &initiator)?
+        } else if let Some(tool) = target.strip_prefix("tool:") {
+            kill_by_tool(&db, &hcom_dir, tool, &initiator)?
         } else if let Some(group) = target.strip_prefix('@') {
             if group.is_empty() {
                 eprintln!("Error: Empty target '@' is not allowed");
@@ -476,10 +478,60 @@ fn kill_all(db: &HcomDb, hcom_dir: &std::path::Path, initiator: &str) -> Result<
 
 /// Kill instances by tag.
 fn kill_by_tag(db: &HcomDb, hcom_dir: &std::path::Path, tag: &str, initiator: &str) -> Result<i32> {
+    kill_matching(
+        db,
+        hcom_dir,
+        &format!("tag:{tag}"),
+        &format!("No agents with tag '{tag}'"),
+        |inst| inst.tag.as_deref() == Some(tag),
+        |orphan| orphan.tag == tag,
+        initiator,
+    )
+}
+
+/// Kill instances by CLI tool (`tool:<cli>`, aliases such as `agy` accepted).
+fn kill_by_tool(
+    db: &HcomDb,
+    hcom_dir: &std::path::Path,
+    tool: &str,
+    initiator: &str,
+) -> Result<i32> {
+    let tool = match tool.parse::<crate::tool::Tool>() {
+        Ok(tool) => tool.as_str(),
+        Err(_) => {
+            let names: Vec<_> = crate::integration_spec::ALL
+                .iter()
+                .map(|s| s.name)
+                .collect();
+            eprintln!("Unknown tool '{tool}'. Valid tools: {}", names.join(", "));
+            return Ok(1);
+        }
+    };
+    kill_matching(
+        db,
+        hcom_dir,
+        &format!("tool:{tool}"),
+        &format!("No agents with tool '{tool}'"),
+        |inst| inst.tool == tool,
+        |orphan| orphan.tool == tool,
+        initiator,
+    )
+}
+
+/// Kill local instances and leftover processes matching the given filters.
+fn kill_matching(
+    db: &HcomDb,
+    hcom_dir: &std::path::Path,
+    label: &str,
+    none_message: &str,
+    instance_filter: impl Fn(&crate::db::InstanceRow) -> bool,
+    orphan_filter: impl Fn(&pidtrack::OrphanProcess) -> bool,
+    initiator: &str,
+) -> Result<i32> {
     let instances = db.iter_instances_full()?;
     let tagged: Vec<_> = instances
         .iter()
-        .filter(|inst| inst.tag.as_deref() == Some(tag) && inst.origin_device_id.is_none())
+        .filter(|inst| instance_filter(inst) && inst.origin_device_id.is_none())
         .collect();
 
     let mut killed = 0;
@@ -528,7 +580,7 @@ fn kill_by_tag(db: &HcomDb, hcom_dir: &std::path::Path, tag: &str, initiator: &s
         .filter_map(|i| i.pid.map(|p| p as u32))
         .collect();
     let orphans = pidtrack::get_orphan_processes(hcom_dir, Some(&active_pids));
-    let tagged_orphans: Vec<_> = orphans.iter().filter(|o| o.tag == tag).collect();
+    let tagged_orphans: Vec<_> = orphans.iter().filter(|o| orphan_filter(o)).collect();
     for orphan in &tagged_orphans {
         let names = orphan.names.join(", ");
         let (result, pane_closed, pane_retry_command) =
@@ -559,11 +611,11 @@ fn kill_by_tag(db: &HcomDb, hcom_dir: &std::path::Path, tag: &str, initiator: &s
     }
 
     if tagged.is_empty() && tagged_orphans.is_empty() {
-        eprintln!("No agents with tag '{}'", tag);
+        eprintln!("{none_message}");
         return Ok(1);
     }
 
-    println!("Killed {} (tag:{})", killed, tag);
+    println!("Killed {} ({})", killed, label);
     Ok(if failed > 0 || incomplete > 0 { 1 } else { 0 })
 }
 

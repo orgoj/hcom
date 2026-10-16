@@ -267,7 +267,7 @@ What you might type from a shell. Agents run their own commands that they learn 
 hcom [N] claude|gemini|codex|agy|opencode|kilo|pi|omp|cursor-agent|kimi|copilot|qoder|grok   # launch N agents
 hcom r <name|session_id>     # resume agent
 hcom f <name|session_id>     # fork session
-hcom kill <name|tag:T|all>   # kill + close terminal pane
+hcom kill <name|@group|tag:T|tool:CLI|all>   # kill + close terminal pane
 ```
 
 hcom launch flags:

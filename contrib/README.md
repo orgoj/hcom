@@ -16,8 +16,9 @@ empty, the catalog `prompt` (if any) applies.
 Send (running instances) asks for a multi-line message the same way and runs
 `hcom send -b @<instance> -- <text>` (sender `bigboss`, the human); an empty text sends
 nothing.
-`Kill group ▾` lists each catalog group with running members (`@persistent (3)`) and,
-after confirming the names, kills exactly those instances. Since is the age of the
+`Kill group ▾` lists each catalog group with running members (`@persistent (3)`), then
+each CLI with running instances (`tool:claude (2)`), and, after confirming the names,
+kills exactly those instances. Since is the age of the
 current status, Age the time since the instance started; both sort numerically. Context is the input size of the latest model call
 and its share of the window, read from the tail of Claude and Codex transcripts (Claude
 transcripts lack the window, so 1M is assumed). Quota is the used share of Codex's

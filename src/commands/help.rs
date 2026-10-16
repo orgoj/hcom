@@ -545,6 +545,10 @@ const KILL_HELP: &[HelpEntry] = &[
     ),
     ("kill @<group>", "Kill all agents in catalog group"),
     ("kill tag:<name>", "Kill all with tag"),
+    (
+        "kill tool:<cli>",
+        "Kill all of one CLI (e.g. tool:codex, tool:agy)",
+    ),
     ("kill all", "Kill all with tracked PIDs"),
 ];
 
@@ -1240,7 +1244,7 @@ Launch:\n\
 \x20 hcom [N] {launchable} [flags] [tool-args]\n\
 \x20 hcom r <target>                       Resume stopped agent\n\
 \x20 hcom f <target>                       Fork agent session ({forkable})\n\
-\x20 hcom kill <name(s)|@group|tag:T|all>  Kill + close terminal pane\n\
+\x20 hcom kill <name(s)|@group|tag:T|tool:CLI|all>  Kill + close terminal pane\n\
 \n\
 \x20 Any flag hcom does not know is forwarded verbatim to the tool; -- ends\n\
 \x20 hcom's own flags. Use --dry-run to see the command without running it.\n\
@@ -1728,5 +1732,11 @@ mod tests {
             forkable_tool_names(),
             "claude/codex/opencode/kilo/pi/omp/qoder/grok"
         );
+    }
+
+    #[test]
+    fn kill_help_lists_tool_target() {
+        assert!(get_help_text().contains("hcom kill <name(s)|@group|tag:T|tool:CLI|all>"));
+        assert!(get_command_help("kill").contains("kill tool:<cli>"));
     }
 }

@@ -61,7 +61,7 @@ BUTTONS = [
     {"label": "Send", "cmd": ["hcom", "send", "-b", "@{instance}", "--", "{ask:message}"], "when": "running"},
     "---",
     {"label": "Kill", "cmd": ["hcom", "kill", "{instance}"], "when": "running", "confirm": True, "key": "<Delete>"},
-    {"label": "Kill group", "menu": "groups"},  # running instances of each catalog group
+    {"label": "Kill group", "menu": "groups"},  # running instances of each catalog group and CLI
     "---",
 ]
 
@@ -330,6 +330,15 @@ def running_groups(rows):
     return {g: sorted(names) for g, names in sorted(groups.items())}
 
 
+def running_tools(rows):
+    """CLI tool -> sorted names of its running instances."""
+    tools = {}
+    for r in rows:
+        if r["instance"] and r["cli"]:
+            tools.setdefault(r["cli"], []).append(r["instance"])
+    return {t: sorted(names) for t, names in sorted(tools.items())}
+
+
 def enabled(button, row):
     if button["when"] == "always":
         return True
@@ -372,7 +381,7 @@ class App(tk.Tk):
         self.columns = [known[k] for k in keys if k in known] or COLUMNS
 
         self.rows = {}
-        self.groups = {}
+        self.groups = ({}, {})  # running_groups, running_tools
         self.sort_col, self.sort_reverse = None, False
         self.busy = self.refreshing = self.refresh_again = False
         self.timer = None
@@ -465,7 +474,7 @@ class App(tk.Tk):
         row = self.selected()
         for b in self.buttons:
             if b != "---":
-                ok = bool(self.groups) if b.get("menu") else enabled(b, row)
+                ok = any(self.groups) if b.get("menu") else enabled(b, row)
                 idle = not self.busy or b.get("detach")
                 b["widget"].configure(state=tk.NORMAL if idle and ok else tk.DISABLED)
 
@@ -509,13 +518,18 @@ class App(tk.Tk):
         else:
             self.last_error = None
             self.rows = {f"{r['agent']}|{r['instance']}": r for r in result}
-            groups = running_groups(result)
+            groups = (running_groups(result), running_tools(result))
             if groups != self.groups:
                 self.groups = groups
                 self.group_menu.delete(0, tk.END)
-                for g, names in groups.items():
+                for g, names in groups[0].items():
                     self.group_menu.add_command(label=f"@{g} ({len(names)})",
-                                                command=lambda g=g, names=names: self.kill_group(g, names))
+                                                command=lambda g=g, names=names: self.kill_group(f"@{g}", names))
+                if groups[0] and groups[1]:
+                    self.group_menu.add_separator()
+                for t, names in groups[1].items():
+                    self.group_menu.add_command(label=f"tool:{t} ({len(names)})",
+                                                command=lambda t=t, names=names: self.kill_group(f"tool:{t}", names))
             self.render()
         if self.refresh_again:
             self.refresh_again = False
@@ -657,7 +671,7 @@ class App(tk.Tk):
     def kill_group(self, group, names):
         """Kill the running instances listed in the menu, by name: exactly what was confirmed,
         independent of which catalogs are reachable from the GUI's cwd."""
-        if self.busy or not messagebox.askyesno("Kill group", f"Kill @{group}: {', '.join(names)}?", parent=self):
+        if self.busy or not messagebox.askyesno("Kill group", f"Kill {group}: {', '.join(names)}?", parent=self):
             return
         self.run_command(["hcom", "kill", *names], HOME)
 

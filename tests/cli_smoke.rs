@@ -4131,6 +4131,57 @@ fn kill_by_group_and_at_prefix() {
 }
 
 #[test]
+fn kill_by_tool_kills_only_instances_of_that_cli() {
+    let h = Hcom::new();
+
+    let (code, stdout, stderr) = h.run(["kill", "tool:nosuch"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("Unknown tool 'nosuch'. Valid tools: claude,"),
+        "stderr={stderr}"
+    );
+
+    let (code, stdout, stderr) = h.run(["kill", "tool:agy"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("No agents with tool 'antigravity'"),
+        "stderr={stderr}"
+    );
+
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    let now = chrono::Utc::now().timestamp();
+    for (name, tool, pid) in [
+        ("agy_a", "antigravity", 999981),
+        ("agy_b", "antigravity", 999982),
+        ("cla_a", "claude", 999983),
+    ] {
+        conn.execute(
+            "INSERT INTO instances (name, status, status_time, created_at, tool, pid) \
+             VALUES (?1, 'listening', ?2, ?2, ?3, ?4)",
+            rusqlite::params![name, now, tool, pid],
+        )
+        .expect("insert instance");
+    }
+
+    let (code, stdout, stderr) = h.run(["kill", "tool:agy"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("agy_a")
+            && stdout.contains("agy_b")
+            && !stdout.contains("cla_a")
+            && stdout.contains("Killed 2 (tool:antigravity)"),
+        "stdout={stdout}"
+    );
+
+    let (code, stdout, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("cla_a") && !stdout.contains("agy_a"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
 fn agent_zsh_completions_add_names_and_groups_separately() {
     let h = Hcom::new();
     let (code, stdout, stderr) = h.run(["agent", "completions", "zsh"]);
