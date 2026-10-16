@@ -352,6 +352,14 @@ hcom config -i luna hints "respond in JSON"   # per-agent
 HCOM_TAG=dev hcom 3 claude                    # per-launch env
 ```
 
+#### Idle autokill
+
+```bash
+hcom config -i luna idle_kill 600   # kill luna after 10 min idle; 0 clears
+```
+
+A running local agent (not a remote one or a subagent) with `idle_kill` set is killed like `hcom kill` once it has been listening that long with nothing unread and no own `intent=request` message still waiting for a reply. A catalog entry or catalog `defaults` can set `"idle_kill": <seconds>` (`0` or `false` disables) for every launch; roaming agents restart on the next send, others resume with `hcom r`. The stopped event records `idle_kill` as the initiator. Enforcement runs inside hcom's own loops and commands, so it needs at least one hcom-managed agent or command running.
+
 #### Per-project isolation
 
 ```bash

@@ -479,6 +479,7 @@ fn listen_loop(
 
         // Update heartbeat
         update_heartbeat(db, instance_name);
+        crate::idle_kill::sweep_throttled(db);
 
         // Wait for notification or short poll
         let remaining = timeout - elapsed;
@@ -496,7 +497,10 @@ fn listen_loop(
         };
 
         if let Some(server) = notify_server {
-            server.wait(Duration::from_secs_f64(wait_time));
+            server.wait(crate::idle_kill::cap_wait(
+                db,
+                Duration::from_secs_f64(wait_time),
+            ));
         } else {
             std::thread::sleep(Duration::from_secs_f64(wait_time));
         }
@@ -744,6 +748,7 @@ fn filter_listen_loop(
         }
 
         update_heartbeat(db, instance_name);
+        crate::idle_kill::sweep_throttled(db);
 
         let remaining = timeout - elapsed;
         if remaining <= 0.0 {
@@ -760,7 +765,10 @@ fn filter_listen_loop(
         };
 
         if let Some(server) = notify_server {
-            server.wait(Duration::from_secs_f64(wait_time));
+            server.wait(crate::idle_kill::cap_wait(
+                db,
+                Duration::from_secs_f64(wait_time),
+            ));
         } else {
             std::thread::sleep(Duration::from_secs_f64(wait_time));
         }

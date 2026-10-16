@@ -980,6 +980,7 @@ pub(super) fn run(
                 let _ = db.register_notify_port(current_name, notify.port());
                 let _ = db.register_inject_port(current_name, state.inject_port);
             }
+            crate::idle_kill::sweep_throttled(db);
             heartbeat = Instant::now();
         }
         let instance = match db.get_instance_full(current_name) {

@@ -552,6 +552,11 @@ const KILL_HELP: &[HelpEntry] = &[
         "Kill the calling agent (uppercase; self is a name)",
     ),
     ("kill all", "Kill all with tracked PIDs"),
+    ("", ""),
+    (
+        "Idle autokill:",
+        "hcom config -i <name> idle_kill <sec> (or catalog \"idle_kill\")",
+    ),
 ];
 
 const LISTEN_HELP: &[HelpEntry] = &[
@@ -634,7 +639,11 @@ const CONFIG_HELP: &[HelpEntry] = &[
     ("Per-agent:", ""),
     (
         "config -i <name|self> [key] [val]",
-        "tag, timeout, hints, subagent_timeout",
+        "tag, timeout, hints, subagent_timeout, idle_kill",
+    ),
+    (
+        "config -i <name> idle_kill <sec>",
+        "Kill a local agent after <sec> idle (0 clears; not subagents)",
     ),
 ];
 
@@ -1269,7 +1278,7 @@ Commands:\n\
 \x20 start        Connect to hcom (run inside any AI tool)\n\
 \x20 stop         Disconnect from hcom\n\
 \x20 handoff      Restart yourself in a clean session with your prompt\n\
-\x20 config       Get/set global and per-agent settings\n\
+\x20 config       Get/set global and per-agent settings (incl. idle_kill)\n\
 \x20 run          Execute workflow scripts\n\
 \x20 agent        Launch named agents from a JSON catalog\n\
 \x20 relay        Cross-device sync + relay daemon\n\
@@ -1748,5 +1757,13 @@ mod tests {
         assert!(get_help_text().contains("hcom kill <name(s)|@group|tag:T|tool:CLI|SELF|all>"));
         assert!(get_command_help("kill").contains("kill tool:<cli>"));
         assert!(get_command_help("kill").contains("kill SELF"));
+    }
+
+    #[test]
+    fn idle_kill_is_documented_in_config_kill_and_overview() {
+        assert!(get_command_help("config").contains("config -i <name> idle_kill <sec>"));
+        assert!(get_command_help("config").contains("subagent_timeout, idle_kill"));
+        assert!(get_command_help("kill").contains("idle_kill <sec>"));
+        assert!(get_help_text().contains("per-agent settings (incl. idle_kill)"));
     }
 }

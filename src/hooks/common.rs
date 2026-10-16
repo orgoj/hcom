@@ -587,7 +587,7 @@ fn poll_loop(
         // TCP wake fires as soon as remote events land — no separate relay
         // polling needed.
         let wait_time = if notify_server.is_some() {
-            remaining.min(Duration::from_secs(30))
+            crate::idle_kill::cap_wait(db, remaining.min(Duration::from_secs(30)))
         } else {
             remaining.min(Duration::from_millis(100))
         };
@@ -616,6 +616,7 @@ fn poll_loop(
 
         // Update heartbeat (also re-asserts tcp_mode=1 for self-healing)
         let _ = db.update_heartbeat(instance_name);
+        crate::idle_kill::sweep_throttled(db);
     }
 
     // Timeout reached

@@ -856,6 +856,7 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
     // kill -9) before this command resolves or messages them. Throttled, so
     // most commands pay one KV read; hooks don't come through here.
     crate::instance_lifecycle::reap_dead_processes_throttled(&db);
+    crate::idle_kill::sweep_throttled(&db);
 
     // Build context (identity resolution, --go flag)
     let process_id = std::env::var("HCOM_PROCESS_ID")

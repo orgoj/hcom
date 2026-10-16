@@ -81,6 +81,8 @@ tell any agent:
 
 **Spawn**, **fork**, **resume**, **kill** in any terminal emulator or headless. In Herdr, `hcom r` returns an agent to its recorded tab and `hcom f` opens a tab named after the fork; neither inherits your tab. `hcom kill` takes names, `@group`, `tag:<tag>`, `tool:<cli>` (e.g. `tool:agy`) or `SELF` (the calling agent ends itself).
 
+**Idle autokill**: `hcom config -i <name|self> idle_kill <seconds>` (or catalog `"idle_kill"`) kills a local agent (not a remote one or a subagent) that stays idle that long; `0` clears. An agent waiting for a reply to its own `--intent request` message, or with unread messages, is not killed.
+
 run `hcom --help` for full command syntax and flags.
 
 ---

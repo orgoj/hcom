@@ -14,6 +14,7 @@ mod db;
 mod delivery;
 pub mod hooks;
 pub mod identity;
+mod idle_kill;
 mod instance_binding;
 mod instance_lifecycle;
 mod instance_names;
@@ -93,6 +94,11 @@ fn main() -> Result<()> {
         };
         log::log_error("native", "panic", &format!("{} at {}", message, location));
     }));
+
+    if std::env::args().nth(1).as_deref() == Some(idle_kill::WORKER_COMMAND) {
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        std::process::exit(idle_kill::run_worker(&args));
+    }
 
     // Dispatch via router (replaces manual MainAction matching)
     router::dispatch()

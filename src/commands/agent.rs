@@ -170,6 +170,13 @@ Start mode:
   \"resume\": true|false or \"continue\": true|false may be set in catalog defaults or an agent entry.
   Unset falls back to false (clean); --resume, --continue, and --clean override the catalog.
 
+Idle autokill:
+  \"idle_kill\": <seconds> in catalog defaults or an agent entry kills the launched instance
+  like `hcom kill` once it has been listening that long with nothing unread and no own
+  intent=request message still waiting for a reply. 0 or false disables it.
+  Roaming agents restart on the next send; others resume with hcom r.
+  For a running local instance (not a subagent): hcom config -i <name> idle_kill <seconds>.
+
 Terminal strategy, in order:
   1. terminal_command set          -> hcom launches with HCOM_TERMINAL=<cmd>
   2. terminal preset selected      -> hcom launches through that preset
@@ -242,6 +249,8 @@ struct AgentDef {
     resume: Option<bool>,
     #[serde(rename = "continue")]
     continue_session: Option<bool>,
+    /// Seconds idle before hcom kills the instance; 0 or false disables.
+    idle_kill: Option<serde_json::Value>,
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
@@ -314,6 +323,7 @@ impl AgentDef {
             system_prompt,
             resume,
             continue_session,
+            idle_kill,
             agent_dir,
             instructions,
             instructions_content
@@ -539,11 +549,13 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
         catalog.defaults.dir = Some(expand_path(&dir, base));
     }
     reject_legacy_skills_dir(&catalog.defaults, "defaults", path)?;
-    for def in catalog.agents.values_mut() {
+    validate_idle_kill(&catalog.defaults, "defaults", path)?;
+    for (name, def) in catalog.agents.iter_mut() {
         if let Some(dir) = def.dir.take() {
             def.dir = Some(expand_path(&dir, base));
         }
         reject_legacy_skills_dir(def, "agent", path)?;
+        validate_idle_kill(def, &format!("agent '{name}'"), path)?;
     }
 
     let agents_dir = path
@@ -1601,6 +1613,8 @@ struct Effective {
     resume: bool,
     continue_session: bool,
     continue_last: Option<usize>,
+    /// Seconds; 0 = off.
+    idle_kill: u64,
     env: BTreeMap<String, String>,
     inherit_env: Vec<String>,
     extra: Vec<String>,
@@ -1611,6 +1625,26 @@ struct AgentSkill {
     name: String,
     description: String,
     path: String,
+}
+
+/// `idle_kill` seconds: a non-negative integer, or false (= 0, disabled).
+fn idle_kill_secs(value: &serde_json::Value) -> Option<u64> {
+    match value {
+        serde_json::Value::Bool(false) => Some(0),
+        other => other.as_u64(),
+    }
+}
+
+fn validate_idle_kill(def: &AgentDef, owner: &str, path: &Path) -> Result<()> {
+    if let Some(value) = &def.idle_kill
+        && idle_kill_secs(value).is_none()
+    {
+        bail!(
+            "invalid idle_kill {value} in {owner} of {}: must be a non-negative integer (seconds) or false",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn reject_legacy_skills_dir(def: &AgentDef, owner: &str, path: &Path) -> Result<()> {
@@ -1910,6 +1944,7 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
             .or(def.continue_session)
             .unwrap_or(false),
         continue_last: cli.continue_last,
+        idle_kill: def.idle_kill.as_ref().and_then(idle_kill_secs).unwrap_or(0),
         env: {
             for key in &def.inherit_env {
                 if !def.env.contains_key(key)
@@ -2694,6 +2729,10 @@ fn run_hcom(
         return Ok(0);
     }
 
+    // Before the launch so the instance has its value from its first loop;
+    // also clears a value an earlier launch under this name left behind.
+    crate::idle_kill::set(&HcomDb::open()?, &eff.name, eff.idle_kill)?;
+
     let mut cmd = Command::new(hcom_bin());
     cmd.args(argv);
     for (k, v) in &eff.env {
@@ -2994,6 +3033,9 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
     }
     println!("cli:       {}", eff.cli);
     println!("dir:       {}", eff.dir);
+    if eff.idle_kill > 0 {
+        println!("idle_kill: {}s", eff.idle_kill);
+    }
     for skill in &eff.skills {
         println!(
             "skill:     {} — {} ({})",
@@ -3965,6 +4007,62 @@ mod tests {
             error.contains("requests unknown agent(s): missing"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn idle_kill_defaults_apply_and_agents_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base.json");
+        let root = tmp.path().join("root.json");
+        std::fs::write(
+            &base,
+            r#"{"defaults":{"idle_kill":600},"agents":{"plain":{},"off":{"idle_kill":0},"no":{"idle_kill":false}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &root,
+            r#"{"imports":[{"from":"base.json"}],"agents":{"short":{"idle_kill":30}}}"#,
+        )
+        .unwrap();
+        let files =
+            load_catalog_tree(&root, tmp.path(), "root".to_string(), &mut Vec::new()).unwrap();
+        let catalogs = Catalogs {
+            base_files: files,
+            project_files: Vec::new(),
+            project_root: None,
+        };
+        let secs = |name: &str| {
+            let cli = parse_cli(&[]).unwrap();
+            effective(name, catalogs.resolve(name).unwrap(), &cli).idle_kill
+        };
+        assert_eq!(secs("plain"), 600);
+        assert_eq!(secs("off"), 0);
+        assert_eq!(secs("no"), 0);
+        assert_eq!(secs("short"), 30);
+        assert_eq!(eff_of("{}", &[]).idle_kill, 0);
+    }
+
+    #[test]
+    fn idle_kill_rejects_invalid_values_naming_the_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("agents.json");
+        for bad in ["-5", "1.5", "\"60\"", "true"] {
+            std::fs::write(
+                &path,
+                format!(r#"{{"agents":{{"reviewer":{{"idle_kill":{bad}}}}}}}"#),
+            )
+            .unwrap();
+            let error = load_catalog_tree(&path, tmp.path(), "root".to_string(), &mut Vec::new())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("agent 'reviewer'"), "{bad}: {error}");
+            assert!(error.contains("idle_kill"), "{bad}: {error}");
+        }
+        std::fs::write(&path, r#"{"defaults":{"idle_kill":-1}}"#).unwrap();
+        let error = load_catalog_tree(&path, tmp.path(), "root".to_string(), &mut Vec::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("in defaults"), "{error}");
     }
 
     #[test]

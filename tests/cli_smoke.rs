@@ -5683,3 +5683,248 @@ fn config_reports_file_parse_errors_in_get_and_list_modes() {
         );
     }
 }
+
+/// A live process group for an idle-kill target: killing the row signals it.
+#[cfg(unix)]
+fn idle_kill_sleeper(h: &Hcom) -> std::process::Child {
+    let child = Command::new("sleep")
+        .arg("120")
+        .process_group(0)
+        .spawn()
+        .expect("spawn sleep");
+    h.track_cleanup_pid(i64::from(child.id()));
+    child
+}
+
+/// Make `name` a headless (no pane) agent that has listened for 100 s, owned
+/// by `pid`, with every message read.
+#[cfg(unix)]
+fn make_idle_kill_row(conn: &rusqlite::Connection, name: &str, status: &str, pid: u32) {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO instances (name, created_at) VALUES (?1, ?2) ON CONFLICT(name) DO NOTHING",
+        rusqlite::params![name, now as f64],
+    )
+    .expect("insert instance");
+    conn.execute(
+        "UPDATE instances SET status = ?2, status_context = '', status_time = ?3, pid = ?4,
+             background = 1, session_id = COALESCE(session_id, 'sess-' || ?1),
+             last_event_id = (SELECT COALESCE(MAX(id), 0) FROM events)
+         WHERE name = ?1",
+        rusqlite::params![name, status, now - 100, pid],
+    )
+    .expect("make instance idle");
+}
+
+/// `(by, reason)` of the newest stopped event for `name`.
+#[cfg(unix)]
+fn idle_kill_stopped_by(conn: &rusqlite::Connection, name: &str) -> Option<(String, String)> {
+    conn.query_row(
+        "SELECT json_extract(data, '$.by'), json_extract(data, '$.reason') FROM events
+         WHERE type = 'life' AND instance = ?1 AND json_extract(data, '$.action') = 'stopped'
+         ORDER BY id DESC LIMIT 1",
+        rusqlite::params![name],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .ok()
+}
+
+#[cfg(unix)]
+fn wait_for_idle_kill(h: &Hcom, child: &mut std::process::Child, drive_with_list: bool) {
+    h.eventually(
+        "idle_kill to end the agent process",
+        Duration::from_secs(25),
+        || {
+            if drive_with_list {
+                h.run(["list"]);
+            }
+            Ok(child.try_wait().map_err(|e| e.to_string())?.map(|_| ()))
+        },
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn idle_kill_set_by_config_kills_idle_agent_and_spares_guarded_ones() {
+    let h = Hcom::new();
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    let mut idle = idle_kill_sleeper(&h);
+    let mut blocked = idle_kill_sleeper(&h);
+    let mut unread = idle_kill_sleeper(&h);
+    let mut waiting = idle_kill_sleeper(&h);
+    let mut peer = idle_kill_sleeper(&h);
+    make_idle_kill_row(&conn, "peer", "listening", peer.id());
+    make_idle_kill_row(&conn, "waiting", "listening", waiting.id());
+
+    // waiting asks peer and gets no reply.
+    let (code, stdout, stderr) = h.run([
+        "send", "@peer", "--intent", "request", "--name", "waiting", "--", "status?",
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    // Named like the kill-all target: only this row may die, not every agent.
+    make_idle_kill_row(&conn, "all", "listening", idle.id());
+    make_idle_kill_row(&conn, "blocked", "blocked", blocked.id());
+    make_idle_kill_row(&conn, "unread", "listening", unread.id());
+    make_idle_kill_row(&conn, "waiting", "listening", waiting.id());
+    // Arrives after the row was marked read, so it stays unread.
+    let (code, stdout, stderr) = h.run(["send", "--from", "bigboss", "@unread", "--", "hi"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+
+    for name in ["all", "blocked", "unread", "waiting"] {
+        let (code, stdout, stderr) = h.run(["config", "-i", name, "idle_kill", "1"]);
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        assert!(stdout.contains("Set idle_kill"), "stdout={stdout}");
+    }
+    let (code, stdout, _) = h.run(["config", "-i", "blocked", "idle_kill"]);
+    assert_eq!((code, stdout.trim()), (0, "1"));
+
+    wait_for_idle_kill(&h, &mut idle, true);
+    h.eventually(
+        "stopped event for the idle agent",
+        Duration::from_secs(10),
+        || Ok(idle_kill_stopped_by(&conn, "all")),
+    );
+    assert_eq!(
+        idle_kill_stopped_by(&conn, "all"),
+        Some(("idle_kill".to_string(), "killed".to_string()))
+    );
+
+    // The same sweeps evaluated the guarded agents; give any stray kill time to land.
+    std::thread::sleep(Duration::from_secs(2));
+    for (name, child) in [
+        ("blocked", &mut blocked),
+        ("unread", &mut unread),
+        ("waiting", &mut waiting),
+        ("peer", &mut peer),
+    ] {
+        assert!(
+            child.try_wait().expect("try_wait").is_none(),
+            "{name} was killed"
+        );
+        assert_eq!(idle_kill_stopped_by(&conn, name), None, "{name}");
+    }
+
+    // 0 clears; invalid values are rejected.
+    let (code, stdout, stderr) = h.run(["config", "-i", "blocked", "idle_kill", "0"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("Cleared idle_kill"), "stdout={stdout}");
+    for bad in ["abc", "-5", "1.5"] {
+        let (code, stdout, stderr) = h.run(["config", "-i", "blocked", "idle_kill", bad]);
+        assert_eq!(code, 1, "{bad}: stdout={stdout} stderr={stderr}");
+        assert!(
+            stderr.contains("idle_kill must be a non-negative integer"),
+            "{bad}: stderr={stderr}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn idle_kill_is_enforced_by_a_lone_listen_loop_enabled_after_it_started() {
+    let h = Hcom::new();
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    let name = h.start_listening_with_process_id("pid-idle-cadence");
+    let mut agent = idle_kill_sleeper(&h);
+    conn.execute(
+        "UPDATE instances SET pid = ?2, background = 1 WHERE name = ?1",
+        rusqlite::params![name, agent.id()],
+    )
+    .expect("bind agent process");
+
+    // The listen loop is already in its long wait when the first key appears.
+    let started = Instant::now();
+    let (code, stdout, stderr) = h.run(["config", "-i", &name, "idle_kill", "1"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    // No other hcom command runs from here on: only the listen loop sweeps.
+    wait_for_idle_kill(&h, &mut agent, false);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(14),
+        "idle_kill=1 took {elapsed:?}"
+    );
+    h.eventually(
+        "stopped event for the listening agent",
+        Duration::from_secs(10),
+        || Ok(idle_kill_stopped_by(&conn, &name)),
+    );
+    assert_eq!(
+        idle_kill_stopped_by(&conn, &name),
+        Some(("idle_kill".to_string(), "killed".to_string()))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn idle_killed_catalog_agents_restart_on_send_and_resume() {
+    let h = Hcom::new();
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    let project = h.root_path().join("proj");
+    std::fs::create_dir_all(project.join(".git")).expect("create git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"defaults":{"idle_kill":1},"agents":{
+            "reviewer":{"roaming":true,"cli":"claude","terminal_command":"sh -c true {script}"},
+            "keeper":{"dir":"/tmp","cli":"claude","terminal_command":"sh -c true {script}"},
+            "never":{"dir":"/tmp","idle_kill":false}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "keeper"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("idle_kill: 1s"), "stdout={stdout}");
+    let (code, stdout, stderr) = h.run(["agent", "show", "never"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(!stdout.contains("idle_kill"), "stdout={stdout}");
+
+    let send = |text: &str| {
+        let output = h
+            .cmd()
+            .current_dir(&project)
+            .args(["send", "--from", "bigboss", "@reviewer", "--", text])
+            .output()
+            .expect("send to roaming agent");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success(),
+            "stdout={stdout} stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        stdout
+    };
+    let stdout = send("first");
+    assert!(stdout.contains("reviewer_proj"), "stdout={stdout}");
+    let (code, stdout, _) = h.run(["config", "-i", "reviewer_proj", "idle_kill"]);
+    assert_eq!((code, stdout.trim()), (0, "1"));
+
+    let mut roaming = idle_kill_sleeper(&h);
+    make_idle_kill_row(&conn, "reviewer_proj", "listening", roaming.id());
+    wait_for_idle_kill(&h, &mut roaming, true);
+    h.eventually(
+        "stopped event for the roaming agent",
+        Duration::from_secs(10),
+        || Ok(idle_kill_stopped_by(&conn, "reviewer_proj")),
+    );
+
+    // The next send autostarts it again, with its idle_kill.
+    send("second");
+    let (code, stdout, stderr) = h.run(["config", "-i", "reviewer_proj", "idle_kill"]);
+    assert_eq!(
+        (code, stdout.trim()),
+        (0, "1"),
+        "stdout={stdout} stderr={stderr}"
+    );
+
+    // A persistent agent killed for idling resumes with hcom r.
+    let (code, stdout, stderr) = h.run(["agent", "keeper"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let mut keeper = idle_kill_sleeper(&h);
+    make_idle_kill_row(&conn, "keeper", "listening", keeper.id());
+    wait_for_idle_kill(&h, &mut keeper, true);
+    h.eventually(
+        "stopped event for the persistent agent",
+        Duration::from_secs(10),
+        || Ok(idle_kill_stopped_by(&conn, "keeper")),
+    );
+    let (code, stdout, stderr) = h.run(["r", "keeper"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+}

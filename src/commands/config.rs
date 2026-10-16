@@ -60,6 +60,10 @@ const INSTANCE_KEYS: &[(&str, &str)] = &[
         "subagent_timeout",
         "Instance-specific subagent timeout in seconds",
     ),
+    (
+        "idle_kill",
+        "Kill the agent after this many seconds idle (0 clears)",
+    ),
 ];
 
 // ── Config File Operations ───────────────────────────────────────────────
@@ -358,7 +362,7 @@ fn config_instance(
     // No key: show instance settings
     if args.is_empty() {
         let full_name = crate::identity::get_full_name(&instance);
-        let config = build_instance_config_json(&instance, &full_name);
+        let config = build_instance_config_json(db, &instance, &full_name);
         println!("{}", render_config_instance_get(&config, None, json_mode));
         return 0;
     }
@@ -449,8 +453,13 @@ pub fn render_config_instance_get(value: &Value, key: Option<&str>, json_mode: b
                 .and_then(|v| v.as_i64())
                 .map(|t| format!("{t}s"))
                 .unwrap_or_else(|| "(default)".to_string());
+            let idle_kill = value
+                .get("idle_kill")
+                .and_then(|v| v.as_u64())
+                .map(|t| format!("{t}s"))
+                .unwrap_or_else(|| "(off)".to_string());
             format!(
-                "Agent: {display}\n  tag: {}\n  timeout: {timeout}s\n  hints: {}\n  subagent_timeout: {subagent_timeout}",
+                "Agent: {display}\n  tag: {}\n  timeout: {timeout}s\n  hints: {}\n  subagent_timeout: {subagent_timeout}\n  idle_kill: {idle_kill}",
                 if tag.is_empty() { "(none)" } else { tag },
                 if hints.is_empty() { "(none)" } else { hints },
             )
@@ -496,6 +505,13 @@ pub fn render_config_instance_set_feedback(instance_name: &str, key: &str, value
                 format!("Set subagent_timeout for {instance_name}: {value}s")
             }
         }
+        "idle_kill" => {
+            if value.trim() == "0" {
+                format!("Cleared idle_kill for {instance_name}")
+            } else {
+                format!("Set idle_kill for {instance_name}: {value}s")
+            }
+        }
         _ => format!("Updated {key} for {instance_name}"),
     }
 }
@@ -508,7 +524,9 @@ pub fn render_config_instance_set_feedback(instance_name: &str, key: &str, value
 ///   `tag` / `hints`   — null when unset (not "")
 ///   `timeout`         — null when unset (server-side default applies elsewhere)
 ///   `subagent_timeout`— null when unset
+///   `idle_kill`       — null when unset
 fn build_instance_config_json(
+    db: &HcomDb,
     instance: &crate::db::InstanceRow,
     full_name: &str,
 ) -> serde_json::Value {
@@ -519,6 +537,7 @@ fn build_instance_config_json(
         "timeout": instance.wait_timeout,
         "hints": instance.hints.as_deref().filter(|s| !s.is_empty()),
         "subagent_timeout": instance.subagent_timeout,
+        "idle_kill": crate::idle_kill::get(db, &instance.name),
     })
 }
 
@@ -537,7 +556,7 @@ pub fn config_instance_get(
     Ok(match key {
         None => {
             let full_name = crate::identity::get_full_name(&instance);
-            build_instance_config_json(&instance, &full_name)
+            build_instance_config_json(db, &instance, &full_name)
         }
         Some("tag") => serde_json::json!({"value": instance.tag.as_deref().unwrap_or("")}),
         Some("timeout") => serde_json::json!({"value": instance.wait_timeout.unwrap_or(86400)}),
@@ -546,6 +565,9 @@ pub fn config_instance_get(
             Some(value) => serde_json::json!({"value": value}),
             None => serde_json::json!({"value": serde_json::Value::Null}),
         },
+        Some("idle_kill") => {
+            serde_json::json!({"value": crate::idle_kill::get(db, &instance.name).unwrap_or(0)})
+        }
         Some(other) => return Err(format!("Unknown instance config key '{}'", other)),
     })
 }
@@ -619,6 +641,16 @@ pub fn config_instance_set(
                 updates.insert("subagent_timeout".into(), serde_json::json!(secs));
             }
             instances::update_instance_position(db, inst_name, &updates);
+        }
+        "idle_kill" => {
+            let secs = crate::idle_kill::parse_secs(value)?;
+            if secs > 0 && instance.origin_device_id.is_some() {
+                return Err("idle_kill applies to local agents only".to_string());
+            }
+            if secs > 0 && instance.parent_name.is_some() {
+                return Err("idle_kill does not apply to subagents".to_string());
+            }
+            crate::idle_kill::set(db, inst_name, secs).map_err(|e| e.to_string())?;
         }
         other => return Err(format!("Unknown instance config key '{}'", other)),
     }
@@ -2452,6 +2484,61 @@ mod tests {
     }
 
     #[test]
+    fn test_config_instance_idle_kill_set_get_clear_and_reject() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::HcomDb::open_at(&dir.path().join("hcom.db")).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, created_at) VALUES (?1, ?2)",
+                rusqlite::params!["luna", crate::shared::time::now_epoch_f64()],
+            )
+            .unwrap();
+        let get = |key| config_instance_get(&db, "luna", key).unwrap();
+
+        assert_eq!(get(Some("idle_kill"))["value"], 0);
+        assert!(get(None)["idle_kill"].is_null());
+        config_instance_set(&db, "luna", "idle_kill", "300").unwrap();
+        assert_eq!(get(Some("idle_kill"))["value"], 300);
+        assert_eq!(get(None)["idle_kill"], 300);
+        for bad in ["-1", "1.5", "soon"] {
+            let err = config_instance_set(&db, "luna", "idle_kill", bad).unwrap_err();
+            assert!(err.contains("non-negative integer"), "{bad}: {err}");
+        }
+        assert_eq!(get(Some("idle_kill"))["value"], 300);
+        config_instance_set(&db, "luna", "idle_kill", "0").unwrap();
+        assert!(get(None)["idle_kill"].is_null());
+        assert_eq!(
+            render_config_instance_set_feedback("luna", "idle_kill", "0"),
+            "Cleared idle_kill for luna"
+        );
+    }
+
+    #[test]
+    fn test_config_instance_idle_kill_rejects_remote_and_subagent_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::HcomDb::open_at(&dir.path().join("hcom.db")).unwrap();
+        let now = crate::shared::time::now_epoch_f64();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, created_at, origin_device_id) VALUES ('remi', ?1, 'dev1')",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, created_at, parent_name) VALUES ('kidu', ?1, 'luna')",
+                rusqlite::params![now],
+            )
+            .unwrap();
+        let err = config_instance_set(&db, "remi", "idle_kill", "60").unwrap_err();
+        assert_eq!(err, "idle_kill applies to local agents only");
+        let err = config_instance_set(&db, "kidu", "idle_kill", "60").unwrap_err();
+        assert_eq!(err, "idle_kill does not apply to subagents");
+        assert_eq!(crate::idle_kill::get(&db, "remi"), None);
+        assert_eq!(crate::idle_kill::get(&db, "kidu"), None);
+    }
+
+    #[test]
     fn test_config_instance_set_empty_hints_clears() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::HcomDb::open_at(&dir.path().join("hcom.db")).unwrap();
@@ -2523,13 +2610,14 @@ mod tests {
                 "timeout": 120,
                 "hints": "ship it",
                 "subagent_timeout": 45,
+                "idle_kill": 600,
             }),
             None,
             false,
         );
         assert_eq!(
             rendered,
-            "Agent: team-luna\n  tag: team\n  timeout: 120s\n  hints: ship it\n  subagent_timeout: 45s"
+            "Agent: team-luna\n  tag: team\n  timeout: 120s\n  hints: ship it\n  subagent_timeout: 45s\n  idle_kill: 600s"
         );
     }
 
@@ -2542,13 +2630,14 @@ mod tests {
                 "timeout": 86400,
                 "hints": "",
                 "subagent_timeout": serde_json::Value::Null,
+                "idle_kill": serde_json::Value::Null,
             }),
             None,
             false,
         );
         assert_eq!(
             rendered,
-            "Agent: luna\n  tag: (none)\n  timeout: 86400s\n  hints: (none)\n  subagent_timeout: (default)"
+            "Agent: luna\n  tag: (none)\n  timeout: 86400s\n  hints: (none)\n  subagent_timeout: (default)\n  idle_kill: (off)"
         );
     }
 

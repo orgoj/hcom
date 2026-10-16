@@ -1909,6 +1909,7 @@ fn refresh_liveness(db: &HcomDb, current_name: &str) {
             &format!("Failed to update heartbeat: {}", e),
         );
     }
+    crate::idle_kill::sweep_throttled(db);
 }
 
 /// Delivery state machine for the native PTY path (Claude/Gemini/Codex/Antigravity).
@@ -2142,7 +2143,7 @@ pub fn run_delivery_loop(
                 } else if claude_mod {
                     Duration::from_secs(1)
                 } else {
-                    IDLE_WAIT
+                    crate::idle_kill::cap_wait(db, IDLE_WAIT)
                 });
             }
             if !running.load(Ordering::Acquire) {
@@ -2301,7 +2302,7 @@ pub fn run_delivery_loop(
                         ) {
                         RETRY_DELAY
                     } else {
-                        IDLE_WAIT
+                        crate::idle_kill::cap_wait(db, IDLE_WAIT)
                     };
                     let notified = notify.wait(idle_wait);
 
@@ -3012,7 +3013,7 @@ pub fn run_delivery_loop(
                     // submit another prompt. A valid hook from the bound tool
                     // session consumes the pending rows and/or advances the
                     // cursor, which safely rearms delivery for anything newer.
-                    notify.wait(IDLE_WAIT);
+                    notify.wait(crate::idle_kill::cap_wait(db, IDLE_WAIT));
                     if !running.load(Ordering::Acquire) {
                         break;
                     }
