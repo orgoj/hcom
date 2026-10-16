@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@hcom_dev'
 created_date: '2026-10-16 13:09'
-updated_date: '2026-10-16 13:32'
+updated_date: '2026-10-16 15:02'
 labels: []
 dependencies: []
 type: feature
@@ -25,6 +25,12 @@ hcom send @cca_admin fails with 'No active agent for @cca_admin' although cca_ad
 - [x] #3 Members hidden by catalog import scope are neither addressed nor revealed
 - [x] #4 send help, README and skills/hcom-agent-messaging document @group; cli_smoke covers the send path
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Follow-up: group expansion runs only for targets crate::messages::resolve_targets leaves unmatched (pure fallback after upstream matching); test covers a running instance named like the group.
+<!-- SECTION:NOTES:END -->
 
 ## Final Summary
 

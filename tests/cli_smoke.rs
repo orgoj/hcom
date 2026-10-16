@@ -4810,6 +4810,27 @@ fn targeted_send_to_catalog_group_starts_only_in_scope_members() {
     let (code, stdout, stderr) = h.run(["send", "--from", "bigboss", "@team", "--", "hi"]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     assert_eq!(names(&h), vec!["public", "team"]);
+
+    // So does a running instance named like the group.
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{
+            "member":{"dir":"/tmp","cli":"codex","groups":["lead"],
+                "terminal_command":"sh -c true {script}"}
+        }}"#,
+    )
+    .expect("write catalog");
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO instances (name, status, status_time, created_at, tool) \
+         VALUES ('lead', 'listening', ?1, ?1, 'claude')",
+        rusqlite::params![now],
+    )
+    .expect("insert lead");
+    let (code, stdout, stderr) = h.run(["send", "--from", "bigboss", "@lead", "--", "hi"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert_eq!(names(&h), vec!["lead", "public", "team"]);
 }
 
 #[test]
