@@ -14,7 +14,10 @@ Optional ~/.hcom/gui.json:
                  {"label": "Backlog", "cmd": ["x-terminal-emulator", "backlog", "board"], "cwd": "{dir}",
                   "if_exists": "{dir}/backlog"}],
    "commands": [{"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": true}],
-   "columns": ["agent", "instance", "status", "context", "git"]}
+   "columns": ["agent", "instance", "status", "context", "git"],
+   "attach": {"herdr": ["sh", "-c", "hcom agent attach \"$1\" && wmctrl -x -a herdr.herdr", "_", "{instance}"]}}
+"attach" maps the terminal an instance runs in (Where column) to the Attach command;
+other terminals run DEFAULT_ATTACH.
 "commands" run as written, without a selected row (optional: confirm, cwd, key).
 "key" (any button) is a Tk event sequence bound in the table, e.g. "z" or "<F2>", shown
 in the button label ("Zed (z)").
@@ -43,7 +46,8 @@ CONFIG_FILE = os.path.join(HCOM_DIR, "gui.json")
 STATE_FILE = os.path.join(HCOM_DIR, "gui-state.json")
 
 # Toolbar. cmd placeholders: {agent} catalog name, {instance} live name, {dir} working
-# directory, {ask:X} asked in a dialog (an empty answer drops it and its preceding --flag;
+# directory, {terminal} and every text field of the instance's launch_context ({pane_id},
+# {herdr_workspace}, ...), {ask:X} asked in a dialog (an empty answer drops it and its preceding --flag;
 # after a bare "--" it is required: an empty answer runs nothing).
 # An answer equal to its prefill (dir, cli) is treated as empty. {ask:resume} is a checkbox:
 # --resume, or --continue when another cli is chosen (a session cannot move between CLIs).
@@ -59,13 +63,16 @@ BUTTONS = [
         "default": "stopped",
     },
     "---",
-    {"label": "Attach", "cmd": ["hcom", "agent", "attach", "{instance}"], "when": "running", "default": "running"},
+    {"label": "Attach", "attach": True, "when": "running", "default": "running"},  # cmd from "attach"
     {"label": "Send", "cmd": ["hcom", "send", "-b", "@{instance}", "--", "{ask:message}"], "when": "running"},
     "---",
     {"label": "Kill", "cmd": ["hcom", "kill", "{instance}"], "when": "running", "confirm": True, "key": "<Delete>"},
     {"label": "Kill group", "menu": "groups"},  # running instances of each catalog group and CLI
     "---",
 ]
+
+# Attach command for terminals without an entry in gui.json "attach".
+DEFAULT_ATTACH = ["hcom", "agent", "attach", "{instance}"]
 
 # Used when gui.json has no "open_with".
 DEFAULT_OPEN_WITH = [
@@ -298,6 +305,8 @@ def build_rows(catalog, live):
             "age": int(time.time() - i["created_at"]) if i.get("created_at") else "",
             "transcript": i.get("transcript_path") or "",
             "where": where(lc),
+            "terminal": lc.get("terminal_preset_effective") or "",
+            "launch_context": {k: v for k, v in lc.items() if isinstance(v, str)},
             "detail": i.get("status_detail") or "",
             "unread": i.get("unread_count") or "",
             "dir": i.get("directory") or (d or {}).get("dir") or "",
@@ -320,6 +329,8 @@ def build_rows(catalog, live):
             "age": "",
             "transcript": "",
             "where": "",
+            "terminal": "",
+            "launch_context": {},
             "detail": "",
             "unread": "",
             "dir": d.get("dir") or "",
@@ -393,7 +404,14 @@ class App(tk.Tk):
         config = self._load_json(CONFIG_FILE)
         self.refresh_ms = int(float(config.get("refresh_seconds", 5)) * 1000)
         open_with = config.get("open_with", DEFAULT_OPEN_WITH)
-        self.buttons = BUTTONS + [{**b, "when": "dir", "detach": True} for b in open_with]
+        attach = {}
+        for terminal, cmd in (config.get("attach") or {}).items():
+            if isinstance(cmd, list) and cmd and all(isinstance(t, str) for t in cmd):
+                attach[terminal] = cmd
+            else:
+                self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: attach.{terminal}: not a command list")
+        self.buttons = [{**b, "cmds": attach} if b != "---" and b.get("attach") else b for b in BUTTONS]
+        self.buttons += [{**b, "when": "dir", "detach": True} for b in open_with]
         if commands := config.get("commands"):
             self.buttons += ["---"] + [{**b, "when": "always"} for b in commands]
         self.config_columns, unknown = pick_columns(config.get("columns"))
@@ -645,33 +663,40 @@ class App(tk.Tk):
                 return
             self.run_command(b["cmd"], os.path.expanduser(b.get("cwd", HOME)))
             return
+        template = b["cmds"].get(row["terminal"], DEFAULT_ATTACH) if "cmds" in b else b["cmd"]
         values = {
+            **row["launch_context"],
             "agent": row["agent"],
             "instance": row["instance"],
             "dir": os.path.expanduser(row["dir"]),
+            "terminal": row["terminal"],
         }
-        asks = [t[5:-1] for t in b["cmd"] if t.startswith("{ask:") and t.endswith("}")]
+        asks = [t[5:-1] for t in template if t.startswith("{ask:") and t.endswith("}")]
         if asks:
             prefill = {"dir": values["dir"], "cli": row["catalog_cli"]}
             answers = self.ask(b["label"], asks, row["instance"] if b["when"] == "running" else row["agent"], prefill)
             if answers is None:
                 return
             values.update({f"ask:{k}": "" if v == prefill.get(k) else v for k, v in answers.items()})
-            required = [t for prev, t in zip(b["cmd"], b["cmd"][1:]) if prev == "--" and t.startswith("{ask:")]
+            required = [t for prev, t in zip(template, template[1:]) if prev == "--" and t.startswith("{ask:")]
             if empty := [t[5:-1] for t in required if not values.get(t[1:-1])]:
                 self.write_log(f"{b['label']}: empty {', '.join(empty)}, nothing run")
                 return
             if values.get("ask:resume"):
                 values["ask:resume"] = "--continue" if values.get("ask:cli") else "--resume"
         cmd = []
-        for token in b["cmd"]:
+        for token in template:
             if token.startswith("{ask:"):
                 if values.get(token[1:-1]):
                     cmd.append(values[token[1:-1]])
                 elif cmd and cmd[-1].startswith("--"):
                     cmd.pop()
                 continue
-            cmd.append(token.format_map(values))
+            try:
+                cmd.append(token.format_map(values))
+            except (KeyError, ValueError) as e:  # a placeholder this instance lacks, or bad braces
+                self.write_log(f"ERROR: {b['label']}: {token}: {e!r}, nothing run")
+                return
         target = row["instance"] or row["agent"]
         if b.get("confirm") and not messagebox.askyesno(b["label"], f"{b['label']} {target}?", parent=self):
             return

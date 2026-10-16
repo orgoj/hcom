@@ -575,6 +575,47 @@ class App(unittest.TestCase):
         self.app.tree.event_generate("<KP_Enter>", when="now")
         self.assertEqual(self.ran, [(["hcom", "agent", "attach", "a2x"], self.app.rows["a2|a2x"]["cwd"])])
 
+    def attach(self, row, config=None):
+        if config is not None:
+            with open(gui.CONFIG_FILE, "w") as f:
+                f.write(gui.json.dumps(config))
+            self.app.destroy()
+            self.app = gui.App()
+            self.app.run_command = lambda cmd, cwd, select=None: self.ran.append((cmd, cwd))
+            self.app.update()
+        self.app.tree.selection_set(row)
+        self.app.update()
+        state = str(self.button("Attach")["widget"].cget("state"))
+        self.app.run_default()
+        return state
+
+    def test_attach_without_configured_terminal_runs_hcom_agent_attach(self):
+        # a1 runs in kitty, solo has no terminal (like a Hermes gateway), a2x in Herdr.
+        config = {"attach": {"herdr": ["focus", "{instance}"]}}
+        self.assertEqual([self.attach(r, config if r == "a1|a1" else None) for r in ("a1|a1", "|solo", "a2|a2x")],
+                         ["normal"] * 3)
+        self.assertEqual([cmd for cmd, _ in self.ran], [["hcom", "agent", "attach", "a1"],
+                                                        ["hcom", "agent", "attach", "solo"], ["focus", "a2x"]])
+
+    def test_configured_attach_replaces_or_adds_a_terminal(self):
+        LIVE[0]["launch_context"]["pane_id"] = "7"
+        self.addCleanup(LIVE[0]["launch_context"].pop, "pane_id")
+        raise_herdr = "hcom agent attach \"$1\" && wmctrl -x -a herdr.herdr"
+        config = {"attach": {"herdr": ["sh", "-c", raise_herdr, "_", "{instance}"],
+                             "kitty": ["kitten", "@", "focus-window", "--match", "id:{pane_id}", "{terminal}"]}}
+        self.assertEqual(self.attach("a2|a2x", config), "normal")
+        self.assertEqual(self.attach("a1|a1"), "normal")
+        self.assertEqual([cmd for cmd, _ in self.ran], [
+            ["sh", "-c", raise_herdr, "_", "a2x"],
+            ["kitten", "@", "focus-window", "--match", "id:7", "kitty"]])
+
+    def test_attach_with_missing_placeholder_or_bad_entry_runs_nothing(self):
+        self.attach("a2|a2x", {"attach": {"herdr": ["focus", "{pane_id}"], "tmux": "tmux select-pane"}})
+        self.assertEqual(self.ran, [])
+        log = self.app.log.get("1.0", "end")
+        self.assertIn("attach.tmux: not a command list", log)
+        self.assertIn("ERROR: Attach: {pane_id}: KeyError('pane_id'), nothing run", log)
+
     def refresh_with(self, live):
         self.patch("hcom_json", lambda *args: CATALOG if args[:2] == ("agent", "list") else live)
         self.app.refresh()

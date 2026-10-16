@@ -6,8 +6,8 @@ Fork-only extras that run on top of the `hcom` CLI and do not touch its code.
 
 Tk window listing every catalog agent (`hcom agent list --all --json`) and every live
 instance (`hcom list --json`), including instances started with `--as`. Buttons run
-existing commands (`hcom agent`, `attach`, `kill`) and log their output; others open the
-selected agent's directory in configured applications. The Start dialog sets `--as`,
+existing commands (`hcom agent`, `kill`, Attach as configured per terminal) and log
+their output; others open the selected agent's directory in configured applications. The Start dialog sets `--as`,
 `--dir`, `--cli` (CLIs installed on PATH), a resume checkbox (`--resume`, or
 `--continue` when another CLI is chosen) and a multi-line prompt (Shift+Enter for a new
 line, Enter or keypad Enter starts): `--hcom-prompt`, the agent's first message, which
@@ -56,9 +56,24 @@ replaced by fixtures, commands are recorded, not run). Optional `~/.hcom/gui.jso
     {"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": true},
     {"label": "Kill WDT", "cmd": ["hcom", "kill", "@wdt_all"], "confirm": true, "cwd": "~/projects/wdt"}
   ],
-  "columns": ["agent", "instance", "cli", "status", "since", "context", "quota", "dir", "git"]
+  "columns": ["agent", "instance", "cli", "status", "since", "context", "quota", "dir", "git"],
+  "attach": {
+    "herdr": ["sh", "-c", "hcom agent attach \"$1\" && wmctrl -x -a herdr.herdr", "_", "{instance}"]
+  }
 }
 ```
+
+`attach` maps the terminal an instance runs in (the Where column: `herdr`, `tmux`,
+`kitty`, ...) to the command of the Attach button (also Enter or double-click on a
+running row). Terminals without an entry run `hcom agent attach {instance}`, which
+focuses a Herdr pane but not the window of the terminal Herdr runs in, and fails (in the
+log) for instances outside Herdr, e.g. a Hermes gateway or a tmux pane. The example
+above also raises the Herdr window by its WM_CLASS on X11 (Herdr started with
+`wezterm start --class herdr -- herdr`); use whatever raises a window on your desktop,
+and add entries such as `tmux` for other terminals. Placeholders: `{instance}`, `{agent}`, `{dir}`, `{terminal}`
+and every text field of the instance's `launch_context` (`{pane_id}`,
+`{herdr_workspace}`, ...); a placeholder the instance lacks logs an error and runs
+nothing, as does an entry that is not a list of strings.
 
 `columns` selects and orders the table columns; without it all are shown. Keys: `agent`,
 `instance`, `cli`, `status`, `since`, `age`, `context`, `quota`, `detail`, `unread`, `dir`,
