@@ -575,6 +575,44 @@ class App(unittest.TestCase):
         self.app.tree.event_generate("<KP_Enter>", when="now")
         self.assertEqual(self.ran, [(["hcom", "agent", "attach", "a2x"], self.app.rows["a2|a2x"]["cwd"])])
 
+    def press_arrow(self, widget, key):
+        self.app.focus_force()
+        widget.focus_set()
+        self.app.update()
+        self.assertIs(self.app.focus_get(), widget)
+        widget.event_generate(key, when="now")
+        self.app.update()
+
+    def test_arrows_outside_table_move_selection_and_focus_table(self):
+        items = self.app.tree.get_children()
+        self.app.tree.selection_set(items[1])
+        self.press_arrow(self.app.log, "<Down>")
+        self.assertEqual(self.app.tree.selection(), (items[2],))
+        self.assertIs(self.app.focus_get(), self.app.tree)
+        self.press_arrow(self.app.log, "<Up>")
+        self.assertEqual(self.app.tree.selection(), (items[1],))
+
+    def test_arrows_without_selection_pick_first_or_last_row(self):
+        items = self.app.tree.get_children()
+        self.app.tree.selection_set(())
+        self.press_arrow(self.app.log, "<Down>")
+        self.assertEqual(self.app.tree.selection(), (items[0],))
+        self.app.tree.selection_set(())
+        self.press_arrow(self.app.log, "<Up>")
+        self.assertEqual(self.app.tree.selection(), (items[-1],))
+
+    def test_arrow_inside_table_moves_one_row(self):
+        items = self.app.tree.get_children()
+        self.app.tree.selection_set(items[0])
+        self.app.tree.focus(items[0])
+        self.press_arrow(self.app.tree, "<Down>")
+        self.assertEqual(self.app.tree.selection(), (items[1],))
+        for key, expected in (("<Down>", items[0]), ("<Up>", items[-1])):
+            self.app.tree.selection_set(())
+            self.app.tree.focus(items[1])  # stale focus row must not be the starting point
+            self.press_arrow(self.app.tree, key)
+            self.assertEqual(self.app.tree.selection(), (expected,))
+
     def attach(self, row, config=None):
         if config is not None:
             with open(gui.CONFIG_FILE, "w") as f:

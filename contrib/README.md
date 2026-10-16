@@ -32,6 +32,8 @@ instance is selected once it appears, unless another row was selected meanwhile.
 catalog rows without an instance; Blocked only lists only instances in `blocked` status.
 The Filter field narrows the table as you type to rows whose agent, instance, directory
 or catalog groups contain the text (case-insensitive); it combines with both checkboxes.
+Up/Down move through the rows from anywhere in the main window (e.g. the Filter field)
+and give the table keyboard focus.
 Sort, window layout and both filters are kept in `~/.hcom/gui-state.json`.
 
 ```sh

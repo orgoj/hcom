@@ -497,9 +497,28 @@ class App(tk.Tk):
         self.tree.bind("<Return>", lambda e: self.run_default())
         self.tree.bind("<KP_Enter>", lambda e: self.run_default())
         self.bind("<F5>", lambda e: self.refresh())
+        for widget in (self, self.tree):  # tree: before its class binding moves from a stale focus row
+            widget.bind("<Up>", lambda e: self._step_row(e, -1))
+            widget.bind("<Down>", lambda e: self._step_row(e, 1))
         for b in self.buttons:
             if b != "---" and b.get("key"):
                 self.tree.bind(b["key"], lambda e, b=b: self.run_button(b))
+
+    def _step_row(self, event, step):
+        """Up/Down outside the table, or in it with no row selected: move the selection and focus the table."""
+        items = self.tree.get_children()
+        sel = self.tree.selection()
+        if not items or (event.widget is self.tree and sel):  # the Treeview moves by itself
+            return
+        if sel:
+            i = max(0, min(len(items) - 1, items.index(sel[0]) + step))
+        else:
+            i = 0 if step > 0 else len(items) - 1
+        self.tree.selection_set(items[i])
+        self.tree.focus(items[i])
+        self.tree.see(items[i])
+        self.tree.focus_set()
+        return "break"
 
     def _configure_columns(self, widths):
         """Show self.columns; widths (key -> width) override the default widths."""
