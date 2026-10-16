@@ -1,4 +1,4 @@
-//! Kill command: `hcom kill <name(s)|@<group>|all|tag:X|tool:X>`
+//! Kill command: `hcom kill <name(s)|@<group>|all|tag:X|tool:X|SELF>`
 //!
 //!
 //! Sends SIGTERM to process groups and optionally closes terminal panes.
@@ -19,7 +19,7 @@ use anyhow::{Result, bail};
 #[derive(clap::Parser, Debug)]
 #[command(name = "kill", about = "Kill agent processes")]
 pub struct KillArgs {
-    /// Targets to kill (names, "@<group>", "all", "tag:X", or "tool:X")
+    /// Targets to kill (names, "@<group>", "all", "tag:X", "tool:X", or "SELF")
     pub targets: Vec<String>,
 }
 
@@ -282,7 +282,35 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
 
     let mut worst_exit = 0;
     for target in &targets {
-        let exit = if let Some(tag) = target.strip_prefix("tag:") {
+        let exit = if target == "SELF" {
+            // Uppercase cannot collide with instance names or groups (lowercase only).
+            // Resolve the caller like the router does for other commands (kill bypasses it).
+            let process_id = std::env::var("HCOM_PROCESS_ID")
+                .ok()
+                .filter(|s| !s.is_empty());
+            let codex_thread_id = crate::shared::context::HcomContext::from_os().codex_thread_id;
+            let identity = crate::cli_context::build_ctx_for_command(
+                &db,
+                Some("kill"),
+                explicit_name.as_deref(),
+                false,
+                process_id.as_deref(),
+                codex_thread_id.as_deref(),
+            )
+            .ok()
+            .and_then(|ctx| ctx.identity);
+            match identity {
+                Some(id) if matches!(id.kind, crate::shared::SenderKind::Instance) => {
+                    kill_single(&db, &hcom_dir, &id.name, &initiator)?
+                }
+                _ => {
+                    eprintln!(
+                        "Error: Cannot determine identity for SELF\nUsage: run 'hcom kill SELF' inside an hcom agent, or pass --name <name>"
+                    );
+                    1
+                }
+            }
+        } else if let Some(tag) = target.strip_prefix("tag:") {
             kill_by_tag(&db, &hcom_dir, tag, &initiator)?
         } else if let Some(tool) = target.strip_prefix("tool:") {
             kill_by_tool(&db, &hcom_dir, tool, &initiator)?

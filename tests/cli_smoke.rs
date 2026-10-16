@@ -4147,6 +4147,62 @@ fn kill_by_tool_kills_only_instances_of_that_cli() {
 }
 
 #[test]
+fn kill_self_kills_only_the_calling_instance() {
+    let h = Hcom::new();
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    let now = chrono::Utc::now().timestamp();
+    for (name, pid) in [("sel_a", 999971), ("sel_b", 999972), ("self", 999973)] {
+        conn.execute(
+            "INSERT INTO instances (name, status, status_time, created_at, tool, pid) \
+             VALUES (?1, 'listening', ?2, ?2, 'claude', ?3)",
+            rusqlite::params![name, now, pid],
+        )
+        .expect("insert instance");
+    }
+
+    let (code, stdout, stderr) = h.run(["kill", "SELF"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("Cannot determine identity for SELF"),
+        "stderr={stderr}"
+    );
+
+    let (code, stdout, stderr) = h.run(["kill", "SELF", "--name", "sel_a"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("sel_a") && !stdout.contains("sel_b"),
+        "stdout={stdout}"
+    );
+
+    let (code, stdout, stderr) = h.run(["kill", "self"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+
+    // Session environment (process binding) without --name.
+    let bound = h.start_with_process_id("pid-self-bound");
+    conn.execute(
+        "UPDATE instances SET pid = 999974 WHERE name = ?1",
+        rusqlite::params![bound],
+    )
+    .expect("set pid");
+    let (code, stdout, stderr) = h.run_as_process("pid-self-bound", ["kill", "SELF"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains(&bound) && !stdout.contains("sel_b"),
+        "stdout={stdout}"
+    );
+
+    let (code, stdout, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("sel_b")
+            && !stdout.contains("sel_a")
+            && !stdout.contains("\"self\"")
+            && !stdout.contains(&format!("\"{bound}\"")),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
 fn agent_zsh_completions_add_names_and_groups_separately() {
     let h = Hcom::new();
     let (code, stdout, stderr) = h.run(["agent", "completions", "zsh"]);
