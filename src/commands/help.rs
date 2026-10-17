@@ -1761,6 +1761,23 @@ mod tests {
     }
 
     #[test]
+    fn agent_help_documents_fields_imports_and_subcommand_flags() {
+        let help = get_command_help("agent");
+        assert!(help.contains("hcom agent show <name> [flags]"));
+        assert!(help.contains("show and attach accept the launch flags below"));
+        assert!(
+            help.contains("[{\"from\": \"../shared/agents.json\", \"agents\": [\"builder\"]}]")
+        );
+        assert!(
+            help.contains(
+                "terminal_command, session, window, tag, groups, env, inherit_env, args,"
+            )
+        );
+        assert!(help.contains("--cli, --tool <tool>"));
+        assert!(help.contains("$VISUAL or $EDITOR"));
+    }
+
+    #[test]
     fn kill_help_lists_tool_target() {
         assert!(get_help_text().contains("hcom kill <name(s)|@group|tag:T|tool:CLI|SELF|all>"));
         assert!(get_command_help("kill").contains("kill tool:<cli>"));

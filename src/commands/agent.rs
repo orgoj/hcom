@@ -46,10 +46,22 @@ pub fn help_text() -> String {
   hcom agent list [@<group>] [--all] [--local] [--json] [--names|--groups]
                  [--for-agents|--for-humans]
                                              Catalog entries, filtered names, or reachable groups
-  hcom agent show <name>                     Effective config and the exact command
-  hcom agent attach <name>                   Focus a running agent's Herdr pane
-  hcom agent edit [--project]                Open a catalog in $EDITOR (creates a starter file)
-  hcom agent completions bash|zsh|fish       Shell completion for agent names
+  hcom agent show <name> [flags]             Effective config and the exact command
+  hcom agent attach <name> [flags]           Focus a running agent's Herdr pane
+  hcom agent edit [--project]                Open a catalog in $VISUAL or $EDITOR (default vi;
+                                             creates a starter file)
+  hcom agent completions [bash|zsh|fish]     Shell completion for agent names (default: bash)
+
+  show and attach accept the launch flags below (--as, --cli, --catalog, ...).
+  A roaming name resolves to <name>_<project> for the current directory; for a
+  disabled roaming agent pass that instance name itself.
+
+Agent fields (in an \"agents\" entry or in \"defaults\"):
+  description, cli, dir, model, reasoning, prompt, system_prompt, terminal,
+  terminal_command, session, window, tag, groups, env, inherit_env, args,
+  resume, continue, idle_kill, roaming, disabled, tools.
+  Top level: version, defaults, agents, imports, system_prompt_file, and
+  cli_overrides (global catalog only).
 
 Catalog and bundles (weakest to strongest, regardless of launch directory):
   1. built-in defaults (cli={DEFAULT_CLI})
@@ -75,9 +87,10 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   file relative to that catalog. Inline defaults.system_prompt overrides it.
 
   Every catalog may use \"imports\" to reference all or selected agents from other
-  catalogs. A project agent is addressable, by `hcom agent` and by `hcom send`,
-  from inside its project, and elsewhere only where a catalog in scope imports
-  it - a selective import's \"agents\" list keeps the project's other agents
+  catalogs: [{{\"from\": \"../shared/agents.json\", \"agents\": [\"builder\"]}}]; without
+  \"agents\" every entry is imported, [] imports none. A project agent is
+  addressable, by `hcom agent` and by `hcom send`, from inside its project, and
+  elsewhere only where a catalog in scope imports it - a selective import's \"agents\" list keeps the project's other agents
   private to that project.
   A sibling agents/<name>/SOUL.md also defines an agent and is appended to its
   system instructions after the catalog system_prompt. Bundle-local skills are
@@ -140,7 +153,7 @@ Listing:
   Table output shows the effective model; JSON also includes reasoning.
 
 Flags:
-  --cli <tool>              claude | codex | gemini | ... (default: {DEFAULT_CLI})
+  --cli, --tool <tool>      claude | codex | gemini | ... (default: {DEFAULT_CLI})
   --dir <path>              Working directory
   --terminal <preset>       hcom terminal preset, or \"here\"
   --terminal-command <cmd>  Raw terminal command with {{script}} (passed via HCOM_TERMINAL)

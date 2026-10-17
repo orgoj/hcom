@@ -4,9 +4,7 @@
 
 *Hook your coding agents together*
 
-[![CI](https://github.com/aannoo/hcom/actions/workflows/ci.yml/badge.svg)](https://github.com/aannoo/hcom/actions/workflows/ci.yml)
-[![Latest release](https://img.shields.io/github/v/release/aannoo/hcom)](https://github.com/aannoo/hcom/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/aannoo/hcom/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 </div>
 
@@ -18,41 +16,28 @@ Use it to coordinate multi-agent pipelines, run different AI CLIs as each other'
 
 Works with: `claude`, `codex`, `opencode`, `copilot`, `qoder`, `grok`, `hermes`, `pi`, `omp`, `agy`, `cursor`, `kimi`, `kilo`, `gemini`
 
+This is the [orgoj fork](https://github.com/orgoj/hcom) of [aannoo/hcom](https://github.com/aannoo/hcom). Upstream behavior runs unchanged; the fork adds named agents from a JSON catalog (`hcom agent`, under Reference below), catalog groups and roaming agents, send autostart, idle autokill, `hcom handoff`, and a desktop window for the catalog ([contrib/hcom-gui](contrib/README.md)).
+
 https://github.com/user-attachments/assets/1ce23ed9-f529-4be0-8124-816aa4c2fd43
 
 ## Install
 
-**python -** macOS, Linux, Windows:
+The fork builds from source and needs Rust 1.89 or newer. The `uv` and `brew` packages install upstream hcom, without the fork's features.
 
 ```bash
-uv tool install hcom
+cargo install --git https://github.com/orgoj/hcom --locked
 ```
 
-**homebrew -** macOS, Linux:
+To follow the repository instead, build it and link the binary:
 
 ```bash
-brew install aannoo/hcom/hcom
+git clone https://github.com/orgoj/hcom.git
+cd hcom
+cargo build --release
+ln -sf "$PWD/target/release/hcom" ~/.cargo/bin/hcom
 ```
 
-<details>
-<summary>Other install options</summary>
-
-```bash
-# macOS, Linux, Android
-curl -fsSL https://github.com/aannoo/hcom/releases/latest/download/hcom-installer.sh | sh
-```
-
-```powershell
-# Windows
-irm https://github.com/aannoo/hcom/releases/latest/download/hcom-installer.ps1 | iex
-```
-
-```bash
-# Update any existing install
-hcom update
-```
-
-</details>
+Update with `git pull && cargo build --release`.
 
 ## Quickstart
 
@@ -102,13 +87,11 @@ hcom
 
 ## What agents can do
 
-- **Message** each other in real time: mid-turn or wake immediately when idle
-
-- **Observe** each other: status, transcripts, file edits, live terminal screens, command history.
-
-- **Subscribe** and notify on status changes, file edits, collisions, specific events. React automatically.
-
-- **Spawn**, **fork**, **resume**, **kill** in any terminal emulator or headless.
+- Message each other in real time, mid-turn or waking an idle agent at once.
+- Read each other's status, transcripts, file edits, terminal screens and command history.
+- Subscribe to status changes, file edits, collisions or any event query, and react when one fires.
+- Spawn, fork, resume and kill agents in any terminal emulator or headless.
+- Start named agents from a catalog, by name, by group, or by sending them a message.
 
 ## How it works
 
@@ -156,7 +139,7 @@ hcom events --idle luna --wait 600 && hcom send -b @nova -- "luna is done, revie
 
 ## Terminal
 
-Every agent runs in a real terminal you can see, scroll, and interrupt. Any emulator works for spawning. **kitty**, **wezterm**, **tmux**, **zellij**, **waveterm**, **cmux**, **herdr** also support closing panes from `hcom kill`.
+Every agent runs in a real terminal you can see, scroll, and interrupt. Any emulator works for spawning. kitty, wezterm, tmux, zellij, waveterm, cmux, herdr and orca also close the agent's pane on `hcom kill`. `--terminal here` runs the agent in the current terminal.
 
 With **herdr**, each catalog agent is placed in its configured tab (default: a tab named after the agent; `hcom agent --help`). `hcom r` returns an agent to its recorded workspace and tab, `hcom f` opens a tab named after the fork, and no launch inherits the caller's tab.
 
@@ -200,12 +183,11 @@ Safely remove all hcom hooks:
 hcom hooks remove
 ```
 
-Then remove binary:
+Then remove the binary:
 
 ```bash
-brew uninstall hcom
-# or: uv tool uninstall hcom
-# or: rm "$(which hcom)"
+cargo uninstall hcom
+# or, for a linked build: rm "$(which hcom)"
 ```
 
 ---
@@ -287,13 +269,15 @@ hcom launch flags:
 
 | Flag | Purpose |
 |---|---|
-| `--tag <name>` | Group label — agents can be addressed as `@tag` |
-| `--terminal <preset>` | Where windows open: `default` (auto-detect), `kitty`, `wezterm`, `tmux`, `cmux`, `iterm`, etc… |
+| `--tag <name>` | Group label; agents become `tag-name` and answer to `@tag-` |
+| `--terminal <preset>` | Where windows open: `default` (auto-detect), `here`, `kitty`, `wezterm`, `tmux`, `herdr`, `orca`, ... |
 | `--dir <path>` | Directory where the agent launches |
-| `--headless` | Run in background pty with no terminal window |
+| `--headless` | Run in a background pty with no terminal window |
+| `--as <name>` | Explicit instance name (single agent only) |
 | `--device <name>` | Spawn on a remote device (via relay) |
 | `--hcom-prompt <text>` | Initial user prompt |
-| `--hcom-system-prompt <text>` | Append to system prompt |
+| `--hcom-system-prompt <text>` | Agent instructions for this launch only |
+| `--dry-run` | Print the launch, run nothing |
 
 Anything else is forwarded to the tool: `--model sonnet`, `--yolo`, etc.
 
@@ -301,15 +285,148 @@ Anything else is forwarded to the tool: `--model sonnet`, `--yolo`, etc.
 
 ```bash
 hcom                           # TUI dashboard
-hcom send -b @luna -- hey      # one-off message to an agent
+hcom send -b @luna -- hey      # one-off message to an agent (-b = from bigboss, the human)
 hcom send -b @review -- hey    # catalog group: its in-scope members, started if stopped
-hcom list                      # show all active agents
+hcom list                      # active agents; list <name> for details, --stopped for stopped ones
+hcom listen 60                 # block until a message arrives
+hcom events --wait <filters>   # block until a matching event, for scripting
+hcom events sub --idle luna    # get an hcom message when luna goes idle
+hcom transcript luna           # read luna's conversation; transcript search 'regex'
+hcom bundle prepare            # context package for a handoff
 hcom term [name]               # view/inject into an agent's PTY screen
-hcom events --wait <filters>   # Block until match for scripting
-hcom update                    # update hcom version
+hcom agent <name>              # launch a catalog agent (see Agent catalog)
+hcom handoff <prompt>          # a catalog agent restarts itself in a clean session
+hcom stop [name]               # disconnect without killing
+hcom archive                   # query past sessions
+hcom hooks [add|remove]        # inspect or change tool hooks
+hcom completions bash          # shell completion (bash|zsh|fish)
+hcom update                    # install the latest orgoj/hcom release
 ```
 
 `hcom run docs --cli` for all commands.
+
+</details>
+
+<details>
+<summary><strong>Agent catalog</strong></summary>
+
+### Agent catalog
+
+`hcom agent` launches named agents from a JSON catalog. Each entry fixes the CLI, directory, model, terminal placement and prompts, so `hcom agent docs` starts the same agent every time, and `hcom send @docs` starts it if it is not running.
+
+```json
+{
+  "defaults": { "cli": "claude", "terminal": "herdr", "idle_kill": 3600 },
+  "agents": {
+    "docs": {
+      "description": "Keeps README and help text in sync with the code",
+      "dir": "~/projects/hcom",
+      "session": "hcom",
+      "model": "sonnet",
+      "resume": true,
+      "groups": ["review"]
+    },
+    "reviewer": {
+      "description": "Reviews the sender's diff and replies with findings",
+      "roaming": true,
+      "cli": "codex",
+      "groups": ["review"],
+      "tools": { "codex": { "model": "gpt-5", "reasoning": "high" } }
+    },
+    "old_helper": { "dir": "~/projects/old", "disabled": true }
+  }
+}
+```
+
+#### Commands
+
+```bash
+hcom agent docs                  # launch; reports the status if docs already runs
+hcom agent docs --resume         # continue the previous session (--continue: clean session + handoff summary)
+hcom agent docs --as docs2       # same definition, second independent instance
+hcom agent docs --restart        # kill the running instance, wait, launch again
+hcom agent @review               # launch every member of a catalog group
+hcom agent show docs             # effective config and the exact command
+hcom agent docs --dry-run        # print the commands, run nothing
+hcom agent list                  # table in a terminal, name + description elsewhere
+hcom agent list --all            # also agents hidden by selective imports, and disabled ones
+hcom agent list --local          # project agents only
+hcom agent list @review --names  # one group, names only
+hcom agent attach docs           # focus the running agent's Herdr pane
+hcom agent edit [--project]      # open the global (or project) catalog in $VISUAL/$EDITOR
+hcom agent completions bash      # completion for agent and group names (bash|zsh|fish)
+```
+
+`show` and `attach` accept the same flags as a launch (`--as`, `--cli`, `--catalog`, ...), so `hcom agent show docs --as docs2` previews that variant. `list` also takes `--json`, `--groups`, `--for-agents` and `--for-humans`.
+
+Launch flags override the catalog for one run: `--cli` (alias `--tool`), `--dir`, `--model`, `--reasoning`, `--tag`, `--terminal`, `--terminal-command`, `--session`, `--window`, `--hcom-prompt`, `--hcom-system-prompt`, `--env K=V`, `--inherit-env VAR`, `--attach`, `--clean`, `--last N`. `--catalog <file>` replaces the project catalog and `--no-project` ignores it. hcom forwards every other flag to the tool. `hcom agent --help` has the full reference.
+
+#### Agent fields
+
+| Field | Meaning |
+|---|---|
+| `description` | One line other agents read in `hcom agent list` |
+| `cli` | Tool to run (default `claude`) |
+| `dir` | Working directory (`~` and `$VAR` expand) |
+| `model`, `reasoning` | Model and reasoning effort (`--effort` for Claude/Antigravity, `model_reasoning_effort` for Codex) |
+| `prompt`, `system_prompt` | Initial user prompt and agent instructions; `system_prompt` replaces earlier layers, `""` clears it |
+| `terminal`, `terminal_command` | hcom terminal preset, or a raw command with `{script}` |
+| `session`, `window` | Herdr workspace and tab (tab defaults to the agent name) |
+| `tag` | Runtime messaging tag, as with `hcom --tag` |
+| `groups` | Catalog groups for `hcom agent @group`, `hcom send @group` and `hcom kill @group` |
+| `env`, `inherit_env`, `args` | Extra environment, variables copied from the caller, extra tool arguments |
+| `resume`, `continue` | Default start mode; `--resume`, `--continue` and `--clean` override it |
+| `idle_kill` | Seconds of idle listening before hcom kills the instance (`0` or `false` off) |
+| `roaming` | Per-project instances, see below |
+| `disabled` | `true` hides the entry, see below |
+| `tools` | Per-CLI profile: `model`, `reasoning`, `prompt`, `system_prompt`, `args` for the effective CLI |
+
+Any field also works in a catalog's `defaults`. Scalars from a later layer replace earlier ones; `env`, `args`, `inherit_env` and `groups` accumulate.
+
+#### Where catalogs live
+
+hcom reads these catalogs in order, each later one stronger:
+
+1. the global catalog `~/.hcom/agents.json` (path override: `HCOM_AGENTS_FILE`)
+2. extra catalogs listed in `HCOM_AGENT_CATALOGS`, left to right
+3. every `.hcom/agents.json` from the launch directory upward, outermost first; no Git required
+
+Each catalog applies its `defaults`, then the entry. Global `cli_overrides` follow, then the `tools.<cli>` profile of the resulting CLI, and command-line flags win over everything. A project agent ignores a same-named global entry but still inherits global `defaults`. Relative `dir` values resolve against `$HOME` in the global catalog, the project root in a project catalog, and the file's own directory elsewhere.
+
+A catalog can import agents from other files. Paths resolve against the importing file:
+
+```json
+{
+  "imports": [{ "from": "../shared/agents.json", "agents": ["builder"] }],
+  "agents": { "tester": { "dir": ".", "cli": "codex" } }
+}
+```
+
+Without `agents`, an import brings in every agent of that file; with a list, the others stay private to it. A project agent is reachable by `hcom agent` and `hcom send` inside its project, and elsewhere only where a catalog in scope imports it.
+
+#### Groups
+
+`"groups": ["review"]` puts an agent in a catalog group, separate from the messaging `tag`. `hcom agent @review` launches every member, including agents a selective import keeps private. `hcom send @review -- text` reaches the members in scope and starts stopped ones. A running agent or catalog agent named `review` takes precedence over the group.
+
+#### Roaming agents
+
+`"roaming": true` defines a project-local archetype with no `dir`, `session` or `window`. A targeted `hcom send @reviewer` from inside a Git project addresses `reviewer_<project>` and starts it in that project's root if it is missing. Broadcasts never start roaming agents.
+
+#### Disabled agents
+
+`"disabled": true` switches an agent off without deleting its entry. hcom then treats the name as undefined: no launch, resume, send autostart, roaming instance, group membership, `show`, listing or completion. The field merges like any other, so `"disabled": true` in `defaults` with `"disabled": false` on one entry keeps only that entry enabled. `hcom agent list --all` still shows disabled agents, marked `disabled`. A running instance stays an ordinary hcom agent: it receives messages and can be killed by name.
+
+#### Bundles and instructions
+
+An `agents/<name>/SOUL.md` next to a catalog defines that agent too and is appended to its instructions after `system_prompt`. Skills in `agents/<name>/skills/*/SKILL.md` belong to it; Claude loads them natively through `--add-dir`. A top-level `"system_prompt_file"` sets a catalog-wide default from a file.
+
+#### Swapping a CLI locally
+
+Only the global catalog accepts `"cli_overrides": {"codex": "claude"}`. It maps a catalog's CLI choice for named launches, groups and send autostart, without editing shared catalogs. `--cli` bypasses it, and running instances keep their tool. `hcom agent docs --restart --continue` moves a running agent to the new CLI with a handoff summary.
+
+#### Environment and handoff
+
+Every launched agent gets `HCOM_INSTANCE_NAME` (its instance name) and `HCOM_AGENT_NAME` (the catalog entry it came from; they differ under `--as` and for roaming agents). An agent started by `hcom agent` or send autostart can restart itself in a clean session with `hcom handoff <prompt>`, keeping its name and catalog entry.
 
 </details>
 
@@ -332,7 +449,7 @@ hcom config -i <name> <key> <value>   # per-agent override at runtime
 
 | Key | Purpose |
 |---|---|
-| `tag` | Group label — launched agents become `tag-name` |
+| `tag` | Group label; launched agents become `tag-name` |
 | `hints` | Text appended to every message the agent receives |
 | `notes` | Text appended to bootstrap (one-time, at launch) |
 | `auto_approve` | Auto-approve safe hcom commands (send/list/events/…) |
@@ -343,6 +460,11 @@ hcom config -i <name> <key> <value>   # per-agent override at runtime
 | `timeout` | Idle timeout for headless Claude (seconds) |
 | `subagent_timeout` | Keep-alive for Claude subagents (seconds) |
 | `claude_args` / `gemini_args` / `codex_args` / `opencode_args` / `kilo_args` / `pi_args` / `omp_args` / `cursor_args` / `kimi_args` / `copilot_args` / `qoder_args` / `grok_args` / `hermes_args` | Default args passed to the tool |
+| `claude_delivery` / `copilot_delivery` | Idle delivery: `inject` (type into the PTY, default) or `native` |
+| `gemini_system_prompt` / `codex_system_prompt` | Default system prompt for that tool |
+| `auto_trust_workspace` | Trust the launch directory, skipping the tool's folder-trust prompt |
+| `herdr_autostart` | Start the Herdr server when it is not running |
+| `continue_last` | Recent exchanges carried into a `--continue` handoff summary |
 
 #### Scope
 
@@ -359,10 +481,6 @@ hcom config -i luna idle_kill 600   # kill luna after 10 min idle; 0 clears
 ```
 
 A running local agent (not a remote one or a subagent) with `idle_kill` set is killed like `hcom kill` once it has been listening that long with nothing unread and no own `intent=request` message still waiting for a reply. A catalog entry or catalog `defaults` can set `"idle_kill": <seconds>` (`0` or `false` disables) for every launch; roaming agents restart on the next send, others resume with `hcom r`. The stopped event records `idle_kill` as the initiator. Enforcement runs inside hcom's own loops and commands, so it needs at least one hcom-managed agent or command running.
-
-#### Disabled catalog agents
-
-`"disabled": true` in a catalog entry or catalog `defaults` switches an agent off without deleting it: `hcom agent`, resume, send autostart, roaming, groups, `hcom agent show`, listings and completions treat it as undefined. It merges like other catalog fields, so a later layer's `false` re-enables it. `hcom agent list --all` still shows it, marked `disabled`. An already running instance is untouched: it still receives messages and can be killed or attached by name.
 
 #### Per-project isolation
 
@@ -394,15 +512,31 @@ hcom run docs             # tell agent to run this to create any new workflow
 
 Tell agent to run them:
 
-- **`hcom run confess`** — An agent (or background clone) writes an honesty self-eval. A spawned calibrator reads the target's transcript independently. A judge compares both reports and sends back a verdict via hcom message.
+- `hcom run confess`: an agent (or a background clone) writes an honesty self-evaluation, a spawned calibrator reads the target's transcript on its own, and a judge compares both reports and sends the verdict as an hcom message.
 
-- **`hcom run debate`** — A judge spawns and sets up a debate with existing agents. It coordinates rounds in a shared thread where all agents see each other's arguments, with shared context of workspace files and transcripts.
+- `hcom run debate`: a judge sets up a debate between existing agents and runs the rounds in a shared thread, where every agent sees the others' arguments, workspace files and transcripts.
 
-- **`hcom run fatcow`** — headless agent reads every file in a path, subscribes to file edit events to stay current, and answers other agents on demand.
+- `hcom run fatcow`: a headless agent reads every file in a path, follows file edit events to stay current, and answers other agents' questions about it.
 
-- **`hcom run onidle`** — waits for an agent to go idle, then types text into another agent (`hcom run onidle luna nova 'luna is done, review it'`) or launches a new one with it as the prompt (`hcom run onidle luna codex 'review what luna just did'`).
+- `hcom run onidle`: waits for an agent to go idle, then types text into another agent (`hcom run onidle luna nova 'luna is done, review it'`) or launches a new one with the text as its prompt (`hcom run onidle luna codex 'review what luna just did'`).
 
-Custom scripts: drop `*.sh` or `*.py` into `~/.hcom/scripts/` — auto-discovered, override bundled scripts of the same name. Ask an agent to author one; `hcom run docs --scripts` is the authoring guide.
+Custom scripts: put `*.sh` or `*.py` files in `~/.hcom/scripts/`. hcom finds them on its own, and they override bundled scripts of the same name. `hcom run docs --scripts` is the authoring guide; an agent can write one from it.
+
+</details>
+
+<details>
+<summary><strong>Desktop GUI</strong></summary>
+
+### hcom-gui
+
+`contrib/hcom-gui` is a Tk window that lists every catalog agent next to every live instance. It starts, kills, attaches and messages agents through the `hcom` CLI, and shows status, context use, Git state and terminal placement per row. It needs Python 3 with tkinter.
+
+```bash
+ln -s "$PWD/contrib/hcom-gui" ~/.local/bin/hcom-gui
+hcom-gui
+```
+
+Buttons and columns are configured in `~/.hcom/gui.json`; [contrib/README.md](contrib/README.md) documents the options and keyboard shortcuts.
 
 </details>
 
