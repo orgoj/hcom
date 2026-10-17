@@ -26,8 +26,9 @@ Target matching:
   A targeted stopped/missing local agent is started automatically when its
   name is defined in the effective hcom agent catalog. Send briefly waits for
   that first event's acknowledgement; otherwise it reports queued/pending.
-  A catalog agent with \"roaming\": true resolves to <name>_<project> in the
-  sender's Git/project root and starts there when missing.
+  A catalog agent with \"roaming\": true resolves to <name>_<project>_<hash>
+  (<hash> = 6 hex of the root path's SHA-256) in the sender's Git/project root
+  and starts there when missing.
   Running agents route first; the catalog is read only for unmatched names,
   tags (which include stopped catalog agents), stopped thread members, or
   --spawn-as; an unreadable catalog only warns. Broadcasts never start agents.
@@ -2132,14 +2133,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
         std::fs::create_dir_all(project.join(".git")).unwrap();
+        let instance = format!(
+            "reviewer_{}",
+            crate::commands::agent::roaming_project_slug(&std::fs::canonicalize(&project).unwrap())
+                .unwrap()
+        );
         db.conn()
             .execute(
                 "INSERT INTO instances (name, status, directory, created_at) \
-                 VALUES ('reviewer_project', 'stopped', ?1, 1000.0)",
-                [project.to_string_lossy().as_ref()],
+                 VALUES (?1, 'stopped', ?2, 1000.0)",
+                [instance.as_str(), project.to_string_lossy().as_ref()],
             )
             .unwrap();
-        db.add_thread_memberships("review", None, &["reviewer_project".to_string()]);
+        db.add_thread_memberships("review", None, std::slice::from_ref(&instance));
         let sender = SenderIdentity {
             kind: SenderKind::External,
             name: "bigboss".into(),
@@ -2160,8 +2166,8 @@ mod tests {
 
         let delivery =
             resolve_delivery(&db, &sender, "continue", Some(&envelope), None, &catalog).unwrap();
-        assert_eq!(delivery.delivered_to, vec!["reviewer_project"]);
-        assert_eq!(delivery.catalog_starts[0].instance, "reviewer_project");
+        assert_eq!(delivery.delivered_to, vec![instance.clone()]);
+        assert_eq!(delivery.catalog_starts[0].instance, instance);
         assert_eq!(
             delivery.catalog_starts[0].launch_dir.as_deref(),
             Some(project.as_path())

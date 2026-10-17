@@ -2380,6 +2380,14 @@ fn agent_help_lists_catalog_layers() {
     assert!(stdout.contains("@<group>"), "stdout={stdout}");
     assert!(stdout.contains("\"groups\""), "stdout={stdout}");
     assert!(stdout.contains("\"roaming\": true"), "stdout={stdout}");
+    assert!(
+        stdout.contains("<name>_<project>_<hash>"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("roots with the same basename differ"),
+        "stdout={stdout}"
+    );
     assert!(stdout.contains("DIPPY_CONFIG_ONLY"), "stdout={stdout}");
     assert!(stdout.contains("--all"), "stdout={stdout}");
     assert!(stdout.contains("--local"), "stdout={stdout}");
@@ -4719,13 +4727,26 @@ fn agent_show_materializes_roaming_agent_for_the_current_project() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
-    assert!(stdout.contains("name:      reviewer_forecast_service"));
+    let instance = roaming_instance("reviewer_forecast_service", &project);
+    assert!(
+        stdout.contains(&format!("name:      {instance}")),
+        "stdout={stdout}"
+    );
     assert!(stdout.contains("roaming:   true"));
     assert!(
         stdout.contains(&format!("dir:       {}", project.display())),
         "stdout={stdout}"
     );
-    assert!(stdout.contains("codex --as reviewer_forecast_service"));
+    assert!(stdout.contains(&format!("codex --as {instance}")));
+}
+
+/// The instance name hcom gives a roaming agent: `<prefix>_<6 hex of the root path hash>`.
+fn roaming_instance(prefix: &str, root: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let root = std::fs::canonicalize(root).expect("canonical project root");
+    let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
+    let hash: String = digest[..3].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{prefix}_{hash}")
 }
 
 #[test]
@@ -4911,7 +4932,10 @@ fn send_help_explains_autostart_acknowledgement() {
     );
     assert!(stdout.contains("queued/pending"), "stdout={stdout}");
     assert!(stdout.contains("roaming"), "stdout={stdout}");
-    assert!(stdout.contains("<name>_<project>"), "stdout={stdout}");
+    assert!(
+        stdout.contains("<name>_<project>_<hash>"),
+        "stdout={stdout}"
+    );
     assert!(
         stdout.contains("Running agents route first"),
         "stdout={stdout}"
@@ -5275,20 +5299,15 @@ fn targeted_send_materializes_roaming_agent_in_the_senders_git_root() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
-    assert!(stdout.contains("reviewer_weather_app"), "stdout={stdout}");
+    let instance = roaming_instance("reviewer_weather_app", &project);
+    assert!(stdout.contains(&instance), "stdout={stdout}");
 
     let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1", "--full"]);
     assert_eq!(code, 0, "events={events} stderr={stderr}");
     let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
     assert_eq!(event["data"]["text"], "review this");
-    assert_eq!(
-        event["data"]["mentions"],
-        serde_json::json!(["reviewer_weather_app"])
-    );
-    assert_eq!(
-        event["data"]["delivered_to"],
-        serde_json::json!(["reviewer_weather_app"])
-    );
+    assert_eq!(event["data"]["mentions"], serde_json::json!([instance]));
+    assert_eq!(event["data"]["delivered_to"], serde_json::json!([instance]));
 
     let (code, instances, stderr) = h.run(["list", "--json"]);
     assert_eq!(code, 0, "instances={instances} stderr={stderr}");
@@ -5296,11 +5315,7 @@ fn targeted_send_materializes_roaming_agent_in_the_senders_git_root() {
         serde_json::from_str(&instances).expect("instance list JSON");
     let reviewer = instances
         .as_array()
-        .and_then(|items| {
-            items
-                .iter()
-                .find(|item| item["name"] == "reviewer_weather_app")
-        })
+        .and_then(|items| items.iter().find(|item| item["name"] == instance.as_str()))
         .expect("materialized reviewer instance");
     assert_eq!(reviewer["directory"], project.to_string_lossy().as_ref());
 
@@ -5337,10 +5352,11 @@ fn roaming_send_from_an_agent_uses_its_recorded_directory_not_process_cwd() {
         rusqlite::params![project.to_string_lossy().as_ref(), sender],
     )
     .expect("move sender context to project");
+    let instance = roaming_instance("reviewer_agent_project", &project);
     conn.execute(
         "INSERT INTO instances (name, status, directory, created_at) \
-         VALUES ('reviewer_agent_project', 'listening', ?1, 1000.0)",
-        [project.to_string_lossy().as_ref()],
+         VALUES (?1, 'listening', ?2, 1000.0)",
+        [instance.as_str(), project.to_string_lossy().as_ref()],
     )
     .expect("insert materialized reviewer");
 
@@ -5354,7 +5370,7 @@ fn roaming_send_from_an_agent_uses_its_recorded_directory_not_process_cwd() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
-    assert!(stdout.contains("reviewer_agent_project"), "stdout={stdout}");
+    assert!(stdout.contains(&instance), "stdout={stdout}");
     assert!(
         !stdout.contains("reviewer_unrelated_cwd"),
         "stdout={stdout}"
@@ -5362,7 +5378,54 @@ fn roaming_send_from_an_agent_uses_its_recorded_directory_not_process_cwd() {
 }
 
 #[test]
-fn roaming_send_rejects_same_slug_for_a_different_project_root() {
+fn roaming_send_from_same_basename_roots_addresses_distinct_instances() {
+    let h = Hcom::new();
+    let first = h.root_path().join("one/app");
+    let second = h.root_path().join("two/app");
+    std::fs::create_dir_all(first.join(".git")).expect("create first git marker");
+    std::fs::create_dir_all(second.join(".git")).expect("create second git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let first_instance = roaming_instance("reviewer_app", &first);
+    let second_instance = roaming_instance("reviewer_app", &second);
+    assert_ne!(first_instance, second_instance);
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    for (instance, root) in [(&first_instance, &first), (&second_instance, &second)] {
+        conn.execute(
+            "INSERT INTO instances (name, status, directory, created_at) \
+             VALUES (?1, 'listening', ?2, 1000.0)",
+            [instance.as_str(), root.to_string_lossy().as_ref()],
+        )
+        .expect("insert project reviewer");
+    }
+
+    for (root, own, other) in [
+        (&first, &first_instance, &second_instance),
+        (&second, &second_instance, &first_instance),
+    ] {
+        let output = h
+            .cmd()
+            .current_dir(root)
+            .args(["send", "--from", "bigboss", "@reviewer", "--", "inspect"])
+            .output()
+            .expect("send from project");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+        assert!(
+            stdout.contains(own.as_str()) && !stdout.contains(other.as_str()),
+            "stdout={stdout}"
+        );
+    }
+}
+
+#[test]
+fn roaming_send_rejects_an_instance_name_recorded_for_another_root() {
     let h = Hcom::new();
     let first = h.root_path().join("one/app");
     let second = h.root_path().join("two/app");
@@ -5378,8 +5441,11 @@ fn roaming_send_rejects_same_slug_for_a_different_project_root() {
     let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
     conn.execute(
         "INSERT INTO instances (name, status, directory, created_at) \
-         VALUES ('reviewer_app', 'stopped', ?1, 1000.0)",
-        [first.to_string_lossy().as_ref()],
+         VALUES (?1, 'stopped', ?2, 1000.0)",
+        [
+            roaming_instance("reviewer_app", &second).as_str(),
+            first.to_string_lossy().as_ref(),
+        ],
     )
     .expect("insert first project reviewer");
 
@@ -5393,7 +5459,7 @@ fn roaming_send_rejects_same_slug_for_a_different_project_root() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "stdout={stdout} stderr={stderr}");
     assert!(
-        stderr.contains("project directory basenames must be unique"),
+        stderr.contains("roaming instance name collides with another project root"),
         "stderr={stderr}"
     );
 }
@@ -5413,13 +5479,15 @@ fn roaming_slug_collision_blocks_only_sends_that_address_that_agent() {
     let (code, _, stderr) = h.run(["list"]);
     assert_eq!(code, 0, "stderr={stderr}");
     let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    let taken = roaming_instance("reviewer_app", &second);
     conn.execute(
         "INSERT INTO instances (name, status, directory, created_at, tag) \
-         VALUES ('reviewer_app', 'stopped', ?1, 1000.0, 'review'), \
-                ('nova', 'listening', ?1, 1000.0, 'astro')",
-        [first.to_string_lossy().as_ref()],
+         VALUES (?1, 'stopped', ?2, 1000.0, 'review'), \
+                ('nova', 'listening', ?2, 1000.0, 'astro')",
+        [taken.as_str(), first.to_string_lossy().as_ref()],
     )
     .expect("insert instances");
+    let taken_target = format!("@{taken}");
 
     let send = |args: &[&str]| {
         let output = h
@@ -5454,19 +5522,12 @@ fn roaming_slug_collision_blocks_only_sends_that_address_that_agent() {
             "--",
             "full name",
         ][..],
-        &[
-            "send",
-            "--from",
-            "bigboss",
-            "@reviewer_app",
-            "--",
-            "instance",
-        ][..],
+        &["send", "--from", "bigboss", &taken_target, "--", "instance"][..],
     ] {
         let (ok, stdout, stderr) = send(args);
         assert!(!ok, "args={args:?} stdout={stdout} stderr={stderr}");
         assert!(
-            stderr.contains("project directory basenames must be unique"),
+            stderr.contains("roaming instance name collides with another project root"),
             "args={args:?} stderr={stderr}"
         );
     }
@@ -5558,15 +5619,21 @@ fn roaming_slug_collision_blocks_thread_only_send_to_that_agent() {
     let (code, _, stderr) = h.run(["list"]);
     assert_eq!(code, 0, "stderr={stderr}");
     let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    let taken = roaming_instance("reviewer_app", &second);
     conn.execute(
         "INSERT INTO instances (name, status, directory, created_at, tag) \
-         VALUES ('reviewer_app', 'stopped', ?1, 1000.0, 'review')",
-        [first.to_string_lossy().as_ref()],
+         VALUES (?1, 'stopped', ?2, 1000.0, 'review')",
+        [taken.as_str(), first.to_string_lossy().as_ref()],
     )
     .expect("insert stopped roaming instance");
     conn.execute(
-        "INSERT INTO kv (key, value) VALUES ('events_sub:thread-review-reviewer_app', ?1)",
-        [r#"{"caller":"reviewer_app","thread_name":"review","auto_thread_member":true,"delivery_only":true,"sql":"0","created":1.0,"last_id":0,"once":false}"#],
+        "INSERT INTO kv (key, value) VALUES (?1, ?2)",
+        [
+            format!("events_sub:thread-review-{taken}"),
+            format!(
+                r#"{{"caller":"{taken}","thread_name":"review","auto_thread_member":true,"delivery_only":true,"sql":"0","created":1.0,"last_id":0,"once":false}}"#
+            ),
+        ],
     )
     .expect("insert thread membership");
 
@@ -5582,7 +5649,7 @@ fn roaming_slug_collision_blocks_thread_only_send_to_that_agent() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "stdout={stdout} stderr={stderr}");
     assert!(
-        stderr.contains("project directory basenames must be unique"),
+        stderr.contains("roaming instance name collides with another project root"),
         "stderr={stderr}"
     );
 }
@@ -6112,23 +6179,24 @@ fn idle_killed_catalog_agents_restart_on_send_and_resume() {
         );
         stdout
     };
+    let instance = roaming_instance("reviewer_proj", &project);
     let stdout = send("first");
-    assert!(stdout.contains("reviewer_proj"), "stdout={stdout}");
-    let (code, stdout, _) = h.run(["config", "-i", "reviewer_proj", "idle_kill"]);
+    assert!(stdout.contains(instance.as_str()), "stdout={stdout}");
+    let (code, stdout, _) = h.run(["config", "-i", instance.as_str(), "idle_kill"]);
     assert_eq!((code, stdout.trim()), (0, "1"));
 
     let mut roaming = idle_kill_sleeper(&h);
-    make_idle_kill_row(&conn, "reviewer_proj", "listening", roaming.id());
+    make_idle_kill_row(&conn, instance.as_str(), "listening", roaming.id());
     wait_for_idle_kill(&h, &mut roaming, true);
     h.eventually(
         "stopped event for the roaming agent",
         Duration::from_secs(10),
-        || Ok(idle_kill_stopped_by(&conn, "reviewer_proj")),
+        || Ok(idle_kill_stopped_by(&conn, instance.as_str())),
     );
 
     // The next send autostarts it again, with its idle_kill.
     send("second");
-    let (code, stdout, stderr) = h.run(["config", "-i", "reviewer_proj", "idle_kill"]);
+    let (code, stdout, stderr) = h.run(["config", "-i", instance.as_str(), "idle_kill"]);
     assert_eq!(
         (code, stdout.trim()),
         (0, "1"),

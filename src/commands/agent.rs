@@ -53,8 +53,8 @@ pub fn help_text() -> String {
   hcom agent completions [bash|zsh|fish]     Shell completion for agent names (default: bash)
 
   show and attach accept the launch flags below (--as, --cli, --catalog, ...).
-  A roaming name resolves to <name>_<project> for the current directory; for a
-  disabled roaming agent pass that instance name itself.
+  A roaming name resolves to <name>_<project>_<hash> for the current directory;
+  for a disabled roaming agent pass that instance name itself.
 
 Agent fields (in an \"agents\" entry or in \"defaults\"):
   description, cli, dir, model, reasoning, prompt, system_prompt, terminal,
@@ -125,7 +125,9 @@ Local CLI replacement:
 Roaming agents:
   \"roaming\": true defines a project-local archetype without dir/session/window.
   A targeted send to @<name> resolves the sender's Git/project root and addresses
-  <name>_<project>. Missing instances start in that root. Broadcasts never start them.
+  <name>_<project>_<hash>: <project> is the root's basename, <hash> the first 6
+  hex digits of SHA-256 of its path, so roots with the same basename differ.
+  Missing instances start in that root. Broadcasts never start them.
   Catalog env values are passed to the materialized process; for an isolated Dippy
   policy use \"env\": {{\"DIPPY_CONFIG_ONLY\": \"/path/to/policy.dippy\"}}.
 
@@ -1113,7 +1115,7 @@ fn roaming_project_root(start: &Path) -> PathBuf {
     start
 }
 
-fn roaming_project_slug(root: &Path) -> Result<String> {
+pub(crate) fn roaming_project_slug(root: &Path) -> Result<String> {
     let basename = root
         .file_name()
         .and_then(|name| name.to_str())
@@ -1137,6 +1139,13 @@ fn roaming_project_slug(root: &Path) -> Result<String> {
             "cannot route a roaming agent: project root '{}' has no usable name",
             root.display()
         );
+    }
+    // Roots that share a basename (~/.hcom, ~/projects/hcom) get distinct names.
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
+    slug.push('_');
+    for byte in &digest[..3] {
+        slug.push_str(&format!("{byte:02x}"));
     }
     Ok(slug)
 }
@@ -1191,7 +1200,7 @@ fn materialize_roaming_definition(
         }
         if canonical_directory(Path::new(&existing.directory)) != root {
             bail!(
-                "cannot route roaming agent '{name}': instance '{instance}' already belongs to '{}', not '{}'; project directory basenames must be unique",
+                "cannot route roaming agent '{name}': instance '{instance}' already belongs to '{}', not '{}'; roaming instance name collides with another project root",
                 existing.directory,
                 root.display()
             );
@@ -3326,7 +3335,35 @@ mod tests {
         let context = roaming_context_directory(&sender).unwrap();
         let root = roaming_project_root(&context);
         assert_eq!(root, canonical_directory(&project));
-        assert_eq!(roaming_project_slug(&root).unwrap(), "weather_app");
+        assert!(
+            roaming_project_slug(&root)
+                .unwrap()
+                .starts_with("weather_app_")
+        );
+    }
+
+    #[test]
+    fn roaming_slug_appends_a_path_hash_so_same_basenames_differ() {
+        assert_eq!(
+            roaming_project_slug(Path::new("/home/u/.hcom")).unwrap(),
+            "hcom_8250fc"
+        );
+        assert_eq!(
+            roaming_project_slug(Path::new("/home/u/projects/hcom")).unwrap(),
+            "hcom_cca348"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn roaming_slug_hashes_raw_bytes_of_non_utf8_parents() {
+        use std::os::unix::ffi::OsStrExt;
+        let first = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xff/hcom"));
+        let second = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/\xfe/hcom"));
+        assert_ne!(
+            roaming_project_slug(first).unwrap(),
+            roaming_project_slug(second).unwrap()
+        );
     }
 
     #[test]

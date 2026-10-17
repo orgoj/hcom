@@ -83,6 +83,8 @@ tell any agent:
 
 **Idle autokill**: `hcom config -i <name|self> idle_kill <seconds>` (or catalog `"idle_kill"`) kills a local agent (not a remote one or a subagent) that stays idle that long; `0` clears. An agent waiting for a reply to its own `--intent request` message, or with unread messages, is not killed.
 
+**Roaming catalog agent**: `"roaming": true` makes `@<name>` address `<name>_<project>_<hash>` for the sender's Git/project root (`<hash>` = 6 hex of SHA-256 of the root path, so roots with the same basename get different instances) and start it there when missing.
+
 **Disabled catalog agent**: `"disabled": true` in `agents.json` (entry or `defaults`; a later layer's `false` re-enables) makes hcom treat the agent as undefined: no launch, send autostart, group membership or listing; `hcom agent list --all` shows it marked `disabled`. A running instance keeps receiving messages and can be killed by name.
 
 run `hcom --help` for full command syntax and flags.

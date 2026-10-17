@@ -288,7 +288,7 @@ const SEND_HELP: &[HelpEntry] = &[
     ),
     (
         "",
-        "A catalog agent with roaming=true materializes as <name>_<project> in the sender's Git/project root.",
+        "A catalog agent with roaming=true materializes as <name>_<project>_<hash> in the sender's Git/project root.",
     ),
     (
         "",
@@ -1280,7 +1280,8 @@ Commands:\n\
 \x20 handoff      Restart yourself in a clean session with your prompt\n\
 \x20 config       Get/set global and per-agent settings (incl. idle_kill)\n\
 \x20 run          Execute workflow scripts\n\
-\x20 agent        Launch named agents from a JSON catalog (\"disabled\": true hides one)\n\
+\x20 agent        Launch named agents from a JSON catalog (\"disabled\": true hides one;\n\
+\x20              roaming ones run as <name>_<project>_<hash>)\n\
 \x20 relay        Cross-device sync + relay daemon\n\
 \x20 archive      Query past hcom sessions\n\
 \x20 reset        Archive and clear database\n\
@@ -1757,7 +1758,14 @@ mod tests {
         let help = get_command_help("agent");
         assert!(help.contains("\"disabled\": true in catalog defaults or an agent entry"));
         assert!(help.contains("and disabled agents marked as disabled"));
-        assert!(get_help_text().contains("JSON catalog (\"disabled\": true hides one)"));
+        assert!(get_help_text().contains("JSON catalog (\"disabled\": true hides one;"));
+    }
+
+    #[test]
+    fn help_documents_hashed_roaming_instance_names() {
+        assert!(get_help_text().contains("roaming ones run as <name>_<project>_<hash>"));
+        assert!(get_command_help("agent").contains("roots with the same basename differ"));
+        assert!(get_command_help("send").contains("<name>_<project>_<hash>"));
     }
 
     #[test]
