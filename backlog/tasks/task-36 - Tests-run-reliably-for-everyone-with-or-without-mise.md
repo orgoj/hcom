@@ -4,6 +4,7 @@ title: 'Tests run reliably for everyone, with or without mise'
 status: To Do
 assignee: []
 created_date: '2026-10-16 22:01'
+updated_date: '2026-10-17 07:17'
 labels: []
 dependencies: []
 priority: high
@@ -14,11 +15,13 @@ ordinal: 35000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-cli_smoke tests fail in some environments for reasons unrelated to the code under test. Known so far (not yet fully analyzed):
-- Tests that launch codex (e.g. targeted_send_materializes_roaming_agent_in_the_senders_git_root) fail with 'Codex hooks/list preflight failed ... mise ERROR node is not a valid shim'. The pinned mock codex (target/mock-tools/bin/codex) starts with '#!/usr/bin/env node'; node resolves to a mise shim (~/.local/share/mise/shims/node), which does not work under the test's isolated HOME.
-- Catalog-group smoke tests fail falsely when the harness sets TMPDIR to a scratch dir (e.g. /home/michael/.hermes/cache/scratch); the current workaround is running cargo test with TMPDIR=/tmp.
-Suggested direction (to be confirmed): resolve real interpreter paths (node) once before isolating HOME, or have the mock-tools install pin an absolute node, so launched tools do not depend on mise/HOME; make the fixture independent of the caller's TMPDIR; document one command that runs the full suite on a clean machine.
-Needs analysis before implementation: list every environment-dependent failure, find each root cause, then complete the description and acceptance criteria.
+cli_smoke fails in some environments for reasons unrelated to the code under test. Full run from a plain shell: 118 passed, 6 failed, all for cause 1; cause 2 appears when TMPDIR is under the real HOME.
+
+1. node via mise shim. Codex tests (agent_catalog_system_prompt_file_renders_and_reaches_spawn_script, agent_group_continues_after_a_member_fails, targeted_send_*) run the pinned target/mock-tools/bin/codex (codex.js, #!/usr/bin/env node). node resolves to the mise shim, which locates its installs via MISE_DATA_DIR / XDG_DATA_HOME / HOME; the fixture sets HOME and XDG_* to the temp root, so the shim fails: 'mise ERROR node is not a valid shim'. Verified: with the real node dir first in PATH all codex tests pass. Codex itself is not mise-installed; setup confirmed fine by agent bin. Fix: tests/support/pins.rs tool_path resolves the real node once from the parent env (node -p process.execPath) and puts its directory after the mock-tools dir, ahead of the inherited PATH. No hardcoded mise paths, no mise env passthrough (would leak user mise state). No-op without node or without mise.
+
+2. Real ~/.hcom leaks into tests when TMPDIR is under the real HOME (e.g. the Claude harness TMPDIR /home/michael/.hermes/cache/scratch). find_project_hcom_dirs (src/commands/agent.rs, fork code) walks up from the workspace; the fixture's global catalog is the temp one, so the real ~/.hcom is taken as a project catalog (kill_by_group_* then fail with 'unknown or empty agent group'). The unit-test guard outside_test_tree only exists under cfg(test). Fix: in the non-test build, ignore project catalogs outside HCOM_TEST_ROOT when it is set (same pattern as hook_cleanup_allowed in src/runtime_env.rs).
+
+3. Setup is undocumented: add to AGENTS.md Commands that cli_smoke needs 'just mock-tools' (pinned CLIs from scripts/mock-tools.pins) once and after a pin bump.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
