@@ -116,6 +116,12 @@ Roaming agents:
   Catalog env values are passed to the materialized process; for an isolated Dippy
   policy use \"env\": {{\"DIPPY_CONFIG_ONLY\": \"/path/to/policy.dippy\"}}.
 
+Disabled agents:
+  \"disabled\": true in catalog defaults or an agent entry makes hcom treat the agent as
+  undefined: no launch, resume, send autostart, roaming, group membership, show,
+  listing or completion. It merges like other fields; a later layer's false re-enables it.
+  A running instance stays an ordinary instance: messageable, killable, attachable.
+
 Catalog groups:
   \"groups\": [\"review\", \"all\"] assigns groups independently of the runtime
   messaging \"tag\". Group launch traverses all recursively reachable imports,
@@ -125,7 +131,8 @@ Catalog groups:
 
 Listing:
   @<group>                  Show only members of one catalog group
-  --all                     Include all agents from recursively reachable imports
+  --all                     Include all agents from recursively reachable imports,
+                            and disabled agents marked as disabled
   --local                   Show only project agents, direct and imported
   --for-agents              Name and \"description\" only, for another agent to read
   --for-humans              Full table, even when output is not a terminal
@@ -232,6 +239,8 @@ struct AgentDef {
     description: Option<String>,
     dir: Option<String>,
     roaming: Option<bool>,
+    /// true hides the entry from the catalog as if it were not defined.
+    disabled: Option<bool>,
     #[serde(default)]
     skills_dir: Option<serde_json::Value>,
     cli: Option<String>,
@@ -311,6 +320,7 @@ impl AgentDef {
             description,
             dir,
             roaming,
+            disabled,
             cli,
             terminal,
             terminal_command,
@@ -892,8 +902,23 @@ impl Catalogs {
         })
     }
 
-    /// Names in catalog order, mapped to the label of the last file defining them.
+    /// Enabled names in catalog order, mapped to the label of the last file defining them.
     fn names(&self) -> BTreeMap<String, String> {
+        self.enabled(self.names_any())
+    }
+
+    /// Enabled project-scoped names, including agents from the project's imports.
+    fn local_names(&self) -> BTreeMap<String, String> {
+        self.enabled(self.local_names_any())
+    }
+
+    fn enabled(&self, mut names: BTreeMap<String, String>) -> BTreeMap<String, String> {
+        names.retain(|name, _| self.resolve(name).is_some());
+        names
+    }
+
+    /// Like `names`, but also disabled entries; only `list --all` shows those.
+    fn names_any(&self) -> BTreeMap<String, String> {
         let mut out = BTreeMap::new();
         for file in &self.base_files {
             for name in file.catalog.agents.keys() {
@@ -910,8 +935,7 @@ impl Catalogs {
         out
     }
 
-    /// Project-scoped names, including agents from the project's imports.
-    fn local_names(&self) -> BTreeMap<String, String> {
+    fn local_names_any(&self) -> BTreeMap<String, String> {
         let mut out = BTreeMap::new();
         for file in &self.project_files {
             for name in file.catalog.agents.keys() {
@@ -921,7 +945,13 @@ impl Catalogs {
         out
     }
 
+    /// The effective definition, or None when it is undefined or disabled.
     fn resolve(&self, name: &str) -> Option<AgentDef> {
+        self.resolve_any(name)
+            .filter(|def| def.disabled != Some(true))
+    }
+
+    fn resolve_any(&self, name: &str) -> Option<AgentDef> {
         if self
             .project_files
             .iter()
@@ -2787,10 +2817,14 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
     } else {
         Catalogs::load(cli.no_project, cli.catalog.as_deref())?
     };
-    let mut names = if local {
-        catalogs.local_names()
-    } else {
-        catalogs.names()
+    // Only the full --all listing shows disabled entries; names, groups and
+    // @group membership stay enabled-only for completions and group sends.
+    let with_disabled = all && !names_only && !groups_only && group_filters.is_empty();
+    let mut names = match (local, with_disabled) {
+        (true, true) => catalogs.local_names_any(),
+        (true, false) => catalogs.local_names(),
+        (false, true) => catalogs.names_any(),
+        (false, false) => catalogs.names(),
     };
     if groups_only {
         let groups = names
@@ -2873,11 +2907,16 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
             .max()
             .unwrap_or(0);
         for name in names.keys() {
-            let def = catalogs.resolve(name).unwrap_or_default();
+            let def = catalogs.resolve_any(name).unwrap_or_default();
+            let marker = if def.disabled == Some(true) {
+                "(disabled) "
+            } else {
+                ""
+            };
             let description = effective(name, def, &Cli::default())
                 .description
                 .unwrap_or_else(|| "-".to_string());
-            println!("{name:<width$}  {description}");
+            println!("{name:<width$}  {marker}{description}");
         }
         return Ok(0);
     }
@@ -2890,10 +2929,12 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
     if json {
         let mut out = Vec::new();
         for (name, source) in &names {
-            let def = catalogs.resolve(name).unwrap_or_default();
+            let def = catalogs.resolve_any(name).unwrap_or_default();
+            let disabled = def.disabled == Some(true);
             let eff = effective(name, def, &Cli::default());
             out.push(serde_json::json!({
                 "name": name,
+                "disabled": disabled,
                 "roaming": eff.roaming,
                 "description": eff.description,
                 "source": source,
@@ -2918,7 +2959,12 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
     let rows: Vec<[String; 6]> = names
         .iter()
         .map(|(name, source)| {
-            let def = catalogs.resolve(name).unwrap_or_default();
+            let def = catalogs.resolve_any(name).unwrap_or_default();
+            let marker = if def.disabled == Some(true) {
+                "  disabled"
+            } else {
+                ""
+            };
             let eff = effective(name, def, &Cli::default());
             let where_ = match (&eff.session, &eff.terminal) {
                 (Some(s), _) => format!("{s}:{}", eff.window),
@@ -2939,7 +2985,7 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
                 } else {
                     shorten_home(&eff.dir)
                 },
-                format!("{status}  [{source}]"),
+                format!("{status}  [{source}]{marker}"),
             ]
         })
         .collect();
@@ -3540,6 +3586,38 @@ mod tests {
         );
         assert!(c.resolve("missing").is_none());
         assert_eq!(c.names().get("a").map(String::as_str), Some("project"));
+    }
+
+    #[test]
+    fn disabled_merges_by_layer_and_hides_the_agent() {
+        let c = catalogs_from(&[
+            (
+                "global",
+                "/home/u",
+                r#"{"defaults":{"disabled":true},"agents":{"off":{"groups":["g"]},"on":{"disabled":false,"groups":["g"]}}}"#,
+            ),
+            (
+                "project",
+                "/repo",
+                r#"{"agents":{"local_off":{"disabled":true},"local_on":{}}}"#,
+            ),
+        ]);
+        assert!(c.resolve("off").is_none(), "global defaults disable it");
+        assert_eq!(c.resolve_any("off").unwrap().disabled, Some(true));
+        assert_eq!(c.resolve("on").unwrap().disabled, Some(false));
+        assert!(c.resolve("local_off").is_none());
+        assert_eq!(
+            c.names().keys().cloned().collect::<Vec<_>>(),
+            ["on"],
+            "global defaults also disable project agents, local_on included"
+        );
+        assert_eq!(c.names_any().len(), 4);
+        assert!(c.local_names().is_empty());
+        assert_eq!(
+            c.local_names_any().keys().cloned().collect::<Vec<_>>(),
+            ["local_off", "local_on"]
+        );
+        assert_eq!(c.group_members("g"), ["on"]);
     }
 
     #[test]

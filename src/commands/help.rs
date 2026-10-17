@@ -1280,7 +1280,7 @@ Commands:\n\
 \x20 handoff      Restart yourself in a clean session with your prompt\n\
 \x20 config       Get/set global and per-agent settings (incl. idle_kill)\n\
 \x20 run          Execute workflow scripts\n\
-\x20 agent        Launch named agents from a JSON catalog\n\
+\x20 agent        Launch named agents from a JSON catalog (\"disabled\": true hides one)\n\
 \x20 relay        Cross-device sync + relay daemon\n\
 \x20 archive      Query past hcom sessions\n\
 \x20 reset        Archive and clear database\n\
@@ -1750,6 +1750,14 @@ mod tests {
             forkable_tool_names(),
             "claude/codex/opencode/kilo/pi/omp/qoder/grok"
         );
+    }
+
+    #[test]
+    fn agent_help_documents_disabled_entries() {
+        let help = get_command_help("agent");
+        assert!(help.contains("\"disabled\": true in catalog defaults or an agent entry"));
+        assert!(help.contains("and disabled agents marked as disabled"));
+        assert!(get_help_text().contains("JSON catalog (\"disabled\": true hides one)"));
     }
 
     #[test]

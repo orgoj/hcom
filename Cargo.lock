@@ -945,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "hcom"
-version = "0.7.30-orgoj.6"
+version = "0.7.30-orgoj.7"
 dependencies = [
  "anyhow",
  "atuin-vt100",

@@ -360,6 +360,10 @@ hcom config -i luna idle_kill 600   # kill luna after 10 min idle; 0 clears
 
 A running local agent (not a remote one or a subagent) with `idle_kill` set is killed like `hcom kill` once it has been listening that long with nothing unread and no own `intent=request` message still waiting for a reply. A catalog entry or catalog `defaults` can set `"idle_kill": <seconds>` (`0` or `false` disables) for every launch; roaming agents restart on the next send, others resume with `hcom r`. The stopped event records `idle_kill` as the initiator. Enforcement runs inside hcom's own loops and commands, so it needs at least one hcom-managed agent or command running.
 
+#### Disabled catalog agents
+
+`"disabled": true` in a catalog entry or catalog `defaults` switches an agent off without deleting it: `hcom agent`, resume, send autostart, roaming, groups, `hcom agent show`, listings and completions treat it as undefined. It merges like other catalog fields, so a later layer's `false` re-enables it. `hcom agent list --all` still shows it, marked `disabled`. An already running instance is untouched: it still receives messages and can be killed or attached by name.
+
 #### Per-project isolation
 
 ```bash

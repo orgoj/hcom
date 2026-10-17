@@ -4303,6 +4303,227 @@ fn agent_group_continues_after_a_member_fails() {
 }
 
 #[test]
+fn agent_disabled_entry_is_treated_as_undefined() {
+    let h = Hcom::new();
+    let project = h.root_path().join("weather-app");
+    std::fs::create_dir_all(project.join(".git")).expect("create git marker");
+    std::fs::create_dir_all(project.join(".hcom")).expect("create project .hcom");
+    std::fs::write(
+        project.join(".hcom/agents.json"),
+        r#"{"agents":{"loc_off":{},"loc_on":{"disabled":false}}}"#,
+    )
+    .expect("write project catalog");
+    // Defaults disable every agent; an entry's false re-enables it.
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"defaults":{"disabled":true,"cli":"codex","terminal_command":"sh -c true {script}"},
+            "agents":{
+                "worker_on":{"dir":"/tmp","groups":["crew"],"disabled":false},
+                "worker_off":{"dir":"/tmp","groups":["crew","hidden"]},
+                "reviewer":{"roaming":true}
+            }}"#,
+    )
+    .expect("write catalog");
+    let run_in = |dir: &std::path::Path, args: &[&str]| {
+        let output = h
+            .cmd()
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("run hcom");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    // Launch, resume, show and send autostart answer exactly as for an undefined name.
+    for (disabled, undefined_name, args) in [
+        (
+            "worker_off",
+            "worker_ofx",
+            vec!["agent", "worker_off", "--dry-run"],
+        ),
+        (
+            "worker_off",
+            "worker_ofx",
+            vec!["agent", "worker_off", "--resume", "--dry-run"],
+        ),
+        (
+            "worker_off",
+            "worker_ofx",
+            vec!["agent", "show", "worker_off"],
+        ),
+        (
+            "worker_off",
+            "worker_ofx",
+            vec!["send", "--from", "bigboss", "@worker_off", "--", "hi"],
+        ),
+        (
+            "reviewer",
+            "reviewex",
+            vec!["send", "--from", "bigboss", "@reviewer", "--", "hi"],
+        ),
+    ] {
+        let undefined_args: Vec<String> = args
+            .iter()
+            .map(|arg| arg.replace(disabled, undefined_name))
+            .collect();
+        let off = run_in(&project, &args);
+        let undefined = h
+            .cmd()
+            .current_dir(&project)
+            .args(&undefined_args)
+            .output()
+            .expect("run hcom");
+        assert_ne!(off.0, 0, "{args:?}: stdout={} stderr={}", off.1, off.2);
+        assert_eq!(Some(off.0), undefined.status.code(), "{args:?}");
+        assert_eq!(
+            off.2.replace(disabled, undefined_name),
+            String::from_utf8_lossy(&undefined.stderr),
+            "{args:?}"
+        );
+    }
+    let (code, instances, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert_eq!(
+        instances.trim(),
+        "[]",
+        "no roaming or catalog instance started"
+    );
+
+    // Group launch and listings skip the disabled entry.
+    let (code, stdout, stderr) = h.run(["agent", "@crew", "--dry-run", "--no-project"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("--as worker_on") && !stdout.contains("worker_off"),
+        "stdout={stdout}"
+    );
+    let (code, stdout, stderr) = h.run(["agent", "@hidden", "--dry-run", "--no-project"]);
+    assert_ne!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stderr.contains("unknown or empty agent group '@hidden'"),
+        "stderr={stderr}"
+    );
+    for args in [
+        vec!["agent", "list", "--names"],
+        vec!["agent", "list", "--all", "--names"],
+        vec!["agent", "list", "--all", "@crew", "--names"],
+    ] {
+        let (code, stdout, stderr) = run_in(&project, &args);
+        assert_eq!(code, 0, "{args:?}: stderr={stderr}");
+        assert_eq!(
+            stdout,
+            if args.contains(&"@crew") {
+                "worker_on\n"
+            } else {
+                "loc_on\nworker_on\n"
+            },
+            "{args:?}"
+        );
+    }
+    let (code, stdout, stderr) = run_in(&project, &["agent", "list", "--all", "--groups"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert_eq!(stdout, "@crew\n");
+    let (code, stdout, stderr) = run_in(&project, &["agent", "list", "--local", "--names"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert_eq!(stdout, "loc_on\n");
+
+    // Only --all shows it, marked, in every output mode.
+    let (code, stdout, stderr) = run_in(&project, &["agent", "list", "--for-agents"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(!stdout.contains("worker_off"), "stdout={stdout}");
+    let (code, stdout, stderr) = run_in(&project, &["agent", "list", "--all", "--for-agents"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let line = |name: &str| {
+        stdout
+            .lines()
+            .find(|line| line.starts_with(name))
+            .unwrap_or_else(|| panic!("{name} missing: {stdout}"))
+            .to_string()
+    };
+    assert!(line("worker_off").contains("(disabled)"), "stdout={stdout}");
+    assert!(!line("worker_on").contains("disabled"), "stdout={stdout}");
+    let (code, table, stderr) = run_in(&project, &["agent", "list", "--all", "--for-humans"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(
+        table
+            .lines()
+            .any(|line| line.starts_with("worker_off") && line.ends_with("disabled")),
+        "table={table}"
+    );
+    for (args, expected) in [
+        (
+            vec!["agent", "list", "--all", "--json"],
+            vec![
+                ("loc_off", true),
+                ("loc_on", false),
+                ("reviewer", true),
+                ("worker_off", true),
+                ("worker_on", false),
+            ],
+        ),
+        (
+            vec!["agent", "list", "--all", "--local", "--json"],
+            vec![("loc_off", true), ("loc_on", false)],
+        ),
+    ] {
+        let (code, stdout, stderr) = run_in(&project, &args);
+        assert_eq!(code, 0, "{args:?}: stderr={stderr}");
+        let listed: serde_json::Value = serde_json::from_str(&stdout).expect("list JSON");
+        let listed: Vec<(String, bool)> = listed
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|item| {
+                (
+                    item["name"].as_str().unwrap().to_string(),
+                    item["disabled"].as_bool().unwrap(),
+                )
+            })
+            .collect();
+        let expected: Vec<(String, bool)> = expected
+            .into_iter()
+            .map(|(name, disabled)| (name.to_string(), disabled))
+            .collect();
+        assert_eq!(listed, expected, "{args:?}");
+    }
+}
+
+#[test]
+fn running_instance_of_a_disabled_agent_is_still_messageable_and_killable() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"worker_off":{"dir":"/tmp","cli":"claude","disabled":true}}}"#,
+    )
+    .expect("write catalog");
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO instances (name, status, status_time, created_at, tool, pid) \
+         VALUES ('worker_off', 'listening', ?1, ?1, 'claude', 999991)",
+        rusqlite::params![now],
+    )
+    .expect("insert worker_off");
+
+    let (code, stdout, stderr) = h.run(["send", "--from", "bigboss", "@worker_off", "--", "hi"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1", "--full"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
+    assert_eq!(
+        event["data"]["delivered_to"],
+        serde_json::json!(["worker_off"])
+    );
+
+    let (code, stdout, stderr) = h.run(["kill", "worker_off"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("worker_off"), "stdout={stdout}");
+}
+
+#[test]
 fn agent_as_uses_catalog_config_with_a_distinct_instance_name() {
     let h = Hcom::new();
     std::fs::write(
