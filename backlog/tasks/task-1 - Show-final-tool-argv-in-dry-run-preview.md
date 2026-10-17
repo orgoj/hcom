@@ -4,7 +4,7 @@ title: Show final tool argv in dry-run preview
 status: To Do
 assignee: []
 created_date: '2026-10-13 12:21'
-updated_date: '2026-10-13 12:21'
+updated_date: '2026-10-17 06:57'
 labels: []
 dependencies: []
 ordinal: 1000
@@ -22,3 +22,9 @@ The `hcom <tool> --dry-run` preview shows only tool, directory and terminal, not
 - [ ] #2 Built-in help and README describe the argv in the dry-run output
 - [ ] #3 A cli_smoke test asserts injected flags appear in the dry-run output
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Deferred: the final argv is built per instance inside launcher::launch() (src/launcher.rs), interleaved with side effects (instance row, name, hooks, system-prompt file, workspace trust) and per-instance bootstrap text (Codex developer_instructions). A faithful preview needs a plan/execute split of launch() - a large upstream-touching refactor needing a proposal and review. Smaller alternative: preview merged args (prepare_launch_execution) plus side-effect-free injections with a <bootstrap> placeholder, documented as excluding per-instance values.
+<!-- SECTION:NOTES:END -->
