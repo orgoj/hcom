@@ -345,6 +345,12 @@ impl Hcom {
                 fs::create_dir_all(&dir).expect("create HCOM_TEST_KEEP_DIR");
                 tempfile::tempdir_in(dir).expect("create temp dir")
             }
+            // hcom walks up from the workspace for project `.hcom` catalogs; a
+            // TMPDIR under the real HOME (an agent harness scratch dir) would
+            // reach the developer's `~/.hcom`. On Linux always use /tmp.
+            None if cfg!(target_os = "linux") => {
+                tempfile::tempdir_in("/tmp").expect("create temp dir")
+            }
             None => tempfile::tempdir().expect("create temp dir"),
         };
         let home = root.path().join("home");

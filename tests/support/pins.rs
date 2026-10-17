@@ -44,6 +44,17 @@ pub fn tool_path(front: Option<&std::path::Path>) -> std::ffi::OsString {
     if pins.is_dir() {
         entries.push(pins);
     }
+    // mise's node shim cannot find its installs under the isolated HOME, so
+    // `#!/usr/bin/env node` launchers (the pinned codex) need the real node.
+    if let Ok(out) = std::process::Command::new("mise")
+        .args(["which", "node"])
+        .output()
+        && out.status.success()
+        && let Some(dir) =
+            std::path::Path::new(String::from_utf8_lossy(&out.stdout).trim()).parent()
+    {
+        entries.push(dir.to_path_buf());
+    }
     if let Some(inherited) = std::env::var_os("PATH") {
         entries.extend(std::env::split_paths(&inherited));
     }
