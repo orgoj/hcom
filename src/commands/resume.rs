@@ -288,6 +288,8 @@ fn resolve_name_to_plan(
 
         if matches!(db.get_instance_full(&current), Ok(None) | Err(_))
             && crate::relay::control::split_device_suffix(&current).is_none()
+            // A stopped hcom agent wins without scanning every transcript.
+            && !has_stopped_event(db, &current)
             && let Some(session_id) = resolve_thread_name(&current)?
         {
             if let Ok(Some(bound)) = db.get_session_binding(&session_id)
@@ -1001,6 +1003,21 @@ fn load_instance_data(
 
     // Fall back to stopped snapshot
     load_stopped_snapshot(db, name)
+}
+
+/// Whether `name` has a stopped life event (a known stopped hcom agent).
+fn has_stopped_event(db: &HcomDb, name: &str) -> bool {
+    db.conn()
+        .query_row(
+            "SELECT 1 FROM events
+             WHERE type='life'
+               AND instance=?
+               AND json_extract(data, '$.action') = 'stopped'
+             LIMIT 1",
+            rusqlite::params![name],
+            |_| Ok(()),
+        )
+        .is_ok()
 }
 
 /// Load stopped snapshot from life events.
@@ -4417,6 +4434,55 @@ mod tests {
         assert_eq!(old, None, "obsolete title A must not resolve");
         assert_eq!(mid, None, "obsolete title B must not resolve");
         assert_eq!(cur, Some("s1".to_string()), "current title C must resolve");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_stopped_agent_name_wins_over_thread_name() {
+        let db = test_db();
+        db.log_event(
+            "life",
+            "luna",
+            &json!({
+                "action": "stopped",
+                "snapshot": {"tool": "claude", "session_id": "agent-session", "launch_args": "[]"}
+            }),
+        )
+        .unwrap();
+        // A stopped row without a loadable snapshot still is the agent's.
+        db.log_event("life", "nova", &json!({"action": "stopped"}))
+            .unwrap();
+        let cfg_dir = tempfile::tempdir().unwrap();
+        let projects = cfg_dir.path().join("projects/proj");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(
+            projects.join("t.jsonl"),
+            r#"{"type":"custom-title","customTitle":"luna","sessionId":"thread-session"}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            projects.join("u.jsonl"),
+            r#"{"type":"custom-title","customTitle":"nova","sessionId":"thread-session-2"}
+"#,
+        )
+        .unwrap();
+
+        let (luna, nova) = with_claude_config_dir(cfg_dir.path(), || {
+            (
+                resolve_name_to_plan(&db, "luna", false, &[], &GlobalFlags::default()),
+                resolve_name_to_plan(&db, "nova", false, &[], &GlobalFlags::default()),
+            )
+        });
+
+        let (name, plan) = luna.unwrap();
+        assert_eq!(name, "luna");
+        assert_eq!(
+            plan.launch.prior_session_id.as_deref(),
+            Some("agent-session")
+        );
+        let err = nova.err().expect("snapshot error").to_string();
+        assert!(!err.contains("thread-session"), "got: {err}");
     }
 
     #[test]
