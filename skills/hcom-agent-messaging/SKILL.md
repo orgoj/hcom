@@ -133,18 +133,10 @@ hcom hooks status    # check hooks specifically
 hcom relay status    # check cross-device relay
 ```
 
-still broken?
-```bash
-hcom reset all # backup config/db + reset it
-hcom claude          # fresh start
-```
-
-still broken after that?
-```bash
-git clone https://github.com/aannoo/hcom.git
-cd hcom
-```
-Read code and figure out what is going on.
+still broken? Report the failing command, its output and the three status
+results to the user or the hcom owner agent (`@hcom_dev` where it exists).
+Never run `hcom reset` yourself: it replaces the shared database and config
+for every agent on the machine, and only the user decides that.
 
 
 ### sandbox / permission issues
