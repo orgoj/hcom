@@ -763,6 +763,40 @@ class App(unittest.TestCase):
         self.app.run_button(self.button("Kill"))
         self.assertEqual(self.ran[0][0], ["hcom", "kill", "a2x"])
 
+    def restart_row(self, row):
+        self.app.tree.selection_set(row)
+        self.app.update()
+        self.app.run_button(self.button("Restart"))
+        return str(self.button("Restart")["widget"].cget("state"))
+
+    def test_restart_needs_a_running_catalog_instance(self):
+        self.assertEqual(str(self.button("Restart")["widget"].cget("state")), "disabled")  # no selection
+        for row in ("a3|", "a2|", "|solo"):
+            self.assertEqual(self.restart_row(row), "disabled", row)
+        self.assertEqual((self.asked, self.ran), ([], []))
+        self.assertEqual(self.restart_row("a1|a1"), "normal")
+
+    def test_restart_confirms_and_relaunches_the_instance(self):
+        self.restart_row("a2|a2x")
+        self.assertEqual(self.asked, [("Restart", "Restart a2x?")])
+        self.assertEqual(self.ran, [(["hcom", "agent", "a2", "--as", "a2x", "--restart"], gui.HOME)])
+
+    def test_restart_declined_runs_nothing(self):
+        self.answer = False
+        self.restart_row("a1|a1")
+        self.assertEqual(len(self.asked), 1)
+        self.assertEqual(self.ran, [])
+
+    def test_restart_of_roaming_agent_runs_in_its_directory(self):
+        catalog = CATALOG + [{"name": "r1", "cli": "claude", "roaming": True, "source": "global"}]
+        live = LIVE + [{"name": "r1_proj_ab12", "tool": "claude", "status": "listening", "directory": "/p/proj",
+                        "launch_context": {"agent_name": "r1"}}]
+        self.patch("hcom_json", lambda *args: catalog if args[:2] == ("agent", "list") else live)
+        self.app.refresh()
+        self.app.update()
+        self.restart_row("r1|r1_proj_ab12")
+        self.assertEqual(self.ran, [(["hcom", "agent", "r1", "--as", "r1_proj_ab12", "--restart"], "/p/proj")])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -51,8 +51,8 @@ STATE_FILE = os.path.join(HCOM_DIR, "gui-state.json")
 # after a bare "--" it is required: an empty answer runs nothing).
 # An answer equal to its prefill (dir, cli) is treated as empty. {ask:resume} is a checkbox:
 # --resume, or --continue when another cli is chosen (a session cannot move between CLIs).
-# when: catalog | running | stopped | dir. Optional: confirm, key (Tk event), default
-# (running | stopped: double-click/Enter on such a row), detach (start without waiting), cwd,
+# when: catalog | running | live (running catalog agent) | stopped | dir. Optional: confirm,
+# key (Tk event), default (running | stopped: double-click/Enter on such a row), detach (start without waiting), cwd,
 # if_exists (a path with {dir}; the button is enabled only while it exists).
 BUTTONS = [
     {
@@ -67,6 +67,8 @@ BUTTONS = [
     {"label": "Send", "cmd": ["hcom", "send", "-b", "@{instance}", "--", "{ask:message}"], "when": "running"},
     "---",
     {"label": "Kill", "cmd": ["hcom", "kill", "{instance}"], "when": "running", "confirm": True, "key": "<Delete>"},
+    {"label": "Restart", "cmd": ["hcom", "agent", "{agent}", "--as", "{instance}", "--restart"], "when": "live",
+     "confirm": True},
     {"label": "Kill group", "menu": "groups"},  # running instances of each catalog group and CLI
     "---",
 ]
@@ -311,7 +313,9 @@ def build_rows(catalog, live):
             "unread": i.get("unread_count") or "",
             "dir": i.get("directory") or (d or {}).get("dir") or "",
             "config": catalog_label(d["source"]) if d else "",
-            "cwd": catalog_cwd(d["source"]) if d else HOME,
+            # A roaming agent resolves its project from the cwd: run in the instance's directory.
+            "cwd": (i.get("directory") if d and d.get("roaming") else None)
+                   or (catalog_cwd(d["source"]) if d else HOME),
         })
     for d in catalog:
         names = running.get(d["name"], [])
@@ -383,6 +387,7 @@ def enabled(button, row):
     return {
         "catalog": bool(row["agent"]),
         "running": bool(row["instance"]),
+        "live": bool(row["agent"]) and bool(row["instance"]),
         "stopped": bool(row["agent"]) and not row["instance"],
         "dir": bool(row["dir"]),
     }[button["when"]]

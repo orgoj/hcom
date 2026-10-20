@@ -6,7 +6,7 @@ Fork-only extras that run on top of the `hcom` CLI and do not touch its code.
 
 Tk window listing every catalog agent (`hcom agent list --all --json`) and every live
 instance (`hcom list --json`), including instances started with `--as`. Buttons run
-existing commands (`hcom agent`, `kill`, Attach as configured per terminal) and log
+existing commands (`hcom agent`, `kill`, Restart, Attach as configured per terminal) and log
 their output; others open the selected agent's directory in configured applications. The Start dialog sets `--as`,
 `--dir`, `--cli` (CLIs installed on PATH), a resume checkbox (`--resume`, or
 `--continue` when another CLI is chosen) and a multi-line prompt (Shift+Enter for a new
@@ -16,6 +16,11 @@ empty, the catalog `prompt` (if any) applies.
 Send (running instances) asks for a multi-line message the same way and runs
 `hcom send -b @<instance> -- <text>` (sender `bigboss`, the human); an empty text sends
 nothing.
+Restart (running instances of a catalog agent, including `--as` names), after
+confirming, runs `hcom agent <agent> --as <instance> --restart`: it kills the instance,
+waits for it to exit and launches the agent again under the same name, with the
+catalog's resume/continue setting. hcom commands of a roaming agent's instance run in
+its directory, since a roaming agent resolves its project from there.
 `Kill group ▾` lists each catalog group with running members (`@persistent (3)`), then
 each CLI with running instances (`tool:claude (2)`), and, after confirming the names,
 kills exactly those instances. Since is the age of the
