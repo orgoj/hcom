@@ -19,8 +19,8 @@ use anyhow::Result;
 use crate::config::Config;
 use crate::db::HcomDb;
 use crate::delivery::{
-    APPROVAL_SCRAPE_CLEAR_MS, DeliveryState, ScreenState, ToolConfig, latch_scraped_approval,
-    run_delivery_loop,
+    APPROVAL_SCRAPE_CLEAR_MS, DeliveryState, ScreenState, ToolConfig, approval_scrape_cleared,
+    latch_scraped_approval, run_delivery_loop,
 };
 use crate::log::{log_error, log_info, log_warn};
 use crate::notify::NotifyServer;
@@ -182,17 +182,25 @@ pub(super) fn update_delivery_state(
         state.ready = screen.is_ready();
         // Cursor and Codex can briefly erase their approval surfaces during
         // redraws (Codex does this on focus changes). Latch positive detection
-        // until output settles so a partial frame cannot clear blocked status.
+        // until the scrape stays negative (or output goes quiet on a negative
+        // frame) so a partial frame cannot clear blocked status.
         let scrape_latched_tool = matches!(target.known_tool(), Some(Tool::Codex | Tool::Cursor));
         let scraped_approval = match target.known_tool() {
             Some(Tool::Codex) => screen.is_waiting_approval() || screen.is_codex_approval_visible(),
             Some(Tool::Cursor) => screen.is_cursor_approval_visible(),
             _ => false,
         };
+        let now = Instant::now();
+        state.approval_scrape_negative_since = if scraped_approval {
+            None
+        } else {
+            Some(state.approval_scrape_negative_since.unwrap_or(now))
+        };
         state.approval_scrape_latched = latch_scraped_approval(
             state.approval_scrape_latched,
             scraped_approval,
-            screen.is_output_stable(APPROVAL_SCRAPE_CLEAR_MS),
+            screen.is_output_stable(APPROVAL_SCRAPE_CLEAR_MS)
+                || approval_scrape_cleared(state.approval_scrape_negative_since, now),
         );
         let approval = (scrape_latched_tool && state.approval_scrape_latched)
             || (target.name() == "antigravity" && screen.is_antigravity_approval_visible());
@@ -219,6 +227,10 @@ pub(super) fn update_delivery_state(
         state.nav_overlay = matches!(target.known_tool(), Some(Tool::Claude))
             && (screen.is_claude_subagent_nav_visible()
                 || screen.is_claude_session_switcher_visible());
+        // Claude only: a blocked bare wake comes back into the input box, and
+        // the gate must not mistake hcom's own trigger for a user draft.
+        state.leftover_wake =
+            matches!(target.known_tool(), Some(Tool::Claude)) && screen.is_claude_leftover_wake();
         state.startup_loading = matches!(target.known_tool(), Some(Tool::Codex))
             && launch_phase_active.load(Ordering::Acquire)
             && screen.is_codex_startup_loading();
@@ -1911,6 +1923,120 @@ No session found matching 'never-saved'"
         assert!(!cleared);
         assert!(state.read().unwrap().approval, "cursor approval untouched");
         assert_eq!(calls.get(), 0, "cursor keystroke must not publish");
+    }
+
+    #[test]
+    fn claude_gate_submits_only_a_lone_leftover_wake() {
+        // Observed: Claude put a blocked bare `<hcom>` back into its
+        // box, and the gate guarded it as a draft ("prompt_has_text") while
+        // messages queued. From the screen through the published state to the
+        // gate: the lone trigger is submitted, anything else is protected.
+        let patterns: Vec<String> = Tool::Claude
+            .ready_patterns()
+            .iter()
+            .map(|p| p.to_string())
+            .collect();
+        let config = crate::delivery::ToolConfig::claude();
+        let border = "\u{2500}".repeat(80);
+        let gate_for = |rows: &[&str]| {
+            let mut screen = ScreenTracker::new_with_instance(24, 80, &patterns, None);
+            let mut frame = format!("\x1b[2J\x1b[H{border}\r\n");
+            for row in rows {
+                frame.push_str(&format!("{row}\r\n"));
+            }
+            frame.push_str(&format!("{border}\r\n  \u{23F8} manual mode on\r\n"));
+            screen.process(frame.as_bytes());
+            let state = Arc::new(RwLock::new(ScreenState::default()));
+            let launch = Arc::new(AtomicBool::new(false));
+            let target = PtyTarget::Known(Tool::Claude);
+            update_delivery_state(&state, &screen, &target, &launch, &|_| {});
+            {
+                let mut s = state.write().unwrap();
+                s.last_user_input = Instant::now() - Duration::from_secs(30);
+            }
+            let delivery = crate::delivery::DeliveryState {
+                screen: state,
+                grok_acp: None,
+                launch_phase_active: launch,
+                inject_port: 0,
+                user_activity_cooldown_ms: 3000,
+            };
+            let gate = crate::delivery::evaluate_gate(&config, &delivery, true);
+            (gate.safe, gate.reason, gate.submits_leftover())
+        };
+        assert_eq!(
+            gate_for(&["\u{276F} <hcom>"]),
+            (true, "leftover_wake", true)
+        );
+        assert_eq!(gate_for(&["\u{276F} "]), (true, "ok", false));
+        for rows in [
+            &["\u{276F} <hcom> hi"][..],
+            &["\u{276F} <hcom>", "  second line of a draft"],
+        ] {
+            assert_eq!(
+                gate_for(rows),
+                (false, "prompt_has_text", false),
+                "{rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn approval_clears_while_output_keeps_churning() {
+        // Codex's /voice meters redraw continuously, so output is never quiet.
+        // An answered approval must still clear once the scrape stays negative.
+        let target = PtyTarget::Known(Tool::Codex);
+        let mut screen = ScreenTracker::new_with_instance(24, 100, &[], None);
+        let state = Arc::new(RwLock::new(ScreenState::default()));
+        let launch = Arc::new(AtomicBool::new(false));
+        let edges = std::cell::RefCell::new(Vec::new());
+        let publish = |a: bool| edges.borrow_mut().push(a);
+        let dialog = "\x1b[2J\x1b[H\u{203a} 1. Yes, proceed (y)\r\n  2. No (esc)\r\n\r\n  Press enter to confirm or esc to cancel\r\n";
+        let idle = |screen: &mut ScreenTracker, level: char| {
+            screen.process(
+                format!(
+                    "\x1b[2J\x1b[H voice \u{25cc} muted\r\n   mic {level}{level}{level}\r\n\r\n\u{203a} Ask Codex to do anything\r\n\r\n  ? for shortcuts\r\n"
+                )
+                .as_bytes(),
+            )
+        };
+        let backdate = |state: &Arc<RwLock<ScreenState>>| {
+            let mut s = state.write().unwrap();
+            s.approval_scrape_negative_since =
+                Some(Instant::now() - Duration::from_millis(APPROVAL_SCRAPE_CLEAR_MS));
+        };
+
+        screen.process(dialog.as_bytes());
+        update_delivery_state(&state, &screen, &target, &launch, &publish);
+        assert!(state.read().unwrap().approval);
+
+        // A negative frame alone may be a partial redraw.
+        idle(&mut screen, '\u{2581}');
+        update_delivery_state(&state, &screen, &target, &launch, &publish);
+        assert!(state.read().unwrap().approval);
+
+        // The dialog coming back restarts the wait.
+        backdate(&state);
+        screen.process(dialog.as_bytes());
+        update_delivery_state(&state, &screen, &target, &launch, &publish);
+        assert!(
+            state
+                .read()
+                .unwrap()
+                .approval_scrape_negative_since
+                .is_none()
+        );
+        idle(&mut screen, '\u{2582}');
+        update_delivery_state(&state, &screen, &target, &launch, &publish);
+        assert!(state.read().unwrap().approval);
+
+        // Negative for the full wait while the meters still churn: clear.
+        backdate(&state);
+        idle(&mut screen, '\u{2583}');
+        assert!(!screen.is_output_stable(APPROVAL_SCRAPE_CLEAR_MS));
+        update_delivery_state(&state, &screen, &target, &launch, &publish);
+        assert!(!state.read().unwrap().approval);
+        assert_eq!(*edges.borrow(), vec![true, false]);
     }
 
     #[test]

@@ -910,6 +910,9 @@ mod host_label {
     }
 }
 
+/// The bare wake typed into a tool whose hooks show the delivery themselves.
+pub(crate) const WAKE_TRIGGER: &str = "<hcom>";
+
 /// Human-readable descriptions for gate block reasons.
 pub(crate) fn gate_block_detail(reason: &str) -> &'static str {
     match reason {
@@ -1034,6 +1037,8 @@ fn format_wake_message_line(
 /// 6. `require_prompt_empty` - Check if prompt has no user text.
 ///    Claude-specific: Uses VT100 dim attribute detection to distinguish placeholder text
 ///    (dim) from user input (not dim). Implemented in screen.rs get_claude_input_text().
+///    A Claude box holding only a leftover `<hcom>` wake is submitted with Enter
+///    rather than waited on (`ScreenState::leftover_wake`).
 #[derive(Clone)]
 pub struct ToolConfig {
     /// Tool name (claude, gemini, codex)
@@ -1116,6 +1121,17 @@ impl ToolConfig {
 pub struct GateResult {
     pub safe: bool,
     pub reason: &'static str,
+}
+
+/// Gate reason for an open gate whose prompt already holds a leftover wake.
+const REASON_LEFTOVER_WAKE: &str = "leftover_wake";
+
+impl GateResult {
+    /// The prompt already holds only a leftover `<hcom>` wake: deliver by
+    /// pressing Enter on it rather than typing another one beside it.
+    pub fn submits_leftover(&self) -> bool {
+        self.safe && self.reason == REASON_LEFTOVER_WAKE
+    }
 }
 
 /// Shared state for delivery thread
@@ -1213,9 +1229,11 @@ pub struct ScreenState {
     /// Latched Cursor/Codex approval signal. Their TUI redraws can briefly erase
     /// both the dialog and title, which would flicker `approval` false while the
     /// prompt is still up. Latch true on any positive detection and only clear
-    /// once output has settled. Antigravity keeps its immediate scrape.
-    /// See `APPROVAL_SCRAPE_CLEAR_MS`.
+    /// once the scrape has stayed negative. Antigravity keeps its immediate
+    /// scrape. See `APPROVAL_SCRAPE_CLEAR_MS`.
     pub approval_scrape_latched: bool,
+    /// When the approval scrape last turned negative (`None` while positive).
+    pub approval_scrape_negative_since: Option<Instant>,
     /// A Claude TUI overlay is focused whose input box is NOT the current
     /// session's root prompt — the subagent navigator (a human may be typing
     /// into a subagent's box) or the `←` session switcher (input box is a
@@ -1224,6 +1242,13 @@ pub struct ScreenState {
     /// set. Only ever true for Claude (see `ScreenTracker::is_claude_subagent_nav_visible`
     /// / `is_claude_session_switcher_visible`).
     pub nav_overlay: bool,
+    /// Claude's input box holds only a leftover `<hcom>` wake on one row (see
+    /// `ScreenTracker::is_claude_leftover_wake`): typically a bare wake its hook
+    /// blocked with nothing pending, which Claude put back into the box. It is
+    /// hcom's own trigger, not a draft, so the gate submits it with Enter
+    /// instead of waiting for an empty prompt that never comes. Only ever true
+    /// for Claude.
+    pub leftover_wake: bool,
     /// Codex is still starting with nothing to answer (see
     /// `ScreenTracker::is_codex_startup_loading`); the launch-blocked heuristic
     /// waits it out rather than reading a quiet loading screen as settled.
@@ -1243,7 +1268,9 @@ impl Default for ScreenState {
             cols: 80,
             last_prompt_submit: None,
             approval_scrape_latched: false,
+            approval_scrape_negative_since: None,
             nav_overlay: false,
+            leftover_wake: false,
             startup_loading: false,
         }
     }
@@ -1264,22 +1291,33 @@ pub(crate) fn pre_enter_settle(tool: &str) -> Option<Duration> {
     (tool == "qoder").then(|| Duration::from_millis(250))
 }
 
-/// How long screen output must be quiet before a negative approval scrape is
-/// trusted to clear the latched signal. Redraw bursts (cursor's approval prompt
-/// animating its selection / spinner) emit partial frames that scrape as "no
-/// approval"; requiring a settled screen before clearing keeps the latch up
-/// through the burst so the gate reports `approval`, not `prompt_has_text`.
+/// How long a negative approval scrape must hold before it clears the latched
+/// signal. Redraw bursts (cursor's approval prompt animating its selection /
+/// spinner, Codex on focus changes) emit partial frames that scrape as "no
+/// approval"; the next full frame shows the prompt again and restarts the wait,
+/// so the gate keeps reporting `approval`, not `prompt_has_text`.
+///
+/// The wait is measured on the scrape, not on quiet output: a TUI that never
+/// stops redrawing (Codex's /voice meters, an animated status line) would
+/// otherwise hold an answered approval forever.
 pub(crate) const APPROVAL_SCRAPE_CLEAR_MS: u64 = 400;
 
-/// Latch decision for screen-scraped approval (cursor). A partial-render frame
-/// mid-redraw scrapes as "no approval"; holding the previous latch through such
-/// transient false reads keeps the gate reporting `approval` instead of falling
-/// through to `prompt_has_text`. The latch only clears once `output_settled`
-/// (no redraw churn) confirms the prompt has genuinely left the screen.
-pub(crate) fn latch_scraped_approval(prev: bool, scraped: bool, output_settled: bool) -> bool {
+/// Whether a negative approval scrape has held for `APPROVAL_SCRAPE_CLEAR_MS`.
+pub(crate) fn approval_scrape_cleared(negative_since: Option<Instant>, now: Instant) -> bool {
+    negative_since.is_some_and(|t| {
+        now.saturating_duration_since(t) >= Duration::from_millis(APPROVAL_SCRAPE_CLEAR_MS)
+    })
+}
+
+/// Latch decision for screen-scraped approval (Cursor, Codex). A partial-render
+/// frame mid-redraw scrapes as "no approval"; holding the previous latch through
+/// such transient false reads keeps the gate reporting `approval` instead of
+/// falling through to `prompt_has_text`. The latch only clears once `settled`
+/// confirms the prompt has genuinely left the screen.
+pub(crate) fn latch_scraped_approval(prev: bool, scraped: bool, settled: bool) -> bool {
     if scraped {
         true
-    } else if output_settled {
+    } else if settled {
         false
     } else {
         prev
@@ -1311,7 +1349,9 @@ impl DeliveryState {
 /// 3. block_on_user_activity - if user recently typed, reason="user_active"
 /// 4. submit-settle cooldown - if prompt just submitted, reason="submit_settle"
 /// 5. require_ready_prompt - if prompt not visible, reason="not_ready"
-/// 6. require_prompt_empty - if prompt has user text, reason="prompt_has_text"
+/// 6. require_prompt_empty - if prompt has user text, reason="prompt_has_text",
+///    unless it is only a leftover `<hcom>` wake (Claude): then the gate opens
+///    with reason="leftover_wake" and the loop presses Enter alone
 ///
 /// The delivery loop checks screen.approval directly for status="blocked",
 /// so Codex OSC9 detection works even when agent is active (gate returns "not_idle").
@@ -1374,6 +1414,16 @@ pub(crate) fn evaluate_gate(
         };
     }
     if config.require_prompt_empty && !screen.prompt_empty {
+        // Our own `<hcom>`, alone in Claude's box (put back after its hook
+        // blocked a bare wake), is not a draft to protect: treating it as one
+        // held every later message at `prompt_has_text`.
+        // Submitting it hands the pending batch to the UserPromptSubmit hook.
+        if screen.leftover_wake {
+            return GateResult {
+                safe: true,
+                reason: REASON_LEFTOVER_WAKE,
+            };
+        }
         return GateResult {
             safe: false,
             reason: "prompt_has_text",
@@ -1698,6 +1748,17 @@ fn prompt_ownership(input_text: Option<&str>, injected_text: &str) -> PromptOwne
             PromptOwnership::Mixed
         }
         _ => PromptOwnership::Other,
+    }
+}
+
+/// Ownership of the prompt before an Enter (first or retry). A leftover wake is
+/// only ours while the scrape still sees it alone on one row: the prompt row
+/// keeps reading `<hcom>` after the user adds a second line, so text alone
+/// cannot tell the leftover from a draft that starts with it.
+fn submit_ownership(screen: &ScreenState, injected_text: &str, leftover: bool) -> PromptOwnership {
+    match prompt_ownership(screen.input_text.as_deref(), injected_text) {
+        PromptOwnership::Exclusive if leftover && !screen.leftover_wake => PromptOwnership::Mixed,
+        ownership => ownership,
     }
 }
 
@@ -2229,6 +2290,7 @@ pub fn run_delivery_loop(
         let mut inject_attempt: u32 = 0;
         let mut enter_attempt: u32 = 0;
         let mut injected_text = String::new();
+        let mut submitting_leftover = false;
         let mut phase_started_at = Instant::now();
         let mut cursor_before: i64 = 0;
         // Gate block tracking for TUI status updates
@@ -2415,6 +2477,24 @@ pub fn run_delivery_loop(
                             continue;
                         }
 
+                        // The prompt already holds our `<hcom>`: type nothing and
+                        // let the render phase see it as this attempt's text. It
+                        // re-checks ownership, approval and typing from a fresh
+                        // snapshot before the Enter, then verifies as usual.
+                        if gate.submits_leftover() {
+                            log_info(
+                                "native",
+                                "delivery.leftover_wake",
+                                "Prompt holds only a leftover wake; submitting it with Enter",
+                            );
+                            injected_text = WAKE_TRIGGER.to_string();
+                            submitting_leftover = true;
+                            phase_started_at = Instant::now();
+                            enter_attempt = 0;
+                            delivery_state = State::WaitTextRender;
+                            continue;
+                        }
+
                         // Claude/Codex hooks show the full delivery in the TUI, so
                         // they only need a trigger. Gemini-style paths use a
                         // compact, prompt-safe preview for human visibility.
@@ -2427,7 +2507,7 @@ pub fn run_delivery_loop(
                         let text = match parsed_tool {
                             Some(Tool::Claude) | Some(Tool::Codex) | Some(Tool::Cursor)
                             | Some(Tool::Kimi) | Some(Tool::Copilot) | Some(Tool::Qoder)
-                            | Some(Tool::Pi) | Some(Tool::Omp) => "<hcom>".to_string(),
+                            | Some(Tool::Pi) | Some(Tool::Omp) => WAKE_TRIGGER.to_string(),
                             _ => build_wake_inject_text(db, &current_name, input_box_width),
                         };
 
@@ -2443,6 +2523,7 @@ pub fn run_delivery_loop(
                                 ),
                             );
                             injected_text = text;
+                            submitting_leftover = false;
                             phase_started_at = Instant::now();
                             enter_attempt = 0;
                             delivery_state = State::WaitTextRender;
@@ -2629,7 +2710,7 @@ pub fn run_delivery_loop(
                             let screen = state.screen.read().unwrap();
                             let approval = screen.approval;
                             let ownership =
-                                prompt_ownership(screen.input_text.as_deref(), &injected_text);
+                                submit_ownership(&screen, &injected_text, submitting_leftover);
                             drop(screen);
 
                             if ownership != PromptOwnership::Exclusive {
@@ -2728,7 +2809,7 @@ pub fn run_delivery_loop(
                             let screen = state.screen.read().unwrap();
                             let approval = screen.approval;
                             let ownership =
-                                prompt_ownership(screen.input_text.as_deref(), &injected_text);
+                                submit_ownership(&screen, &injected_text, submitting_leftover);
                             drop(screen);
 
                             if ownership != PromptOwnership::Exclusive {
@@ -3262,7 +3343,9 @@ mod tests {
             cols: 80,
             last_prompt_submit: None,
             approval_scrape_latched: false,
+            approval_scrape_negative_since: None,
             nav_overlay: false,
+            leftover_wake: false,
             startup_loading: false,
         }
     }
@@ -3768,6 +3851,107 @@ mod tests {
         let result = evaluate_gate(&config, &state, true);
         assert!(!result.safe);
         assert_eq!(result.reason, "prompt_has_text");
+    }
+
+    /// Claude's prompt as the PTY scrape reports it: `text` typed in the box,
+    /// with `leftover_wake` as `ScreenTracker::is_claude_leftover_wake` sets it.
+    fn claude_prompt(text: &str, leftover_wake: bool) -> ScreenState {
+        ScreenState {
+            prompt_empty: text.is_empty(),
+            input_text: Some(text.to_string()),
+            leftover_wake,
+            ..safe_screen()
+        }
+    }
+
+    #[test]
+    fn gate_submits_a_leftover_wake_but_never_a_draft() {
+        let config = ToolConfig::claude();
+
+        // Only our own wake in the box: open, and press Enter on it.
+        let state = make_state(claude_prompt("<hcom>", true), 500);
+        let result = evaluate_gate(&config, &state, true);
+        assert!(result.safe, "leftover wake held: {}", result.reason);
+        assert!(result.submits_leftover());
+        assert_eq!(result.reason, "leftover_wake");
+
+        // A draft that merely starts with the wake stays protected.
+        let state = make_state(claude_prompt("<hcom> hi", false), 500);
+        let result = evaluate_gate(&config, &state, true);
+        assert!(!result.safe);
+        assert!(!result.submits_leftover());
+        assert_eq!(result.reason, "prompt_has_text");
+
+        // An empty box takes the normal typed wake.
+        let state = make_state(claude_prompt("", false), 500);
+        let result = evaluate_gate(&config, &state, true);
+        assert!(result.safe);
+        assert!(!result.submits_leftover());
+        assert_eq!(result.reason, "ok");
+    }
+
+    #[test]
+    fn gate_leftover_wake_still_waits_for_idle_and_the_user() {
+        // The leftover only stands in for an empty prompt; every earlier gate
+        // (idle, approval, typing, overlays, submit settle) still applies.
+        let config = ToolConfig::claude();
+        let gate = |screen: ScreenState, idle: bool| {
+            let result = evaluate_gate(&config, &make_state(screen, 500), idle);
+            assert!(!result.safe, "{}: gate opened", result.reason);
+            assert!(!result.submits_leftover(), "{}", result.reason);
+            result.reason
+        };
+        assert_eq!(gate(claude_prompt("<hcom>", true), false), "not_idle");
+
+        type Tweak = fn(&mut ScreenState);
+        let tweaks: [(&str, Tweak); 4] = [
+            ("approval", |s| s.approval = true),
+            ("user_active", |s| s.last_user_input = Instant::now()),
+            ("nav_overlay", |s| s.nav_overlay = true),
+            ("submit_settle", |s| {
+                s.last_prompt_submit = Some(Instant::now())
+            }),
+        ];
+        for (reason, tweak) in tweaks {
+            let mut screen = claude_prompt("<hcom>", true);
+            tweak(&mut screen);
+            assert_eq!(gate(screen, true), reason);
+        }
+    }
+
+    #[test]
+    fn leftover_wake_is_rendered_text_for_the_submit_phase() {
+        // The loop hands the leftover to the render phase as this attempt's
+        // text, so the usual exclusive-ownership check guards the Enter.
+        assert_eq!(
+            phase1_decision(Some("<hcom>"), WAKE_TRIGGER, Duration::ZERO),
+            Phase1Decision::Rendered
+        );
+        assert_eq!(
+            phase1_decision(Some("<hcom> hi"), WAKE_TRIGGER, Duration::ZERO),
+            Phase1Decision::MixedPrompt
+        );
+    }
+
+    #[test]
+    fn leftover_wake_enter_needs_the_leftover_to_still_hold() {
+        // After the gate opened on a leftover, the user adds a second line:
+        // the prompt row still reads `<hcom>`, but the scrape no longer sees a
+        // lone wake. Neither the first Enter nor a retry may submit it.
+        let draft = claude_prompt("<hcom>", false);
+        assert_eq!(
+            submit_ownership(&draft, WAKE_TRIGGER, true),
+            PromptOwnership::Mixed
+        );
+        assert_eq!(
+            submit_ownership(&claude_prompt("<hcom>", true), WAKE_TRIGGER, true),
+            PromptOwnership::Exclusive
+        );
+        // A wake hcom typed itself keeps the usual text check.
+        assert_eq!(
+            submit_ownership(&draft, WAKE_TRIGGER, false),
+            PromptOwnership::Exclusive
+        );
     }
 
     fn open_ready_test_db() -> (tempfile::TempDir, HcomDb) {
