@@ -27,7 +27,7 @@ Target matching:
   name is defined in the effective hcom agent catalog. Send briefly waits for
   that first event's acknowledgement; otherwise it reports queued/pending.
   A catalog agent with \"roaming\": true resolves to <name>_<project>_<hash>
-  (<hash> = 6 hex of the root path's SHA-256) in the sender's Git/project root
+  (<hash> = 3-digit number from the root path's SHA-256) in the sender's Git/project root
   and starts there when missing.
   Running agents route first; the catalog is read only for unmatched names,
   tags (which include stopped catalog agents), stopped thread members, or
@@ -1656,6 +1656,12 @@ mod tests {
     use clap::Parser;
     use serial_test::serial;
     use std::path::PathBuf;
+
+    #[test]
+    fn send_help_describes_roaming_suffix_as_a_number() {
+        assert!(SEND_AFTER_HELP.contains("<hash> = 3-digit number"));
+        assert!(!SEND_AFTER_HELP.contains("hex"));
+    }
 
     type TestEnv = (
         tempfile::TempDir,

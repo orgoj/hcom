@@ -4852,13 +4852,13 @@ fn agent_show_materializes_roaming_agent_for_the_current_project() {
     assert!(stdout.contains(&format!("codex --as {instance}")));
 }
 
-/// The instance name hcom gives a roaming agent: `<prefix>_<6 hex of the root path hash>`.
+/// The instance name hcom gives a roaming agent: `<prefix>_<3-digit number from the root path hash>`.
 fn roaming_instance(prefix: &str, root: &std::path::Path) -> String {
     use sha2::{Digest, Sha256};
     let root = std::fs::canonicalize(root).expect("canonical project root");
     let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
-    let hash: String = digest[..3].iter().map(|b| format!("{b:02x}")).collect();
-    format!("{prefix}_{hash}")
+    let value = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    format!("{prefix}_{}", value % 900 + 100)
 }
 
 #[test]

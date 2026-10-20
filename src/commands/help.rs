@@ -1797,7 +1797,10 @@ mod tests {
     fn help_documents_hashed_roaming_instance_names() {
         assert!(get_help_text().contains("roaming ones run as <name>_<project>_<hash>"));
         assert!(get_command_help("agent").contains("roots with the same basename differ"));
+        assert!(get_command_help("agent").contains("<hash> a 3-digit"));
         assert!(get_command_help("send").contains("<name>_<project>_<hash>"));
+        assert!(!get_command_help("agent").contains("hex"));
+        assert!(!get_command_help("send").contains("hex"));
     }
 
     #[test]

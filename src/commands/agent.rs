@@ -125,8 +125,8 @@ Local CLI replacement:
 Roaming agents:
   \"roaming\": true defines a project-local archetype without dir/session/window.
   A targeted send to @<name> resolves the sender's Git/project root and addresses
-  <name>_<project>_<hash>: <project> is the root's basename, <hash> the first 6
-  hex digits of SHA-256 of its path, so roots with the same basename differ.
+  <name>_<project>_<hash>: <project> is the root's basename, <hash> a 3-digit
+  number (100-999) from SHA-256 of its path, so roots with the same basename differ.
   Missing instances start in that root. Broadcasts never start them.
   Catalog env values are passed to the materialized process; for an isolated Dippy
   policy use \"env\": {{\"DIPPY_CONFIG_ONLY\": \"/path/to/policy.dippy\"}}.
@@ -1141,12 +1141,11 @@ pub(crate) fn roaming_project_slug(root: &Path) -> Result<String> {
         );
     }
     // Roots that share a basename (~/.hcom, ~/projects/hcom) get distinct names.
+    // A 3-digit decimal is one token for common tokenizers; hex is several.
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
-    slug.push('_');
-    for byte in &digest[..3] {
-        slug.push_str(&format!("{byte:02x}"));
-    }
+    let value = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    slug.push_str(&format!("_{}", value % 900 + 100));
     Ok(slug)
 }
 
@@ -3343,15 +3342,26 @@ mod tests {
     }
 
     #[test]
-    fn roaming_slug_appends_a_path_hash_so_same_basenames_differ() {
+    fn roaming_slug_appends_a_path_number_so_same_basenames_differ() {
         assert_eq!(
             roaming_project_slug(Path::new("/home/u/.hcom")).unwrap(),
-            "hcom_8250fc"
+            "hcom_807"
         );
         assert_eq!(
             roaming_project_slug(Path::new("/home/u/projects/hcom")).unwrap(),
-            "hcom_cca348"
+            "hcom_518"
         );
+    }
+
+    #[test]
+    fn roaming_slug_suffix_is_three_digits_from_100_to_999() {
+        for index in 0..500 {
+            let slug = roaming_project_slug(&PathBuf::from(format!("/p/{index}/app"))).unwrap();
+            let suffix = slug.strip_prefix("app_").unwrap();
+            assert_eq!(suffix.len(), 3, "{slug}");
+            let number: u32 = suffix.parse().unwrap();
+            assert!((100..=999).contains(&number), "{slug}");
+        }
     }
 
     #[cfg(unix)]

@@ -412,7 +412,7 @@ Without `agents`, an import brings in every agent of that file; with a list, the
 
 #### Roaming agents
 
-`"roaming": true` defines a project-local archetype with no `dir`, `session` or `window`. A targeted `hcom send @reviewer` from inside a Git project addresses `reviewer_<project>_<hash>` and starts it in that project's root if it is missing. `<project>` is the root's basename and `<hash>` the first 6 hex digits of the SHA-256 of its path, so `~/.hcom` and `~/projects/hcom` get different instances (for example `reviewer_hcom_8250fc`). Broadcasts never start roaming agents.
+`"roaming": true` defines a project-local archetype with no `dir`, `session` or `window`. A targeted `hcom send @reviewer` from inside a Git project addresses `reviewer_<project>_<hash>` and starts it in that project's root if it is missing. `<project>` is the root's basename and `<hash>` a 3-digit number (100-999) derived from the SHA-256 of its path, so `~/.hcom` and `~/projects/hcom` get different instances (for example `reviewer_hcom_807`). Broadcasts never start roaming agents.
 
 #### Disabled agents
 

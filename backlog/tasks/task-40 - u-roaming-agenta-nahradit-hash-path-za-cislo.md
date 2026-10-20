@@ -1,10 +1,11 @@
 ---
 id: TASK-40
 title: 'Roaming instance names: replace the hex path hash with a 3-digit number'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@hcom_dev'
 created_date: '2026-10-20 15:09'
-updated_date: '2026-10-20 15:48'
+updated_date: '2026-10-20 16:17'
 labels: []
 dependencies: []
 priority: medium
@@ -28,11 +29,11 @@ Out of scope: migrating or renaming existing hex-named roaming instances (user d
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 roaming_project_slug returns <project>_<n> where n is a 3-digit decimal in 100..=999 computed deterministically from SHA-256 of the root path bytes, and the same root always yields the same n
-- [ ] #2 Unit tests assert the new slug for /home/u/.hcom and /home/u/projects/hcom, that the two differ, and that the suffix is exactly 3 digits in 100..=999
-- [ ] #3 When two different roots map to the same instance name, routing still fails with the existing collision error instead of reusing the other root's instance (covered by a test)
-- [ ] #4 Built-in help, README.md, docs/ and skills/hcom-agent-messaging/ describe the suffix as a 3-digit number and no longer mention hex digits; help tests updated
-- [ ] #5 Existing hex-named roaming instances are not renamed or killed by the change; a send from their project addresses the new numeric name
+- [x] #1 roaming_project_slug returns <project>_<n> where n is a 3-digit decimal in 100..=999 computed deterministically from SHA-256 of the root path bytes, and the same root always yields the same n
+- [x] #2 Unit tests assert the new slug for /home/u/.hcom and /home/u/projects/hcom, that the two differ, and that the suffix is exactly 3 digits in 100..=999
+- [x] #3 When two different roots map to the same instance name, routing still fails with the existing collision error instead of reusing the other root's instance (covered by a test)
+- [x] #4 Built-in help, README.md, docs/ and skills/hcom-agent-messaging/ describe the suffix as a 3-digit number and no longer mention hex digits; help tests updated
+- [x] #5 Existing hex-named roaming instances are not renamed or killed by the change; a send from their project addresses the new numeric name
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -43,3 +44,9 @@ Out of scope: migrating or renaming existing hex-named roaming instances (user d
 3. Update help text (agent topic, top-level overview), README.md:415, docs/, skills/hcom-agent-messaging/.
 4. Run cargo fmt --check, cargo clippy --bin hcom --all-targets, cargo test --bin hcom, cargo test --test cli_smoke.
 <!-- SECTION:PLAN:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+roaming_project_slug now appends (first 4 SHA-256 bytes as u32 % 900) + 100 instead of 6 hex digits, e.g. hcom_807. Tests: fixed expectations for /home/u/.hcom (807) and /home/u/projects/hcom (518), a 500-path range test for 3 digits in 100..=999, existing cli_smoke collision tests unchanged and passing, cli_smoke roaming_instance helper computes the numeric name. Help (agent topic, send after_help), README, skill updated; help tests assert no hex. No migration code: hex-named instances stay as they are. Verified: cargo fmt --check, clippy 0 warnings, cargo test --bin hcom 2871 passed (idle_kill::fired_policy_retries_after_expiry_for_the_same_incarnation failed once and passed on rerun, unrelated timing flake), cargo test --test cli_smoke 134 passed.
+<!-- SECTION:FINAL_SUMMARY:END -->
