@@ -215,6 +215,7 @@ fn get_agent_counts(db: &HcomDb) -> AgentCounts {
 
 /// Main entry point for `hcom status` command.
 pub fn cmd_status(db: &HcomDb, args: &StatusArgs, _ctx: Option<&CommandContext>) -> i32 {
+    crate::commands::config::drop_old_delivery_keys();
     let json_mode = args.json;
     let show_logs = args.logs;
 
@@ -241,6 +242,7 @@ pub fn cmd_status(db: &HcomDb, args: &StatusArgs, _ctx: Option<&CommandContext>)
         .into_values()
         .collect();
     let config_valid = config_errors.is_empty();
+    let bootstrap_exclude = crate::config::HcomConfig::load(None).bootstrap_exclude;
 
     // Terminal — read from config
     let config = crate::config::load_config_snapshot().core;
@@ -281,6 +283,7 @@ pub fn cmd_status(db: &HcomDb, args: &StatusArgs, _ctx: Option<&CommandContext>)
             "hcom_writable": dir_writable,
             "config_valid": config_valid,
             "config_errors": config_errors,
+            "bootstrap_exclude": bootstrap_exclude,
             "tools": tool_statuses_json(&tools),
             "terminal": {
                 "config": terminal_config,
@@ -366,6 +369,9 @@ pub fn cmd_status(db: &HcomDb, args: &StatusArgs, _ctx: Option<&CommandContext>)
     println!("config:    {config_symbol} {config_desc}");
     for msg in &config_errors {
         println!("           {msg}");
+    }
+    if bootstrap_exclude != "none" {
+        println!("bootstrap: ⚠ excluded {bootstrap_exclude}");
     }
 
     // Tools
@@ -690,18 +696,8 @@ mod tests {
         std::fs::create_dir_all(&bin_dir).unwrap();
         std::fs::write(bin_dir.join("agy"), "").unwrap();
 
-        let old_home = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", dir.path());
-        }
+        let _home = crate::hooks::test_helpers::EnvVarGuard::set("HOME", dir.path());
         assert!(is_antigravity_installed());
-        unsafe {
-            if let Some(home) = old_home {
-                std::env::set_var("HOME", home);
-            } else {
-                std::env::remove_var("HOME");
-            }
-        }
     }
 
     // B-2: preset availability must match the validate/launch platform gate —

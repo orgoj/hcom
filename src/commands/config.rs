@@ -28,6 +28,8 @@ pub struct ConfigArgs {
     /// Value to set (quote multi-word or dash-prefixed values)
     #[arg(allow_hyphen_values = true)]
     pub value: Option<String>,
+    /// Additional arguments for `config bootstrap show/render`.
+    pub extra: Vec<String>,
     /// JSON output
     #[arg(long)]
     pub json: bool,
@@ -127,6 +129,25 @@ fn config_set_at_path(path: &Path, key: &str, value: Option<&str>) -> Result<(),
         validate_config_args(field.name, value)?;
     }
 
+    let new_value = value
+        .map(|v| crate::config::field_toml_value(field, v))
+        .transpose()?;
+    edit_config_at_path(path, |doc| {
+        crate::config::set_doc_path(doc, field.toml, new_value);
+        // Refuse what the loader would reject and replace with the default.
+        match crate::config::file_field_error(&doc.to_string(), field.name) {
+            Some(err) => Err(err),
+            None => Ok(true),
+        }
+    })
+}
+
+/// Read-modify-write config.toml under its lock. `edit` returns whether to
+/// write the document back.
+fn edit_config_at_path(
+    path: &Path,
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<bool, String>,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create config directory: {e}"))?;
@@ -147,19 +168,43 @@ fn config_set_at_path(path: &Path, key: &str, value: Option<&str>) -> Result<(),
     let mut doc: toml_edit::DocumentMut = content
         .parse()
         .map_err(|e| format!("Failed to parse config.toml: {e}"))?;
-    let new_value = value
-        .map(|v| crate::config::field_toml_value(field, v))
-        .transpose()?;
-    crate::config::set_doc_path(&mut doc, field.toml, new_value);
-    let content = doc.to_string();
-
-    // Refuse what the loader would reject and replace with the default.
-    if let Some(err) = crate::config::file_field_error(&content, field.name) {
-        return Err(err);
+    if !edit(&mut doc)? {
+        return Ok(());
     }
-
-    crate::config::write_config_toml_path(path, &content)
+    crate::config::write_config_toml_path(path, &doc.to_string())
         .map_err(|e| format!("Failed to write config.toml: {e}"))
+}
+
+/// One-off cleanup of the 0.7.29-0.7.30 `launch.<tool>.delivery` keys (see
+/// `UNPINNED_FIELDS` in config.rs). They are already ignored; this only drops
+/// the dead lines. Run from `hcom config` and `hcom status`, which are rare,
+/// not from every config load. Remove once those versions are long gone.
+pub(crate) fn drop_old_delivery_keys() {
+    drop_old_delivery_keys_at(&config_path());
+}
+
+fn drop_old_delivery_keys_at(path: &Path) {
+    const OLD_KEYS: [&str; 2] = ["launch.claude.delivery", "launch.copilot.delivery"];
+    // Unlocked check on the text: almost always nothing to do. Also skips a
+    // missing file (never created) and `idle_delivery`/`rpc_delivery`.
+    let stale = std::fs::read_to_string(path).is_ok_and(|content| {
+        content
+            .lines()
+            .any(|line| line.trim_start().starts_with("delivery"))
+    });
+    if !stale {
+        return;
+    }
+    let result = edit_config_at_path(path, |doc| {
+        let before = doc.to_string();
+        for key in OLD_KEYS {
+            crate::config::set_doc_path(doc, key, None);
+        }
+        Ok(doc.to_string() != before)
+    });
+    if let Err(e) = result {
+        crate::log::log_warn("config", "config.old_delivery_keys_failed", &e);
+    }
 }
 
 /// Set a key the way `hcom config <key> <value>` does, including side effects.
@@ -661,8 +706,90 @@ pub fn config_instance_set(
 
 // ── Main Entry Point ─────────────────────────────────────────────────────
 
+fn note_bootstrap_exclusion_source() {
+    let file_config = crate::config::HcomConfig::load(Some(&std::collections::HashMap::new()));
+    let effective = crate::config::HcomConfig::load(None);
+    if effective.bootstrap_exclude != file_config.bootstrap_exclude
+        && std::env::var_os("HCOM_BOOTSTRAP_EXCLUDE").is_some()
+    {
+        eprintln!(
+            "Note: bootstrap_exclude={} from the current environment overrides config.toml ({}).",
+            effective.bootstrap_exclude, file_config.bootstrap_exclude
+        );
+    }
+}
+
+fn config_bootstrap(db: &HcomDb, args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("show") => {
+            if args.len() > 2 {
+                eprintln!("Usage: hcom config bootstrap show [part]");
+                return 1;
+            }
+            note_bootstrap_exclusion_source();
+            if let Some(part) = args.get(1) {
+                match crate::bootstrap::part_source(part) {
+                    Some(source) => println!("{source}"),
+                    None => {
+                        eprintln!(
+                            "Unknown bootstrap part '{part}'. Valid parts: {}",
+                            crate::bootstrap::EXCLUDE_PARTS.join(", ")
+                        );
+                        return 1;
+                    }
+                }
+            } else {
+                let config = crate::config::HcomConfig::load(None);
+                let excluded = crate::bootstrap::parse_excluded_parts(&config.bootstrap_exclude)
+                    .unwrap_or_default();
+                for part in crate::bootstrap::EXCLUDE_PARTS {
+                    let state = if excluded.contains(part) {
+                        "excluded"
+                    } else {
+                        "included"
+                    };
+                    println!(
+                        "{part} ({state})\n{}\n",
+                        crate::bootstrap::part_source(part).unwrap_or_default()
+                    );
+                }
+            }
+            0
+        }
+        Some("render") => {
+            if !(3..=4).contains(&args.len()) || (args.len() == 4 && args[3] != "launched") {
+                eprintln!("Usage: hcom config bootstrap render <name> <tool> [launched]");
+                return 1;
+            }
+            if args[2].parse::<crate::tool::Tool>().is_err() {
+                eprintln!("Unknown tool '{}'", args[2]);
+                return 1;
+            }
+            note_bootstrap_exclusion_source();
+            let mut hcom_ctx = crate::shared::HcomContext::from_os();
+            hcom_ctx.is_launched = args.len() == 4;
+            println!(
+                "{}",
+                crate::bootstrap::get_bootstrap(db, &hcom_ctx, &args[1], &args[2])
+            );
+            0
+        }
+        _ => {
+            eprintln!(
+                "Usage: hcom config bootstrap show [part]\n       hcom config bootstrap render <name> <tool> [launched]"
+            );
+            1
+        }
+    }
+}
+
 /// Main entry point for `hcom config` command.
 pub fn cmd_config(db: &HcomDb, args: &ConfigArgs, ctx: Option<&CommandContext>) -> i32 {
+    if args.key.as_deref() != Some("bootstrap") && !args.extra.is_empty() {
+        eprintln!("Error: quote multi-word config values");
+        return 1;
+    }
+    drop_old_delivery_keys();
     let json_mode = args.json;
     let edit_mode = args.edit;
     let unset_mode = args.unset;
@@ -676,6 +803,7 @@ pub fn cmd_config(db: &HcomDb, args: &ConfigArgs, ctx: Option<&CommandContext>) 
         .iter()
         .cloned()
         .chain(args.value.iter().cloned())
+        .chain(args.extra.iter().cloned())
         .collect();
 
     // --setup: only valid with 'terminal kitty' (C4 fix)
@@ -800,6 +928,21 @@ pub fn cmd_config(db: &HcomDb, args: &ConfigArgs, ctx: Option<&CommandContext>) 
     }
 
     let key_arg = &argv[0];
+
+    if key_arg == "bootstrap" {
+        if instance_name.is_some()
+            || edit_mode
+            || unset_mode
+            || reset_mode
+            || setup_mode
+            || info_mode
+            || json_mode
+        {
+            eprintln!("Error: unsupported option for 'hcom config bootstrap'");
+            return 1;
+        }
+        return config_bootstrap(db, &argv[1..]);
+    }
 
     if normalize_key(key_arg) == "HCOM_DEV_ROOT" {
         return config_dev_root(
@@ -1142,6 +1285,29 @@ Usage:
   Changing after launch has no effect (bootstrap already delivered).",
         ),
 
+        "HCOM_BOOTSTRAP_EXCLUDE" => Some(
+            "\
+HCOM_BOOTSTRAP_EXCLUDE - Comma-separated bootstrap parts to leave out
+
+Parts: identity, messages, capabilities, rules, handoff
+Default: none
+Use all to exclude every built-in part.
+Excluded parts may remove instructions agents need to use hcom correctly.
+Individual parts affect the main bootstrap; all also suppresses the Claude subagent bootstrap.
+
+  hcom config bootstrap_exclude rules
+  hcom config bootstrap_exclude rules,handoff
+  hcom config bootstrap_exclude all
+  hcom config bootstrap_exclude none
+  HCOM_BOOTSTRAP_EXCLUDE=rules hcom 1 claude
+
+Inspect the exact parts and rendered result:
+  hcom config bootstrap show [part]
+  hcom config bootstrap render <name> <tool> [launched]
+
+Notes remain appended and take precedence over other hcom instructions.",
+        ),
+
         "HCOM_TIMEOUT" => Some(
             "\
 HCOM_TIMEOUT - Advanced: idle timeout for headless Claude (seconds)
@@ -1204,13 +1370,11 @@ Usage:
             "\
 HCOM_CLAUDE_DELIVERY - How hcom wakes idle Claude agents
 
-Default: inject
+  hcom config claude_delivery inject     # type into the terminal
+  hcom config claude_delivery --unset    # back to the default (native)
+  HCOM_CLAUDE_DELIVERY=inject hcom claude  # one launch
 
-  hcom config claude_delivery native     # experimental Claude mod
-  hcom config claude_delivery --unset    # back to inject
-  HCOM_CLAUDE_DELIVERY=native hcom claude  # one launch
-
-native  bundled Claude mod (loaded with --plugin-dir) submits the wake
+native  bundled Claude mod (loaded with --plugin-dir) submits the wake (default)
 inject  PTY wrapper types the wake into Claude's prompt
 
 Native needs Claude Code 2.1.287+ (mod support). Managed disableSideloadFlags
@@ -1435,12 +1599,11 @@ Prepended to launch-time cli args.",
             "\
 HCOM_COPILOT_DELIVERY - How idle Copilot agents get messages
 
-  hcom config copilot_delivery native   # Copilot CLI extension
-  hcom config copilot_delivery inject   # type into the terminal (default)
-  hcom config copilot_delivery --unset  # back to the default
-  HCOM_COPILOT_DELIVERY=native hcom copilot   # per-launch override
+  hcom config copilot_delivery inject   # type into the terminal
+  hcom config copilot_delivery --unset  # back to the default (native)
+  HCOM_COPILOT_DELIVERY=inject hcom copilot   # per-launch override
 
-native: `hcom copilot` ships an extension in its per-run plugin that hands
+native (default): `hcom copilot` ships an extension in its per-run plugin that hands
 messages to an idle session with the Copilot SDK (`session.send`) instead of
 typing into the terminal: no waiting for an empty prompt, no extra wake turn.
 Copilot CLI extensions are experimental: if Copilot's settings.json leaves
@@ -2344,21 +2507,42 @@ mod tests {
     }
 
     #[test]
+    fn old_delivery_keys_are_dropped_and_the_rest_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let old = "# mine\n[launch.claude]\nargs = \"--x\"\ndelivery = \"inject\"\n\n\
+                   [launch.copilot]\ndelivery = \"inject\"\nidle_delivery = \"inject\"\n";
+        std::fs::write(&path, old).unwrap();
+        drop_old_delivery_keys_at(&path);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("\ndelivery"), "{content}");
+        assert!(
+            content.contains("# mine") && content.contains("args = \"--x\""),
+            "{content}"
+        );
+        assert!(content.contains("idle_delivery = \"inject\""), "{content}");
+
+        let missing = dir.path().join("none.toml");
+        drop_old_delivery_keys_at(&missing);
+        assert!(!missing.exists());
+    }
+
+    #[test]
     fn test_config_set_copilot_delivery() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         let read = || -> toml::Table { std::fs::read_to_string(&path).unwrap().parse().unwrap() };
 
-        config_set_at_path(&path, "HCOM_COPILOT_DELIVERY", Some("native")).unwrap();
+        config_set_at_path(&path, "HCOM_COPILOT_DELIVERY", Some("inject")).unwrap();
         assert_eq!(
-            read()["launch"]["copilot"]["delivery"].as_str(),
-            Some("native")
+            read()["launch"]["copilot"]["idle_delivery"].as_str(),
+            Some("inject")
         );
         assert!(config_set_at_path(&path, "HCOM_COPILOT_DELIVERY", Some("pty")).is_err());
 
         // --unset writes "", which removes the key (back to the default).
         config_set_at_path(&path, "HCOM_COPILOT_DELIVERY", None).unwrap();
-        assert!(read()["launch"]["copilot"].get("delivery").is_none());
+        assert!(read()["launch"]["copilot"].get("idle_delivery").is_none());
     }
 
     #[test]
@@ -2412,6 +2596,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial] // resets the process-wide Config other tests read
     #[cfg(target_os = "macos")]
     fn test_terminal_help_text_lists_cmux_as_managed() {
         crate::config::Config::reset();
@@ -2461,6 +2646,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial] // "default" reads HCOM_TIMEOUT, which serial tests set
     fn test_config_instance_set_timeout_default_resets() {
         let dir = tempfile::tempdir().unwrap();
         let db = crate::db::HcomDb::open_at(&dir.path().join("hcom.db")).unwrap();
@@ -2480,7 +2666,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(timeout, 86400);
+        // The configured default, not a literal: a developer's shell may export HCOM_TIMEOUT.
+        let expected = crate::config::HcomConfig::load(None).timeout;
+        assert_ne!(expected, 15);
+        assert_eq!(timeout, expected);
     }
 
     #[test]

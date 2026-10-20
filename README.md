@@ -278,6 +278,7 @@ hcom launch flags:
 | `--hcom-prompt <text>` | Initial user prompt |
 | `--hcom-system-prompt <text>` | Agent instructions for this launch only |
 | `--dry-run` | Print the launch, run nothing |
+| `--json` | Print the outcome as one JSON object (also `hcom r`, `hcom f`, `hcom kill`); an error that stops the command before it acts goes to stderr with a non-zero exit and no JSON |
 
 Anything else is forwarded to the tool: `--model sonnet`, `--yolo`, etc.
 
@@ -294,6 +295,7 @@ hcom events sub --idle luna    # get an hcom message when luna goes idle
 hcom transcript luna           # read luna's conversation; transcript search 'regex'
 hcom bundle prepare            # context package for a handoff
 hcom term [name]               # view/inject into an agent's PTY screen
+hcom events --follow           # stream events as JSON Lines
 hcom agent <name>              # launch a catalog agent (see Agent catalog)
 hcom handoff <prompt>          # a catalog agent restarts itself in a clean session
 hcom stop [name]               # disconnect without killing
@@ -452,6 +454,7 @@ hcom config -i <name> <key> <value>   # per-agent override at runtime
 | `tag` | Group label; launched agents become `tag-name` |
 | `hints` | Text appended to every message the agent receives |
 | `notes` | Text appended to bootstrap (one-time, at launch) |
+| `bootstrap_exclude` | Bootstrap parts to omit: `identity`, `messages`, `capabilities` (including tag, relay, headless, and command notices), `rules`, `handoff`, or `all` (default: `none`). Inspect with `hcom config bootstrap show [part]`. |
 | `auto_approve` | Auto-approve safe hcom commands (send/list/events/…) |
 | `auto_subscribe` | Event subscription presets: `collision`, `created`, `stopped`, `blocked` |
 | `name_export` | Export instance name to a custom env var |
@@ -460,7 +463,7 @@ hcom config -i <name> <key> <value>   # per-agent override at runtime
 | `timeout` | Idle timeout for headless Claude (seconds) |
 | `subagent_timeout` | Keep-alive for Claude subagents (seconds) |
 | `claude_args` / `gemini_args` / `codex_args` / `opencode_args` / `kilo_args` / `pi_args` / `omp_args` / `cursor_args` / `kimi_args` / `copilot_args` / `qoder_args` / `grok_args` / `hermes_args` | Default args passed to the tool |
-| `claude_delivery` / `copilot_delivery` | Idle delivery: `inject` (type into the PTY, default) or `native` |
+| `claude_delivery` / `copilot_delivery` | Idle delivery: `native` (default; Claude mod, Copilot CLI extension) or `inject` (type into the PTY) |
 | `gemini_system_prompt` / `codex_system_prompt` | Default system prompt for that tool |
 | `auto_trust_workspace` | Trust the launch directory, skipping the tool's folder-trust prompt |
 | `herdr_autostart` | Start the Herdr server when it is not running |

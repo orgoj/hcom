@@ -36,7 +36,7 @@ Use hcom to:
 - avoid copy-pasting
 
 ```bash
-uv tool install hcom
+cargo install --git https://github.com/orgoj/hcom --locked
 hcom claude       # or: hcom gemini, hcom codex, hcom opencode, hcom kilo, hcom pi, hcom omp, hcom agy, hcom cursor, hcom kimi, hcom copilot, hcom qoder, hcom grok, hcom hermes
 hcom              # TUI dashboard
 ```
@@ -77,9 +77,9 @@ tell any agent:
 
 **Observe** each other: status, transcripts, file edits, live terminal screens, command history.
 
-**Subscribe** and notify on status changes, file edits, collisions, specific events. React automatically.
+**Subscribe** and notify on status changes, file edits, collisions, specific events. React automatically. Scripts can stream matching events as JSON Lines with `hcom events --follow`.
 
-**Spawn**, **fork**, **resume**, **kill** in any terminal emulator or headless. In Herdr, `hcom r` returns an agent to its recorded tab and `hcom f` opens a tab named after the fork; neither inherits your tab. `hcom kill` takes names, `@group`, `tag:<tag>`, `tool:<cli>` (e.g. `tool:agy`) or `SELF` (the calling agent ends itself).
+**Spawn**, **fork**, **resume**, **kill** in any terminal emulator or headless. In Herdr, `hcom r` returns an agent to its recorded tab and `hcom f` opens a tab named after the fork; neither inherits your tab. `hcom kill` takes names, `@group`, `tag:<tag>`, `tool:<cli>` (e.g. `tool:agy`) or `SELF` (the calling agent ends itself). Add `--json` to a launch, `hcom r`, `hcom f` or `hcom kill` to get the outcome as one JSON object.
 
 **Idle autokill**: `hcom config -i <name|self> idle_kill <seconds>` (or catalog `"idle_kill"`) kills a local agent (not a remote one or a subagent) that stays idle that long; `0` clears. An agent waiting for a reply to its own `--intent request` message, or with unread messages, is not killed.
 
@@ -109,10 +109,10 @@ If hcom list shows "Your name: <name>" where `<name>` is not "(not participating
 
 If running `hcom status` returns "command not found", install first:
 ```bash
-uv tool install hcom
+cargo install --git https://github.com/orgoj/hcom --locked
 ```
 
-See the [hcom README](https://github.com/aannoo/hcom#install) for other install options.
+See the [hcom README](https://github.com/orgoj/hcom#install) for other install options. The `uv` and `brew` packages install upstream hcom without this fork's features.
 
 If hcom status shows a list of CLI tools and you are not any of them, run `hcom start` to connect to hcom.
 
@@ -167,4 +167,4 @@ hcom <command> --help
 hcom run docs --scripts   # script authoring info
 ```
 
-Github: https://github.com/aannoo/hcom
+Github: https://github.com/orgoj/hcom (fork of https://github.com/aannoo/hcom)

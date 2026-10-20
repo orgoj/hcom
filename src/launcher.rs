@@ -23,9 +23,9 @@ use crate::shared::constants::HCOM_IDENTITY_VARS;
 use crate::shared::tool_detection::tool_marker_vars;
 use crate::terminal;
 use crate::tools::launch_arg_validation::{
-    ANTIGRAVITY_REJECTED_ARGS, GEMINI_REJECTED_ARGS, GROK_REJECTED_ARGS, KILO_REJECTED_ARGS,
-    KIMI_REJECTED_ARGS, OMP_REJECTED_ARGS, OPENCODE_REJECTED_ARGS, PI_REJECTED_ARGS,
-    QODER_REJECTED_ARGS, validate_rejected_args,
+    ANTIGRAVITY_REJECTED_ARGS, GEMINI_REJECTED_ARGS, KILO_REJECTED_ARGS, KIMI_REJECTED_ARGS,
+    OMP_REJECTED_ARGS, OPENCODE_REJECTED_ARGS, PI_REJECTED_ARGS, QODER_REJECTED_ARGS,
+    validate_grok_args, validate_rejected_args,
 };
 use crate::tools::{
     codex_preprocessing, copilot_preprocessing, cursor_preprocessing, opencode_preprocessing,
@@ -371,6 +371,25 @@ fn apply_inherited_agent_catalogs(
     }
 }
 
+fn reply_handoff_suffix(
+    launcher_name: &str,
+    append_reply_handoff: bool,
+    excluded: &std::collections::HashSet<&str>,
+) -> String {
+    if append_reply_handoff
+        && launcher_name != "api"
+        && launcher_name != "user"
+        && !excluded.contains("handoff")
+    {
+        format!(
+            "\n\n{}",
+            crate::bootstrap::HANDOFF_SUFFIX.replace("{launcher_name}", launcher_name)
+        )
+    } else {
+        String::new()
+    }
+}
+
 /// Start a new Grok conversation under an explicit session id.
 ///
 /// Without one the TUI opens on its welcome screen over a hidden "home"
@@ -380,10 +399,19 @@ fn apply_inherited_agent_catalogs(
 fn ensure_grok_session_id(args: &mut Vec<String>) {
     let opens_conversation = args.iter().take_while(|arg| *arg != "--").any(|arg| {
         let flag = arg.split('=').next().unwrap_or(arg);
-        matches!(
-            flag,
-            "-r" | "--resume" | "-c" | "--continue" | "-s" | "--session-id"
-        )
+        matches!(flag, "--resume" | "--load" | "--continue" | "--session-id")
+            || arg
+                .strip_prefix('-')
+                .filter(|short| !short.starts_with('-'))
+                .is_some_and(|short| {
+                    // clap accepts attached values (-rID, -sUUID) and boolean
+                    // clusters (-cmMODEL). Stop at any value-taking option so a
+                    // model/worktree name containing c/r/s is never a selector.
+                    short
+                        .chars()
+                        .take_while(|c| matches!(c, 'c' | 'r' | 's' | 'h' | 'v'))
+                        .any(|c| matches!(c, 'c' | 'r' | 's'))
+                })
     });
     if !opens_conversation {
         args.insert(0, "--session-id".to_string());
@@ -987,11 +1015,8 @@ fn resolve_runner_binaries(
 /// routes every hook and agent command elsewhere.
 fn warn_if_agent_hcom_differs(runner_dirs: &[String], env_path: Option<&str>, prepended: bool) {
     static WARNED: std::sync::Once = std::sync::Once::new();
-    // Dev mode re-execs whichever hcom runs into the dev build; uvx hooks
-    // never resolve `hcom` by name.
-    if crate::router::resolve_effective_dev_root(&crate::paths::db_path()).is_some()
-        || crate::runtime_env::get_hcom_prefix().len() > 1
-    {
+    // Dev mode re-execs whichever hcom runs into the dev build.
+    if crate::router::resolve_effective_dev_root(&crate::paths::db_path()).is_some() {
         return;
     }
     let Ok(exe) = std::env::current_exe() else {
@@ -1927,6 +1952,19 @@ fn initialize_launch_instance(
         if db.get_instance_full(instance_name)?.is_none() {
             bail!("Failed to initialize instance '{instance_name}'");
         }
+        // Only a tracked resume carries a cursor: the same identity returns,
+        // so it gets back the subscriptions its stop saved, like its unread
+        // position. Done before spawn so replayed matches queue as unread.
+        if params.resume_cursor.is_some()
+            && let Err(e) =
+                crate::db::subscriptions::restore_stopped_subscriptions(db, instance_name)
+        {
+            crate::log::log_warn(
+                "launcher",
+                "resume.restore_subscriptions_fail",
+                &format!("instance={instance_name} err={e}"),
+            );
+        }
         Ok(())
     })
 }
@@ -2054,6 +2092,12 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
         base_env.remove(crate::commands::agent::DIPPY_POLICY_CWD);
     }
     base_env.remove(crate::commands::agent::CATALOG_LAUNCH_ENV);
+    let bootstrap_exclude_value = base_env
+        .get("HCOM_BOOTSTRAP_EXCLUDE")
+        .cloned()
+        .unwrap_or_else(|| "none".to_string());
+    let bootstrap_excluded = crate::bootstrap::parse_excluded_parts(&bootstrap_exclude_value)
+        .map_err(anyhow::Error::msg)?;
     base_env.remove("HCOM_TERMINAL");
     ensure_tool_config_env(&normalized, &mut base_env);
 
@@ -2214,12 +2258,11 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
     // When a real hcom participant launched us, append a reply instruction so
     // the spawned agent knows to send its result back.
     if let Some(ref prompt) = params.initial_prompt {
-        let reply_suffix =
-            if params.append_reply_handoff && launcher_name != "api" && launcher_name != "user" {
-                format!("\n\nWhen done, send your result back to @{launcher_name} via hcom.")
-            } else {
-                String::new()
-            };
+        let reply_suffix = reply_handoff_suffix(
+            &launcher_name,
+            params.append_reply_handoff,
+            &bootstrap_excluded,
+        );
         let full_prompt = format!("{prompt}{reply_suffix}");
         append_initial_prompt_args(&normalized, &mut params.args, full_prompt)?;
     }
@@ -2972,12 +3015,8 @@ pub(crate) fn validate_tool_args(tool: &LaunchTool, args: &[String]) -> Vec<Stri
             validate_rejected_args("Qoder", "hcom qoder", args, QODER_REJECTED_ARGS)
         }
         LaunchTool::Grok => {
-            let mut errors = validate_rejected_args("Grok", "hcom grok", args, GROK_REJECTED_ARGS);
             let borrowed: Vec<_> = args.iter().map(String::as_str).collect();
-            if let Err(error) = crate::delivery::grok::Launch::validate_args(&borrowed) {
-                errors.push(error.to_string());
-            }
-            errors
+            validate_grok_args(&borrowed)
         }
     }
 }
@@ -2992,7 +3031,6 @@ fn cleanup_instance(db: &HcomDb, name: &str, process_id: &str) {
 mod tests {
     use super::*;
     use serial_test::serial;
-    use std::collections::BTreeMap;
 
     #[test]
     fn inline_instruction_config_is_additive() {
@@ -3121,53 +3159,23 @@ mod tests {
         );
     }
 
-    struct EnvVarGuard {
-        saved: BTreeMap<String, Option<std::ffi::OsString>>,
-    }
+    use crate::hooks::test_helpers::EnvVarGuard;
 
-    impl EnvVarGuard {
-        fn clean_detection_env() -> Self {
-            let mut keys: Vec<String> = tool_marker_vars()
-                .iter()
-                .copied()
-                .chain(["HCOM_LAUNCHED", "CI", "GITHUB_ACTIONS", "CARGO_TEST_PARENT"])
-                .map(str::to_string)
-                .collect();
-            keys.extend(
-                std::env::vars_os()
-                    .map(|(key, _)| key)
-                    .filter_map(|key| key.into_string().ok())
-                    .filter(|key| key.starts_with("CARGO_")),
-            );
-            Self::remove(keys)
-        }
-
-        fn remove<I>(keys: I) -> Self
-        where
-            I: IntoIterator<Item = String>,
-        {
-            let mut saved = BTreeMap::new();
-            for key in keys {
-                saved
-                    .entry(key.clone())
-                    .or_insert_with(|| std::env::var_os(&key));
-                unsafe { std::env::remove_var(key) };
-            }
-            Self { saved }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            for (key, value) in &self.saved {
-                unsafe {
-                    match value {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
-                    }
-                }
-            }
-        }
+    /// Unset every variable launch-context detection reads.
+    fn clean_detection_env() -> EnvVarGuard {
+        let mut keys: Vec<String> = tool_marker_vars()
+            .iter()
+            .copied()
+            .chain(["HCOM_LAUNCHED", "CI", "GITHUB_ACTIONS", "CARGO_TEST_PARENT"])
+            .map(str::to_string)
+            .collect();
+        keys.extend(
+            std::env::vars_os()
+                .map(|(key, _)| key)
+                .filter_map(|key| key.into_string().ok())
+                .filter(|key| key.starts_with("CARGO_")),
+        );
+        EnvVarGuard::remove(keys)
     }
 
     #[test]
@@ -3282,7 +3290,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_grok_rejects_one_shot() {
+    fn validate_grok_rejects_one_shot_and_ignored_flags() {
         let errors = validate_tool_args(&LaunchTool::Grok, &["-p".to_string(), "task".to_string()]);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("-p") || errors[0].contains("single"));
@@ -3293,12 +3301,27 @@ mod tests {
             validate_tool_args(&LaunchTool::Grok, &["--no-leader".into()]).len(),
             1
         );
-        for flag in ["--deny=bash", "--disable-web-search", "--allow"] {
+        for flag in [
+            "--deny=bash",
+            "--disable-web-search",
+            "--allow",
+            "--no-memory",
+            "--experimental-memory",
+            "--storage-mode=local",
+            "--tools=Read",
+            "--disallowed-tools=Bash",
+            "--agents={}",
+            "--max-turns=1",
+            "--memory-flush",
+        ] {
             assert_eq!(
                 validate_tool_args(&LaunchTool::Grok, &[flag.to_string()]).len(),
                 1
             );
         }
+        assert!(
+            validate_tool_args(&LaunchTool::Grok, &["--".into(), "--tools=Read".into()]).is_empty()
+        );
         assert!(validate_tool_args(&LaunchTool::Grok, &["--no-subagents".to_string()]).is_empty());
     }
 
@@ -3597,14 +3620,14 @@ mod tests {
     #[test]
     #[serial]
     fn test_clean_detection_env_clears_and_restores_all_markers() {
-        let _original = EnvVarGuard::clean_detection_env();
+        let _original = clean_detection_env();
         for var in tool_marker_vars() {
             unsafe { std::env::set_var(var, "1") };
         }
         assert!(contaminated_parent());
 
         {
-            let _clean = EnvVarGuard::clean_detection_env();
+            let _clean = clean_detection_env();
             for var in tool_marker_vars() {
                 assert!(std::env::var_os(var).is_none(), "{var} was not cleared");
             }
@@ -3623,7 +3646,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_contaminated_parent_detection() {
-        let _guard = EnvVarGuard::clean_detection_env();
+        let _guard = clean_detection_env();
         assert!(!contaminated_parent());
 
         for rule in crate::shared::tool_detection::TOOL_DETECTION_RULES {
@@ -3864,6 +3887,10 @@ mod tests {
             vec!["-c"],
             vec!["--session-id=abc"],
             vec!["--resume", "abc", "--fork-session"],
+            vec!["--load=abc"],
+            vec!["-rabc"],
+            vec!["-sabc"],
+            vec!["-cmopenrouter-free"],
         ] {
             let mut args: Vec<String> = existing.iter().map(|s| s.to_string()).collect();
             let before = args.clone();
@@ -3873,6 +3900,15 @@ mod tests {
         let mut literal = vec!["--".to_string(), "--resume".to_string()];
         ensure_grok_session_id(&mut literal);
         assert_eq!(literal[0], "--session-id");
+        for args in [
+            ["-m", "crs"],
+            ["-mcrs", "--always-approve"],
+            ["-wcrs", "--always-approve"],
+        ] {
+            let mut args = args.map(str::to_string).to_vec();
+            ensure_grok_session_id(&mut args);
+            assert_eq!(args[0], "--session-id");
+        }
     }
 
     #[test]
@@ -3904,6 +3940,30 @@ mod tests {
         let bootstrap = build_grok_bootstrap(&db, hcom_dir.path(), "kumo", true, &HashMap::new());
         assert!(bootstrap.contains("Your name: kumo"));
         assert!(bootstrap.contains("Messages instantly and automatically arrive"));
+    }
+
+    #[test]
+    fn test_handoff_exclusion_controls_reply_suffix() {
+        let included = crate::bootstrap::parse_excluded_parts("none").unwrap();
+        let excluded = crate::bootstrap::parse_excluded_parts("handoff").unwrap();
+        assert_eq!(
+            reply_handoff_suffix("nova", true, &included),
+            "\n\nWhen done, send your result back to @nova via hcom."
+        );
+        assert!(reply_handoff_suffix("nova", true, &excluded).is_empty());
+        assert!(reply_handoff_suffix("user", true, &included).is_empty());
+        assert!(reply_handoff_suffix("nova", false, &included).is_empty());
+    }
+
+    #[test]
+    fn test_codex_bootstrap_uses_effective_exclusion_env() {
+        let db = launcher_test_db();
+        let hcom_dir = tempfile::tempdir().unwrap();
+        let env = HashMap::from([("HCOM_BOOTSTRAP_EXCLUDE".to_string(), "messages".to_string())]);
+        let bootstrap = build_codex_bootstrap(&db, hcom_dir.path(), "luna", false, &env);
+        assert!(!bootstrap.contains("## MESSAGES"));
+        assert!(!bootstrap.contains("## DELIVERY"));
+        assert!(bootstrap.contains("## CAPABILITIES"));
     }
 
     #[test]
@@ -4173,7 +4233,10 @@ mod tests {
     // Windows generates a PowerShell runner with a different shape.
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn test_runner_script_strips_instance_state_vars() {
+        // The runner lands in $HCOM_DIR/.tmp/launch, which other tests repoint.
+        let (_dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
         let env = HashMap::from([
             ("GEMINI_PTY_INFO".to_string(), "child_process".to_string()),
             ("GEMINI_API_KEY".to_string(), "gem-key".to_string()),
@@ -4223,7 +4286,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[serial]
     fn test_run_here_runner_preserves_current_pane_identity() {
+        // The runner lands in $HCOM_DIR/.tmp/launch, which other tests repoint.
+        let (_dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
         let env = HashMap::from([
             ("HERDR_PANE_ID".to_string(), "w1:current".to_string()),
             ("RORI_MY_VAR".to_string(), "myval".to_string()),
@@ -4246,7 +4312,10 @@ mod tests {
     // create_runner_script_windows() isn't cfg(windows)-gated (only its call
     // site is, via a runtime cfg!(windows) check), so this runs on any host.
     #[test]
+    #[serial]
     fn test_runner_script_windows_has_bom_and_propagates_exit_code() {
+        // The runner lands in $HCOM_DIR/.tmp/launch, which other tests repoint.
+        let (_dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
         let env = HashMap::from([
             ("SOME_SECRET".to_string(), "sekrit".to_string()),
             ("herdr_pane_id".to_string(), "w1:old".to_string()),
@@ -4327,7 +4396,10 @@ mod tests {
     // executables, so the child re-splits argv at quote boundaries (#66 —
     // `hcom codex` failed on its quote-bearing `-c` values).
     #[test]
+    #[serial]
     fn test_runner_script_windows_passes_args_via_sidecar_file() {
+        // The runner lands in $HCOM_DIR/.tmp/launch, which other tests repoint.
+        let (_dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
         let env = HashMap::new();
         let args = vec![
             "-c".to_string(),
@@ -4365,7 +4437,10 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_runner_script_windows_no_args_skips_sidecar_file() {
+        // The runner lands in $HCOM_DIR/.tmp/launch, which other tests repoint.
+        let (_dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
         let env = HashMap::new();
         let script =
             create_runner_script_windows("gemini", "/tmp", "test-noargs", &env, &[], false)
@@ -4461,6 +4536,33 @@ mod tests {
             db.ack_hook_delivery("luna", queued_id, false, None)
                 .unwrap();
             assert!(db.get_unread_messages("luna").is_empty());
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn launch_registration_restores_subscriptions_only_for_tracked_resume() {
+        let _env = EnvVarGuard::remove(["HCOM_LAUNCH_EVENT_ID".to_string()]);
+        for resume in [true, false] {
+            let db = launcher_test_db();
+            let saved = json!({"id": "sub-saved", "caller": "luna", "sql": "0", "last_id": 0});
+            db.log_event(
+                "life",
+                "luna",
+                &json!({"action": "stopped", "snapshot": {"subscriptions": [saved]}}),
+            )
+            .unwrap();
+            let params = LaunchParams {
+                prior_session_id: resume.then(|| "resumed-session".into()),
+                resume_cursor: resume.then_some(0),
+                ..Default::default()
+            };
+            initialize_launch_instance(&db, &params, "luna", "codex", "", "/tmp", 0).unwrap();
+            assert_eq!(
+                db.kv_get("events_sub:sub-saved").unwrap().is_some(),
+                resume,
+                "only a tracked resume inherits the stopped identity's subscriptions"
+            );
         }
     }
 

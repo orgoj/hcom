@@ -329,6 +329,18 @@ fn config_terminal_accepts_here_mode() {
 }
 
 #[test]
+fn version_prints_and_exits_zero() {
+    let h = Hcom::new();
+    let (code, stdout, stderr) = h.run(["--version"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert_eq!(
+        stdout.trim(),
+        concat!("hcom ", env!("CARGO_PKG_VERSION")),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
 fn status_json_in_fresh_dir() {
     let h = Hcom::new();
     let (code, stdout, _stderr) = h.run(["status", "--json"]);
@@ -360,6 +372,95 @@ fn list_json_empty() {
     let v: serde_json::Value = serde_json::from_str(&stdout).expect("list json");
     let arr = v.as_array().expect("list returns array");
     assert!(arr.is_empty(), "expected empty list, got {stdout}");
+}
+
+#[test]
+fn kill_json_reports_every_target() {
+    let h = Hcom::new();
+    let agent = h.start();
+    let (code, _, stderr) = h.run(["stop", &agent]);
+    assert_eq!(code, 0, "stop failed: {stderr}");
+
+    let (code, stdout, stderr) = h.run(["kill", &agent, "nosuchagent", "--json"]);
+    assert_eq!(
+        code, 1,
+        "a missing target fails the command: stderr={stderr}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("kill --json object");
+    assert_eq!(report["ok"], false);
+    let results = report["results"].as_array().expect("results array");
+    assert_eq!(results.len(), 2, "one outcome per target: {stdout}");
+    assert_eq!(results[0]["target"], agent.as_str());
+    assert_eq!(results[0]["kind"], "stopped");
+    assert_eq!(results[0]["result"], "already_stopped");
+    assert_eq!(results[0]["resume"], format!("hcom r {agent}"));
+    assert_eq!(results[1]["target"], "nosuchagent");
+    assert_eq!(results[1]["result"], "error");
+    assert!(results[1]["error"].is_string(), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn launch_json_reports_names_for_kill_json() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = Hcom::new();
+    // A stand-in `claude` that answers --version and then idles: enough for
+    // hcom to launch, track, and kill it without a real tool.
+    let fake_bin = h.root_path().join("fake-bin");
+    std::fs::create_dir_all(&fake_bin).expect("create fake bin");
+    let fake_claude = fake_bin.join("claude");
+    std::fs::write(
+        &fake_claude,
+        "#!/bin/sh\ncase \"$1\" in --version) echo '2.1.200 (Claude Code)'; exit 0;; esac\nsleep 300\n",
+    )
+    .expect("write fake claude");
+    std::fs::set_permissions(&fake_claude, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod fake claude");
+    let hcom_bin_dir = std::path::Path::new(env!("CARGO_BIN_EXE_hcom"))
+        .parent()
+        .expect("hcom bin dir")
+        .to_path_buf();
+    let path = std::env::join_paths([hcom_bin_dir, fake_bin].into_iter().chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .expect("join PATH");
+
+    let output = h
+        .cmd()
+        .args(["1", "claude", "--headless", "--json"])
+        .env("PATH", &path)
+        .output()
+        .expect("run launch");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    let launch: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("stdout is exactly one JSON object");
+    assert_eq!(launch["action"], "launch");
+    assert_eq!(launch["tool"], "claude");
+    assert_eq!(launch["launched"], 1);
+    assert_eq!(launch["failed"], 0);
+    assert!(
+        launch["batch_id"].as_str().is_some_and(|b| !b.is_empty()),
+        "{launch}"
+    );
+    let names = launch["names"].as_array().expect("names array");
+    assert_eq!(names.len(), 1, "{launch}");
+    let name = names[0].as_str().expect("name string");
+
+    let (_, stdout, stderr) = h.run(["kill", name, "--json"]);
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout} / {stderr}"));
+    let outcome = &report["results"][0];
+    assert_eq!(outcome["target"], name, "{report}");
+    // Usually still running; a slow host may have already given up waiting
+    // for the fake tool to become ready, which stops it first.
+    assert!(
+        outcome["kind"] == "agent" || outcome["kind"] == "stopped",
+        "{report}"
+    );
+    assert_eq!(outcome["resume"], format!("hcom r {name}"));
 }
 
 #[test]
@@ -4048,6 +4149,17 @@ fn kill_by_group_and_at_prefix() {
         "stderr={stderr}"
     );
 
+    // --json reports the failure under the selector as written.
+    let (code, stdout, stderr) = h.run(["kill", "@workers", "--json"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    let report: serde_json::Value = serde_json::from_str(stdout.trim()).expect("kill --json");
+    assert_eq!(report["ok"], false, "stdout={stdout}");
+    assert_eq!(
+        report["results"][0]["target"], "@workers",
+        "stdout={stdout}"
+    );
+    assert_eq!(report["results"][0]["kind"], "error", "stdout={stdout}");
+
     // Bare group name without @ suggests @workers
     let (code, stdout, stderr) = h.run(["kill", "workers"]);
     assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
@@ -4910,7 +5022,7 @@ fn kill_by_group_matches_members_running_under_another_instance_name() {
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     assert!(stdout.contains("'rev2'"), "stdout={stdout}");
     assert!(
-        stdout.contains(&format!("stopped process group {pid} for 'rev3'")),
+        stdout.contains("leftover process of stopped agent 'rev3'"),
         "stdout={stdout}"
     );
     assert!(
@@ -6216,4 +6328,137 @@ fn idle_killed_catalog_agents_restart_on_send_and_resume() {
     );
     let (code, stdout, stderr) = h.run(["r", "keeper"]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+}
+
+/// Spawn `hcom events --follow <args>` and forward its stdout lines over a
+/// channel, so tests can wait for each line with a timeout.
+fn spawn_follow(
+    h: &Hcom,
+    args: &[&str],
+) -> (std::process::Child, std::sync::mpsc::Receiver<String>) {
+    use std::io::BufRead;
+    let mut child = h
+        .cmd()
+        .args(["events", "--follow"])
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn events --follow");
+    let stdout = child.stdout.take().expect("follow stdout");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    (child, rx)
+}
+
+fn next_follow_line(rx: &std::sync::mpsc::Receiver<String>) -> serde_json::Value {
+    let line = rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("events --follow produced no line within 10s");
+    serde_json::from_str(&line).unwrap_or_else(|e| panic!("follow line is not JSON ({e}): {line}"))
+}
+
+#[test]
+fn events_follow_streams_new_matches_and_resumes_from_cursor() {
+    let h = Hcom::new();
+    let agent = h.start();
+    let send = |text: &str| {
+        let (code, _, stderr) = h.run(["send", "-b", &format!("@{agent}"), "--", text]);
+        assert_eq!(code, 0, "send failed: {stderr}");
+    };
+
+    send("first");
+    // --last 1 replays the existing message; receiving it proves the follower
+    // has fixed its cursor, so the next send is guaranteed to stream.
+    let (mut follower, rx) = spawn_follow(&h, &["--type", "message", "--last", "1"]);
+    let first = next_follow_line(&rx);
+    assert_eq!(first["data"]["text"], "first", "backlog line: {first}");
+    send("second");
+    let second = next_follow_line(&rx);
+    assert_eq!(second["data"]["text"], "second", "streamed line: {second}");
+    assert!(second["id"].as_i64() > first["id"].as_i64());
+    let _ = follower.kill();
+    let _ = follower.wait();
+
+    // A saved cursor replays everything after it, in id order.
+    let cursor = first["id"].as_i64().expect("event id").to_string();
+    let (mut resumed, rx) = spawn_follow(&h, &["--type", "message", "--after-id", &cursor]);
+    let replayed = next_follow_line(&rx);
+    assert_eq!(replayed["id"], second["id"], "resumed line: {replayed}");
+    let _ = resumed.kill();
+    let _ = resumed.wait();
+}
+
+#[cfg(unix)]
+#[test]
+fn events_follow_exits_when_reader_closes() {
+    let h = Hcom::new();
+    let mut child = h
+        .cmd()
+        .args(["events", "--follow"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn events --follow");
+    // Close the read end without any event arriving: an idle follower must
+    // notice on its own instead of waiting for a write to fail.
+    drop(child.stdout.take());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("events --follow kept running after its reader closed");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "follow exit status: {status}");
+}
+
+#[test]
+fn events_follow_rejects_conflicting_flags() {
+    let h = Hcom::new();
+    for (args, expected) in [
+        (
+            vec!["events", "--after-id", "1"],
+            "--after-id requires --follow",
+        ),
+        (
+            vec!["events", "--follow", "--wait", "5"],
+            "--follow cannot be combined with --wait",
+        ),
+        (
+            vec!["events", "--follow", "--after-id", "1", "--last", "2"],
+            "--last and --after-id are mutually exclusive",
+        ),
+        (
+            vec!["events", "--follow", "--after-id", "999999"],
+            "is past the newest event",
+        ),
+    ] {
+        let (code, _, stderr) = h.run(&args);
+        assert_eq!(code, 1, "{args:?}: stderr={stderr}");
+        assert!(stderr.contains(expected), "{args:?}: stderr={stderr}");
+    }
+}
+
+#[test]
+fn events_follow_exits_on_query_error() {
+    let h = Hcom::new();
+    // An unbound `?` passes prepare but fails at query time; follow must
+    // report it instead of polling forever.
+    let (code, _, stderr) = h.run(["events", "--follow", "--sql", "type = ?"]);
+    assert_eq!(code, 2, "stderr={stderr}");
+    assert!(stderr.contains("SQL"), "stderr={stderr}");
 }

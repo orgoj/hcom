@@ -74,6 +74,23 @@ const EVENTS_QUERY: &[HelpEntry] = &[
     ),
 ];
 
+const EVENTS_FOLLOW: &[HelpEntry] = &[
+    ("Follow (streams until Ctrl-C or the reader exits):", ""),
+    (
+        "events --follow [filters]",
+        "New matching events as JSON Lines, oldest first",
+    ),
+    ("  --last N", "Replay the N most recent matches first"),
+    (
+        "  --after-id ID",
+        "Resume after a saved event id (replays every match since)",
+    ),
+    (
+        "",
+        "A {\"db_reset\": true} line means hcom reset ran and ids restarted",
+    ),
+];
+
 const EVENTS_SHORTCUTS: &[HelpEntry] = &[
     ("Shortcuts:", ""),
     ("  --idle NAME", "--agent NAME --status listening"),
@@ -173,6 +190,7 @@ const EVENTS_PAGE: &[&[HelpEntry]] = &[
     FILTERS_HEADER,
     FILTER_HELP,
     EVENTS_SHORTCUTS,
+    EVENTS_FOLLOW,
     EVENTS_LAUNCH,
     EVENTS_SUB,
     EVENTS_UNSUB,
@@ -552,6 +570,7 @@ const KILL_HELP: &[HelpEntry] = &[
         "Kill the calling agent (uppercase; self is a name)",
     ),
     ("kill all", "Kill all with tracked PIDs"),
+    ("  --json", "Print every outcome as one JSON object"),
     ("", ""),
     (
         "Idle autokill:",
@@ -657,6 +676,10 @@ const CONFIG_KEYS_HELP: &[HelpEntry] = &[
     ("  hints", "Text appended to all messages agent receives"),
     ("  notes", "Notes appended to agent bootstrap"),
     (
+        "  bootstrap_exclude",
+        "Bootstrap parts to leave out (see config bootstrap show)",
+    ),
+    (
         "  subagent_timeout",
         "Subagent keep-alive seconds after task",
     ),
@@ -666,7 +689,7 @@ const CONFIG_KEYS_HELP: &[HelpEntry] = &[
     ),
     (
         "  claude_delivery / copilot_delivery",
-        "Idle delivery: inject (PTY, default) | native (claude: experimental mod, copilot: CLI extension)",
+        "Idle delivery: native (default; claude: mod, copilot: CLI extension) | inject (PTY)",
     ),
     (
         "  gemini_system_prompt / codex_system_prompt",
@@ -902,6 +925,10 @@ const TERM_SCREEN: &[HelpEntry] = &[
         "    Fields: lines[], size[rows,cols], cursor[row,col], ready, prompt_empty, input_text",
     ),
     (
+        "",
+        "    prompt_empty/input_text are null when no composer is read (not parsed for this tool)",
+    ),
+    (
         "  --clean",
         "No status header or line numbers ([name] labels kept for all)",
     ),
@@ -1075,6 +1102,10 @@ fn generate_tool_help(spec: &crate::integration_spec::IntegrationSpec) -> String
         "HCOM_HINTS"
     ));
     lines.push(format!("    {:<28} One-time bootstrap notes", "HCOM_NOTES"));
+    lines.push(format!(
+        "    {:<28} Bootstrap parts to exclude",
+        "HCOM_BOOTSTRAP_EXCLUDE"
+    ));
     for (u, d) in spec.help.extra_env {
         lines.push(format!("    {:<28} {}", u.trim(), d));
     }
@@ -1312,6 +1343,7 @@ const SHARED_LAUNCH_FLAGS: &[(&str, &str)] = &[
         "Invocation-local agent instructions",
     ),
     ("--dry-run", "Print the launch preview, run nothing"),
+    ("--json", "Print the result as one JSON object"),
 ];
 
 /// Shared help body for `hcom r` / `hcom f` (both accept the same target
@@ -1330,7 +1362,7 @@ fn resume_fork_help(usage_line: &str, blurb: &str, see_also_line: &str) -> Strin
          \x20 {usage_line}\n\
          \n\
          <target> can be:\n\
-         \x20 <name>                            hcom name (4-letter)\n\
+         \x20 <name>                            hcom name (e.g. luna)\n\
          \x20 <uuid>                            claude/codex/gemini session UUID\n\
          \x20 ses_<id>                          opencode/kilo session ID\n\
          \x20 <thread-name>                     claude /rename title or codex thread_name\n\

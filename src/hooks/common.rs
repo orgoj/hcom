@@ -467,18 +467,20 @@ fn poll_messages_inner(
     timeout_secs: u64,
     is_background: bool,
 ) -> Result<PollResult> {
-    // Check instance exists
-    let instance_data = db
+    // Check instance exists. Its created_at is the launch this poll speaks
+    // for, read before the notify port is advertised so a stop+resume racing
+    // the registration is still seen as a different launch.
+    let Some(instance_data) = db
         .get_instance_full(instance_name)
-        .context("DB error checking instance")?;
-    if instance_data.is_none() {
+        .context("DB error checking instance")?
+    else {
         return Ok(PollResult {
             delivered: false,
             output: None,
             timed_out: false,
             ack: None,
         });
-    }
+    };
 
     // Setup TCP notification socket
     let (notify_server, tcp_mode) = setup_tcp_notification(instance_name);
@@ -506,6 +508,7 @@ fn poll_messages_inner(
     let result = poll_loop(
         db,
         instance_name,
+        instance_data.created_at,
         timeout,
         start,
         is_background,
@@ -524,6 +527,7 @@ fn poll_messages_inner(
 fn poll_loop(
     db: &HcomDb,
     instance_name: &str,
+    created_at: f64,
     timeout: Duration,
     start: Instant,
     is_background: bool,
@@ -536,19 +540,22 @@ fn poll_loop(
         ack: None,
     };
     let mut waited = false;
-    let mut created_at = None;
     while start.elapsed() < timeout {
+        // Poll for messages BEFORE select to catch transition gap
+        let raw_messages = db.get_unread_messages(instance_name);
+
         // Stopped (row deleted) or stopped and resumed (row recreated): the
-        // waiting process no longer speaks for this name.
+        // waiting process no longer speaks for this name. Checked after the
+        // read: created_at only moves forward, so a row unchanged now was ours
+        // during the read, while checking first would let a resume in between
+        // hand this poll mail meant for the new launch.
         let Some(instance_data) = db.get_instance_full(instance_name)? else {
             return Ok(empty());
         };
-        if *created_at.get_or_insert(instance_data.created_at) != instance_data.created_at {
+        if instance_data.created_at != created_at {
             return Ok(empty());
         }
 
-        // Poll for messages BEFORE select to catch transition gap
-        let raw_messages = db.get_unread_messages(instance_name);
         if !raw_messages.is_empty() {
             // Orphan detection: don't deliver if parent died.
             // Only check after we've waited at least once — on the first iteration stdin
@@ -1555,6 +1562,18 @@ fn stop_instance_inner(
     StopOutcome::Stopped
 }
 
+/// What happens to the process behind a soft-stopped identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoftStop {
+    /// The process lives on and may take more turns (Antigravity loop end,
+    /// OMP soft stop), so its subscriptions stay live. The hard stop that
+    /// eventually retires the row saves them for `hcom r`.
+    ProcessContinues,
+    /// The process now runs another identity (session switch): this one's
+    /// subscriptions are saved to the snapshot and removed.
+    IdentityRetired,
+}
+
 /// Soft session end for Antigravity: mark inactive without deleting the `instances` row.
 ///
 /// agy has no process-death hook — its hook set is only PreToolUse/PostToolUse/
@@ -1577,6 +1596,7 @@ pub fn soft_finalize_session(
     reason: &str,
     updates: Option<&serde_json::Map<String, Value>>,
     keep_process_binding: bool,
+    soft_stop: SoftStop,
 ) -> anyhow::Result<()> {
     log::log_info(
         "hooks",
@@ -1601,7 +1621,7 @@ pub fn soft_finalize_session(
         return Ok(());
     };
 
-    let snapshot = serde_json::json!({
+    let mut snapshot = serde_json::json!({
         "name": instance_name,
         "transcript_path": instance_data.transcript_path,
         "session_id": instance_data.session_id,
@@ -1624,6 +1644,19 @@ pub fn soft_finalize_session(
         "background_log_file": instance_data.background_log_file,
         "last_event_id": instance_data.last_event_id,
     });
+    // A retired identity's subscriptions are saved before the cleanup below,
+    // so the row's later hard stop carries them into the snapshot `hcom r`
+    // restores from.
+    let retired = soft_stop == SoftStop::IdentityRetired;
+    if retired
+        && let Ok(saved) = crate::db::subscriptions::subscriptions_to_save(
+            db,
+            instance_name,
+            instance_data.created_at,
+        )
+    {
+        snapshot["subscriptions"] = serde_json::json!(saved);
+    }
 
     // Binding and endpoint cleanup is what makes the stop real; subscription
     // cleanup and the life event below stay best-effort.
@@ -1647,7 +1680,9 @@ pub fn soft_finalize_session(
             params![instance_name],
         )?;
     }
-    let _ = db.cleanup_subscriptions(instance_name);
+    if retired {
+        let _ = db.cleanup_subscriptions(instance_name);
+    }
 
     if let Err(e) = db.log_life_event(
         instance_name,
@@ -2054,7 +2089,8 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let start = Instant::now();
         let timeout = Duration::from_millis(180);
-        let result = poll_loop(&db, "polltest", timeout, start, true, Some(&listener)).unwrap();
+        let result =
+            poll_loop(&db, "polltest", 0.0, timeout, start, true, Some(&listener)).unwrap();
         assert!(result.timed_out);
         assert!(start.elapsed() >= timeout);
         let writes: i64 = db
@@ -3114,7 +3150,15 @@ mod tests {
             )
             .unwrap();
 
-        soft_finalize_session(&db, "vine", "unknown", None, false).unwrap();
+        soft_finalize_session(
+            &db,
+            "vine",
+            "unknown",
+            None,
+            false,
+            SoftStop::ProcessContinues,
+        )
+        .unwrap();
 
         assert!(db.get_instance_full("vine").unwrap().is_some());
         let status = db.get_status("vine").unwrap().map(|(s, _)| s);
@@ -3158,7 +3202,15 @@ mod tests {
             )
             .unwrap();
 
-        soft_finalize_session(&db, "luna", "turn_end", None, true).unwrap();
+        soft_finalize_session(
+            &db,
+            "luna",
+            "turn_end",
+            None,
+            true,
+            SoftStop::ProcessContinues,
+        )
+        .unwrap();
 
         assert_eq!(
             db.get_process_binding("pid-keep").unwrap(),
@@ -3169,5 +3221,94 @@ mod tests {
             db.get_status("luna").unwrap().map(|(s, _)| s),
             Some(ST_INACTIVE.to_string())
         );
+    }
+
+    fn soft_stop_db_with_sub() -> (tempfile::TempDir, crate::db::HcomDb) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::HcomDb::open_raw(&dir.path().join("test.db")).unwrap();
+        db.init_db().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, created_at, tool)
+                 VALUES ('vine', 'listening', 1.0, 'antigravity')",
+                [],
+            )
+            .unwrap();
+        let sub = serde_json::json!({"id": "sub-w", "caller": "vine", "sql": "0", "last_id": 0});
+        db.kv_set("events_sub:sub-w", Some(&sub.to_string()))
+            .unwrap();
+        (dir, db)
+    }
+
+    fn last_stop_subscription_ids(db: &crate::db::HcomDb) -> Vec<String> {
+        let data: String = db
+            .conn()
+            .query_row(
+                "SELECT data FROM events WHERE type = 'life' AND instance = 'vine'
+                   AND json_extract(data, '$.action') = 'stopped'
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_str(&data).unwrap();
+        data["snapshot"]["subscriptions"]
+            .as_array()
+            .map(|subs| {
+                subs.iter()
+                    .filter_map(|s| s["id"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn soft_stop_of_live_process_keeps_subscriptions_until_hard_stop() {
+        let (_dir, db) = soft_stop_db_with_sub();
+
+        soft_finalize_session(
+            &db,
+            "vine",
+            "turn_end",
+            None,
+            false,
+            SoftStop::ProcessContinues,
+        )
+        .unwrap();
+        assert!(
+            db.kv_get("events_sub:sub-w").unwrap().is_some(),
+            "a process that takes more turns keeps its watches"
+        );
+
+        assert_eq!(
+            stop_instance(&db, "vine", "test", "closed"),
+            StopOutcome::Stopped
+        );
+        assert!(db.kv_get("events_sub:sub-w").unwrap().is_none());
+        assert_eq!(last_stop_subscription_ids(&db), vec!["sub-w".to_string()]);
+    }
+
+    #[test]
+    fn soft_stop_of_retired_identity_saves_and_removes_subscriptions() {
+        let (_dir, db) = soft_stop_db_with_sub();
+
+        soft_finalize_session(
+            &db,
+            "vine",
+            "session_switch",
+            None,
+            false,
+            SoftStop::IdentityRetired,
+        )
+        .unwrap();
+        assert!(db.kv_get("events_sub:sub-w").unwrap().is_none());
+        assert_eq!(last_stop_subscription_ids(&db), vec!["sub-w".to_string()]);
+
+        // The kept row's later hard stop still carries them.
+        assert_eq!(
+            stop_instance(&db, "vine", "test", "closed"),
+            StopOutcome::Stopped
+        );
+        assert_eq!(last_stop_subscription_ids(&db), vec!["sub-w".to_string()]);
     }
 }

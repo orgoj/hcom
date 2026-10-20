@@ -1812,6 +1812,23 @@ mod tests {
     }
 
     #[test]
+    fn legacy_uvx_notify_is_replaced_by_installed_per_run_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "notify = ['uvx', 'hcom', 'codex-notify']\n").unwrap();
+        let ctx = per_run_ctx(&[], dir.path());
+        let (_, hooks) = merged_per_run_hooks(&ctx).unwrap();
+        let generated = hooks.to_string();
+        assert_eq!(
+            hooks["SessionStart"][0]["hooks"][0]["command"].as_str(),
+            Some(build_codex_hook_command("codex-sessionstart").as_str())
+        );
+        assert!(!generated.contains("uvx"), "{generated}");
+        cleanup_codex_hooks_in_dir(dir.path()).unwrap();
+        assert!(!std::fs::read_to_string(config).unwrap().contains("notify"));
+    }
+
+    #[test]
     fn per_run_cleanup_discards_malformed_trust_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let metadata_path = dir.path().join(HCOM_HOOK_TRUST_METADATA_FILE);
@@ -2112,18 +2129,11 @@ mod tests {
         let transcript = sessions.join("rollout-1-abc-123-def.jsonl");
         std::fs::File::create(&transcript).unwrap();
 
-        let saved = std::env::var("CODEX_HOME").ok();
-        unsafe { std::env::set_var("CODEX_HOME", dir.path()) };
+        let _codex_home = crate::hooks::test_helpers::EnvVarGuard::set("CODEX_HOME", dir.path());
 
         let result = derive_codex_transcript_path("abc-123-def");
         assert!(result.is_some(), "should find transcript file");
         assert!(result.unwrap().contains("rollout-1-abc-123-def.jsonl"));
-
-        if let Some(v) = saved {
-            unsafe { std::env::set_var("CODEX_HOME", v) };
-        } else {
-            unsafe { std::env::remove_var("CODEX_HOME") };
-        }
     }
 
     // -- build_codex_rules --

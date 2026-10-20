@@ -563,7 +563,14 @@ fn handle_sessionend(db: &HcomDb, ctx: &HcomContext, payload: &HookPayload) -> H
     // that's about to take another turn. Real teardown is the PTY exit. Other gemini
     // tools have a genuine SessionEnd == process death, so they hard-finalize.
     if is_agy {
-        if let Err(e) = common::soft_finalize_session(db, &instance.name, &reason, None, false) {
+        if let Err(e) = common::soft_finalize_session(
+            db,
+            &instance.name,
+            &reason,
+            None,
+            false,
+            common::SoftStop::ProcessContinues,
+        ) {
             crate::log::log_error(
                 "hooks",
                 "sessionend.soft_failed",
@@ -1519,7 +1526,10 @@ fn verify_hooks_at(settings_path: &Path, check_permissions: bool) -> Result<(), 
                     let command = hook.get("command").and_then(|v| v.as_str()).unwrap_or("");
                     let has_hcom = command.contains("${HCOM}")
                         || command.to_ascii_lowercase().contains("hcom");
-                    if !has_hcom || !command.contains(cmd_suffix) {
+                    if !has_hcom
+                        || !command.contains(cmd_suffix)
+                        || crate::hooks::runtime::uses_legacy_uvx(command)
+                    {
                         return Err(VerifyFailReason::HookCommandMissing {
                             hook_type: hook_type.to_string(),
                             cmd_suffix: cmd_suffix.to_string(),
@@ -1602,22 +1612,6 @@ mod tests {
             assert_eq!(
                 cmd,
                 "sh -c 'command -v hcom >/dev/null 2>&1 && exec hcom gemini-beforeagent || exit 0'"
-            );
-        }
-    }
-
-    #[test]
-    fn test_hook_command_uses_first_word_as_bin_for_uvx() {
-        let cmd = hook_command("uvx hcom", "gemini-sessionend");
-        if cfg!(windows) {
-            assert_eq!(
-                cmd,
-                "if (Get-Command uvx -ErrorAction SilentlyContinue) { uvx hcom gemini-sessionend } else { exit 0 }"
-            );
-        } else {
-            assert_eq!(
-                cmd,
-                "sh -c 'command -v uvx >/dev/null 2>&1 && exec uvx hcom gemini-sessionend || exit 0'"
             );
         }
     }
@@ -2364,7 +2358,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn test_verify_accepts_alternate_hcom_prefix() {
+    fn test_verify_refreshes_legacy_uvx_prefix() {
         let (_dir, _test_home, settings_path, _guard) = gemini_test_env();
 
         assert!(setup_gemini_hooks(false));
@@ -2379,8 +2373,22 @@ mod tests {
         )
         .unwrap();
 
+        assert!(verify_hooks_at(&settings_path, false).is_err());
+        assert!(setup_gemini_hooks(false));
+        assert!(
+            !std::fs::read_to_string(&settings_path)
+                .unwrap()
+                .contains("uvx")
+        );
         assert!(verify_hooks_at(&settings_path, false).is_ok());
 
+        std::fs::write(&settings_path, serde_json::to_string(&settings).unwrap()).unwrap();
+        assert!(remove_gemini_hooks());
+        assert!(
+            !std::fs::read_to_string(&settings_path)
+                .unwrap_or_default()
+                .contains("uvx")
+        );
         drop(_guard);
     }
 

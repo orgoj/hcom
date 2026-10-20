@@ -651,7 +651,6 @@ impl HcomDb {
         pid_guard: Option<(u32, &str)>,
         event_data: &serde_json::Value,
     ) -> Result<bool> {
-        let data = serde_json::to_string(event_data)?;
         let mut event_id = None;
 
         let won = self.with_write_scope(|| {
@@ -709,6 +708,16 @@ impl HcomDb {
                 "DELETE FROM kv WHERE key = 'copilot_ext_inflight:' || ?",
                 params![name],
             )?;
+            // The snapshot keeps what the deletion below drops, so a resume
+            // of this identity can restore it.
+            let mut event_data = event_data.clone();
+            if let Some(snapshot) = event_data
+                .get_mut("snapshot")
+                .and_then(|s| s.as_object_mut())
+            {
+                let saved = subscriptions::subscriptions_to_save(self, name, created_at)?;
+                snapshot.insert("subscriptions".into(), serde_json::json!(saved));
+            }
             tx.execute(
                 "DELETE FROM kv
                  WHERE key LIKE 'events_sub:%'
@@ -719,7 +728,7 @@ impl HcomDb {
             tx.execute(
                 "INSERT INTO events (timestamp, type, instance, data)
                  VALUES (?, 'life', ?, ?)",
-                params![timestamp, name, data],
+                params![timestamp, name, serde_json::to_string(&event_data)?],
             )?;
             event_id = Some(tx.last_insert_rowid());
             Ok(true)
@@ -774,15 +783,27 @@ impl HcomDb {
     /// across the `session_bindings` cascade, so they're the right thing to
     /// consult when reclaiming hcom identity by UUID after stop/kill.
     pub fn find_stopped_instance_by_session_id(&self, session_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .find_stopped_event_by_session_id(session_id)?
+            .map(|(name, _)| name))
+    }
+
+    /// Like `find_stopped_instance_by_session_id`, plus the id of that
+    /// life.stopped event, so a caller can load exactly that snapshot instead
+    /// of whichever stop is newest for the name.
+    pub fn find_stopped_event_by_session_id(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<(String, i64)>> {
         self.conn
             .query_row(
-                "SELECT instance FROM events
+                "SELECT instance, id FROM events
                  WHERE type = 'life'
                    AND json_extract(data, '$.action') = 'stopped'
                    AND json_extract(data, '$.snapshot.session_id') = ?
                  ORDER BY id DESC LIMIT 1",
                 params![session_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()
             .map_err(Into::into)

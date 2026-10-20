@@ -21,6 +21,9 @@ use anyhow::{Result, bail};
 pub struct KillArgs {
     /// Targets to kill (names, "@<group>", "all", "tag:X", "tool:X", or "SELF")
     pub targets: Vec<String>,
+    /// Print one JSON object describing every outcome
+    #[arg(long)]
+    pub json: bool,
 }
 
 pub struct KillTrackedResult {
@@ -34,6 +37,105 @@ pub struct KillTrackedResult {
 }
 
 const EPERM_RECHECK_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// One kill outcome, as reported by `--json`.
+#[derive(serde::Serialize, Debug)]
+struct KillOutcome {
+    target: String,
+    /// `agent` (tracked process), `orphan` (leftover process of a stopped
+    /// agent), `stopped` (already stopped; nothing to signal), `bridge` (chat
+    /// disconnected), `untracked` (no process; row stopped), or `error`.
+    kind: &'static str,
+    pid: Option<u32>,
+    /// `sent`, `already_dead`, `permission_denied`, `already_stopped`,
+    /// `disconnected`, `stopped`, or `error`.
+    result: &'static str,
+    pane_closed: bool,
+    pane_retry_command: Option<String>,
+    /// Command that resumes the agent, when it can be resumed.
+    resume: Option<String>,
+    error: Option<String>,
+}
+
+impl KillOutcome {
+    fn new(target: &str, kind: &'static str, result: &'static str) -> Self {
+        Self {
+            target: target.to_string(),
+            kind,
+            pid: None,
+            result,
+            pane_closed: false,
+            pane_retry_command: None,
+            resume: None,
+            error: None,
+        }
+    }
+
+    fn signalled(
+        target: &str,
+        kind: &'static str,
+        pid: u32,
+        result: terminal::KillResult,
+        pane_closed: bool,
+        pane_retry_command: Option<String>,
+    ) -> Self {
+        Self {
+            pid: Some(pid),
+            pane_closed,
+            pane_retry_command,
+            ..Self::new(target, kind, result.as_str())
+        }
+    }
+
+    fn resumable(mut self, name: &str) -> Self {
+        self.resume = Some(format!("hcom r {name}"));
+        self
+    }
+}
+
+/// Kill output. Human mode prints each line as it happens; `--json` collects
+/// the outcomes and prints them as one object when the command finishes.
+/// Warnings stay on stderr in both modes.
+struct KillReport {
+    json: bool,
+    outcomes: Vec<KillOutcome>,
+}
+
+impl KillReport {
+    fn new(json: bool) -> Self {
+        Self {
+            json,
+            outcomes: Vec::new(),
+        }
+    }
+
+    fn say(&self, line: impl std::fmt::Display) {
+        if !self.json {
+            println!("{line}");
+        }
+    }
+
+    fn record(&mut self, outcome: KillOutcome) {
+        self.outcomes.push(outcome);
+    }
+
+    fn record_error(&mut self, target: &str, message: String) {
+        self.record(KillOutcome {
+            error: Some(message),
+            ..KillOutcome::new(target, "error", "error")
+        });
+    }
+
+    fn finish(self, exit: i32) -> i32 {
+        if self.json {
+            println!(
+                "{}",
+                serde_json::json!({ "ok": exit == 0, "results": self.outcomes })
+            );
+        }
+        exit
+    }
+}
 
 #[derive(Clone, Copy)]
 enum PaneCleanupProcessState {
@@ -157,7 +259,11 @@ pub fn kill_tracked_instance(
     })
 }
 
-fn handle_remote_kill_response(name: &str, response: &serde_json::Value) -> Result<i32> {
+fn handle_remote_kill_response(
+    name: &str,
+    response: &serde_json::Value,
+    report: &mut KillReport,
+) -> Result<i32> {
     let result = &response["result"];
     let kill_result = result["kill_result"].as_str();
 
@@ -167,7 +273,12 @@ fn handle_remote_kill_response(name: &str, response: &serde_json::Value) -> Resu
             .map_err(anyhow::Error::msg)?;
         bail!("Remote kill returned no kill_result");
     }
-    let kill_result = kill_result.unwrap();
+    let kill_result = match kill_result.unwrap() {
+        "sent" => terminal::KillResult::Sent,
+        "already_dead" => terminal::KillResult::AlreadyDead,
+        "permission_denied" => terminal::KillResult::PermissionDenied,
+        other => bail!("Remote kill failed for {name}: unexpected kill_result {other}"),
+    };
 
     let pid = result["pid"].as_u64().unwrap_or(0);
     let pane_closed = result["pane_closed"].as_bool().unwrap_or(false);
@@ -175,33 +286,35 @@ fn handle_remote_kill_response(name: &str, response: &serde_json::Value) -> Resu
     let pane_id = result["pane_id"].as_str().unwrap_or("");
     let pane_retry_command = result["pane_retry_command"].as_str();
     let pane_info = pane_info_str(pane_closed, preset_name, pane_id);
+    let outcome = KillOutcome::signalled(
+        name,
+        "agent",
+        u32::try_from(pid).unwrap_or(0),
+        kill_result,
+        pane_closed,
+        pane_retry_command.map(str::to_string),
+    );
 
-    if kill_result == "permission_denied" {
+    if kill_result == terminal::KillResult::PermissionDenied {
         eprintln!(
             "Permission denied to kill process group {} for '{}'",
             pid, name
         );
+        report.record(outcome);
         return Ok(1);
     }
 
-    let lines = render_remote_kill_feedback(name, kill_result, &pane_info)?;
-    for line in lines {
-        println!("{line}");
+    for line in render_remote_kill_feedback(name, kill_result.as_str(), &pane_info)? {
+        report.say(line);
     }
+    report.record(outcome.resumable(name));
     if pane_retry_command.is_some()
         && let Some((_, device)) = crate::relay::control::split_device_suffix(name)
     {
         eprintln!("Run the pane-close retry command on remote device {device}.");
     }
     Ok(
-        if report_incomplete_pane_cleanup(
-            match kill_result {
-                "sent" => PaneCleanupProcessState::Terminated,
-                "already_dead" => PaneCleanupProcessState::AlreadyDead,
-                _ => PaneCleanupProcessState::NotTerminated,
-            },
-            pane_retry_command,
-        ) {
+        if report_incomplete_pane_cleanup(kill_result.into(), pane_retry_command) {
             1
         } else {
             0
@@ -268,6 +381,7 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     let db = HcomDb::open()?;
     let hcom_dir = paths::hcom_dir();
     let initiator = resolve_initiator(&db, explicit_name.as_deref());
+    let mut report = KillReport::new(kill_args.json);
 
     let catalogs = crate::commands::agent::Catalogs::load_for_groups(false, None).ok();
 
@@ -277,12 +391,13 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
 
     // If any target is "all", just kill all
     if targets.iter().any(|t| t == "all") {
-        return kill_all(&db, &hcom_dir, &initiator);
+        let exit = kill_all(&db, &hcom_dir, &initiator, &mut report)?;
+        return Ok(report.finish(exit));
     }
 
     let mut worst_exit = 0;
     for target in &targets {
-        let exit = if target == "SELF" {
+        let attempt = if target == "SELF" {
             // Uppercase cannot collide with instance names or groups (lowercase only).
             // Resolve the caller like the router does for other commands (kill bypasses it).
             let process_id = std::env::var("HCOM_PROCESS_ID")
@@ -301,25 +416,27 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
             .and_then(|ctx| ctx.identity);
             match identity {
                 Some(id) if matches!(id.kind, crate::shared::SenderKind::Instance) => {
-                    kill_single(&db, &hcom_dir, &id.name, &initiator)?
+                    kill_single(&db, &hcom_dir, &id.name, &initiator, &mut report)
                 }
                 _ => {
                     eprintln!(
                         "Error: Cannot determine identity for SELF\nUsage: run 'hcom kill SELF' inside an hcom agent, or pass --name <name>"
                     );
-                    1
+                    report.record_error(target, "Cannot determine identity for SELF".into());
+                    Ok(1)
                 }
             }
         } else if let Some(tag) = target.strip_prefix("tag:") {
-            kill_by_tag(&db, &hcom_dir, tag, &initiator)?
+            kill_by_tag(&db, &hcom_dir, tag, &initiator, &mut report)
         } else if let Some(tool) = target.strip_prefix("tool:") {
-            kill_by_tool(&db, &hcom_dir, tool, &initiator)?
+            kill_by_tool(&db, &hcom_dir, tool, &initiator, &mut report)
         } else if let Some(group) = target.strip_prefix('@') {
             if group.is_empty() {
                 eprintln!("Error: Empty target '@' is not allowed");
-                1
+                report.record_error(target, "Empty target '@' is not allowed".into());
+                Ok(1)
             } else if let Some(tag) = group.strip_prefix("tag:") {
-                kill_by_tag(&db, &hcom_dir, tag, &initiator)?
+                kill_by_tag(&db, &hcom_dir, tag, &initiator, &mut report)
             } else {
                 let (has_group, members) = match catalogs.as_ref() {
                     Some(cats) => (
@@ -329,23 +446,38 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
                     None => (false, Vec::new()),
                 };
                 if !has_group && members.is_empty() {
-                    eprintln!("unknown or empty agent group '@{}'", group);
-                    1
+                    let msg = format!("unknown or empty agent group '@{}'", group);
+                    eprintln!("{msg}");
+                    report.record_error(target, msg);
+                    Ok(1)
                 } else if members.is_empty() {
-                    eprintln!("group '@{}' is empty", group);
-                    1
+                    let msg = format!("group '@{}' is empty", group);
+                    eprintln!("{msg}");
+                    report.record_error(target, msg);
+                    Ok(1)
                 } else {
-                    kill_by_group(&db, &hcom_dir, group, &members, &initiator)?
+                    kill_by_group(&db, &hcom_dir, group, &members, &initiator, &mut report)
                 }
             }
         } else {
-            kill_single(&db, &hcom_dir, target, &initiator)?
+            kill_single(&db, &hcom_dir, target, &initiator, &mut report)
+        };
+        let exit = match attempt {
+            Ok(exit) => exit,
+            // JSON callers get every target's outcome, so one bad target
+            // doesn't discard what already happened to the others.
+            Err(e) if report.json => {
+                eprintln!("Error: {e}");
+                report.record_error(target, e.to_string());
+                1
+            }
+            Err(e) => return Err(e),
         };
         if exit > worst_exit {
             worst_exit = exit;
         }
     }
-    Ok(worst_exit)
+    Ok(report.finish(worst_exit))
 }
 
 /// Whether a tracked orphan process belongs to `target`: a base name, a
@@ -370,6 +502,15 @@ fn orphan_label(orphan: &pidtrack::OrphanProcess) -> String {
         name.to_string()
     } else {
         format!("{}-{name}", orphan.tag)
+    }
+}
+
+/// Report target for an orphan: its label, or its PID when it has no name.
+fn orphan_target(orphan: &pidtrack::OrphanProcess) -> String {
+    if orphan.names.is_empty() {
+        orphan.pid.to_string()
+    } else {
+        orphan_label(orphan)
     }
 }
 
@@ -407,7 +548,12 @@ fn pane_info_str(pane_closed: bool, preset_name: &str, pane_id: &str) -> String 
 }
 
 /// Kill all instances.
-fn kill_all(db: &HcomDb, hcom_dir: &std::path::Path, initiator: &str) -> Result<i32> {
+fn kill_all(
+    db: &HcomDb,
+    hcom_dir: &std::path::Path,
+    initiator: &str,
+    report: &mut KillReport,
+) -> Result<i32> {
     let instances = db.iter_instances_full()?;
     let mut killed = 0;
     let mut failed = 0;
@@ -430,11 +576,11 @@ fn kill_all(db: &HcomDb, hcom_dir: &std::path::Path, initiator: &str) -> Result<
             let pane_info = pane_info_str(pane_closed, &preset_name, &pane_id);
             match result {
                 terminal::KillResult::Sent => {
-                    println!("Sent SIGTERM to \'{}\'{}", inst.name, pane_info);
+                    report.say(format!("Sent SIGTERM to \'{}\'{}", inst.name, pane_info));
                     killed += 1;
                 }
                 terminal::KillResult::AlreadyDead => {
-                    println!("\'{}\' had already exited{}", inst.name, pane_info);
+                    report.say(format!("\'{}\' had already exited{}", inst.name, pane_info));
                     killed += 1;
                 }
                 terminal::KillResult::PermissionDenied => {
@@ -447,13 +593,25 @@ fn kill_all(db: &HcomDb, hcom_dir: &std::path::Path, initiator: &str) -> Result<
             }
             incomplete +=
                 report_incomplete_pane_cleanup(result.into(), pane_retry_command.as_deref()) as i32;
+            let outcome = KillOutcome::signalled(
+                &inst.name,
+                "agent",
+                pid as u32,
+                result,
+                pane_closed,
+                pane_retry_command,
+            );
             if result != terminal::KillResult::PermissionDenied {
                 stop_instance(db, &inst.name, initiator, "killed");
-                println!("  To resume: hcom r {}", inst.name);
+                report.say(format!("  To resume: hcom r {}", inst.name));
+                report.record(outcome.resumable(&inst.name));
+            } else {
+                report.record(outcome);
             }
         } else {
             // No PID tracked — just clean up
             stop_instance(db, &inst.name, initiator, "killed");
+            report.record(KillOutcome::new(&inst.name, "untracked", "stopped"));
         }
     }
 
@@ -472,11 +630,17 @@ fn kill_all(db: &HcomDb, hcom_dir: &std::path::Path, initiator: &str) -> Result<
         };
         match result {
             terminal::KillResult::Sent => {
-                println!("Sent SIGTERM to orphan process {}{}", orphan.pid, label);
+                report.say(format!(
+                    "Sent SIGTERM to orphan process {}{}",
+                    orphan.pid, label
+                ));
                 killed += 1;
             }
             terminal::KillResult::AlreadyDead => {
-                println!("Orphan process {} had already exited{}", orphan.pid, label);
+                report.say(format!(
+                    "Orphan process {} had already exited{}",
+                    orphan.pid, label
+                ));
                 killed += 1;
             }
             terminal::KillResult::PermissionDenied => {
@@ -488,32 +652,49 @@ fn kill_all(db: &HcomDb, hcom_dir: &std::path::Path, initiator: &str) -> Result<
         if result != terminal::KillResult::PermissionDenied {
             pidtrack::remove_pid(hcom_dir, orphan.pid);
         }
+        report.record(KillOutcome::signalled(
+            &orphan_target(orphan),
+            "orphan",
+            orphan.pid,
+            result,
+            pane_closed,
+            pane_retry_command,
+        ));
     }
 
     if killed == 0 && failed == 0 {
-        println!("No processes with tracked PIDs found");
+        report.say("No processes with tracked PIDs found");
     } else if failed > 0 || incomplete > 0 {
-        println!(
+        report.say(format!(
             "Killed {}, {} failed, {} with incomplete pane cleanup",
             killed, failed, incomplete
-        );
+        ));
     } else {
-        println!("Killed {}", killed);
+        report.say(format!("Killed {}", killed));
     }
 
     Ok(if failed > 0 || incomplete > 0 { 1 } else { 0 })
 }
 
 /// Kill instances by tag.
-fn kill_by_tag(db: &HcomDb, hcom_dir: &std::path::Path, tag: &str, initiator: &str) -> Result<i32> {
+fn kill_by_tag(
+    db: &HcomDb,
+    hcom_dir: &std::path::Path,
+    tag: &str,
+    initiator: &str,
+    report: &mut KillReport,
+) -> Result<i32> {
+    let selector = format!("tag:{tag}");
     kill_matching(
         db,
         hcom_dir,
-        &format!("tag:{tag}"),
+        &selector,
+        &selector,
         &format!("No agents with tag '{tag}'"),
         |inst| inst.tag.as_deref() == Some(tag),
         |orphan| orphan.tag == tag,
         initiator,
+        report,
     )
 }
 
@@ -523,6 +704,7 @@ fn kill_by_tool(
     hcom_dir: &std::path::Path,
     tool: &str,
     initiator: &str,
+    report: &mut KillReport,
 ) -> Result<i32> {
     let tool = match tool.parse::<crate::tool::Tool>() {
         Ok(tool) => tool.as_str(),
@@ -531,30 +713,73 @@ fn kill_by_tool(
                 .iter()
                 .map(|s| s.name)
                 .collect();
-            eprintln!("Unknown tool '{tool}'. Valid tools: {}", names.join(", "));
+            let msg = format!("Unknown tool '{tool}'. Valid tools: {}", names.join(", "));
+            eprintln!("{msg}");
+            report.record_error(&format!("tool:{tool}"), msg);
             return Ok(1);
         }
     };
+    let selector = format!("tool:{tool}");
     kill_matching(
         db,
         hcom_dir,
-        &format!("tool:{tool}"),
+        &selector,
+        &selector,
         &format!("No agents with tool '{tool}'"),
         |inst| inst.tool == tool,
         |orphan| orphan.tool == tool,
         initiator,
+        report,
+    )
+}
+
+/// Kill instances belonging to a catalog group.
+fn kill_by_group(
+    db: &HcomDb,
+    hcom_dir: &std::path::Path,
+    group: &str,
+    members: &[String],
+    initiator: &str,
+    report: &mut KillReport,
+) -> Result<i32> {
+    let member_set: HashSet<&str> = members.iter().map(|s| s.as_str()).collect();
+    kill_matching(
+        db,
+        hcom_dir,
+        &format!("@{group}"),
+        &format!("group:@{group}"),
+        &format!("No active agents in group '@{group}'"),
+        |inst| {
+            (member_set.contains(inst.name.as_str())
+                || member_set.contains(identity::get_full_name(inst).as_str())
+                || inst
+                    .catalog_agent_name()
+                    .is_some_and(|agent| member_set.contains(agent.as_str())))
+                && (inst.pid.is_some() || inst.status != "stopped")
+        },
+        |orphan| {
+            member_set.contains(orphan.agent_name.as_str())
+                || orphan.names.iter().any(|n| member_set.contains(n.as_str()))
+        },
+        initiator,
+        report,
     )
 }
 
 /// Kill local instances and leftover processes matching the given filters.
+/// `target` is the selector as the caller wrote it (JSON error target);
+/// `label` names it in the summary line.
+#[allow(clippy::too_many_arguments)]
 fn kill_matching(
     db: &HcomDb,
     hcom_dir: &std::path::Path,
+    target: &str,
     label: &str,
     none_message: &str,
     instance_filter: impl Fn(&crate::db::InstanceRow) -> bool,
     orphan_filter: impl Fn(&pidtrack::OrphanProcess) -> bool,
     initiator: &str,
+    report: &mut KillReport,
 ) -> Result<i32> {
     let instances = db.iter_instances_full()?;
     let tagged: Vec<_> = instances
@@ -575,11 +800,11 @@ fn kill_matching(
             let pane_info = pane_info_str(pane_closed, &preset_name, &pane_id);
             match result {
                 terminal::KillResult::Sent => {
-                    println!("Sent SIGTERM to \'{}\'{}", inst.name, pane_info);
+                    report.say(format!("Sent SIGTERM to \'{}\'{}", inst.name, pane_info));
                     killed += 1;
                 }
                 terminal::KillResult::AlreadyDead => {
-                    println!("\'{}\' had already exited", inst.name);
+                    report.say(format!("\'{}\' had already exited", inst.name));
                     killed += 1;
                 }
                 terminal::KillResult::PermissionDenied => {
@@ -592,13 +817,28 @@ fn kill_matching(
             }
             incomplete +=
                 report_incomplete_pane_cleanup(result.into(), pane_retry_command.as_deref()) as i32;
+            let outcome = KillOutcome::signalled(
+                &inst.name,
+                "agent",
+                pid as u32,
+                result,
+                pane_closed,
+                pane_retry_command,
+            );
             if result != terminal::KillResult::PermissionDenied {
                 stop_instance(db, &inst.name, initiator, "killed");
+                report.record(outcome.resumable(&inst.name));
+            } else {
+                report.record(outcome);
             }
         } else {
             // No PID tracked — clean up DB entry
-            println!("No tracked process for '{}', stopping instance.", inst.name);
+            report.say(format!(
+                "No tracked process for '{}', stopping instance.",
+                inst.name
+            ));
             stop_instance(db, &inst.name, initiator, "killed");
+            report.record(KillOutcome::new(&inst.name, "untracked", "stopped"));
         }
     }
 
@@ -617,14 +857,14 @@ fn kill_matching(
         let pane_info = pane_info_str(pane_closed, &orphan.terminal_preset, &orphan.pane_id);
         match result {
             terminal::KillResult::Sent => {
-                println!(
+                report.say(format!(
                     "Sent SIGTERM to leftover process of stopped agent \'{}\'{}",
                     names, pane_info
-                );
+                ));
                 killed += 1;
             }
             terminal::KillResult::AlreadyDead => {
-                println!("\'{}\' had already exited", names);
+                report.say(format!("\'{}\' had already exited", names));
             }
             terminal::KillResult::PermissionDenied => {
                 eprintln!("Permission denied to kill process group {}", orphan.pid);
@@ -636,136 +876,23 @@ fn kill_matching(
         if result != terminal::KillResult::PermissionDenied {
             pidtrack::remove_pid(hcom_dir, orphan.pid);
         }
+        report.record(KillOutcome::signalled(
+            &orphan_target(orphan),
+            "orphan",
+            orphan.pid,
+            result,
+            pane_closed,
+            pane_retry_command,
+        ));
     }
 
     if tagged.is_empty() && tagged_orphans.is_empty() {
         eprintln!("{none_message}");
+        report.record_error(target, none_message.to_string());
         return Ok(1);
     }
 
-    println!("Killed {} ({})", killed, label);
-    Ok(if failed > 0 || incomplete > 0 { 1 } else { 0 })
-}
-
-/// Kill instances belonging to a catalog group.
-fn kill_by_group(
-    db: &HcomDb,
-    hcom_dir: &std::path::Path,
-    group: &str,
-    members: &[String],
-    initiator: &str,
-) -> Result<i32> {
-    let member_set: HashSet<&str> = members.iter().map(|s| s.as_str()).collect();
-    let instances = db.iter_instances_full()?;
-
-    let group_instances: Vec<_> = instances
-        .into_iter()
-        .filter(|inst| {
-            inst.origin_device_id.is_none()
-                && (member_set.contains(inst.name.as_str())
-                    || member_set.contains(identity::get_full_name(inst).as_str())
-                    || inst
-                        .catalog_agent_name()
-                        .is_some_and(|agent| member_set.contains(agent.as_str())))
-                && (inst.pid.is_some() || inst.status != "stopped")
-        })
-        .collect();
-
-    let mut killed = 0;
-    let mut failed = 0;
-    let mut incomplete = 0;
-
-    let mut active_pids = HashSet::new();
-
-    for inst in &group_instances {
-        if let Some(pid) = inst.pid {
-            active_pids.insert(pid as u32);
-            let is_headless = inst.background != 0;
-            let (result, pane_closed, pane_retry_command, preset_name, pane_id) =
-                kill_instance(db, &inst.name, pid as u32, inst, is_headless, initiator);
-            let pane_info = pane_info_str(pane_closed, &preset_name, &pane_id);
-            match result {
-                terminal::KillResult::Sent => {
-                    println!(
-                        "Sent SIGTERM to process group {} for '{}'{}",
-                        pid, inst.name, pane_info
-                    );
-                    killed += 1;
-                }
-                terminal::KillResult::AlreadyDead => {
-                    println!(
-                        "Process group {} already terminated for '{}'",
-                        pid, inst.name
-                    );
-                    killed += 1;
-                }
-                terminal::KillResult::PermissionDenied => {
-                    eprintln!(
-                        "Permission denied to kill process group {} for '{}'",
-                        pid, inst.name
-                    );
-                    failed += 1;
-                }
-            }
-            incomplete +=
-                report_incomplete_pane_cleanup(result.into(), pane_retry_command.as_deref()) as i32;
-            if result != terminal::KillResult::PermissionDenied {
-                stop_instance(db, &inst.name, initiator, "killed");
-            }
-        } else {
-            // No PID tracked but instance marked active — clean up DB entry
-            println!("No tracked process for '{}', stopping instance.", inst.name);
-            stop_instance(db, &inst.name, initiator, "killed");
-        }
-    }
-
-    // Also kill orphan processes belonging to this group
-    let orphans = pidtrack::get_orphan_processes(hcom_dir, Some(&active_pids));
-    let group_orphans: Vec<_> = orphans
-        .iter()
-        .filter(|o| {
-            member_set.contains(o.agent_name.as_str())
-                || o.names.iter().any(|n| member_set.contains(n.as_str()))
-        })
-        .collect();
-    for orphan in &group_orphans {
-        let names = orphan.names.join(", ");
-        let (result, pane_closed, pane_retry_command) =
-            terminal::kill_process(orphan.pid, &orphan.terminal_info());
-        let result = normalize_kill_result(&names, orphan.pid, result, pane_closed);
-        let pane_info = pane_info_str(pane_closed, &orphan.terminal_preset, &orphan.pane_id);
-        match result {
-            terminal::KillResult::Sent => {
-                println!(
-                    "Sent SIGTERM to stopped process group {} for '{}'{}",
-                    orphan.pid, names, pane_info
-                );
-                killed += 1;
-            }
-            terminal::KillResult::AlreadyDead => {
-                println!(
-                    "Process group {} already terminated for '{}'",
-                    orphan.pid, names
-                );
-            }
-            terminal::KillResult::PermissionDenied => {
-                eprintln!("Permission denied to kill process group {}", orphan.pid);
-                failed += 1;
-            }
-        }
-        incomplete +=
-            report_incomplete_pane_cleanup(result.into(), pane_retry_command.as_deref()) as i32;
-        if result != terminal::KillResult::PermissionDenied {
-            pidtrack::remove_pid(hcom_dir, orphan.pid);
-        }
-    }
-
-    if group_instances.is_empty() && group_orphans.is_empty() {
-        eprintln!("No active agents in group '@{}'", group);
-        return Ok(1);
-    }
-
-    println!("Killed {} (group:@{})", killed, group);
+    report.say(format!("Killed {} ({})", killed, label));
     Ok(if failed > 0 || incomplete > 0 { 1 } else { 0 })
 }
 
@@ -775,6 +902,7 @@ fn kill_single(
     hcom_dir: &std::path::Path,
     target: &str,
     initiator: &str,
+    report: &mut KillReport,
 ) -> Result<i32> {
     // Resolve display name
     let name = identity::resolve_display_name(db, target).unwrap_or_else(|| target.to_string());
@@ -821,40 +949,54 @@ fn kill_single(
                     pane_info_str(pane_closed, &orphan.terminal_preset, &orphan.pane_id);
                 match result {
                     terminal::KillResult::Sent => {
-                        println!(
+                        report.say(format!(
                             "Sent SIGTERM to leftover process of stopped agent \'{}\'{}",
                             target, pane_info
-                        );
+                        ));
                     }
                     terminal::KillResult::AlreadyDead => {
-                        println!("\'{}\' had already exited{}", target, pane_info);
+                        report.say(format!("\'{}\' had already exited{}", target, pane_info));
                     }
                     terminal::KillResult::PermissionDenied => {
                         eprintln!("Permission denied to kill process group {}", orphan.pid);
+                        report.record(KillOutcome::signalled(
+                            target,
+                            "orphan",
+                            orphan.pid,
+                            result,
+                            pane_closed,
+                            pane_retry_command,
+                        ));
                         return Ok(1);
                     }
                 }
                 pidtrack::remove_pid(hcom_dir, orphan.pid);
-                return Ok(
-                    if report_incomplete_pane_cleanup(result.into(), pane_retry_command.as_deref())
-                    {
-                        1
-                    } else {
-                        0
-                    },
-                );
+                let incomplete =
+                    report_incomplete_pane_cleanup(result.into(), pane_retry_command.as_deref());
+                report.record(KillOutcome::signalled(
+                    target,
+                    "orphan",
+                    orphan.pid,
+                    result,
+                    pane_closed,
+                    pane_retry_command,
+                ));
+                return Ok(if incomplete { 1 } else { 0 });
             }
             // The goal of a kill is already met for a stopped agent: say when and
             // by whom instead of failing, so retries don't look like errors.
             if let Some(stopped) = identity::last_stopped(db, target) {
-                println!("'{target}' {}", stopped.summary());
+                report.say(format!("'{target}' {}", stopped.summary()));
+                let outcome = KillOutcome::new(target, "stopped", "already_stopped");
                 if stopped.reason == crate::hooks::hermes_bridge::DISCONNECTED {
-                    println!(
+                    report.say(format!(
                         "  {}",
                         crate::hooks::hermes_bridge::reconnect_hint(&stopped.name)
-                    );
+                    ));
+                    report.record(outcome);
                 } else {
-                    println!("  To resume: hcom r {}", stopped.display_name());
+                    report.say(format!("  To resume: hcom r {}", stopped.display_name()));
+                    report.record(outcome.resumable(&stopped.display_name()));
                 }
                 return Ok(0);
             }
@@ -881,7 +1023,7 @@ fn kill_single(
                 crate::relay::control::RPC_DEFAULT_TIMEOUT,
             )
             .map_err(anyhow::Error::msg)?;
-            return handle_remote_kill_response(&name, &result);
+            return handle_remote_kill_response(&name, &result, report);
         }
         bail!("Cannot kill remote '{name}' - missing device suffix");
     }
@@ -890,7 +1032,8 @@ fn kill_single(
     if inst.pid.is_none()
         && let Some(note) = crate::hooks::hermes_bridge::disconnect(db, &name, initiator)
     {
-        println!("{note}");
+        report.say(note);
+        report.record(KillOutcome::new(&name, "bridge", "disconnected"));
         return Ok(0);
     }
     if inst.pid.is_none() {
@@ -911,13 +1054,13 @@ fn kill_single(
     let pane_info = pane_info_str(pane_closed, &preset_name, &pane_id);
     let exit = match result {
         terminal::KillResult::Sent => {
-            println!("Sent SIGTERM to \'{}\'{}", name, pane_info);
-            println!("  To resume: hcom r {}", name);
+            report.say(format!("Sent SIGTERM to \'{}\'{}", name, pane_info));
+            report.say(format!("  To resume: hcom r {}", name));
             0
         }
         terminal::KillResult::AlreadyDead => {
-            println!("\'{}\' had already exited{}", name, pane_info);
-            println!("  To resume: hcom r {}", name);
+            report.say(format!("\'{}\' had already exited{}", name, pane_info));
+            report.say(format!("  To resume: hcom r {}", name));
             0
         }
         terminal::KillResult::PermissionDenied => {
@@ -928,13 +1071,15 @@ fn kill_single(
             1
         }
     };
-    Ok(
-        if report_incomplete_pane_cleanup(result.into(), pane_retry_command.as_deref()) {
-            1
-        } else {
-            exit
-        },
-    )
+    let incomplete = report_incomplete_pane_cleanup(result.into(), pane_retry_command.as_deref());
+    let outcome =
+        KillOutcome::signalled(&name, "agent", pid, result, pane_closed, pane_retry_command);
+    report.record(if exit == 0 {
+        outcome.resumable(&name)
+    } else {
+        outcome
+    });
+    Ok(if incomplete { 1 } else { exit })
 }
 
 fn restore_failed_kill_status(
@@ -1220,6 +1365,7 @@ mod tests {
                     "pane_id": ""
                 }
             }),
+            &mut KillReport::new(false),
         )
         .unwrap();
         assert_eq!(result, 1);
@@ -1239,6 +1385,7 @@ mod tests {
                     "pane_id": "@1"
                 }
             }),
+            &mut KillReport::new(false),
         )
         .unwrap();
         assert_eq!(result, 0);
@@ -1282,6 +1429,7 @@ mod tests {
                     "pane_id": ""
                 }
             }),
+            &mut KillReport::new(false),
         )
         .unwrap_err()
         .to_string();

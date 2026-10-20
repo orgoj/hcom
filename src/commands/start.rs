@@ -1415,8 +1415,8 @@ mod tests {
     #[test]
     #[serial]
     fn test_plain_claude_rebind_moves_session_binding_to_target() {
-        // Targets are longer than generated names (4-letter CVCV), so the
-        // bare start's random identity can never collide with them.
+        // Targets aren't consonant/vowel-alternating like generated names,
+        // so the bare start's random identity can never collide with them.
         let (_dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
         let db = HcomDb::open().unwrap();
         let ctx = make_claude_ctx(
@@ -1521,11 +1521,13 @@ mod tests {
         );
         assert_eq!(start_bare(&db, &ctx, None).unwrap(), 0);
 
+        // Longer than generated names (4-letter CVCV), so the bare start's
+        // random identity can never collide with the target.
         let _ = crate::runtime_env::take_last_terminal_title();
-        assert_eq!(start_rebind(&db, "nova", &ctx, None).unwrap(), 0);
+        assert_eq!(start_rebind(&db, "rebound", &ctx, None).unwrap(), 0);
         assert_eq!(
             crate::runtime_env::take_last_terminal_title().as_deref(),
-            Some("nova"),
+            Some("rebound"),
             "a rebind must rename the pane, or the pane keeps advertising the old name"
         );
     }
