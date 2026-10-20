@@ -660,16 +660,69 @@ class App(unittest.TestCase):
         self.app.update()
         return self.app.tree.selection()
 
-    def test_selection_follows_agent_after_start(self):
-        self.app.tree.selection_set("a3|")
+    def select(self, row):
+        self.app.tree.selection_set(row)
         self.app.update()
-        started = {"name": "a3", "tool": "claude", "status": "active", "launch_context": {"agent_name": "a3"}}
+
+    def without(self, name):
+        return [i for i in LIVE if i["name"] != name]
+
+    def test_selection_follows_agent_after_start(self):
+        self.app.sort_by("status")  # by index the new a3 row would not be selected
+        self.app.ask = lambda title, keys, agent, prefill: {**prefill, "resume": "", "name": "", "prompt": ""}
+        self.select("a3|")
+        self.app.run_button(self.button("Start"))
+        started = {"name": "a3", "tool": "claude", "status": "listening", "launch_context": {"agent_name": "a3"}}
         self.assertEqual(self.refresh_with(LIVE + [started]), ("a3|a3",))
 
-    def test_selection_follows_agent_after_kill(self):
-        self.app.tree.selection_set("a2|a2x")
-        self.app.update()
-        self.assertEqual(self.refresh_with([i for i in LIVE if i["name"] != "a2x"]), ("a2|",))
+    def test_instance_started_with_as_later_vanishing_keeps_its_index(self):
+        self.app.sort_by("status")  # by agent a3| would be selected
+        self.app.ask = lambda title, keys, agent, prefill: {**prefill, "resume": "", "name": "x", "prompt": ""}
+        self.select("a3|")
+        self.app.run_button(self.button("Start"))
+        started = {"name": "x", "tool": "claude", "status": "listening", "launch_context": {"agent_name": "a3"}}
+        self.assertEqual(self.refresh_with(LIVE + [started]), ("a3|x",))
+        self.assertEqual(self.refresh_with(LIVE), ("|solo",))
+
+    def test_detached_command_after_start_drops_the_agent_follow(self):
+        self.fake_popen()
+        self.app.sort_by("status")
+        self.app.ask = lambda title, keys, agent, prefill: {**prefill, "resume": "", "name": "", "prompt": ""}
+        self.select("a3|")
+        self.app.run_button(self.button("Start"))
+        self.app.run_button(self.button("Folder"))
+        started = {"name": "a3", "tool": "claude", "status": "listening", "launch_context": {"agent_name": "a3"}}
+        self.assertEqual(self.refresh_with(LIVE + [started]), ("a2|a2x",))
+
+    def test_selection_follows_agent_while_restarting(self):
+        self.app.sort_by("status")  # by index a3| would be selected
+        self.restart_row("a2|a2x")
+        self.assertEqual(self.refresh_with(self.without("a2x")), ("a2|",))
+
+    def test_killed_middle_row_keeps_its_index(self):
+        self.app.running_only.set(True)
+        self.app.render()
+        self.select("a2|a2x")
+        self.app.run_button(self.button("Kill"))
+        self.assertEqual(self.refresh_with(self.without("a2x")), ("|solo",))
+
+    def test_killed_last_row_selects_the_new_last_row(self):
+        self.select("|solo")
+        self.assertEqual(self.refresh_with(self.without("solo")), ("a3|",))
+
+    def test_killed_catalog_instance_keeps_its_index_not_its_agent(self):
+        self.app.sort_by("cli")  # claude rows: a1|a1, |solo, a3|; a1| comes back after |solo
+        self.select("a1|a1")
+        self.assertEqual(self.refresh_with(self.without("a1")), ("|solo",))
+
+    def test_row_hidden_by_a_filter_refresh_keeps_its_index(self):
+        blocked = [{"name": n, "tool": "codex", "status": "blocked"} for n in ("b1", "b2")]
+        self.refresh_with(LIVE + blocked)
+        self.app.blocked_only.set(True)
+        self.app.render()
+        self.select("|b1")
+        self.assertEqual(self.refresh_with(LIVE + [{**blocked[0], "status": "active"}, blocked[1]]), ("|b2",))
+        self.assertEqual(self.refresh_with(LIVE), ())  # empty table: nothing to select
 
     def test_catalog_row_of_agent_running_under_another_name(self):
         self.assertEqual(self.app.tree.set("a2|", "status"), "running as a2x")

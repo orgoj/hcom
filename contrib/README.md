@@ -32,7 +32,10 @@ state: `*` uncommitted changes, `↑2 ↓1` commits ahead of/behind the upstream
 `git status` per directory on every refresh). Where is the terminal an
 instance was launched in, with the Herdr workspace/tab (`herdr: cc-hcom/hcom_dev`, `kitty`). A catalog agent running only under other names (`--as`) keeps
 its row, not greyed, with Status `running as <names>`. After Start with `--as`, the new
-instance is selected once it appears, unless another row was selected meanwhile. Clicking a column heading sorts ascending (▲), again descending
+instance is selected once it appears, unless another row was selected meanwhile. When the
+selected row disappears (Kill, Kill group, the instance ended, a filter hides it), the row
+now at the same position in the current sort and filter is selected, or the last row when it
+was the last one; after Start or Restart the selection stays on that agent instead. Clicking a column heading sorts ascending (▲), again descending
 (▼), a third time back to the default order (agent, then instance). Running only hides
 catalog rows without an instance; Blocked only lists only instances in `blocked` status.
 The Filter field narrows the table as you type to rows whose agent, instance, directory

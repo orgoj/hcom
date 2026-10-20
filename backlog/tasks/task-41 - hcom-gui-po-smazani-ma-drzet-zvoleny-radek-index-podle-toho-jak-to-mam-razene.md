@@ -3,10 +3,11 @@ id: TASK-41
 title: >-
   hcom-gui: keep the selection at the same row index when the selected row
   disappears
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@hcom_dev'
 created_date: '2026-10-20 16:42'
-updated_date: '2026-10-20 16:45'
+updated_date: '2026-10-20 16:50'
 labels: []
 dependencies: []
 priority: medium
@@ -30,11 +31,11 @@ Out of scope: selection when the selected row still exists; select_next for Star
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 After the selected row disappears, the row at the same index in the current sort and filter is selected and focused, also when the disappearing row was a catalog agent's instance whose agent still has another row elsewhere
-- [ ] #2 When the disappeared row was the last one, the new last row is selected; nothing is selected only when the table is empty
-- [ ] #3 While and after a Start (when=catalog) or Restart (when=live) command for the selected row, selection follows the same agent as today (new instance via select_next or the agent's row), not the index
-- [ ] #4 contrib/README.md describes the selection rule after a row disappears
-- [ ] #5 contrib/test-hcom-gui covers: middle row killed, last row killed, catalog instance killed, row hidden by a filter refresh, Start and Restart keeping the agent
+- [x] #1 After the selected row disappears, the row at the same index in the current sort and filter is selected and focused, also when the disappearing row was a catalog agent's instance whose agent still has another row elsewhere
+- [x] #2 When the disappeared row was the last one, the new last row is selected; nothing is selected only when the table is empty
+- [x] #3 While and after a Start (when=catalog) or Restart (when=live) command for the selected row, selection follows the same agent as today (new instance via select_next or the agent's row), not the index
+- [x] #4 contrib/README.md describes the selection rule after a row disappears
+- [x] #5 contrib/test-hcom-gui covers: middle row killed, last row killed, catalog instance killed, row hidden by a filter refresh, Start and Restart keeping the agent
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -45,3 +46,15 @@ Out of scope: selection when the selected row still exists; select_next for Star
 3. Mark Start/Restart in run_button/run_command (by the button's when: catalog/live) and clear the mark when the command's refresh has applied.
 4. Update contrib/README.md; add cases to contrib/test-hcom-gui and run it.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Review agent_review_hcom_884: fixed keep_agent surviving a consumed select_next and detached commands not clearing it; regression tests added. OK after fixes.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+render() remembers the selected row's index; when that row vanishes it selects children[min(index, last)] in the current sort/filter. Start (when=catalog) and Restart (when=live) set keep_agent so one vanished row of that agent reselects the agent as before; keep_agent is cleared after that replacement, when select_next is consumed, on selecting another agent's row, and by any other command including detached ones. README updated. contrib/test-hcom-gui: 78 passed; new cases cover middle/last/catalog-instance/filter-hidden/empty table, Start, Restart, Start --as instance vanishing later, detached command after Start; the 4 index cases fail on the old code.
+<!-- SECTION:FINAL_SUMMARY:END -->

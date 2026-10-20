@@ -434,6 +434,7 @@ class App(tk.Tk):
         self.last_error = None
         self.last_selected = None
         self.select_next = None  # row id selected once it appears (an instance started with --as)
+        self.keep_agent = None  # agent of the last Start/Restart: its vanished row reselects the agent
 
         self._create_widgets()
         self._restore_state()
@@ -566,6 +567,8 @@ class App(tk.Tk):
         if sel and sel[0] != self.last_selected:  # render() re-selects on every refresh
             self.select_next = None  # another row chosen: do not jump to a started instance
             row = self.rows[sel[0]]
+            if row["agent"] != self.keep_agent:
+                self.keep_agent = None
             if row["detail"]:
                 self.write_log(f"{row['instance']}: {row['detail']}")
         self.last_selected = sel[0] if sel else None
@@ -644,6 +647,7 @@ class App(tk.Tk):
                 return (not r["agent"], (r["agent"] or r["instance"]).lower(), not r["instance"], r["instance"])
         needle = self.filter_text.get().strip().lower()
         sel = self.tree.selection()
+        index = self.tree.index(sel[0]) if sel else 0
         self.tree.delete(*self.tree.get_children())
         for iid, r in sorted(self.rows.items(), key=lambda kv: key(kv[1]), reverse=self.sort_reverse):
             if self.running_only.get() and not r["instance"]:
@@ -659,10 +663,15 @@ class App(tk.Tk):
             values = [cell(c, r) for c, _, _ in self.columns]
             self.tree.insert("", tk.END, iid=iid, values=values, tags=(tag,))
         if self.select_next and self.tree.exists(self.select_next):  # started with --as
-            sel, self.select_next = [self.select_next], None
-        if sel and not self.tree.exists(sel[0]):  # start/kill changes the id: keep the agent
-            agent = sel[0].split("|")[0]
-            sel = [i for i in self.tree.get_children() if agent and self.rows[i]["agent"] == agent][:1]
+            sel, self.select_next, self.keep_agent = [self.select_next], None, None
+        if sel and not self.tree.exists(sel[0]):
+            agent, children = sel[0].split("|")[0], self.tree.get_children()
+            # Start/Restart changes the id: keep the agent. Any other vanished row keeps its
+            # place in the list as sorted and filtered.
+            sel = [i for i in children if agent and agent == self.keep_agent and self.rows[i]["agent"] == agent][:1]
+            self.keep_agent = None  # one replacement per command
+            if not sel and children:
+                sel = [children[min(index, len(children) - 1)]]
         if sel and self.tree.exists(sel[0]):
             self.tree.selection_set(sel[0])
             self.tree.focus(sel[0])
@@ -685,6 +694,7 @@ class App(tk.Tk):
         if b["when"] == "always":
             if b.get("confirm") and not messagebox.askyesno(b["label"], f"{' '.join(b['cmd'])}?", parent=self):
                 return
+            self.keep_agent = None
             self.run_command(b["cmd"], os.path.expanduser(b.get("cwd", HOME)))
             return
         template = b["cmds"].get(row["terminal"], DEFAULT_ATTACH) if "cmds" in b else b["cmd"]
@@ -724,6 +734,7 @@ class App(tk.Tk):
         target = row["instance"] or row["agent"]
         if b.get("confirm") and not messagebox.askyesno(b["label"], f"{b['label']} {target}?", parent=self):
             return
+        self.keep_agent = row["agent"] if b["when"] in ("catalog", "live") else None
         if b.get("detach"):
             cwd = b["cwd"].format_map(values) if b.get("cwd") else row["cwd"]
             self.write_log(f"$ {' '.join(cmd)}  (in {tilde(cwd)})")
@@ -763,6 +774,7 @@ class App(tk.Tk):
         independent of which catalogs are reachable from the GUI's cwd."""
         if self.busy or not messagebox.askyesno("Kill group", f"Kill {group}: {', '.join(names)}?", parent=self):
             return
+        self.keep_agent = None
         self.run_command(["hcom", "kill", *names], HOME)
 
     def run_command(self, cmd, cwd, select=None):
