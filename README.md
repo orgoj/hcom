@@ -171,6 +171,8 @@ hcom relay off|on   # toggle
 hcom status   # diagnostics
 ```
 
+Claude may show `UserPromptSubmit operation blocked by hook: This hcom wake arrived after another hook handled the queued delivery.` This is harmless: the messages were already delivered, and hcom blocks the late wake so it does not start an empty turn.
+
 ```bash
 hcom reset all   # clear and archive: database + hooks + config
 ```
