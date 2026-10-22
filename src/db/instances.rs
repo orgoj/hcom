@@ -161,6 +161,24 @@ impl InstanceRow {
             .map(str::to_string)
     }
 
+    /// Copy the launch-context fields that `hcom r` and handoff restore from
+    /// a stopped snapshot, as `get_instance_snapshot` records them.
+    pub fn add_launch_context_to_snapshot(&self, snapshot: &mut serde_json::Value) {
+        let ctx: serde_json::Value = self
+            .launch_context
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default();
+        for key in [
+            "dippy_policy_cwd",
+            "agent_name",
+            "herdr_workspace",
+            "herdr_tab",
+        ] {
+            snapshot[key] = ctx.get(key).cloned().unwrap_or_default();
+        }
+    }
+
     /// Whether a *different* live process now holds `pid` (the identity in
     /// this snapshot no longer matches), so it must not be signalled on this
     /// instance's behalf. Checked against the snapshot, not a fresh read, so

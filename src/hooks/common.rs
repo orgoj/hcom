@@ -1386,7 +1386,7 @@ fn stop_instance_inner(
 
     // Prepare snapshot before delete (preserves data for transcript access)
     // Use Option values directly so None serializes as JSON null
-    let snapshot = serde_json::json!({
+    let mut snapshot = serde_json::json!({
         "name": instance_name,
         "transcript_path": instance_data.transcript_path,
         "session_id": instance_data.session_id,
@@ -1409,6 +1409,7 @@ fn stop_instance_inner(
         "background_log_file": instance_data.background_log_file,
         "last_event_id": instance_data.last_event_id,
     });
+    instance_data.add_launch_context_to_snapshot(&mut snapshot);
 
     // Snapshot both child sets before deleting the parent. Only the teardown
     // winner processes them, but it still needs relationships that may be
@@ -1644,6 +1645,7 @@ pub fn soft_finalize_session(
         "background_log_file": instance_data.background_log_file,
         "last_event_id": instance_data.last_event_id,
     });
+    instance_data.add_launch_context_to_snapshot(&mut snapshot);
     // A retired identity's subscriptions are saved before the cleanup below,
     // so the row's later hard stop carries them into the snapshot `hcom r`
     // restores from.

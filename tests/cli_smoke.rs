@@ -3674,6 +3674,64 @@ fn handoff_relaunches_the_same_catalog_agent_under_its_instance_name() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn handoff_after_kill_and_resume_keeps_the_catalog_agent_of_an_as_instance() {
+    let h = Hcom::new();
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"claude",
+                "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+    let (code, stdout, stderr) = h.run(["agent", "reviewer", "--as", "rev2"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let mut agent = idle_kill_sleeper(&h);
+    make_idle_kill_row(&conn, "rev2", "listening", agent.id());
+    let (code, stdout, stderr) = h.run(["kill", "rev2"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    agent.wait().expect("killed agent exits");
+    let snapshot_agent: Option<String> = conn
+        .query_row(
+            "SELECT json_extract(data, '$.snapshot.agent_name') FROM events
+             WHERE type = 'life' AND instance = 'rev2'
+               AND json_extract(data, '$.action') = 'stopped'
+             ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("stopped event for rev2");
+    assert_eq!(snapshot_agent.as_deref(), Some("reviewer"));
+
+    std::fs::remove_dir_all(h.path().join(".tmp/launch")).expect("clear launch directory");
+    let (code, stdout, stderr) = h.run(["r", "rev2"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let scripts = std::fs::read_dir(h.path().join(".tmp/launch"))
+        .expect("read launch directory")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(scripts.contains("HCOM_AGENT_NAME=reviewer"), "{scripts}");
+    let process_id = scripts
+        .split("HCOM_PROCESS_ID=")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split(|c: char| c.is_whitespace() || c == '\'' || c == ';')
+                .find(|s| !s.is_empty())
+        })
+        .expect("process id in launch script")
+        .to_string();
+    let (code, stdout, stderr) = h.run_as_process(&process_id, ["handoff", "--dry-run", "next"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("kill rev2"), "stdout={stdout}");
+    assert!(
+        stdout.contains("HCOM_AGENT_NAME=reviewer"),
+        "stdout={stdout}"
+    );
+}
+
 #[test]
 fn agent_catalog_inline_system_prompt_overrides_file() {
     let h = Hcom::new();
