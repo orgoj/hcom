@@ -789,6 +789,32 @@ class App(unittest.TestCase):
     def shown(self):
         return list(self.app.tree.get_children())
 
+    def test_disabled_agent_is_struck_through_and_hidden_by_default(self):
+        catalog = CATALOG + [{"name": "a4", "cli": "claude", "source": "global", "dir": "/w", "disabled": True}]
+        self.patch("hcom_json", lambda *args: catalog if args[:2] == ("agent", "list") else LIVE)
+        self.app.refresh()
+        self.app.update()
+        self.assertTrue(self.app.hide_disabled.get())
+        self.assertNotIn("a4|", self.shown())
+        self.app.hide_disabled.set(False)
+        self.app.render()
+        self.assertEqual(self.app.tree.item("a4|", "tags"), ("disabled",))
+        self.assertEqual(self.app.tree.item("a3|", "tags"), ("stopped",))
+        self.assertIn("overstrike", str(self.app.tree.tag_configure("disabled", "font")))
+        self.app._on_close()
+        self.app = gui.App()
+        self.app.update()
+        self.assertFalse(self.app.hide_disabled.get())
+        self.assertIn("a4|", self.shown())
+
+    def test_running_instance_of_disabled_agent_stays_visible(self):
+        catalog = [dict(CATALOG[0], disabled=True)] + CATALOG[1:]
+        self.patch("hcom_json", lambda *args: catalog if args[:2] == ("agent", "list") else LIVE)
+        self.app.refresh()
+        self.app.update()
+        self.assertIn("a1|a1", self.shown())
+        self.assertEqual(self.app.tree.item("a1|a1", "tags"), ("",))
+
     def test_text_filter_matches_agent_instance_dir_and_groups(self):
         everything = self.shown()
         self.app.filter_entry.insert("end", "WDT")  # the table narrows at once

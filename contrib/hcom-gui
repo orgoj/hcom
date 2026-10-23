@@ -26,7 +26,8 @@ in the button label ("Zed (z)").
 made with the Columns… button is kept in gui-state.json and takes precedence (Reset drops it).
 Heading clicks cycle the sort: ascending, descending, default. The Filter field matches
 agent, instance, dir and groups (case-insensitive).
-Window layout, columns, sort and filters (Running only, Blocked only) are kept in
+A disabled catalog agent's row is struck through; Hide disabled (on by default) hides it.
+Window layout, columns, sort and filters (Running only, Blocked only, Hide disabled) are kept in
 ~/.hcom/gui-state.json.
 """
 
@@ -316,6 +317,7 @@ def build_rows(catalog, live):
             # A roaming agent resolves its project from the cwd: run in the instance's directory.
             "cwd": (i.get("directory") if d and d.get("roaming") else None)
                    or (catalog_cwd(d["source"]) if d else HOME),
+            "disabled": False,  # a running instance is shown even when its agent is disabled
         })
     for d in catalog:
         names = running.get(d["name"], [])
@@ -340,6 +342,7 @@ def build_rows(catalog, live):
             "dir": d.get("dir") or "",
             "config": catalog_label(d["source"]),
             "cwd": catalog_cwd(d["source"]),
+            "disabled": bool(d.get("disabled")),
         })
     return rows
 
@@ -468,6 +471,9 @@ class App(tk.Tk):
         self.blocked_only = tk.BooleanVar(value=False)
         ttk.Checkbutton(toolbar, text="Blocked only", variable=self.blocked_only,
                         command=self.render).pack(side=tk.RIGHT, padx=10)
+        self.hide_disabled = tk.BooleanVar(value=True)
+        ttk.Checkbutton(toolbar, text="Hide disabled", variable=self.hide_disabled,
+                        command=self.render).pack(side=tk.RIGHT, padx=10)
         self.filter_text = tk.StringVar()
         self.filter_text.trace_add("write", lambda *_: self.render())
         self.filter_entry = ttk.Entry(toolbar, textvariable=self.filter_text, width=16)
@@ -488,6 +494,7 @@ class App(tk.Tk):
         self.tree.tag_configure("blocked", foreground="#d97706", font=("DejaVu Sans", 11, "bold"))
         self.tree.tag_configure("error", foreground="red")
         self.tree.tag_configure("stopped", foreground="#888888")
+        self.tree.tag_configure("disabled", foreground="#aaaaaa", font=("DejaVu Sans", 11, "overstrike"))
         self.paned.add(frame, weight=3)
 
         frame = ttk.Frame(self.paned)
@@ -654,12 +661,14 @@ class App(tk.Tk):
                 continue
             if self.blocked_only.get() and r["state"] != "blocked":
                 continue
+            if self.hide_disabled.get() and r["disabled"]:
+                continue
             if needle and needle not in " ".join([r["agent"], r["instance"], r["dir"], tilde(r["dir"]),
                                                   *r["groups"]]).lower():
                 continue
             # A catalog row has a status only while the agent runs under other names.
             tag = r["state"] if r["state"] in ("active", "blocked", "error") else (
-                "" if r["instance"] or r["status"] else "stopped")
+                "disabled" if r["disabled"] else "" if r["instance"] or r["status"] else "stopped")
             values = [cell(c, r) for c, _, _ in self.columns]
             self.tree.insert("", tk.END, iid=iid, values=values, tags=(tag,))
         if self.select_next and self.tree.exists(self.select_next):  # started with --as
@@ -942,6 +951,7 @@ class App(tk.Tk):
         self.geometry(state.get("geometry", "1200x700"))
         self.running_only.set(state.get("running_only", False))
         self.blocked_only.set(state.get("blocked_only", False))
+        self.hide_disabled.set(state.get("hide_disabled", True))
         if state.get("sort_col") in self.tree["columns"]:
             self.sort_col, self.sort_reverse = state["sort_col"], bool(state.get("sort_reverse"))
 
@@ -964,6 +974,7 @@ class App(tk.Tk):
             "sash_pos": self.paned.sashpos(0),
             "running_only": self.running_only.get(),
             "blocked_only": self.blocked_only.get(),
+            "hide_disabled": self.hide_disabled.get(),
             "sort_col": self.sort_col,
             "sort_reverse": self.sort_reverse,
             "column_widths": {c: self.tree.column(c, "width") for c in self.tree["columns"]},

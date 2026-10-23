@@ -38,11 +38,13 @@ now at the same position in the current sort and filter is selected, or the last
 was the last one; after Start or Restart the selection stays on that agent instead. Clicking a column heading sorts ascending (▲), again descending
 (▼), a third time back to the default order (agent, then instance). Running only hides
 catalog rows without an instance; Blocked only lists only instances in `blocked` status.
+A disabled catalog agent's row (`"disabled": true`) is struck through in light grey; Hide
+disabled, on by default, hides it. A running instance of a disabled agent stays visible.
 The Filter field narrows the table as you type to rows whose agent, instance, directory
 or catalog groups contain the text (case-insensitive); it combines with both checkboxes.
 Up/Down move through the rows from anywhere in the main window (e.g. the Filter field)
 and give the table keyboard focus.
-Sort, window layout and both filters are kept in `~/.hcom/gui-state.json`.
+Sort, window layout and the filters are kept in `~/.hcom/gui-state.json`.
 
 ```sh
 ln -s "$PWD/contrib/hcom-gui" ~/.local/bin/hcom-gui
