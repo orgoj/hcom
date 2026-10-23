@@ -1,9 +1,10 @@
 ---
 id: TASK-38
-title: 'hcom-gui: disabled catalog agents shown grey, hidden by default'
+title: 'hcom-gui: disabled catalog agents shown struck through, hidden by default'
 status: To Do
 assignee: []
 created_date: '2026-10-19 20:07'
+updated_date: '2026-10-23 14:11'
 labels: []
 dependencies: []
 type: feature
@@ -18,8 +19,14 @@ hcom-gui fills its table from 'hcom agent list --all --json', which by design (T
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A disabled catalog agent's row is rendered grey, distinct from enabled stopped agents
-- [ ] #2 A 'Hide disabled' filter hides disabled agents' rows; it is on by default
-- [ ] #3 The 'Hide disabled' choice persists in ~/.hcom/gui-state.json
-- [ ] #4 contrib/test-hcom-gui covers the grey rendering and the filter in both states
+- [ ] #1 A 'Hide disabled' filter hides disabled agents' rows; it is on by default
+- [ ] #2 The 'Hide disabled' choice persists in ~/.hcom/gui-state.json
+- [ ] #3 A disabled catalog agent's row is rendered in a struck-through (overstrike) light-grey font, distinct from enabled stopped agents (plain #888888 grey)
+- [ ] #4 contrib/test-hcom-gui covers the struck-through rendering and the filter in both states
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Style decided by the user: struck-through font, because stopped rows are already grey.
+<!-- SECTION:NOTES:END -->
