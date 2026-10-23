@@ -30,7 +30,15 @@ transcripts lack the window, so 1M is assumed). Quota is the used share of Codex
 primary (5h) rate limit from the same transcript. The Branch and Git columns show each directory's current branch and its
 state: `*` uncommitted changes, `↑2 ↓1` commits ahead of/behind the upstream (one
 `git status` per directory on every refresh). Where is the terminal an
-instance was launched in, with the Herdr workspace/tab (`herdr: cc-hcom/hcom_dev`, `kitty`). A catalog agent running only under other names (`--as`) keeps
+instance was launched in, with the Herdr workspace/tab (`herdr: cc-hcom/hcom_dev`, `kitty`).
+The usage columns come from the life and message events of the live database (`hcom events`;
+history restarts after `hcom reset`), per instance name, and a catalog row uses its agent name:
+Starts counts `created` events, Runtime sums each session from `created` to the next `stopped`
+(a running instance's open session counts up to now), Handoffs counts `handoff` events (relaunch
+attempts started by `hcom handoff`), Msgs is sent/received messages, Last start the latest
+`created`, Stops the `stopped` events as `total: Nk Ni Ne` (killed, idle autokill, exit = every other end: the CLI exited, terminal closed, cleanup), Failed the
+`launch_failed` and `launch_blocked` events. A row without any events shows empty cells. Events
+reload at most every `stats_seconds` (default 60) in `gui.json`. A catalog agent running only under other names (`--as`) keeps
 its row, not greyed, with Status `running as <names>`. After Start with `--as`, the new
 instance is selected once it appears, unless another row was selected meanwhile. When the
 selected row disappears (Kill, Kill group, the instance ended, a filter hides it), the row
@@ -57,6 +65,7 @@ replaced by fixtures, commands are recorded, not run). Optional `~/.hcom/gui.jso
 ```json
 {
   "refresh_seconds": 5,
+  "stats_seconds": 60,
   "open_with": [
     {"label": "Zed",  "cmd": ["zed", "{dir}"], "key": "z"},
     {"label": "gitg", "cmd": ["gitg"], "cwd": "{dir}", "key": "g"},

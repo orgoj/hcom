@@ -1,10 +1,11 @@
 ---
 id: TASK-42
 title: 'hcom-gui: agent usage statistics columns'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@hcom_dev'
 created_date: '2026-10-23 13:34'
-updated_date: '2026-10-23 14:07'
+updated_date: '2026-10-23 14:56'
 labels: []
 dependencies:
   - TASK-42.1
@@ -27,11 +28,11 @@ Risks: event volume (thousands of life/message rows) must not slow the 5 s refre
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Columns Starts, Runtime, Handoffs, Msgs (sent/received), Last start, Stops (by reason: killed/idle/exit), Failed launches exist in COLUMNS, are selectable in the column dialog and gui.json columns, and sort numerically (Last start by time)
-- [ ] #2 Values are computed from life and message events of the live database via the hcom CLI and aggregated per instance name; a catalog row without any events shows empty cells
-- [ ] #3 Runtime counts a currently running session up to now; Handoffs counts only events carrying the TASK-42.1 handoff marker
-- [ ] #4 Statistics are recomputed at most once per a configurable interval (gui.json, default 60 s), not on every table refresh
-- [ ] #5 contrib/test-hcom-gui covers each column from fixture events, including a running session and a row without events; contrib/README.md documents the columns and the interval
+- [x] #1 Columns Starts, Runtime, Handoffs, Msgs (sent/received), Last start, Stops (by reason: killed/idle/exit), Failed launches exist in COLUMNS, are selectable in the column dialog and gui.json columns, and sort numerically (Last start by time)
+- [x] #2 Values are computed from life and message events of the live database via the hcom CLI and aggregated per instance name; a catalog row without any events shows empty cells
+- [x] #3 Runtime counts a currently running session up to now; Handoffs counts only events carrying the TASK-42.1 handoff marker
+- [x] #4 Statistics are recomputed at most once per a configurable interval (gui.json, default 60 s), not on every table refresh
+- [x] #5 contrib/test-hcom-gui covers each column from fixture events, including a running session and a row without events; contrib/README.md documents the columns and the interval
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -42,3 +43,15 @@ Risks: event volume (thousands of life/message rows) must not slow the 5 s refre
 3. Add columns, sorting, column-dialog entries.
 4. Fixture-based tests in contrib/test-hcom-gui, README update.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Stops buckets as implemented: killed (reason killed, not by idle_kill), idle (by idle_kill, or legacy reason idle), exit (every other stop: CLI exit, terminal closed, cleanup). Msgs sent/received from hcom events --type message --full (user decision).
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+hcom-gui usage columns Starts, Runtime, Handoffs, Msgs (sent/received), Last start, Stops (killed/idle/exit), Failed, computed from hcom events life + message --full of the live DB per instance name (catalog row: agent name); events reload at most every stats_seconds (default 60), a failed load logs and retries after the interval. Verified with contrib/test-hcom-gui (86 OK) and a live run (load 0.6s, aggregation 24ms); reviewed by agent_review.
+<!-- SECTION:FINAL_SUMMARY:END -->

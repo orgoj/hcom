@@ -22,6 +22,7 @@ other terminals run DEFAULT_ATTACH.
 "key" (any button) is a Tk event sequence bound in the table, e.g. "z" or "<F2>", shown
 in the button label ("Zed (z)").
 "open_with" programs also start while an hcom command runs; a quick non-zero exit is logged.
+"stats_seconds" (default 60) is how often the usage columns reload life and message events.
 "columns" selects and orders the table columns (keys of COLUMNS; default: all); a choice
 made with the Columns… button is kept in gui-state.json and takes precedence (Reset drops it).
 Heading clicks cycle the sort: ascending, descending, default. The Filter field matches
@@ -31,6 +32,7 @@ Window layout, columns, sort and filters (Running only, Blocked only, Hide disab
 ~/.hcom/gui-state.json.
 """
 
+import datetime
 import json
 import os
 import shutil
@@ -106,7 +108,15 @@ COLUMNS = [
     ("git", "Git", 80),
     ("where", "Where", 160),
     ("config", "Config", 260),
+    ("starts", "Starts", 70),
+    ("runtime", "Runtime", 80),
+    ("handoffs", "Handoffs", 80),
+    ("msgs", "Msgs", 80),
+    ("last_start", "Last start", 110),
+    ("stops", "Stops", 110),
+    ("failed", "Failed", 70),
 ]
+STATS = ("starts", "runtime", "handoffs", "msgs", "last_start", "stops", "failed")
 
 # A detached program that exits non-zero within this time gets its exit code and stderr logged.
 DETACH_WATCH_SECONDS = 5
@@ -141,6 +151,15 @@ def cell(col, row):
         return f"{round(value / 1000)}k {round(100 * value / row['context_window'])}%"
     if col == "quota" and value != "":
         return f"{round(value)}%"
+    if col == "runtime" and value != "":
+        return age(value)
+    if col == "msgs" and value != "":
+        return f"{row['sent']}/{row['received']}"
+    if col == "last_start" and value != "":
+        return time.strftime("%m-%d %H:%M", time.localtime(value))
+    if col == "stops" and value != "":
+        killed, idle, other = row["stop_kinds"]
+        return f"{value}: {killed}k {idle}i {other}e"
     return value
 
 
@@ -280,6 +299,77 @@ def add_usage(rows):
     return rows
 
 
+def hcom_jsonl(*args):
+    out = subprocess.run(["hcom", *args], cwd=HOME, env=HCOM_ENV, capture_output=True, text=True, timeout=60)
+    if out.returncode != 0:
+        raise RuntimeError(f"hcom {' '.join(args)}: {out.stderr.strip() or out.returncode}")
+    return [json.loads(line) for line in out.stdout.splitlines() if line.strip()]
+
+
+def load_events():
+    """Every life and message event of the live database (messages with their recipients)."""
+    return (hcom_jsonl("events", "--type", "life", "--last", "100000000"),
+            hcom_jsonl("events", "--type", "message", "--full", "--last", "100000000"))
+
+
+def ts_epoch(ts):
+    """Event timestamps are UTC without an offset."""
+    return int(datetime.datetime.fromisoformat(ts).replace(tzinfo=datetime.timezone.utc).timestamp())
+
+
+def event_stats(life, messages, running, now):
+    """Usage per instance name. A session runs from its created event to the next stopped
+    one; one still open counts up to now while the instance is running."""
+    stats, opened = {}, {}
+
+    def of(name):
+        return stats.setdefault(name, {"starts": 0, "runtime": 0, "handoffs": 0, "sent": 0, "received": 0,
+                                       "last_start": "", "stops": 0, "stop_kinds": [0, 0, 0], "failed": 0})
+
+    for e in sorted(life, key=lambda e: e["id"]):
+        data, name = e.get("data") or {}, e["instance"]
+        action = data.get("action")
+        if action == "created":
+            st, t = of(name), ts_epoch(e["ts"])
+            st["starts"] += 1
+            st["last_start"] = opened[name] = t
+        elif action == "stopped":
+            st = of(name)
+            st["stops"] += 1
+            # Idle autokill stops with reason "killed" by "idle_kill"; older events used reason "idle".
+            reason = data.get("reason") or ""
+            idle = data.get("by") == "idle_kill" or reason == "idle"
+            st["stop_kinds"][1 if idle else 0 if reason == "killed" else 2] += 1
+            if name in opened:
+                st["runtime"] += ts_epoch(e["ts"]) - opened.pop(name)
+        elif action == "handoff":
+            of(name)["handoffs"] += 1
+        elif action in ("launch_failed", "launch_blocked"):
+            of(name)["failed"] += 1
+    for name, t in opened.items():
+        if name in running:
+            stats[name]["runtime"] += max(0, now - t)
+    for m in messages:
+        data = m.get("data") or {}
+        of(data.get("from") or m["instance"])["sent"] += 1
+        for name in data.get("delivered_to") or []:
+            of(name)["received"] += 1
+    for st in stats.values():
+        st["msgs"] = st["sent"] + st["received"]
+    return stats
+
+
+def add_stats(rows, events):
+    """Fill the usage columns from cached events: an instance row by its name, a catalog
+    row by its agent name. Rows without events keep empty cells."""
+    stats = event_stats(*events, {r["instance"] for r in rows if r["instance"]}, int(time.time())) \
+        if events else {}
+    for r in rows:
+        st = stats.get(r["instance"] or r["agent"])
+        r.update(st or dict.fromkeys(STATS, ""))
+    return rows
+
+
 def where(lc):
     """Terminal of an instance's launch_context, with the Herdr workspace/tab: "herdr: ws/tab"."""
     terminal = lc.get("terminal_preset_effective") or ""
@@ -411,6 +501,7 @@ class App(tk.Tk):
 
         config = self._load_json(CONFIG_FILE)
         self.refresh_ms = int(float(config.get("refresh_seconds", 5)) * 1000)
+        self.stats_seconds = float(config.get("stats_seconds", 60))
         open_with = config.get("open_with", DEFAULT_OPEN_WITH)
         attach = {}
         for terminal, cmd in (config.get("attach") or {}).items():
@@ -434,6 +525,7 @@ class App(tk.Tk):
         self.sort_col, self.sort_reverse = None, False
         self.busy = self.refreshing = self.refresh_again = False
         self.timer = None
+        self.events, self.events_at = None, None  # cached (life, messages) for the usage columns
         self.last_error = None
         self.last_selected = None
         self.select_next = None  # row id selected once it appears (an instance started with --as)
@@ -592,18 +684,29 @@ class App(tk.Tk):
             self.timer = None
         self.refreshing = True
 
+        events = self.events
+        stats_due = self.events_at is None or time.monotonic() - self.events_at >= self.stats_seconds
+
         def work():
+            nonlocal events
+            if stats_due:
+                try:
+                    events = load_events()
+                except Exception as e:  # the usage columns keep the last events
+                    self.after(0, self.write_log, f"ERROR: usage statistics: {e}")
             try:
-                result = add_usage(add_git(build_rows(hcom_json("agent", "list", "--all", "--json"),
-                                                        hcom_json("list", "--json"))))
+                result = add_stats(add_usage(add_git(build_rows(hcom_json("agent", "list", "--all", "--json"),
+                                                                  hcom_json("list", "--json")))), events)
             except Exception as e:  # shown in the log, next refresh retries
                 result = e
-            self.after(0, self._apply, result)
+            self.after(0, self._apply, result, stats_due, events)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _apply(self, result):
+    def _apply(self, result, stats_due=False, events=None):
         self.refreshing = False
+        if stats_due:  # also after a failed load, so it retries only at the next interval
+            self.events, self.events_at = events, time.monotonic()
         if isinstance(result, Exception):
             if str(result) != self.last_error:
                 self.write_log(f"ERROR: {result}")

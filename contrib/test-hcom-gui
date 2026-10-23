@@ -47,6 +47,29 @@ LIVE = [
 COMMANDS = [{"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": True, "cwd": "~/proj"}]
 
 
+def life(eid, instance, ts, action, **data):
+    return {"id": eid, "instance": instance, "ts": ts, "type": "life", "data": {"action": action, **data}}
+
+
+# a1 runs (its open session counts up to now); a3 only has a catalog row and is stopped.
+LIFE = [
+    life(1, "a1", "2026-10-01T10:00:00", "created"),
+    life(2, "a1", "2026-10-01T10:01:40", "stopped", reason="killed", by="cli"),
+    life(3, "a3", "2026-10-01T11:00:00", "created"),
+    life(4, "a3", "2026-10-01T11:00:30", "stopped", reason="killed", by="idle_kill"),
+    life(5, "a3", "2026-10-01T12:00:00", "launch_failed"),
+    life(6, "a3", "2026-10-01T12:05:00", "launch_blocked"),
+    life(7, "a1", "2026-10-02T09:00:00", "handoff", by="a1"),
+    life(8, "a3", "2026-10-02T09:30:00", "stopped", reason="exit:prompt_input_exit"),
+    life(9, "a1", "2026-10-02T10:00:00", "created"),
+    life(10, "a3", "2026-10-02T11:00:00", "created"),
+]
+MESSAGES = [
+    {"id": 20, "instance": "a1", "type": "message", "data": {"from": "a1", "delivered_to": ["a3"]}},
+    {"id": 21, "instance": "solo", "type": "message", "data": {"from": "solo", "delivered_to": ["a1", "a2x"]}},
+]
+
+
 def fake_hcom_json(*args):
     return CATALOG if args[:2] == ("agent", "list") else LIVE
 
@@ -181,6 +204,29 @@ class ContextUsage(unittest.TestCase):
         self.assertEqual(gui.transcript_usage("claude", os.path.join(self.dir.name, "missing.jsonl")), {})
 
 
+class Stats(unittest.TestCase):
+    NOW = gui.ts_epoch("2026-10-02T10:10:00")
+
+    def test_counts_runtime_handoffs_messages_stops_and_failures(self):
+        stats = gui.event_stats(LIFE, MESSAGES, {"a1"}, self.NOW)
+        a1, a3 = stats["a1"], stats["a3"]
+        self.assertEqual((a1["starts"], a1["runtime"], a1["handoffs"]), (2, 100 + 600, 1))
+        self.assertEqual((a1["sent"], a1["received"], a1["msgs"]), (1, 1, 2))
+        self.assertEqual(a1["last_start"], gui.ts_epoch("2026-10-02T10:00:00"))
+        self.assertEqual((a1["stops"], a1["stop_kinds"], a1["failed"]), (1, [1, 0, 0], 0))
+        # a3 is not running: its open session adds nothing.
+        self.assertEqual((a3["starts"], a3["runtime"], a3["handoffs"]), (2, 30, 0))
+        self.assertEqual((a3["stops"], a3["stop_kinds"], a3["failed"]), (2, [0, 1, 1], 2))
+        self.assertEqual((a3["sent"], a3["received"]), (0, 1))
+        self.assertEqual((stats["a2x"]["sent"], stats["a2x"]["received"]), (0, 1))
+
+    def test_rows_without_events_stay_empty(self):
+        rows = gui.add_stats([{"agent": "", "instance": "nobody"}], (LIFE, MESSAGES))
+        self.assertEqual([rows[0][c] for c in gui.STATS], [""] * len(gui.STATS))
+        rows = gui.add_stats([{"agent": "a3", "instance": ""}], None)
+        self.assertEqual(rows[0]["starts"], "")
+
+
 class App(unittest.TestCase):
     def setUp(self):
         os.makedirs(os.path.join(REPO, "tmp"), exist_ok=True)
@@ -191,6 +237,7 @@ class App(unittest.TestCase):
         self.patch("CONFIG_FILE", config)
         self.patch("STATE_FILE", os.path.join(self.dir.name, "gui-state.json"))
         self.patch("hcom_json", fake_hcom_json)
+        self.patch("load_events", lambda: (LIFE, MESSAGES))
         self.patch("git_state", lambda d: ("main", "* ↑1") if d == "/w" else ("", ""))
         self.patch("transcript_usage", lambda tool, path: {"context": (62000, 1_000_000), "quota": 48.6}
                    if path == "/t/a1.jsonl" else {})
@@ -788,6 +835,67 @@ class App(unittest.TestCase):
 
     def shown(self):
         return list(self.app.tree.get_children())
+
+    def value(self, iid, col):
+        return self.app.tree.set(iid, col)
+
+    def test_usage_columns_show_counts_and_sort_numerically(self):
+        self.assertEqual(self.value("a1|a1", "starts"), "2")
+        self.assertEqual(self.value("a1|a1", "handoffs"), "1")
+        self.assertEqual(self.value("a1|a1", "msgs"), "1/1")
+        self.assertEqual(self.value("a3|", "stops"), "2: 0k 1i 1e")
+        self.assertEqual(self.value("a3|", "failed"), "2")
+        self.assertEqual(self.value("a3|", "runtime"), "30s")
+        self.assertEqual(self.value("a1|a1", "last_start"),
+                         time.strftime("%m-%d %H:%M", time.localtime(gui.ts_epoch("2026-10-02T10:00:00"))))
+        self.assertEqual((self.value("|solo", "starts"), self.value("|solo", "msgs")), ("0", "1/0"))
+        self.assertEqual(self.value("a2|", "starts"), "")  # no events at all
+        self.app.sort_by("failed")
+        shown = [self.value(iid, "failed") for iid in self.app.tree.get_children()]
+        self.assertEqual(shown, ["0", "0", "0", "2", ""])  # numeric, empty cells last
+
+    def test_usage_events_reload_only_after_the_interval(self):
+        calls = []
+        self.patch("load_events", lambda: calls.append(1) or (LIFE, MESSAGES))
+        self.app.refresh()
+        self.app.update()
+        self.assertEqual(calls, [])
+        self.app.events_at -= self.app.stats_seconds
+        self.app.refresh()
+        self.app.update()
+        self.assertEqual(calls, [1])
+
+    def test_failed_event_load_keeps_the_table_and_logs(self):
+        def fail():
+            raise RuntimeError("boom")
+
+        self.patch("load_events", fail)
+        self.app.events_at -= self.app.stats_seconds
+        self.app.refresh()
+        self.app.update()
+        self.assertIn("ERROR: usage statistics: boom", self.app.log.get("1.0", "end"))
+        self.assertEqual(self.value("a1|a1", "starts"), "2")
+
+    def test_failed_first_event_load_retries_only_after_the_interval(self):
+        calls = []
+
+        def fail():
+            calls.append(1)
+            raise RuntimeError("boom")
+
+        self.patch("load_events", fail)
+        self.app.destroy()
+        self.app = gui.App()
+        self.app.update()
+        self.assertEqual(calls, [1])
+        self.assertEqual(self.value("a1|a1", "starts"), "")
+        self.app.refresh()
+        self.app.update()
+        self.assertEqual(calls, [1])
+        self.app.events_at -= self.app.stats_seconds
+        self.app.refresh()
+        self.app.update()
+        self.assertEqual(calls, [1, 1])
 
     def test_disabled_agent_is_struck_through_and_hidden_by_default(self):
         catalog = CATALOG + [{"name": "a4", "cli": "claude", "source": "global", "dir": "/w", "disabled": True}]
