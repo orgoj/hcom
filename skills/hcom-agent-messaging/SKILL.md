@@ -87,6 +87,8 @@ tell any agent:
 
 **Disabled catalog agent**: `"disabled": true` in `agents.json` (entry or `defaults`; a later layer's `false` re-enables) makes hcom treat the agent as undefined: no launch, send autostart, group membership or listing; `hcom agent list --all` shows it marked `disabled`. A running instance keeps receiving messages and can be killed by name.
 
+**Catalog sidecar**: `<stem>.local.json` next to any catalog (`agents.json` → `agents.local.json`, usually gitignored) is merged into it for temporary changes: same fields, may add or disable agents, same scope as its catalog, no `imports`. `hcom agent show <name>` lists it under `sources`.
+
 run `hcom --help` for full command syntax and flags.
 
 ---

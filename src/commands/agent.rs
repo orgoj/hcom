@@ -92,6 +92,11 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   addressable, by `hcom agent` and by `hcom send`, from inside its project, and
   elsewhere only where a catalog in scope imports it - a selective import's \"agents\" list keeps the project's other agents
   private to that project.
+  Sidecar: <stem>.local.json beside any catalog (agents.json -> agents.local.json,
+  e.g. gitignored for temporary changes) is merged into it as its strongest part:
+  defaults and entries merge like a later catalog, it may add or disable agents,
+  and it keeps that catalog's scope. It may not use \"imports\"; cli_overrides only
+  beside the global catalog. `hcom agent show` lists it under sources.
   A sibling agents/<name>/SOUL.md also defines an agent and is appended to its
   system instructions after the catalog system_prompt. Bundle-local skills are
   discovered from agents/<name>/skills/*/SKILL.md. AGENTS.md is not a fallback.
@@ -409,6 +414,8 @@ struct CatalogFile {
     /// Agents this file's `defaults` apply to: its own entries plus every agent
     /// it brought in, by import or as an enclosing project catalog.
     defaults_apply_to: BTreeSet<String>,
+    /// The `<stem>.local.json` merged into `catalog`, when present.
+    sidecar: Option<PathBuf>,
 }
 
 /// Expand `~` and `$VAR`, then absolutize against `base`.
@@ -495,7 +502,101 @@ fn home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// `<stem>.local.json` next to a catalog: a gitignored override merged into it.
+fn sidecar_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = name.strip_suffix(".json").unwrap_or(&name);
+    path.with_file_name(format!("{stem}.local.json"))
+}
+
 fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogFile> {
+    let mut catalog = parse_catalog(path, base, &label)?;
+    let mut defaults_apply_to: BTreeSet<String> = catalog.agents.keys().cloned().collect();
+    let sidecar = sidecar_path(path);
+    let sidecar = if sidecar.is_file() {
+        let over = parse_catalog(&sidecar, base, &label)?;
+        if !over.imports.is_empty() {
+            bail!(
+                "imports are not supported in a sidecar catalog: {}",
+                sidecar.display()
+            );
+        }
+        catalog.defaults.merge_from(&over.defaults);
+        for (name, def) in &over.agents {
+            defaults_apply_to.insert(name.clone());
+            catalog
+                .agents
+                .entry(name.clone())
+                .or_default()
+                .merge_from(def);
+        }
+        catalog.cli_overrides.extend(over.cli_overrides);
+        Some(sidecar)
+    } else {
+        None
+    };
+
+    let agents_dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("agents");
+    if agents_dir.is_dir() {
+        for entry in std::fs::read_dir(&agents_dir)
+            .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", agents_dir.display()))?
+        {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let dir = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path());
+            let instructions = dir.join("SOUL.md");
+            let instructions_declared = match std::fs::symlink_metadata(&instructions) {
+                Ok(_) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    bail!(
+                        "cannot inspect agent bundle instructions {}: {e}",
+                        instructions.display()
+                    );
+                }
+            };
+            if instructions_declared {
+                if !crate::identity::is_valid_base_name(&name) {
+                    bail!("invalid agent bundle name '{}': {}", name, dir.display());
+                }
+                catalog.agents.entry(name.clone()).or_default();
+                defaults_apply_to.insert(name.clone());
+            }
+            if let Some(def) = catalog.agents.get_mut(&name) {
+                def.agent_dir = Some(dir.to_string_lossy().into_owned());
+                if instructions_declared {
+                    let content = std::fs::read_to_string(&instructions).map_err(|e| {
+                        anyhow::anyhow!(
+                            "cannot read agent bundle instructions {}: {e}",
+                            instructions.display()
+                        )
+                    })?;
+                    def.instructions = Some(instructions.to_string_lossy().into_owned());
+                    def.instructions_content = Some(content);
+                }
+            }
+        }
+    }
+    Ok(CatalogFile {
+        path: path.to_path_buf(),
+        label,
+        catalog,
+        defaults_apply_to,
+        sidecar,
+    })
+}
+
+/// Parse and validate one catalog file; a missing file is an empty catalog.
+fn parse_catalog(path: &Path, base: &Path, label: &str) -> Result<Catalog> {
     let mut catalog: Catalog = if path.is_file() {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
@@ -583,58 +684,7 @@ fn load_catalog_file(path: &Path, base: &Path, label: String) -> Result<CatalogF
         validate_idle_kill(def, &format!("agent '{name}'"), path)?;
     }
 
-    let agents_dir = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("agents");
-    if agents_dir.is_dir() {
-        for entry in std::fs::read_dir(&agents_dir)
-            .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", agents_dir.display()))?
-        {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let dir = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path());
-            let instructions = dir.join("SOUL.md");
-            let instructions_declared = match std::fs::symlink_metadata(&instructions) {
-                Ok(_) => true,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-                Err(e) => {
-                    bail!(
-                        "cannot inspect agent bundle instructions {}: {e}",
-                        instructions.display()
-                    );
-                }
-            };
-            if instructions_declared {
-                if !crate::identity::is_valid_base_name(&name) {
-                    bail!("invalid agent bundle name '{}': {}", name, dir.display());
-                }
-                catalog.agents.entry(name.clone()).or_default();
-            }
-            if let Some(def) = catalog.agents.get_mut(&name) {
-                def.agent_dir = Some(dir.to_string_lossy().into_owned());
-                if instructions_declared {
-                    let content = std::fs::read_to_string(&instructions).map_err(|e| {
-                        anyhow::anyhow!(
-                            "cannot read agent bundle instructions {}: {e}",
-                            instructions.display()
-                        )
-                    })?;
-                    def.instructions = Some(instructions.to_string_lossy().into_owned());
-                    def.instructions_content = Some(content);
-                }
-            }
-        }
-    }
-    Ok(CatalogFile {
-        path: path.to_path_buf(),
-        label,
-        defaults_apply_to: catalog.agents.keys().cloned().collect(),
-        catalog,
-    })
+    Ok(catalog)
 }
 
 /// Load a catalog and its imports in precedence order. Imports are expanded
@@ -822,7 +872,7 @@ impl Catalogs {
 
         let global = global_catalog_path();
         let global_bundles = global.parent().is_some_and(|p| p.join("agents").is_dir());
-        if global.is_file() || global_bundles {
+        if global.is_file() || global_bundles || sidecar_path(&global).is_file() {
             let base = home_dir().unwrap_or_else(|| PathBuf::from("."));
             if global.is_file() {
                 base_files.extend(load_catalog_tree_with_mode(
@@ -1028,7 +1078,7 @@ impl Catalogs {
         self.base_files
             .iter()
             .chain(&self.project_files)
-            .map(|f| f.path.as_path())
+            .flat_map(|f| std::iter::once(f.path.as_path()).chain(f.sidecar.as_deref()))
             .filter(|path| path.is_file())
             .collect()
     }
@@ -3585,6 +3635,7 @@ mod tests {
                     label: label.to_string(),
                     defaults_apply_to: catalog.agents.keys().cloned().collect(),
                     catalog,
+                    sidecar: None,
                 }
             })
             .collect::<Vec<_>>();

@@ -408,6 +408,8 @@ A catalog can import agents from other files. Paths resolve against the importin
 
 Without `agents`, an import brings in every agent of that file; with a list, the others stay private to it. A project agent is reachable by `hcom agent` and `hcom send` inside its project, and elsewhere only where a catalog in scope imports it.
 
+For temporary changes without touching a tracked file, put a sidecar `<stem>.local.json` next to any catalog (`agents.json` → `agents.local.json`) and gitignore it. hcom merges it into that catalog as its strongest part: `defaults` and entries merge like a later catalog (scalars replace, `env`/`args` merge), it may add agents or set `"disabled": true`, and it keeps the catalog's scope (an import's `agents` list and project scope apply to it too). A sidecar may not declare `imports`, and `cli_overrides` work only in the global catalog's sidecar. `hcom agent show <name>` lists it under `sources`; `hcom agent list --json` keeps the catalog's own `source`. `~/.hcom/agents.local.json` is read even without `~/.hcom/agents.json`.
+
 #### Groups
 
 `"groups": ["review"]` puts an agent in a catalog group, separate from the messaging `tag`. `hcom agent @review` launches every member, including agents a selective import keeps private. `hcom send @review -- text` reaches the members in scope and starts stopped ones. A running agent or catalog agent named `review` takes precedence over the group.
@@ -430,7 +432,7 @@ Only the global catalog accepts `"cli_overrides": {"codex": "claude"}`. It maps 
 
 #### Environment and handoff
 
-Every launched agent gets `HCOM_INSTANCE_NAME` (its instance name) and `HCOM_AGENT_NAME` (the catalog entry it came from; they differ under `--as` and for roaming agents). An agent started by `hcom agent` or send autostart can restart itself in a clean session with `hcom handoff <prompt>`, keeping its name and catalog entry.
+Every launched agent gets `HCOM_INSTANCE_NAME` (its instance name) and `HCOM_AGENT_NAME` (the catalog entry it came from; they differ under `--as` and for roaming agents). An agent started by `hcom agent` or send autostart can restart itself in a clean session with `hcom handoff <prompt>`, keeping its name and catalog entry. Each handoff that passes validation logs a life event with action `handoff` when the relaunch starts (`hcom events --action handoff`); it counts attempts, and a successor that fails afterwards is reported in `~/.hcom/logs/handoff-<name>.log`.
 
 </details>
 

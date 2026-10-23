@@ -28,8 +28,8 @@ pub struct HandoffArgs {
     pub dry_run: bool,
 }
 
-pub fn cmd_handoff(_db: &HcomDb, args: &HandoffArgs, ctx: Option<&CommandContext>) -> i32 {
-    match run(args, ctx) {
+pub fn cmd_handoff(db: &HcomDb, args: &HandoffArgs, ctx: Option<&CommandContext>) -> i32 {
+    match run(db, args, ctx) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("Error: {e:#}");
@@ -38,7 +38,7 @@ pub fn cmd_handoff(_db: &HcomDb, args: &HandoffArgs, ctx: Option<&CommandContext
     }
 }
 
-fn run(args: &HandoffArgs, ctx: Option<&CommandContext>) -> anyhow::Result<i32> {
+fn run(db: &HcomDb, args: &HandoffArgs, ctx: Option<&CommandContext>) -> anyhow::Result<i32> {
     let Some((name, data)) = ctx
         .and_then(|c| c.identity.as_ref())
         .filter(|id| matches!(id.kind, SenderKind::Instance))
@@ -102,6 +102,13 @@ fn run(args: &HandoffArgs, ctx: Option<&CommandContext>) -> anyhow::Result<i32> 
         .stderr(log);
     crate::sys::process::detach_session(&mut relaunch);
     relaunch.spawn()?;
+    // Counts a validated relaunch attempt; a successor that fails later is
+    // reported in the handoff log and never becomes ready.
+    let _ = db.log_event(
+        "life",
+        &name,
+        &serde_json::json!({"action": "handoff", "by": name, "cli": args.cli}),
+    );
     println!(
         "Handoff started: '{name}' stops now and restarts in a clean session with your prompt. \
          End your turn. Log: {}",

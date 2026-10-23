@@ -19,7 +19,7 @@ const FILTER_HELP: &[HelpEntry] = &[
     ),
     (
         "  --action VAL",
-        "created | started | ready | stopped | batch_launched | launch_failed | launch_blocked",
+        "created | started | ready | stopped | handoff | batch_launched | launch_failed | launch_blocked",
     ),
     (
         "  --cmd PATTERN",
@@ -173,7 +173,7 @@ const EVENTS_SQL_REFERENCE: &[HelpEntry] = &[
     ),
     (
         "  life_action",
-        "created, started, ready, stopped, batch_launched, launch_failed, launch_blocked",
+        "created, started, ready, stopped, handoff, batch_launched, launch_failed, launch_blocked",
     ),
     ("", ""),
     (
@@ -528,6 +528,10 @@ const HANDOFF_HELP: &[HelpEntry] = &[
     (
         "",
         "Only for agents launched by hcom agent or send autostart. End your turn after it.",
+    ),
+    (
+        "",
+        "Logs life action 'handoff' once the relaunch starts; a failing successor is in logs/handoff-<name>.log.",
     ),
 ];
 
@@ -1312,7 +1316,8 @@ Commands:\n\
 \x20 config       Get/set global and per-agent settings (incl. idle_kill)\n\
 \x20 run          Execute workflow scripts\n\
 \x20 agent        Launch named agents from a JSON catalog (\"disabled\": true hides one;\n\
-\x20              roaming ones run as <name>_<project>_<hash>, <hash> = 3 digits)\n\
+\x20              roaming ones run as <name>_<project>_<hash>, <hash> = 3 digits;\n\
+\x20              <stem>.local.json beside a catalog overrides it)\n\
 \x20 relay        Cross-device sync + relay daemon\n\
 \x20 archive      Query past hcom sessions\n\
 \x20 reset        Archive and clear database\n\
@@ -1794,10 +1799,24 @@ mod tests {
     }
 
     #[test]
+    fn help_documents_catalog_sidecar() {
+        assert!(get_help_text().contains("<stem>.local.json beside a catalog overrides it)"));
+        let help = get_command_help("agent");
+        assert!(help.contains("Sidecar: <stem>.local.json beside any catalog"));
+        assert!(help.contains("It may not use \"imports\""));
+    }
+
+    #[test]
+    fn handoff_help_documents_the_life_event() {
+        assert!(get_command_help("handoff").contains("Logs life action 'handoff'"));
+        assert!(get_command_help("events").contains("stopped | handoff |"));
+    }
+
+    #[test]
     fn help_documents_hashed_roaming_instance_names() {
         assert!(
             get_help_text()
-                .contains("roaming ones run as <name>_<project>_<hash>, <hash> = 3 digits)")
+                .contains("roaming ones run as <name>_<project>_<hash>, <hash> = 3 digits;")
         );
         assert!(get_command_help("agent").contains("roots with the same basename differ"));
         assert!(get_command_help("agent").contains("<hash> a 3-digit"));

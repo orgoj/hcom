@@ -3599,6 +3599,33 @@ fn handoff_relaunches_the_same_catalog_agent_under_its_instance_name() {
         "stdout={stdout}"
     );
 
+    // Only a real handoff that passed validation logs the life action.
+    let handoffs = || -> i64 {
+        rusqlite::Connection::open(h.hcom_dir.join("hcom.db"))
+            .expect("open hcom db")
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE type = 'life' AND instance = 'rev2'
+                   AND json_extract(data, '$.action') = 'handoff'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count handoff events")
+    };
+    assert_eq!(handoffs(), 0, "dry-run must not log a handoff");
+    let catalog = h.path().join("agents.json");
+    let parked = h.path().join("agents.json.parked");
+    std::fs::rename(&catalog, &parked).expect("park catalog");
+    let (code, _stdout, stderr) = h.run_as_process(&process_id, ["handoff", "next"]);
+    std::fs::rename(&parked, &catalog).expect("restore catalog");
+    assert_eq!(code, 1, "unknown agent fails validation: {stderr}");
+    assert_eq!(handoffs(), 0, "failed validation must not log a handoff");
+    let (code, stdout, stderr) = h.run_as_process(&process_id, ["handoff", "next"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert_eq!(handoffs(), 1);
+    let (code, stdout, stderr) = h.run(["events", "--action", "handoff", "--all"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("\"action\":\"handoff\""), "stdout={stdout}");
+
     // An agent launched outside the catalog has no catalog name to relaunch.
     std::fs::remove_dir_all(h.path().join(".tmp/launch")).expect("clear launch directory");
     let (code, stdout, stderr) = h.run([
@@ -3730,6 +3757,24 @@ fn handoff_after_kill_and_resume_keeps_the_catalog_agent_of_an_as_instance() {
         stdout.contains("HCOM_AGENT_NAME=reviewer"),
         "stdout={stdout}"
     );
+
+    // A plain restart of a running agent is not a handoff.
+    let (code, stdout, stderr) = h.run(["agent", "reviewer", "--as", "rev3"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let mut agent = idle_kill_sleeper(&h);
+    make_idle_kill_row(&conn, "rev3", "listening", agent.id());
+    let (code, stdout, stderr) = h.run(["agent", "reviewer", "--as", "rev3", "--restart"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    agent.wait().expect("restarted agent exits");
+    let handoffs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM events WHERE type = 'life'
+               AND json_extract(data, '$.action') = 'handoff'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count handoff events");
+    assert_eq!(handoffs, 0);
 }
 
 #[test]
@@ -4184,6 +4229,226 @@ fn agent_group_dry_run_includes_agents_hidden_by_selective_import() {
     assert!(
         stdout.contains("group '@crew': 2 succeeded, 0 failed (2 total)"),
         "stdout={stdout}"
+    );
+}
+
+fn agent_names(stdout: &str) -> Vec<(String, String)> {
+    let rows: serde_json::Value = serde_json::from_str(stdout).expect("agent list JSON");
+    rows.as_array()
+        .expect("agent list array")
+        .iter()
+        .map(|r| {
+            (
+                r["name"].as_str().unwrap_or_default().to_string(),
+                r["source"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn agent_global_sidecar_merges_into_the_global_catalog() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"cli_overrides":{"codex":"claude"},
+            "defaults":{"model":"base-model"},
+            "agents":{
+            "a":{"cli":"claude","dir":"/tmp","model":"m1","env":{"A":"1"},"args":["--x"]},
+            "b":{"cli":"claude","dir":"/tmp"},
+            "gone":{"cli":"claude","dir":"/tmp"},
+            "mapped":{"cli":"codex","dir":"/tmp"}}}"#,
+    )
+    .expect("write catalog");
+    std::fs::write(
+        h.path().join("agents.local.json"),
+        r#"{"cli_overrides":{"gemini":"codex"},
+            "defaults":{"reasoning":"high"},
+            "agents":{
+            "a":{"model":"m2","env":{"B":"2"},"args":["--y"]},
+            "added":{"cli":"gemini","dir":"/tmp"},
+            "gone":{"disabled":true}}}"#,
+    )
+    .expect("write sidecar");
+
+    let (code, stdout, stderr) = h.run(["agent", "show", "a"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("model:     m2"), "stdout={stdout}");
+    assert!(stdout.contains("reasoning: high"), "stdout={stdout}");
+    assert!(stdout.contains("A=1 B=2"), "stdout={stdout}");
+    assert!(stdout.contains("args:      --x --y"), "stdout={stdout}");
+    let base = h.path().join("agents.json");
+    let sidecar = h.path().join("agents.local.json");
+    assert!(
+        stdout.contains(&format!(
+            "sources:   {}, {}",
+            base.display(),
+            sidecar.display()
+        )),
+        "stdout={stdout}"
+    );
+    let (code, stdout, stderr) = h.run(["agent", "show", "b"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("model:     base-model"), "stdout={stdout}");
+    assert!(stdout.contains("reasoning: high"), "stdout={stdout}");
+
+    // cli_overrides merge per source: the base maps codex, the sidecar gemini.
+    let (code, stdout, stderr) = h.run(["agent", "show", "mapped"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("cli:       claude"), "stdout={stdout}");
+    let (code, stdout, stderr) = h.run(["agent", "show", "added"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("cli:       codex"), "stdout={stdout}");
+
+    let (code, stdout, stderr) = h.run(["agent", "list", "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let names = agent_names(&stdout);
+    assert!(names.contains(&("a".into(), "global".into())), "{names:?}");
+    assert!(
+        names.contains(&("added".into(), "global".into())),
+        "{names:?}"
+    );
+    assert!(!names.iter().any(|(n, _)| n == "gone"), "{names:?}");
+    let (code, stdout, stderr) = h.run(["agent", "list", "--all", "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains(r#""name":"gone""#) || stdout.contains(r#""name": "gone""#));
+
+    // Sidecar errors name the sidecar.
+    for bad in [r#"{"agents":"#, r#"{"imports":[{"from":"other.json"}]}"#] {
+        std::fs::write(&sidecar, bad).expect("write bad sidecar");
+        let (code, stdout, stderr) = h.run(["agent", "show", "a"]);
+        assert_ne!(code, 0, "stdout={stdout}");
+        assert!(
+            stderr.contains(&sidecar.display().to_string()),
+            "stderr={stderr}"
+        );
+    }
+}
+
+#[test]
+fn agent_global_sidecar_without_base_catalog_is_loaded() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.local.json"),
+        r#"{"agents":{"only":{"cli":"claude","dir":"/tmp"}}}"#,
+    )
+    .expect("write sidecar");
+    let (code, stdout, stderr) = h.run(["agent", "show", "only"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains(&h.path().join("agents.local.json").display().to_string()),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
+fn agent_sidecars_of_extra_imported_and_project_catalogs_keep_their_scope() {
+    let h = Hcom::new();
+    let root = h.root_path();
+    let shared = root.join("shared");
+    let extra = root.join("extra");
+    let project = root.join("proj");
+    std::fs::create_dir_all(&shared).expect("create shared dir");
+    std::fs::create_dir_all(&extra).expect("create extra dir");
+    std::fs::create_dir_all(project.join(".hcom")).expect("create project dir");
+    std::fs::write(
+        shared.join("agents.json"),
+        r#"{"agents":{"s":{"cli":"claude","dir":"/tmp","model":"s1"},
+                      "hidden":{"cli":"claude","dir":"/tmp"}}}"#,
+    )
+    .expect("write shared catalog");
+    std::fs::write(
+        shared.join("agents.local.json"),
+        r#"{"agents":{"s":{"model":"s2"},"sneaky":{"cli":"claude","dir":"/tmp"}}}"#,
+    )
+    .expect("write shared sidecar");
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"imports":[{{"from":{},"agents":["s"]}}]}}"#,
+            serde_json::to_string(&shared.join("agents.json")).unwrap()
+        ),
+    )
+    .expect("write global catalog");
+    std::fs::write(
+        extra.join("team.json"),
+        r#"{"agents":{"e":{"cli":"claude","dir":"/tmp","model":"e1"}}}"#,
+    )
+    .expect("write extra catalog");
+    std::fs::write(
+        extra.join("team.local.json"),
+        r#"{"agents":{"e":{"model":"e2"}}}"#,
+    )
+    .expect("write extra sidecar");
+    std::fs::write(
+        project.join(".hcom/agents.json"),
+        r#"{"agents":{"p":{"cli":"claude","dir":".","model":"p1"}}}"#,
+    )
+    .expect("write project catalog");
+    std::fs::write(
+        project.join(".hcom/agents.local.json"),
+        r#"{"agents":{"p":{"model":"p2"},"padd":{"cli":"claude","dir":"."}}}"#,
+    )
+    .expect("write project sidecar");
+
+    let run_in = |dir: &std::path::Path, args: &[&str]| {
+        let output = h
+            .cmd()
+            .current_dir(dir)
+            .env("HCOM_AGENT_CATALOGS", extra.join("team.json"))
+            .args(args)
+            .output()
+            .expect("run hcom");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    for (dir, name, model) in [
+        (root, "s", "s2"),
+        (root, "e", "e2"),
+        (project.as_path(), "p", "p2"),
+    ] {
+        let (code, stdout, stderr) = run_in(dir, &["agent", "show", name]);
+        assert_eq!(code, 0, "{name}: stdout={stdout} stderr={stderr}");
+        assert!(
+            stdout.contains(&format!("model:     {model}")),
+            "{name}: stdout={stdout}"
+        );
+    }
+    let (code, stdout, stderr) = run_in(project.as_path(), &["agent", "show", "padd"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+
+    // Outside the project and the import filter, sidecar additions stay private.
+    let (code, stdout, stderr) = run_in(root, &["agent", "list", "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let names = agent_names(&stdout);
+    for private in ["sneaky", "hidden", "padd", "p"] {
+        assert!(!names.iter().any(|(n, _)| n == private), "{names:?}");
+    }
+    for private in ["sneaky", "padd"] {
+        let (code, _stdout, stderr) = run_in(root, &["agent", "show", private]);
+        assert_ne!(code, 0, "{private} must not resolve: {stderr}");
+    }
+
+    // cli_overrides stay global-only, also in a sidecar.
+    std::fs::write(
+        project.join(".hcom/agents.local.json"),
+        r#"{"cli_overrides":{"codex":"claude"}}"#,
+    )
+    .expect("write project sidecar with cli_overrides");
+    let (code, _stdout, stderr) = run_in(project.as_path(), &["agent", "show", "p"]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains(
+            &project
+                .join(".hcom/agents.local.json")
+                .display()
+                .to_string()
+        ),
+        "stderr={stderr}"
     );
 }
 
