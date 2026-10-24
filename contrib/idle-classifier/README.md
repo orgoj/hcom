@@ -124,6 +124,13 @@ v3.1-3622r1 model and the Haiku label disagree (must_act scored < 0.1, or not mu
 | Training calibration split | 70 | 50 | 12 true→false, 8 false→true | `labels-train-2026-10-24-r2-sonnet.jsonl` (1601 must_act) |
 | Fresh held-out, disputed | 19 | 16 | 1 true→false, 2 false→true | `labels-fresh-2026-10-24b-sonnet-disputed.jsonl` (66 must_act) |
 
+Frozen XLM-R large head (out-of-fold over 3622) vs the r2 gold: 322 disputed training cases,
+Sonnet agrees with gold on 265; 14 true→false, 43 false→true; 33 calls, 1.019 USD. Corrected
+copy `labels-train-2026-10-24-r3-sonnet.jsonl` (1630 must_act). Sonnet contradicts 4 of the
+10 agent-review corrections it saw (`compare-labels-train-2026-10-24-r3-sonnet.json`).
+User rule since then: every model-vs-gold disagreement gets a blind Sonnet check, and
+Sonnet labels rank above Haiku; local_models keeps one record per case in `cases/<id>.json`.
+
 A Sonnet run on all 141 fresh cases happened before the scope was narrowed and is kept
 separate: 130/141 agree, 9 true→false, 2 false→true (`labels-fresh-2026-10-24b-sonnet.jsonl`).
 Cost: training 0.209 USD, fresh 0.436 USD. Originals stay untouched.

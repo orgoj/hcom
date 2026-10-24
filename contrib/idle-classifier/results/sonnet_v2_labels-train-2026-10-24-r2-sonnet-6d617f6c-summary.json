@@ -1,0 +1,22 @@
+{
+  "stem": "sonnet_v2_labels-train-2026-10-24-r2-sonnet-6d617f6c",
+  "rules": "6d617f6c",
+  "source_cases": 322,
+  "labelled": 322,
+  "calls": 33,
+  "cost_usd": 1.0189,
+  "duration_ms_per_call": {
+    "p50": 3308,
+    "max": 8205
+  },
+  "ms_per_case": 352,
+  "input_tokens": 285673,
+  "output_tokens": 12292,
+  "states": {
+    "done": 149,
+    "needs_user": 66,
+    "blocked": 3,
+    "waiting_agent": 104
+  },
+  "must_act": 72
+}
