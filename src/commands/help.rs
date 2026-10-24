@@ -774,6 +774,10 @@ const TRANSCRIPT_HELP: &[HelpEntry] = &[
         "Show exchanges N through M (N- = to the end)",
     ),
     (
+        "transcript --path FILE [N-M]",
+        "Read a transcript file directly, e.g. an earlier session",
+    ),
+    (
         "transcript timeline",
         "User prompts across all agents by time",
     ),
@@ -1664,6 +1668,7 @@ mod tests {
             );
         }
         assert!(transcript_help.contains("final_text"));
+        assert!(transcript_help.contains("--path FILE"));
 
         let hooks_help = get_command_help("hooks");
         for tool in crate::commands::hooks::hook_tools() {

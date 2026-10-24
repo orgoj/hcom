@@ -67,6 +67,9 @@ pub struct TranscriptArgs {
     /// Exchange range (flag form)
     #[arg(long = "range")]
     pub range_flag: Option<String>,
+    /// Read this transcript file instead of an agent's (parser chosen from the path)
+    #[arg(long)]
+    pub path: Option<String>,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -1123,6 +1126,10 @@ fn cmd_transcript_timeline(db: &HcomDb, args: &TranscriptTimelineArgs) -> i32 {
 
 /// Main entry point for `hcom transcript` command.
 pub fn cmd_transcript(db: &HcomDb, args: &TranscriptArgs, ctx: Option<&CommandContext>) -> i32 {
+    if args.path.is_some() && args.subcmd.is_some() {
+        eprintln!("Error: --path reads one file; it does not combine with search or timeline");
+        return 1;
+    }
     // Handle subcommands
     match &args.subcmd {
         Some(TranscriptSubcmd::Search(search_args)) => {
@@ -1138,6 +1145,41 @@ pub fn cmd_transcript(db: &HcomDb, args: &TranscriptArgs, ctx: Option<&CommandCo
     let full_mode = args.full;
     let detailed = args.detailed;
     let last_n = args.last.unwrap_or(10);
+
+    if let Some(ref path) = args.path {
+        // With --path the only positional is a range.
+        let positional = match args.name.as_deref() {
+            Some(arg) if is_range_arg(arg) => Some(arg.to_string()),
+            Some(arg) => {
+                eprintln!("Error: --path reads one file and takes no agent name (got '{arg}')");
+                return 1;
+            }
+            None => None,
+        };
+        let range = args
+            .range_flag
+            .clone()
+            .or(positional)
+            .or_else(|| args.range_positional.clone());
+        let opts = TranscriptRenderOpts {
+            range: range.as_deref(),
+            last_n,
+            json_mode,
+            full_mode,
+            detailed,
+            retry_codex: false,
+        };
+        return match render_transcript_path(path, &opts) {
+            Ok(out) => {
+                println!("{out}");
+                0
+            }
+            Err(err) => {
+                eprintln!("Error: {err}");
+                1
+            }
+        };
+    }
 
     if let Some(ref name) = args.name {
         let stripped = name.strip_prefix('@').unwrap_or(name);
@@ -1172,9 +1214,7 @@ pub fn cmd_transcript(db: &HcomDb, args: &TranscriptArgs, ctx: Option<&CommandCo
     let mut range = args.range_flag.clone();
     if let Some(ref name) = args.name {
         let stripped = name.strip_prefix('@').unwrap_or(name);
-        if stripped.chars().all(|c| c.is_ascii_digit() || c == '-')
-            && stripped.chars().any(|c| c.is_ascii_digit())
-        {
+        if is_range_arg(stripped) {
             range.get_or_insert_with(|| stripped.to_string());
         } else {
             target = Some(stripped.to_string());
@@ -1210,6 +1250,27 @@ pub fn cmd_transcript(db: &HcomDb, args: &TranscriptArgs, ctx: Option<&CommandCo
             1
         }
     }
+}
+
+/// A positional like `5`, `5-10` or `5-` is an exchange range, not a name.
+fn is_range_arg(arg: &str) -> bool {
+    arg.chars().all(|c| c.is_ascii_digit() || c == '-') && arg.chars().any(|c| c.is_ascii_digit())
+}
+
+/// Render one transcript file without an hcom instance (`--path`). Formats
+/// that keep every session in one database need a session id, so they are
+/// refused; read those through the agent name.
+pub(crate) fn render_transcript_path(
+    path: &str,
+    opts: &TranscriptRenderOpts<'_>,
+) -> Result<String, String> {
+    let agent = detect_agent_type(path);
+    if transcript::backend_from_agent_or_path(agent, path)?.is_shared_database() {
+        return Err(format!(
+            "{path} holds many sessions; read it with hcom transcript <name>"
+        ));
+    }
+    render_transcript_file(path, agent, None, path, opts)
 }
 
 /// Display options for transcript rendering.
@@ -1324,6 +1385,22 @@ fn render_instance_transcript_impl(
     let (instance_name, transcript_path, agent_type, session_id) =
         resolve_instance_transcript(db, name)
             .ok_or_else(|| no_transcript_error(db, name, display_name, device))?;
+    render_transcript_file(
+        &transcript_path,
+        &agent_type,
+        session_id.as_deref(),
+        &instance_name,
+        opts,
+    )
+}
+
+fn render_transcript_file(
+    transcript_path: &str,
+    agent_type: &str,
+    session_id: Option<&str>,
+    instance_name: &str,
+    opts: &TranscriptRenderOpts<'_>,
+) -> Result<String, String> {
     let range = opts.range.map(parse_range).transpose()?;
     let effective_last = if range.is_some() {
         usize::MAX
@@ -1331,11 +1408,11 @@ fn render_instance_transcript_impl(
         opts.last_n
     };
     let exchanges = get_exchanges(
-        &transcript_path,
-        &agent_type,
+        transcript_path,
+        agent_type,
         effective_last,
         opts.detailed,
-        session_id.as_deref(),
+        session_id,
         opts.retry_codex,
     )?;
 
@@ -1399,7 +1476,7 @@ fn render_instance_transcript_impl(
         return Ok("No exchanges found".to_string());
     }
 
-    let header = conversation_header(&filtered, &exchanges, &instance_name);
+    let header = conversation_header(&filtered, &exchanges, instance_name);
     let owned: Vec<Exchange> = filtered.into_iter().cloned().collect();
     let mut formatted = format_transcript_exchanges(&owned, opts.full_mode, opts.detailed);
     if let Some(hint) = transcript::flag_hint(opts.full_mode, opts.detailed) {

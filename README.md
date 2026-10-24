@@ -296,6 +296,7 @@ hcom events --wait <filters>   # block until a matching event, for scripting
 hcom events sub --idle luna    # get an hcom message when luna goes idle
 hcom transcript luna           # read luna's conversation; transcript search 'regex'
 hcom transcript luna --json    # per exchange: user, action, final_text (reply after the last tool call)
+hcom transcript --path FILE    # read a transcript file directly (e.g. an earlier session); not for shared session DBs
 hcom bundle prepare            # context package for a handoff
 hcom term [name]               # view/inject into an agent's PTY screen
 hcom events --follow           # stream events as JSON Lines

@@ -21,7 +21,7 @@ are acceptable.
 
 | File | Purpose |
 |---|---|
-| `build_eval_set.py [--hcom BIN] [--batch NAME]` | Idle points from hcom transcripts (`hcom transcript <name> 1- --json`, `final_text`, else `action`); weak label from the next user turn (human / hcom / system) and cs/en keyword cues; balanced sample of up to 60 per weak label. `--batch` exports only texts no earlier export holds. Only the newest incarnation of each instance name is reachable. |
+| `build_eval_set.py [--hcom BIN] [--batch NAME [--older N]]` | Idle points from hcom transcripts (`hcom transcript <name> 1- --json`, `final_text`, else `action`); weak label from the next user turn (human / hcom / system) and cs/en keyword cues; balanced sample of up to 60 per weak label. `--batch` exports only texts no earlier export holds; by name it reaches only the newest incarnation of each instance. `--older N` instead reads every stopped incarnation's transcript file (`hcom transcript --path`), skips shared session databases (OpenCode, Kilo, Hermes) and keeps a seed-42 sample of N unseen idle points. |
 | `label_haiku.py [--rules v1\|v2] [--source cases\|candidates] [--max-batches N]` | Labels from Haiku, batches of 10; per-call metrics and a run summary in `results/`. v2 = contract v2 rules with `must_act`. Resumes, never labels an id twice. |
 | `contract_v1.json` | local_models' contract v1 (4 labels, `qwen3.5:4b`), copied for reproducibility. |
 | `eval_local.py [MODEL [MAX_CASES]]` | v1 eval: accuracy, confusion, attention misses, threshold sweep; writes `review.jsonl`. |

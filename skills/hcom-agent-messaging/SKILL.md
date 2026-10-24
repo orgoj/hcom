@@ -75,7 +75,7 @@ tell any agent:
 
 **Message** each other in real time: mid-turn or wake immediately when idle
 
-**Observe** each other: status, transcripts, file edits, live terminal screens, command history. `hcom transcript <name> --json` gives each exchange's `final_text`: the assistant text after the last tool call (empty when the parser cannot tell).
+**Observe** each other: status, transcripts, file edits, live terminal screens, command history. `hcom transcript <name> --json` gives each exchange's `final_text`: the assistant text after the last tool call (empty when the parser cannot tell). `hcom transcript --path <file>` reads a transcript file directly, e.g. an agent's earlier session.
 
 **Subscribe** and notify on status changes, file edits, collisions, specific events. React automatically. Scripts can stream matching events as JSON Lines with `hcom events --follow`.
 

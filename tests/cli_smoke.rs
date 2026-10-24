@@ -6785,3 +6785,70 @@ fn events_follow_exits_on_query_error() {
     assert_eq!(code, 2, "stderr={stderr}");
     assert!(stderr.contains("SQL"), "stderr={stderr}");
 }
+
+#[test]
+fn transcript_path_reads_a_file_without_an_instance() {
+    let h = Hcom::new();
+    let item = |role: &str, kind: &str, text: &str| {
+        serde_json::json!({"type": "response_item", "timestamp": "2026-03-27T10:00:00Z",
+            "payload": {"type": "message", "role": role, "content": [{"type": kind, "text": text}]}})
+        .to_string()
+    };
+    let rollout = h.path().join("rollout-old-session.jsonl");
+    let lines = [
+        item("user", "input_text", "first prompt"),
+        item("assistant", "output_text", "first answer"),
+        item("user", "input_text", "second prompt"),
+        item("assistant", "output_text", "second answer"),
+    ];
+    std::fs::write(&rollout, lines.join("\n")).expect("write rollout");
+    let rollout = rollout.to_str().expect("utf-8 path");
+
+    // A positional range still works with --path; no instance row is needed.
+    let (code, stdout, stderr) = h.run(["transcript", "--path", rollout, "2", "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let exchanges: serde_json::Value = serde_json::from_str(stdout.trim()).expect("json");
+    assert_eq!(
+        exchanges.as_array().map(Vec::len),
+        Some(1),
+        "stdout={stdout}"
+    );
+    assert_eq!(exchanges[0]["position"], 2);
+    assert_eq!(exchanges[0]["user"], "second prompt");
+    assert_eq!(exchanges[0]["action"], "second answer");
+
+    // An agent name and --path are mutually exclusive.
+    let (code, _, stderr) = h.run(["transcript", "luna", "--path", rollout]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("takes no agent name"), "stderr={stderr}");
+
+    // Subcommands read the database, so --path must not be silently ignored by them.
+    for subcmd in [&["timeline"][..], &["search", "answer"][..]] {
+        let mut argv = vec!["transcript", "--path", rollout];
+        argv.extend_from_slice(subcmd);
+        let (code, _, stderr) = h.run(argv);
+        assert_eq!(code, 1, "{subcmd:?}");
+        assert!(stderr.contains("does not combine"), "stderr={stderr}");
+    }
+
+    // A shared session database needs the agent's session, so it is refused.
+    let db = h.path().join("opencode.db");
+    std::fs::write(&db, b"").expect("write db");
+    let (code, _, stderr) = h.run(["transcript", "--path", db.to_str().expect("utf-8 path")]);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("holds many sessions"), "stderr={stderr}");
+
+    // An unknown format is an error, not a guessed parser.
+    let unknown = h.path().join("notes.txt");
+    std::fs::write(&unknown, b"x").expect("write file");
+    let (code, _, stderr) = h.run([
+        "transcript",
+        "--path",
+        unknown.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("Unable to determine transcript parser"),
+        "stderr={stderr}"
+    );
+}

@@ -10,6 +10,9 @@ Without --batch (first export, refused when it exists): candidates.jsonl (all) a
 (balanced sample), counts in results/dataset-summary.json.
 With --batch NAME: only idle points whose text is in no earlier export (candidates.jsonl,
 candidates-*.jsonl) go to candidates-NAME.jsonl, counts in results/dataset-NAME-summary.json.
+With --batch NAME --older N: the sources are all stopped incarnations' transcript files read
+via `hcom transcript --path` (shared session databases skipped); a random sample (seed 42) of
+N new idle points is kept.
 """
 import argparse
 import collections
@@ -86,6 +89,23 @@ def agents():
     return {n: t for n, t in found.items() if t and t != "adhoc"}
 
 
+SHARED_DB_TOOLS = {"opencode", "kilo", "hermes"}  # one database for all sessions: no --path
+
+
+def older_transcripts():
+    """(instance, tool, path) of every stopped incarnation whose transcript file still exists."""
+    found = {}
+    stops = hcom_json_lines("events", "--type", "life", "--action", "stopped", "--last", "100000", "--full")
+    for ev in stops:
+        snap = ev.get("data", {}).get("snapshot") or {}
+        path, tool = snap.get("transcript_path") or "", snap.get("tool") or ""
+        if snap.get("parent_name") or not path or tool in ("", "adhoc", *SHARED_DB_TOOLS):
+            continue
+        if os.path.isfile(path):
+            found.setdefault(path, (ev["instance"], tool))
+    return [(inst, tool, path) for path, (inst, tool) in sorted(found.items())]
+
+
 def next_kind(user):
     text = user.lstrip()
     if text.startswith("<hcom>"):
@@ -126,10 +146,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--hcom", default="hcom")
     ap.add_argument("--batch", help="name of an incremental export, e.g. 2026-10-24b")
+    ap.add_argument("--older", type=int, metavar="N",
+                    help="with --batch: read every stopped incarnation's transcript file "
+                         "(hcom transcript --path) and keep a random sample of N new idle points")
     args = ap.parse_args()
     HCOM = args.hcom
     if args.batch and not re.fullmatch(r"[\w.-]+", args.batch):
         sys.exit("--batch must be a plain name")
+    if args.older is not None and (not args.batch or args.older <= 0):
+        sys.exit("--older N needs --batch and N > 0")
     OUT.path.mkdir(mode=0o700, parents=True, exist_ok=True)
     if args.batch:
         out_name = f"candidates-{args.batch}.jsonl"
@@ -139,8 +164,13 @@ def main():
     elif (OUT / "candidates.jsonl").exists():
         sys.exit("candidates.jsonl exists and is labelled; use --batch NAME for new idle points")
     candidates, skipped = [], collections.Counter()
-    for name, tool in sorted(agents().items()):
-        out = subprocess.run([HCOM, "transcript", name, "1-", "--json", "--full"],
+    if args.older:
+        sources = [(f"{inst}@{hashlib.sha1(path.encode()).hexdigest()[:8]}", tool, ["--path", path])
+                   for inst, tool, path in older_transcripts()]
+    else:
+        sources = [(name, tool, [name]) for name, tool in sorted(agents().items())]
+    for name, tool, target in sources:
+        out = subprocess.run([HCOM, "transcript", *target, "1-", "--json", "--full"],
                              capture_output=True, text=True, timeout=120)
         if out.returncode != 0:
             skipped["no_transcript"] += 1
@@ -175,7 +205,10 @@ def main():
 
     if args.batch:
         new = [c for c in candidates if c["text"] not in used]
-        content = "".join(json.dumps(c, ensure_ascii=False) + "\n" for c in new)
+        unsampled = len(new)
+        if args.older:
+            new = random.Random(42).sample(new, min(args.older, len(new)))
+        content ="".join(json.dumps(c, ensure_ascii=False) + "\n" for c in new)
         # A batch may already be labelled or used as held-out: it never changes under its name.
         if (OUT / out_name).exists():
             if (OUT / out_name).read_text(encoding="utf-8") != content:
@@ -183,7 +216,8 @@ def main():
         else:
             (OUT / out_name).write_text(content, encoding="utf-8")
         summary = {
-            "batch": args.batch, "seen": len(candidates), "already_used": len(candidates) - len(new),
+            "batch": args.batch, "sources": len(sources), "seen": len(candidates),
+            "already_used": len(candidates) - unsampled, "new_unsampled": unsampled,
             "new_candidates": len(new), "skipped": dict(skipped),
             "lang": dict(collections.Counter(c["lang"] for c in new)),
             "cli": dict(collections.Counter(c["cli"] for c in new)),
