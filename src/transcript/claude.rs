@@ -289,6 +289,16 @@ pub(crate) fn parse_claude_jsonl_with_usage(
                     }
                     current_action.push_str(&text);
                 }
+                // A step that calls tools ends the text so far: the next text is the
+                // conclusion, as with Claude's tool_use blocks.
+                if pe
+                    .data
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .is_some_and(|calls| !calls.is_empty())
+                {
+                    tool_since_text = true;
+                }
             }
             "user" => {
                 // Check if this user entry has actual user text (not just tool_result blocks)
@@ -590,6 +600,37 @@ mod tests {
                 "detailed={detailed}"
             );
         }
+    }
+
+    #[test]
+    fn antigravity_final_text_follows_planner_tool_calls() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let lines = [
+            json!({"type": "USER_INPUT", "created_at": "2026-09-18T15:15:48Z",
+                   "content": "<USER_REQUEST>\nfix the editor\n</USER_REQUEST>"}),
+            json!({"type": "PLANNER_RESPONSE", "content": "Plan: change the encoder. Confirm?"}),
+            json!({"type": "PLANNER_RESPONSE", "tool_calls": [
+                {"name": "run_command", "args": {"CommandLine": "make test"}}]}),
+            json!({"type": "GENERIC", "content": "The command exited with code 0."}),
+            json!({"type": "PLANNER_RESPONSE", "content": "Done: the editor keeps the encoding."}),
+        ];
+        std::fs::write(
+            file.path(),
+            lines
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+
+        let ex = &parse_claude_jsonl(file.path(), 10, false).unwrap()[0];
+        assert!(
+            ex.action.contains("Plan: change the encoder."),
+            "{}",
+            ex.action
+        );
+        assert_eq!(ex.final_text, "Done: the editor keeps the encoding.");
     }
 
     #[test]
