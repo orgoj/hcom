@@ -72,10 +72,17 @@ def gold_rows(labels, batch=None):
                  for r in read_jsonl(OUT / f"haiku_v2_{source[:-len('.jsonl')]}-{HAIKU_V2_RULES}.jsonl")}
     # Manual review lives in cases.jsonl (a sampled copy), so it applies to candidates by id too.
     manual = {c["id"]: c["label"] for c in read_jsonl(OUT / "cases.jsonl") if c.get("label")}
+    # Reviewed must_act corrections (v2 only, so v1 results stay reproducible).
+    corrected = {}
+    if labels == "v2" and (OUT / "manual_must_act.jsonl").exists():
+        rows = read_jsonl(OUT / "manual_must_act.jsonl")
+        corrected = {r["id"]: r["must_act"] for r in rows}
+        if len(corrected) != len(rows) or any(not isinstance(v, bool) for v in corrected.values()):
+            sys.exit("manual_must_act.jsonl needs unique ids and boolean must_act")
     rows = []
     for c in read_jsonl(OUT / source):
         label = c.get("label") or manual.get(c["id"])
-        must_act = label in ATTENTION if label else haiku.get(c["id"])
+        must_act = label in ATTENTION if label else corrected.get(c["id"], haiku.get(c["id"]))
         if must_act is not None:
             rows.append({"id": c["id"], "text": c["text"], "must_act": must_act, "lang": c["lang"]})
     return rows

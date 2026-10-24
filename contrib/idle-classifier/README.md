@@ -39,7 +39,8 @@ the raw name (`qwen3.5:4b` → `qwen3.5_4b-c57d0c95`).
 
 Dataset: 622 idle points from Claude, Codex, Antigravity and Hermes; the sample has
 done 60, needs_user 60, waiting_agent 43, blocked 11 by weak label. Gold for now = Haiku
-labels (94 attention = `needs_user` ∪ `blocked`, 80 other); the manual pass is pending.
+labels (94 attention = `needs_user` ∪ `blocked`, 80 other); the user's manual pass is
+pending (see Reviewed corrections for the agent-reviewed fixes so far).
 
 | `qwen3.5:4b` | contract v1 (4 labels) | prompt v2 (yes/no) |
 |---|---|---|
@@ -93,10 +94,29 @@ AUC stays near 0.88 from 139 to 497 cases: the frozen encoder with a linear head
 label count, limits it (`results/attention-head-v2-cv.json`,
 `results/attention-holdout-v2-summary.json`).
 
+### Reviewed corrections
+
+`$HCOM_DIR/tmp/idle-classifier/manual_must_act.jsonl` holds reviewed must_act corrections,
+one JSON object per line, e.g.
+`{"id": "fd4bd73f2f3c", "must_act": false, "reviewer": "hcom_dev", "note": "finished report"}`.
+`id` (unique) and boolean `must_act` are required; `reviewer` and `note` are optional
+provenance and are not read. They apply to v2 labels
+only (v1 results stay reproducible). Precedence: a `label` on the candidate or in
+`cases.jsonl` > `manual_must_act.jsonl` > Haiku. A frozen fresh set never changes, so a
+correction of a fresh id makes `fresh` refuse instead of rewriting it.
+
+Current content: 21 corrections by hcom_dev (agent review, not the user's manual pass) from
+the 37 must_act calibration cases that the 3622-label v3.1 model scored below 0.1. 21 were
+noise (finished reports, own next-step plans, waiting for another agent), 9 genuine asks,
+7 ambiguous kept must_act. Training file with them: `labels-train-2026-10-24-r1.jsonl`
+(3622 rows, 1605 must_act). Haiku's must_act is consistent with its own state, so the noise
+is Haiku calling plain reports needs_user; more is likely among higher-scoring cases.
+
 ## Caveats
 
 - Gold is Haiku labelled with the v1 rules, so it shares their blind spots. Final gold needs
-  the user's manual pass, including a sample of cases where all labellers agree on "no".
+  the user's manual pass, including a sample of cases where all labellers agree on "no";
+  only the 21 agent-reviewed corrections above exist so far.
 - Prompt v2 was written after seeing the v1 misses on this same set; its 0 misses may be
   optimistic until measured on fresh cases.
 - Only 11 `blocked` cases by weak label (5 by Haiku).
