@@ -28,12 +28,23 @@ deny python3 * "Run only scripts inside this repository: put the script in tmp/<
 deny python * "Run only scripts inside this repository: put the script in tmp/<topic>/x.py and run python3 -I tmp/<topic>/x.py; keep exchange data in ~/.hcom/tmp/"
 allow python3 -I ~/projects/hcom/** *
 allow python3 ~/projects/hcom/** *
+allow python3 --version|
 
 # Exchange area for briefs and experiment data shared with other agents.
 allow-read ~/.hcom/tmp/**
 allow-edit ~/.hcom/tmp/**
 allow-redirect ~/.hcom/tmp/**
 allow mkdir -p ~/.hcom/tmp/**+
+allow rm ~/.hcom/tmp/**+
+allow rm -f ~/.hcom/tmp/**+
+
+# Files inside the repository (no -r; .git stays with git commands).
+allow rm ~/projects/hcom/**+
+allow rm -f ~/projects/hcom/**+
+# Mixed cleanup: repository files first, then exchange-area files.
+allow rm ~/projects/hcom/**+ ~/.hcom/tmp/**+
+allow rm -f ~/projects/hcom/**+ ~/.hcom/tmp/**+
+deny rm * ~/projects/hcom/.git/** * "Change the repository through git commands"
 deny-edit **/.dippy* "Rule files are not editable; ask the user"
 
 deny /usr/bin/time * "Use the shell keyword: time <command> (TIMEFORMAT=%R prints seconds)"
