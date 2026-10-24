@@ -1361,6 +1361,7 @@ fn render_instance_transcript_impl(
                     "position": ex.position,
                     "user": ex.user,
                     "action": ex.action,
+                    "final_text": ex.final_text,
                     "files": ex.files,
                     "timestamp": ex.timestamp,
                 });
@@ -1952,6 +1953,25 @@ View transport messages with: hcom events --remote-fetch --device ABCD --partici
                     "content": [{"type": "output_text", "text": "assistant answer"}]
                 }
             }),
+            json!({
+                "type": "response_item",
+                "timestamp": "2026-03-27T10:00:02Z",
+                "payload": {
+                    "type": "function_call",
+                    "name": "shell",
+                    "call_id": "call_1",
+                    "arguments": "{\"command\":\"pwd\"}"
+                }
+            }),
+            json!({
+                "type": "response_item",
+                "timestamp": "2026-03-27T10:00:03Z",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "final answer"}]
+                }
+            }),
         ];
         fs::write(
             &transcript_path,
@@ -1980,7 +2000,8 @@ View transport messages with: hcom events --remote-fetch --device ABCD --partici
 
         assert_eq!(first["position"], 1);
         assert_eq!(first["user"], "user prompt");
-        assert_eq!(first["action"], "assistant answer");
+        assert_eq!(first["action"], "assistant answer\nfinal answer");
+        assert_eq!(first["final_text"], "final answer");
     }
 
     #[test]

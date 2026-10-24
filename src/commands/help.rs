@@ -783,7 +783,10 @@ const TRANSCRIPT_HELP: &[HelpEntry] = &[
         "  --detailed",
         "Show tool I/O, file edits, errors, token usage",
     ),
-    ("  --json", "JSON output"),
+    (
+        "  --json",
+        "JSON output (final_text: reply after the last tool call)",
+    ),
     ("", ""),
     (
         "transcript search \"pattern\"",
@@ -1660,6 +1663,7 @@ mod tests {
                 "transcript help omitted {tool}"
             );
         }
+        assert!(transcript_help.contains("final_text"));
 
         let hooks_help = get_command_help("hooks");
         for tool in crate::commands::hooks::hook_tools() {
