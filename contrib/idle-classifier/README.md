@@ -106,6 +106,13 @@ only (v1 results stay reproducible). Precedence: a `label` on the candidate or i
 `cases.jsonl` > `manual_must_act.jsonl` > Haiku. A frozen fresh set never changes, so a
 correction of a fresh id makes `fresh` refuse instead of rewriting it.
 
+Canonical gold now lives in local_models' per-case records
+`$HCOM_DIR/tmp/idle-classifier/cases/<id>.json` with the user's precedence
+user > Sonnet > hcom_dev agent review (`manual_must_act.jsonl`) > Haiku. The user settled the
+4 conflicts between agent review and Sonnet: 56225cb19b6a, 425b463dc67e, bdef3bf39810 are
+must_act (Sonnet right), 960ff6c1d551 is ambiguous. The label files built by
+`attention_data.py` predate this and do not apply Sonnet.
+
 Current content: 21 corrections by hcom_dev (agent review, not the user's manual pass) from
 the 37 must_act calibration cases that the 3622-label v3.1 model scored below 0.1. 21 were
 noise (finished reports, own next-step plans, waiting for another agent), 9 genuine asks,
