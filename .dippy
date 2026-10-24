@@ -1,3 +1,5 @@
+set context-env HCOM_AGENT_NAME
+
 allow backlog *
 allow cargo *
 allow git *
@@ -18,3 +20,21 @@ allow rm tmp/*+
 allow scripts/bump-fork-version.sh
 
 allow sqlite3 ~/.hcom/hcom.db *
+allow sqlite3 -readonly ~/.hcom/hcom.db *
+
+# Python: scripts inside this repository only (cargo/just already run repo code).
+# ~/.hcom/tmp is a shared exchange area that every agent writes to.
+deny python3 * "Run only scripts inside this repository: put the script in tmp/<topic>/x.py and run python3 -I tmp/<topic>/x.py; keep exchange data in ~/.hcom/tmp/"
+deny python * "Run only scripts inside this repository: put the script in tmp/<topic>/x.py and run python3 -I tmp/<topic>/x.py; keep exchange data in ~/.hcom/tmp/"
+allow python3 -I ~/projects/hcom/** *
+allow python3 ~/projects/hcom/** *
+
+# Exchange area for briefs and experiment data shared with other agents.
+allow-read ~/.hcom/tmp/**
+allow-edit ~/.hcom/tmp/**
+allow-redirect ~/.hcom/tmp/**
+allow mkdir -p ~/.hcom/tmp/**+
+deny-edit **/.dippy* "Rule files are not editable; ask the user"
+
+deny /usr/bin/time * "Use the shell keyword: time <command> (TIMEFORMAT=%R prints seconds)"
+deny mise * "Do not inspect tool installations; run the tool by name"
