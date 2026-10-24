@@ -1,0 +1,22 @@
+{
+  "stem": "haiku_v3_inputs-3class-8892593d",
+  "rules": "8892593d",
+  "source_cases": 3420,
+  "labelled": 3420,
+  "calls": 343,
+  "cost_usd": 0.6545,
+  "duration_ms_per_call": {
+    "p50": 5534,
+    "max": 10145
+  },
+  "ms_per_case": 571,
+  "input_tokens": 3108851,
+  "output_tokens": 373049,
+  "states": {
+    "needs_user": 1443,
+    "waiting": 771,
+    "done": 1067,
+    "not_final": 139
+  },
+  "must_act": 1443
+}

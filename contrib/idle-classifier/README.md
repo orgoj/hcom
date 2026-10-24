@@ -22,7 +22,9 @@ are acceptable.
 | File | Purpose |
 |---|---|
 | `build_eval_set.py [--hcom BIN] [--batch NAME [--older N]]` | Idle points from hcom transcripts (`hcom transcript <name> 1- --json`, `final_text`, else `action`); weak label from the next user turn (human / hcom / system) and cs/en keyword cues; balanced sample of up to 60 per weak label. `--batch` exports only texts no earlier export holds; by name it reaches only the newest incarnation of each instance. `--older N` instead reads every stopped incarnation's transcript file (`hcom transcript --path`), skips shared session databases (OpenCode, Kilo, Hermes) and keeps a seed-42 sample of N unseen idle points. |
-| `label_haiku.py [--rules v1\|v2] [--model haiku\|sonnet] [--source STEM] [--ids FILE] [--max-batches N]` | Blind labels (message text + rules only) from Haiku or Sonnet, batches of 10; per-call metrics and a run summary in `results/`. v2 = contract v2 rules with `must_act`. `--source` is any private JSONL with id and text, `--ids` limits the run to listed ids. Resumes, never labels an id twice. |
+| `final_inputs.py [--hcom BIN] OUT EXPORT...` | Inputs for the 3-class task from earlier exports: per idle point `final` (`true` when hcom recorded active → listening before the next exchange, `false` when the next input interrupted a running turn, `"unknown"` for instances hcom did not know then) and the input text (final_text; a tool-free reply; a reply ending on a tool call plus its last command when that is an `hcom send`), last 3000 characters. OUT is written once; counts in `results/final-inputs-OUT-summary.json`. |
+| `label_haiku.py [--rules v1\|v2\|v3] [--model haiku\|sonnet] [--source STEM] [--ids FILE] [--max-batches N]` | Blind labels (message text + rules only) from Haiku or Sonnet, batches of 10; per-call metrics and a run summary in `results/`. v2 = contract v2 rules with `must_act`; v3 = contract v3 `class` with `must_act` = needs_user. `--source` is any private JSONL with id and text, `--ids` limits the run to listed ids. Resumes, never labels an id twice. |
+| `contract_v3.json` | 3-class labelling rules for final messages: `needs_user` / `waiting` (another agent, script, review; must not be stopped) / `done` (can be stopped), plus `not_final` for intermediate progress notes. needs_user wins, then waiting before done. |
 | `compare_labels.py BASE SECOND OUT [--ids FILE]` | Agreement of a labels file with a second blind labelling (e.g. Sonnet), and a corrected copy OUT (new name, written once) that takes SECOND's label for the compared ids; summary with disagreeing ids in `results/compare-OUT.json`. |
 | `contract_v1.json` | local_models' contract v1 (4 labels, `qwen3.5:4b`), copied for reproducibility. |
 | `eval_local.py [MODEL [MAX_CASES]]` | v1 eval: accuracy, confusion, attention misses, threshold sweep; writes `review.jsonl`. |
@@ -142,7 +144,46 @@ A Sonnet run on all 141 fresh cases happened before the scope was narrowed and i
 separate: 130/141 agree, 9 true→false, 2 false→true (`labels-fresh-2026-10-24b-sonnet.jsonl`).
 Cost: training 0.209 USD, fresh 0.436 USD. Originals stay untouched.
 
+## Three-class cycle (final messages)
+
+The user redefined the task: classify only the final message of an agent idle in listen as
+needs_user, waiting or done, and found the earlier inputs wrong. Results above (binary,
+old inputs) are superseded; the cycle restarts in this order: re-export, Haiku v3 on all
+in-scope cases, existing models raw on the new inputs, blind Sonnet v3 on every disagreement
+(precedence user > Sonnet > Haiku), only then training and held-out evaluation.
+
+- Re-export `inputs-3class` (hcom 0.7.30-orgoj.17, from `candidates`, `candidates-2026-10-24b`,
+  `candidates-2026-10-24-older`): 3745 rows, final 3084 / not final 325 / unknown 336, 18
+  cases no longer in transcripts dropped (`results/final-inputs-inputs-3class-summary.json`).
+- Haiku v3 on the 3420 final or unknown ids: needs_user 1443, waiting 771, done 1067,
+  not_final 139; 343 calls, 0.655 USD (`results/haiku_v3_inputs-3class-8892593d-*`).
+- `inputs-3class` is wrong for Codex: hcom ignored Codex code-mode tool calls
+  (`custom_tool_call` `exec`), so those turns had no final_text and their input was the whole
+  reply. Fixed in hcom 0.7.30-orgoj.18. `inputs-3class-r2` is a defective run: bare-name
+  references of instances that had handed off since resolved to the new session (116 rows
+  missing). `inputs-3class-r3` resolves them to the earlier transcript by text: 3748 rows,
+  final 3092 / not final 313 / unknown 343, 15 missing; 607 texts differ from
+  `inputs-3class` (568 Codex), final flags are unchanged. Haiku v3 relabels only the 548
+  in-scope ids whose input changed or is new (`haiku_v3_inputs-3class-r3-*`): needs_user 101,
+  waiting 151, done 276, not_final 20; 56 calls, 0.072 USD. Other ids keep their
+  `inputs-3class` Haiku label (identical input).
+- `inputs-3class-r5` is current: r3 minus 4 rows whose source exchange is ambiguous; every row
+  is verified by the export id hash (3117) or a unique text match (627). `inputs-3class-r4` is
+  a defective run (the same file reached by name and by path counted as 589 ambiguities).
+- Blind Sonnet v3 on the 441 model disagreements whose input did not change
+  (`results/sonnet_v3_inputs-3class-r3-*`, 1.594 USD): agrees with Haiku on 356; by Haiku
+  class done 163/215, waiting 175/198, needs_user 18/28; Sonnet adds 47 needs_user
+  (done→needs_user 43, waiting→needs_user 14, needs_user→other 10).
+- Then on the 59 model disagreements among the 548 relabelled ids (same Sonnet file, 500 ids,
+  1.728 USD in total): agrees with Haiku on 36; by Haiku class done 14/22, waiting 9/11,
+  needs_user 13/26 (needs_user→waiting 10). Step 4 overall: 392/500 agree; Sonnet adds 63
+  needs_user and removes 23. The summary file describes the last `--ids` run only.
+
 ## Caveats
+
+- A turn that starts with a tool call and then has text gets an empty `final_text` from
+  hcom (`final_segment` treats start 0 as no boundary); `final_inputs.py` then uses the whole
+  reply, which is the correct text, and records it as `tool_ended_other`.
 
 - Gold is Haiku labelled with the v1 rules, so it shares their blind spots. Final gold needs
   the user's manual pass, including a sample of cases where all labellers agree on "no";

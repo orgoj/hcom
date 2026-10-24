@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Independent labels from Claude Haiku or Sonnet (user-approved labelling; texts go to the cloud).
 
-Usage: python3 -I label_haiku.py [--rules v1|v2] [--model haiku|sonnet] [--source STEM] [--ids FILE]
+Usage: python3 -I label_haiku.py [--rules v1|v2|v3] [--model haiku|sonnet] [--source STEM] [--ids FILE]
                                  [--max-batches N]
   v1: contract_v1 rules, 4-way state, haiku           -> haiku_labels.jsonl (cases only)
   v2: contract_v2 rules, must_act (needs_user yes/no) + state -> <model>_v2_<source>-<rules hash>.jsonl
+  v3: contract_v3 rules, class needs_user|waiting|done|not_final (+ must_act = needs_user)
+      -> <model>_v3_<source>-<rules hash>.jsonl
 The model sees only the message text and the rules (blind to any other label or score).
 --source is any private JSONL with id and text; --ids limits the run to the listed ids.
 
@@ -58,12 +60,13 @@ BATCH_NOTE = ("You get several messages, each in <message id=\"...\"> tags. Labe
 def rules_and_schema(version):
     contract = json.loads((HERE / f"contract_{version}.json").read_text())
     rules = contract["request"]["messages"][0]["content"].rsplit("Answer only with JSON", 1)[0] + BATCH_NOTE
-    item = {"id": {"type": "string"}, "state": {"type": "string", "enum": STATES}}
+    states = contract.get("classes", STATES)
+    item = {"id": {"type": "string"}, "state": {"type": "string", "enum": states}}
     if version == "v2":
         item["needs_user"] = {"type": "string", "enum": ["yes", "no"]}
     schema = {"type": "object", "required": ["labels"], "properties": {"labels": {"type": "array", "items": {
         "type": "object", "properties": item, "required": list(item)}}}}
-    return rules, schema
+    return rules, schema, states
 
 
 def read_jsonl(path):
@@ -75,7 +78,7 @@ def read_jsonl(path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--rules", choices=["v1", "v2"], default="v1")
+    ap.add_argument("--rules", choices=["v1", "v2", "v3"], default="v1")
     ap.add_argument("--model", choices=["haiku", "sonnet"], default="haiku")
     ap.add_argument("--source", default="cases",
                     help="private JSONL with id and text: cases, candidates[-<batch>], labels-...")
@@ -86,10 +89,11 @@ def main():
         sys.exit("--source must be a plain file stem in the private data directory")
     if args.rules == "v1" and (args.source != "cases" or args.model != "haiku"):
         sys.exit("v1 labels exist for cases with haiku only")
-    rules, schema = rules_and_schema(args.rules)
+    rules, schema, states = rules_and_schema(args.rules)
     rules_hash = hashlib.sha1(rules.encode()).hexdigest()[:8]
-    # v2 files carry the rules hash, so changed rules start a new label set instead of mixing.
-    stem = "haiku_labels" if args.rules == "v1" else f"{args.model}_v2_{args.source}-{rules_hash}"
+    # v2/v3 files carry the rules hash, so changed rules start a new label set instead of mixing.
+    stem = "haiku_labels" if args.rules == "v1" else f"{args.model}_{args.rules}_{args.source}-{rules_hash}"
+    label_key = "class" if args.rules == "v3" else "haiku"
 
     out_path, calls_path = OUT / f"{stem}.jsonl", RESULTS / f"{stem}-calls.jsonl"
     existing = read_jsonl(out_path)
@@ -131,8 +135,8 @@ def main():
             # stderr and the exception text may quote message texts: report the category only.
             sys.exit(f"batch {i // BATCH}: unusable output ({type(e).__name__}, exit {proc.returncode})")
         ids = {c["id"] for c in batch}
-        valid = [x for x in labels if x.get("id") in ids and x.get("state") in STATES
-                 and (args.rules == "v1" or x.get("needs_user") in ("yes", "no"))]
+        valid = [x for x in labels if x.get("id") in ids and x.get("state") in states
+                 and (args.rules != "v2" or x.get("needs_user") in ("yes", "no"))]
         # An id answered more than once is ambiguous: drop it, a later run retries it.
         seen = [x["id"] for x in valid]
         valid = [x for x in valid if seen.count(x["id"]) == 1]
@@ -149,9 +153,11 @@ def main():
             }) + "\n")
         with out_path.open("a", encoding="utf-8") as f:
             for x in valid:
-                row = {"id": x["id"], "haiku": x["state"], "rules": rules_hash}
+                row = {"id": x["id"], label_key: x["state"], "rules": rules_hash}
                 if args.rules == "v2":
                     row["must_act"] = x["needs_user"] == "yes"
+                elif args.rules == "v3":
+                    row["must_act"] = x["state"] == "needs_user"
                 f.write(json.dumps(row) + "\n")
         print(f"batch {i // BATCH}: {len(valid)}/{len(batch)} labels")
 
@@ -165,9 +171,9 @@ def main():
         "ms_per_case": round(sum(durations) / sum(c["cases"] for c in calls)) if durations else None,
         "input_tokens": sum(c.get("input_tokens") or 0 for c in calls),
         "output_tokens": sum(c.get("output_tokens") or 0 for c in calls),
-        "states": {s: sum(r["haiku"] == s for r in labelled) for s in STATES},
+        "states": {s: sum(r[label_key] == s for r in labelled) for s in states},
     }
-    if args.rules == "v2":
+    if args.rules in ("v2", "v3"):
         summary["must_act"] = sum(r["must_act"] for r in labelled)
     (RESULTS / f"{stem}-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary))

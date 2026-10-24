@@ -1,0 +1,22 @@
+{
+  "stem": "sonnet_v3_inputs-3class-r3-8892593d",
+  "rules": "8892593d",
+  "source_cases": 59,
+  "labelled": 59,
+  "calls": 51,
+  "cost_usd": 1.7282,
+  "duration_ms_per_call": {
+    "p50": 3036,
+    "max": 4921
+  },
+  "ms_per_case": 318,
+  "input_tokens": 537298,
+  "output_tokens": 13449,
+  "states": {
+    "needs_user": 19,
+    "waiting": 21,
+    "done": 19,
+    "not_final": 0
+  },
+  "must_act": 19
+}

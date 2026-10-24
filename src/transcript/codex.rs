@@ -151,7 +151,7 @@ pub(crate) fn parse_codex_jsonl_with_usage(
     for entry in entries {
         let payload = entry.get("payload").cloned().unwrap_or(entry.clone());
         let payload_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if payload_type == "function_call_output" {
+        if payload_type == "function_call_output" || payload_type == "custom_tool_call_output" {
             let call_id = payload
                 .get("call_id")
                 .and_then(|v| v.as_str())
@@ -356,12 +356,15 @@ pub(crate) fn parse_codex_jsonl_with_usage(
                         }
                     }
                 }
-                "function_call" => {
+                // Codex code mode runs tools as `custom_tool_call` with free-form `input`
+                // (`exec`: a script calling `tools.exec_command({"cmd": ...})`).
+                "function_call" | "custom_tool_call" => {
                     let raw_name = payload
                         .get("name")
                         .and_then(|v| v.as_str())
                         .unwrap_or("unknown");
                     let tool_name = normalize_tool_name(raw_name);
+                    let custom_input = payload.get("input").and_then(|v| v.as_str());
                     let args_str = payload
                         .get("arguments")
                         .and_then(|v| v.as_str())
@@ -390,7 +393,11 @@ pub(crate) fn parse_codex_jsonl_with_usage(
                         false
                     };
 
-                    let command = tool_call_detail(raw_name, &args);
+                    let command = tool_call_detail(raw_name, &args).or_else(|| {
+                        custom_input
+                            .filter(|_| raw_name == "exec")
+                            .map(str::to_string)
+                    });
 
                     current_tools.push(ToolUse {
                         name: tool_name.to_string(),
@@ -683,6 +690,48 @@ mod tests {
         );
         assert_eq!(exchanges[1].user, "event only user");
         assert_eq!(exchanges[1].action, "event only assistant");
+    }
+
+    #[test]
+    fn test_parse_codex_code_mode_tools_split_final_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout.jsonl");
+        let script = r#"const r = await tools.exec_command({"cmd":"cat a.txt"});"#;
+        let lines = [
+            json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "review"}]}}),
+            json!({"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "Reading the diff."}]}}),
+            json!({"type": "response_item", "payload": {"type": "custom_tool_call",
+                "name": "exec", "call_id": "c1", "input": script}}),
+            json!({"type": "response_item", "payload": {"type": "custom_tool_call_output",
+                "call_id": "c1", "output": "Script completed"}}),
+            json!({"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "No defects found."}]}}),
+            json!({"type": "response_item", "payload": {"type": "function_call",
+                "name": "exec_command", "call_id": "c2",
+                "arguments": "{\"cmd\":\"hcom send @dev -- ok\"}"}}),
+        ];
+        fs::write(
+            &path,
+            lines
+                .iter()
+                .map(serde_json::Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+
+        let exchanges = parse_codex_jsonl(&path, 10, true).unwrap();
+        assert_eq!(exchanges.len(), 1);
+        let tools = &exchanges[0].tools;
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name, "exec");
+        assert_eq!(tools[0].command.as_deref(), Some(script));
+        assert_eq!(tools[0].output.as_deref(), Some("Script completed"));
+        assert_eq!(tools[1].name, "Bash");
+        assert_eq!(tools[1].command.as_deref(), Some("hcom send @dev -- ok"));
+        assert_eq!(exchanges[0].final_text, "No defects found.");
     }
 
     #[test]

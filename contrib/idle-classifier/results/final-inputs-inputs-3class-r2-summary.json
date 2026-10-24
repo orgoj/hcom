@@ -1,0 +1,29 @@
+{
+  "out": "inputs-3class-r2",
+  "exports": [
+    "candidates",
+    "candidates-2026-10-24b",
+    "candidates-2026-10-24-older"
+  ],
+  "rows": 3629,
+  "final": {
+    "True": 2969,
+    "unknown": 336,
+    "False": 324
+  },
+  "by_kind": {
+    "final_text/final=False": 158,
+    "final_text/final=True": 1298,
+    "final_text/final=unknown": 50,
+    "hcom_send/final=False": 6,
+    "hcom_send/final=True": 313,
+    "hcom_send/final=unknown": 1,
+    "missing": 134,
+    "tool_ended_other/final=False": 117,
+    "tool_ended_other/final=True": 759,
+    "tool_ended_other/final=unknown": 3,
+    "tool_free/final=False": 43,
+    "tool_free/final=True": 599,
+    "tool_free/final=unknown": 282
+  }
+}
