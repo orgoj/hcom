@@ -1,0 +1,28 @@
+{
+  "holdout": 35,
+  "attention": 19,
+  "other": 16,
+  "missed": "1/19",
+  "false_highlight": "11/16",
+  "missed_ids": [
+    "3154ffca694b"
+  ],
+  "false_highlight_ids": [
+    "87623c8959a3",
+    "a9c755eafbfd",
+    "11d84b491c8f",
+    "ac017e25d315",
+    "8ad4083f4776",
+    "34b91671d759",
+    "eabee6af5a3d",
+    "bb828d2b95a6",
+    "3d3453f3e0c3",
+    "e2f7823c13d0",
+    "00017514b4b0"
+  ],
+  "lowest_p_on_attention": 0.0014,
+  "latency_ms": {
+    "p50": 19.37,
+    "max": 179.62
+  }
+}

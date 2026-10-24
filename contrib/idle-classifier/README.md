@@ -27,6 +27,7 @@ are acceptable.
 | `eval_local.py [MODEL [MAX_CASES]]` | v1 eval: accuracy, confusion, attention misses, threshold sweep; writes `review.jsonl`. |
 | `contract_v2.json` | Draft prompt v2: primary binary question `needs_user` yes/no, explicit implicit-ask rules, user need wins, "if unsure: yes". Decoding as v1. |
 | `eval_v2.py CONTRACT MODEL [MAX_CASES]` | Binary eval on P(yes) from the logprobs of the decision token. |
+| `attention_data.py export \| check SCORES` | Labels for local_models' contract v2 (`attention.py`: frozen `ufal/robeczech-base` encoder + logistic head trained here); stratified 20 % holdout; held-out check. |
 
 Every new external call is verified on exactly one call (`MAX_BATCHES=1`, `MAX_CASES=1`)
 before a full run. Verification runs write `*-probe.jsonl` and never replace full-set results.
@@ -54,6 +55,22 @@ labels (94 attention = `needs_user` ∪ `blocked`, 80 other); the manual pass is
   0 misses and 10 false highlights.
 - Haiku labeller: 18 calls (≤ 10 cases each), p50 5.1 s per call, about 0.017 USD for 174
   cases, 168/174 identical labels across two runs. Regex weak labels agree with Haiku on 0.707.
+
+### Contract v2: RobeCzech encoder + trained head
+
+The user's target is a Jev-class decision model (milliseconds, < 1 GB VRAM); local_models
+withdrew the chat models. Head trained on 139 cases (75 must_act, 122 Czech), 35 held out:
+
+| | Result |
+|---|---|
+| CV AUC | 0.879 (cs 0.860, en 0.188 on 17 English cases) |
+| CV zero misses | threshold 0.0014, 50/64 false highlights |
+| CV 2 % / 5 % miss budget | 1 missed, 30 FH / 3 missed, 26 FH |
+| Held-out at default threshold | 1/19 missed, 11/16 false highlights |
+| Latency | p50 19 ms per message |
+
+Not usable yet: zero misses costs about 78 % false highlights. The head needs more labelled
+real cases (`results/attention-head-cv.json`, `results/attention-holdout-summary.json`).
 
 ## Caveats
 
