@@ -27,7 +27,7 @@ are acceptable.
 | `eval_local.py [MODEL [MAX_CASES]]` | v1 eval: accuracy, confusion, attention misses, threshold sweep; writes `review.jsonl`. |
 | `contract_v2.json` | Draft prompt v2: primary binary question `needs_user` yes/no, explicit implicit-ask rules, user need wins, "if unsure: yes". Decoding as v1. |
 | `eval_v2.py CONTRACT MODEL [MAX_CASES]` | Binary eval on P(yes) from the logprobs of the decision token. |
-| `attention_data.py export LABELS \| check LABELS SCORES \| fresh BATCH` (LABELS `v1` = 174 cases, `v2` = all candidates with Haiku v2 `must_act`) | Labels for local_models' `attention.py` (RobeCzech encoder + head); stratified 20 % holdout; held-out check; `fresh` turns a whole `--batch` export into an untouched held-out set. |
+| `attention_data.py export LABELS \| check LABELS SCORES \| fresh BATCH \| train NAME [BATCH...]` (LABELS `v1` = 174 cases, `v2` = all candidates with Haiku v2 `must_act`) | Labels for local_models' `attention.py` (RobeCzech encoder + head); stratified 20 % holdout; held-out check; `fresh` turns a whole `--batch` export into an untouched held-out set; `train` joins `candidates.jsonl` and fully labelled batches into one training file and refuses frozen held-out batches. |
 
 Every new external call is verified on exactly one call before a full run. Local evals
 (`MAX_CASES=1`) write `*-probe.jsonl` and never replace full-set results. For Haiku the

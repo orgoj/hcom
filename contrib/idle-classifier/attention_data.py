@@ -6,6 +6,8 @@ Usage:
   python3 -I attention_data.py check LABELS SCORES    # SCORES = attention.py score output on the holdout
   python3 -I attention_data.py fresh BATCH            # labels-fresh-BATCH.jsonl: a whole new export
                                                       # (build_eval_set.py --batch) as untouched held-out
+  python3 -I attention_data.py train NAME [BATCH...]  # labels-train-NAME.jsonl: candidates.jsonl + batches,
+                                                      # each fully labelled; frozen fresh batches refused
 
 LABELS v1: the 174 cases, must_act = Haiku v1 state in {needs_user, blocked} (no suffix).
 LABELS v2: all candidates, must_act from Haiku with contract v2 rules (suffix -v2).
@@ -96,13 +98,33 @@ def export(labels):
     print(json.dumps({"train": count(train), "holdout": count(holdout)}))
 
 
+def complete_rows(batch):
+    """Gold rows of an export (None = candidates.jsonl) whose Haiku v2 labels cover it exactly."""
+    source = f"candidates-{batch}" if batch else "candidates"
+    candidate_ids = [c["id"] for c in read_jsonl(OUT / f"{source}.jsonl")]
+    label_ids = [r["id"] for r in read_jsonl(OUT / f"haiku_v2_{source}-{HAIKU_V2_RULES}.jsonl")]
+    if len(set(label_ids)) != len(label_ids) or set(label_ids) != set(candidate_ids):
+        sys.exit(f"labels must cover every {source} id exactly once; finish the Haiku run first")
+    return gold_rows("v2", batch)
+
+
+def train_all(name, batches):
+    """One training file from candidates.jsonl plus the given batches; frozen held-out batches are refused."""
+    rows = complete_rows(None)
+    for batch in batches:
+        if (OUT / f"labels-fresh-{batch}.jsonl").exists():
+            sys.exit(f"{batch} is a frozen held-out set and never goes into training")
+        rows += complete_rows(batch)
+    if len({r["id"] for r in rows}) != len(rows):
+        sys.exit("duplicate ids across sources")
+    write_jsonl(OUT / f"labels-train-{name}.jsonl", rows)
+    print(json.dumps({"train": {"n": len(rows), "must_act": sum(r["must_act"] for r in rows),
+                                "cs": sum(r["lang"] == "cs" for r in rows)}}))
+
+
 def fresh(batch):
     """A whole incremental export as one untouched held-out set (never used for training)."""
-    candidate_ids = [c["id"] for c in read_jsonl(OUT / f"candidates-{batch}.jsonl")]
-    label_ids = [r["id"] for r in read_jsonl(OUT / f"haiku_v2_candidates-{batch}-{HAIKU_V2_RULES}.jsonl")]
-    if len(set(label_ids)) != len(label_ids) or set(label_ids) != set(candidate_ids):
-        sys.exit("labels must cover every batch candidate exactly once; finish the Haiku run first")
-    rows = gold_rows("v2", batch)
+    rows = complete_rows(batch)
     path = OUT / f"labels-fresh-{batch}.jsonl"
     content = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
     # A held-out set is frozen once written: only a byte-identical rebuild is accepted.
@@ -147,5 +169,7 @@ if __name__ == "__main__":
         check(sys.argv[2], sys.argv[3])
     elif sys.argv[1:2] == ["fresh"] and len(sys.argv) == 3 and re.fullmatch(r"[\w.-]+", sys.argv[2]):
         fresh(sys.argv[2])
+    elif sys.argv[1:2] == ["train"] and len(sys.argv) >= 3 and all(re.fullmatch(r"[\w.-]+", a) for a in sys.argv[2:]):
+        train_all(sys.argv[2], sys.argv[3:])
     else:
         sys.exit(__doc__)

@@ -1,0 +1,26 @@
+{
+  "batch": "2026-10-24-older",
+  "sources": 1824,
+  "seen": 13796,
+  "already_used": 1627,
+  "new_unsampled": 12169,
+  "new_candidates": 3000,
+  "skipped": {},
+  "lang": {
+    "cs": 2889,
+    "en": 111
+  },
+  "cli": {
+    "codex": 668,
+    "claude": 2119,
+    "antigravity": 213
+  },
+  "weak_label_x_lang": {
+    "done/cs": 1960,
+    "needs_user/cs": 627,
+    "blocked/cs": 34,
+    "done/en": 109,
+    "waiting_agent/cs": 268,
+    "needs_user/en": 2
+  }
+}
