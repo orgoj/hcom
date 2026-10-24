@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Independent labels from Claude Haiku (user-approved labelling step; texts go to the cloud).
+"""Independent labels from Claude Haiku or Sonnet (user-approved labelling; texts go to the cloud).
 
-Usage: python3 -I label_haiku.py [--rules v1|v2] [--source cases|candidates|candidates-<batch>] [--max-batches N]
-  v1: contract_v1 rules, 4-way state                       -> haiku_labels.jsonl (cases only)
-  v2: contract_v2 rules, must_act (needs_user yes/no) + state -> haiku_v2_<source>-<rules hash>.jsonl
+Usage: python3 -I label_haiku.py [--rules v1|v2] [--model haiku|sonnet] [--source STEM] [--ids FILE]
+                                 [--max-batches N]
+  v1: contract_v1 rules, 4-way state, haiku           -> haiku_labels.jsonl (cases only)
+  v2: contract_v2 rules, must_act (needs_user yes/no) + state -> <model>_v2_<source>-<rules hash>.jsonl
+The model sees only the message text and the rules (blind to any other label or score).
+--source is any private JSONL with id and text; --ids limits the run to the listed ids.
 
 Labels go to the private data directory, per-call metrics to results/<stem>-calls.jsonl and a
 run summary to results/<stem>-summary.json. Already labelled ids are skipped, so a run resumes
@@ -73,17 +76,20 @@ def read_jsonl(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rules", choices=["v1", "v2"], default="v1")
-    ap.add_argument("--source", default="cases", help="cases, candidates or candidates-<batch>")
+    ap.add_argument("--model", choices=["haiku", "sonnet"], default="haiku")
+    ap.add_argument("--source", default="cases",
+                    help="private JSONL with id and text: cases, candidates[-<batch>], labels-...")
+    ap.add_argument("--ids", help="private file with one id per line: label only these source rows")
     ap.add_argument("--max-batches", type=int, default=0, help="0 = all")
     args = ap.parse_args()
-    if not re.fullmatch(r"cases|candidates(-[\w.-]+)?", args.source):
-        sys.exit("--source must be cases, candidates or candidates-<batch>")
-    if args.rules == "v1" and args.source != "cases":
-        sys.exit("v1 labels exist for cases only")
+    if not re.fullmatch(r"[\w.-]+", args.source):
+        sys.exit("--source must be a plain file stem in the private data directory")
+    if args.rules == "v1" and (args.source != "cases" or args.model != "haiku"):
+        sys.exit("v1 labels exist for cases with haiku only")
     rules, schema = rules_and_schema(args.rules)
     rules_hash = hashlib.sha1(rules.encode()).hexdigest()[:8]
     # v2 files carry the rules hash, so changed rules start a new label set instead of mixing.
-    stem = "haiku_labels" if args.rules == "v1" else f"haiku_v2_{args.source}-{rules_hash}"
+    stem = "haiku_labels" if args.rules == "v1" else f"{args.model}_v2_{args.source}-{rules_hash}"
 
     out_path, calls_path = OUT / f"{stem}.jsonl", RESULTS / f"{stem}-calls.jsonl"
     existing = read_jsonl(out_path)
@@ -93,6 +99,15 @@ def main():
     if len(done) != len(existing):
         sys.exit(f"{out_path.name} has duplicate ids")
     cases = read_jsonl(OUT / f"{args.source}.jsonl")
+    if any(not isinstance(c.get("id"), str) or not isinstance(c.get("text"), str) for c in cases):
+        sys.exit(f"{args.source}.jsonl needs string id and text in every row")
+    if len({c["id"] for c in cases}) != len(cases):
+        sys.exit(f"{args.source}.jsonl has duplicate ids")
+    if args.ids:
+        wanted = set((OUT / args.ids).read_text(encoding="utf-8").split())
+        if not wanted <= {c["id"] for c in cases}:
+            sys.exit(f"{args.ids} has ids that are not in {args.source}.jsonl")
+        cases = [c for c in cases if c["id"] in wanted]
     source_ids = {c["id"] for c in cases}
     todo = [c for c in cases if c["id"] not in done]
     if args.max_batches > 0:
@@ -102,7 +117,7 @@ def main():
         batch = todo[i:i + BATCH]
         prompt = "\n\n".join(f'<message id="{c["id"]}">\n{c["text"]}\n</message>' for c in batch)
         proc = subprocess.run(
-            ["claude", "-p", "--model", "haiku", "--tools", "", "--setting-sources", "",
+            ["claude", "-p", "--model", args.model, "--tools", "", "--setting-sources", "",
              "--output-format", "json", "--json-schema", json.dumps(schema), "--system-prompt", rules],
             input=prompt, capture_output=True, text=True, timeout=300,
         )

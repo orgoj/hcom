@@ -1,0 +1,22 @@
+{
+  "stem": "sonnet_v2_candidates-2026-10-24b-6d617f6c",
+  "rules": "6d617f6c",
+  "source_cases": 141,
+  "labelled": 141,
+  "calls": 15,
+  "cost_usd": 0.436,
+  "duration_ms_per_call": {
+    "p50": 3413,
+    "max": 8873
+  },
+  "ms_per_case": 396,
+  "input_tokens": 135128,
+  "output_tokens": 5260,
+  "states": {
+    "done": 24,
+    "needs_user": 56,
+    "blocked": 1,
+    "waiting_agent": 60
+  },
+  "must_act": 58
+}

@@ -1,0 +1,38 @@
+{
+  "base": "labels-fresh-2026-10-24b",
+  "second": "sonnet_v2_candidates-2026-10-24b-6d617f6c",
+  "out": "labels-fresh-2026-10-24b-sonnet",
+  "compared": 141,
+  "agree": 130,
+  "base_to_second": {
+    "False->False": 74,
+    "True->True": 56,
+    "True->False": 9,
+    "False->True": 2
+  },
+  "by_lang": {
+    "cs:agree": 115,
+    "cs:disagree": 10,
+    "en:agree": 15,
+    "en:disagree": 1
+  },
+  "must_act": {
+    "base": 65,
+    "out": 58
+  },
+  "disagreeing_ids": [
+    "13d72d6b1d8e",
+    "335e87a3afbe",
+    "4b5f854ead40",
+    "7d5319c1b594",
+    "8d4ec17b7a21",
+    "af2fb5620e49",
+    "b3e2b7d3cf81",
+    "b8da35049865",
+    "c26212ce900d",
+    "db032095e08f",
+    "dc4eb1baca00"
+  ],
+  "manual_corrections_compared": 0,
+  "manual_corrections_agree": 0
+}

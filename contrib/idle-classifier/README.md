@@ -22,7 +22,8 @@ are acceptable.
 | File | Purpose |
 |---|---|
 | `build_eval_set.py [--hcom BIN] [--batch NAME [--older N]]` | Idle points from hcom transcripts (`hcom transcript <name> 1- --json`, `final_text`, else `action`); weak label from the next user turn (human / hcom / system) and cs/en keyword cues; balanced sample of up to 60 per weak label. `--batch` exports only texts no earlier export holds; by name it reaches only the newest incarnation of each instance. `--older N` instead reads every stopped incarnation's transcript file (`hcom transcript --path`), skips shared session databases (OpenCode, Kilo, Hermes) and keeps a seed-42 sample of N unseen idle points. |
-| `label_haiku.py [--rules v1\|v2] [--source cases\|candidates] [--max-batches N]` | Labels from Haiku, batches of 10; per-call metrics and a run summary in `results/`. v2 = contract v2 rules with `must_act`. Resumes, never labels an id twice. |
+| `label_haiku.py [--rules v1\|v2] [--model haiku\|sonnet] [--source STEM] [--ids FILE] [--max-batches N]` | Blind labels (message text + rules only) from Haiku or Sonnet, batches of 10; per-call metrics and a run summary in `results/`. v2 = contract v2 rules with `must_act`. `--source` is any private JSONL with id and text, `--ids` limits the run to listed ids. Resumes, never labels an id twice. |
+| `compare_labels.py BASE SECOND OUT [--ids FILE]` | Agreement of a labels file with a second blind labelling (e.g. Sonnet), and a corrected copy OUT (new name, written once) that takes SECOND's label for the compared ids; summary with disagreeing ids in `results/compare-OUT.json`. |
 | `contract_v1.json` | local_models' contract v1 (4 labels, `qwen3.5:4b`), copied for reproducibility. |
 | `eval_local.py [MODEL [MAX_CASES]]` | v1 eval: accuracy, confusion, attention misses, threshold sweep; writes `review.jsonl`. |
 | `contract_v2.json` | Draft prompt v2: primary binary question `needs_user` yes/no, explicit implicit-ask rules, user need wins, "if unsure: yes". Decoding as v1. |
@@ -111,6 +112,21 @@ noise (finished reports, own next-step plans, waiting for another agent), 9 genu
 7 ambiguous kept must_act. Training file with them: `labels-train-2026-10-24-r1.jsonl`
 (3622 rows, 1605 must_act). Haiku's must_act is consistent with its own state, so the noise
 is Haiku calling plain reports needs_user; more is likely among higher-scoring cases.
+
+### Sonnet check of disputed cases
+
+Blind Sonnet (`claude-sonnet-5-5`, contract v2 rules, text only) on cases where the
+v3.1-3622r1 model and the Haiku label disagree (must_act scored < 0.1, or not must_act scored
+≥ 0.5):
+
+| Set | Compared | Agree | Haiku→Sonnet changes | Corrected file |
+|---|---|---|---|---|
+| Training calibration split | 70 | 50 | 12 true→false, 8 false→true | `labels-train-2026-10-24-r2-sonnet.jsonl` (1601 must_act) |
+| Fresh held-out, disputed | 19 | 16 | 1 true→false, 2 false→true | `labels-fresh-2026-10-24b-sonnet-disputed.jsonl` (66 must_act) |
+
+A Sonnet run on all 141 fresh cases happened before the scope was narrowed and is kept
+separate: 130/141 agree, 9 true→false, 2 false→true (`labels-fresh-2026-10-24b-sonnet.jsonl`).
+Cost: training 0.209 USD, fresh 0.436 USD. Originals stay untouched.
 
 ## Caveats
 

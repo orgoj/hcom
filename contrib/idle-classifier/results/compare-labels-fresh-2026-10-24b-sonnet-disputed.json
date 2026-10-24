@@ -1,0 +1,29 @@
+{
+  "base": "labels-fresh-2026-10-24b",
+  "second": "sonnet_v2_candidates-2026-10-24b-6d617f6c",
+  "out": "labels-fresh-2026-10-24b-sonnet-disputed",
+  "compared": 19,
+  "agree": 16,
+  "base_to_second": {
+    "False->False": 13,
+    "False->True": 2,
+    "True->False": 1,
+    "True->True": 3
+  },
+  "by_lang": {
+    "cs:agree": 16,
+    "cs:disagree": 2,
+    "en:disagree": 1
+  },
+  "must_act": {
+    "base": 65,
+    "out": 66
+  },
+  "disagreeing_ids": [
+    "13d72d6b1d8e",
+    "7d5319c1b594",
+    "c26212ce900d"
+  ],
+  "manual_corrections_compared": 0,
+  "manual_corrections_agree": 0
+}
