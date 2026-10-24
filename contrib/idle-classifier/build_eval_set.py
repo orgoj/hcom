@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Build the weak-labelled real-data eval set for the idle-agent classifier.
+
+Usage: python3 -I build_eval_set.py [HCOM_BIN]   (HCOM_BIN needs `transcript --json` final_text)
+
+Every exchange that has a following exchange is one idle point: its final assistant text is the
+classifier input, the next user turn gives the weak label. Weak labels only pre-sort; `label`
+stays null until a gold labelling pass. Message texts stay in $HCOM_DIR/tmp/idle-classifier/:
+candidates.jsonl (all), cases.jsonl (balanced sample); counts go to results/dataset-summary.json.
+"""
+import collections
+import datetime
+import hashlib
+import json
+import os
+import pathlib
+import random
+import re
+import subprocess
+import sys
+
+HERE = pathlib.Path(__file__).resolve().parent
+RESULTS = HERE / "results"  # metrics only, committed
+class PrivateDir:
+    """$HCOM_DIR/tmp/idle-classifier: message texts live only here, never in the repository."""
+
+    def __init__(self):
+        root = pathlib.Path(os.environ.get("HCOM_DIR", pathlib.Path.home() / ".hcom")).expanduser()
+        self.path = (root / "tmp" / "idle-classifier").resolve()
+        if self.path.is_relative_to(HERE.parents[1]):
+            sys.exit(f"refusing private data directory inside the repository: {self.path}")
+
+    def __truediv__(self, name):
+        if pathlib.Path(name).name != name:
+            sys.exit(f"unsafe file name: {name!r}")
+        path = self.path / name
+        if path.is_symlink():
+            sys.exit(f"refusing symlinked private file: {path}")
+        return path
+
+
+OUT = PrivateDir()
+HCOM = sys.argv[1] if len(sys.argv) > 1 else "hcom"
+MAX_CHARS = 3000  # contract input: last 3000 characters
+PER_LABEL = 60
+LABELS = ("done", "needs_user", "blocked", "waiting_agent")
+
+CS_CHARS = re.compile(r"[ěščřžýáíéůúťďň]")
+BLOCKED = re.compile(
+    r"permission denied|access denied|not permitted|forbidden|unreachable|connection refused"
+    r"|no space left|cannot (access|reach|connect|continue|proceed)|can't (access|reach|continue)"
+    r"|blocked on|i'?m blocked|missing (credential|token|access|permission)"
+    r"|nemám (přístup|oprávnění|práva)|bez (přístupu|oprávnění)|nelze pokračovat|nemohu pokračovat"
+    r"|nedostupn|zablokovan|blokuje mě|chybí (přístup|oprávnění|token|heslo)",
+    re.I,
+)
+WAITING = re.compile(
+    r"waiting for (a |the )?(reply|response|answer|@)|wait(ing)? for @\w+|until @\w+ (replies|responds)"
+    r"|once @\w+ (replies|responds)|čekám na|počkám na|až @\w+ odpoví|až odpoví",
+    re.I,
+)
+
+
+def hcom_json_lines(*args):
+    out = subprocess.run([HCOM, *args], capture_output=True, text=True, timeout=120)
+    return [json.loads(line) for line in out.stdout.splitlines() if line.startswith("{")]
+
+
+def agents():
+    """name -> tool for stopped and live instances, newest incarnation wins (as transcript does)."""
+    found = {}
+    stops = hcom_json_lines("events", "--type", "life", "--action", "stopped", "--last", "100000", "--full")
+    for ev in sorted(stops, key=lambda e: e["id"]):
+        snap = ev.get("data", {}).get("snapshot") or {}
+        if snap.get("parent_name"):
+            continue  # subagent rows
+        found[ev["instance"]] = snap.get("tool") or ""
+    live = subprocess.run([HCOM, "list", "--json"], capture_output=True, text=True, timeout=60)
+    for row in json.loads(live.stdout or "[]"):
+        if not row.get("parent_name"):
+            found[row["name"]] = row.get("tool") or ""
+    return {n: t for n, t in found.items() if t and t != "adhoc"}
+
+
+def next_kind(user):
+    text = user.lstrip()
+    if text.startswith("<hcom>"):
+        return "hcom"
+    if not text or text.startswith("<"):
+        return "system"  # task notifications, reminders, slash-command wrappers
+    return "human"
+
+
+def parse_ts(value):
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
+def weak_label(text, kind):
+    tail = text[-600:]
+    question = "?" in text[-400:]
+    if BLOCKED.search(tail):
+        return "blocked"  # rule: an obstacle is blocked even when it ends with a question
+    if kind == "human" and question:
+        return "needs_user"
+    if WAITING.search(tail):
+        return "waiting_agent"
+    if question:
+        return "needs_user"
+    return "done"
+
+
+def main():
+    OUT.path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    candidates, skipped = [], collections.Counter()
+    for name, tool in sorted(agents().items()):
+        out = subprocess.run([HCOM, "transcript", name, "1-", "--json", "--full"],
+                             capture_output=True, text=True, timeout=120)
+        if out.returncode != 0:
+            skipped["no_transcript"] += 1
+            continue
+        try:
+            exchanges = json.loads(out.stdout)
+        except json.JSONDecodeError:
+            skipped["bad_json"] += 1
+            continue
+        for cur, nxt in zip(exchanges, exchanges[1:]):
+            text = (cur.get("final_text") or cur.get("action") or "").strip()
+            if not text:
+                skipped["empty_text"] += 1
+                continue
+            kind = next_kind(nxt.get("user") or "")
+            start, end = parse_ts(cur.get("timestamp")), parse_ts(nxt.get("timestamp"))
+            ref = f"{name}#{cur['position']}"
+            candidates.append({
+                # A reused instance name restarts positions, so the id also covers time and text:
+                # labels keyed by id never carry over to a different message.
+                "id": hashlib.sha1(f"{ref}\n{cur.get('timestamp')}\n{text}".encode()).hexdigest()[:12],
+                "cli": tool,
+                "lang": "cs" if CS_CHARS.search(text.lower()) else "en",
+                "text": text[-MAX_CHARS:],
+                "source_field": "final_text" if cur.get("final_text") else "action",
+                "next_kind": kind,
+                "gap_s": round(end - start) if start and end else None,
+                "weak_label": weak_label(text, kind),
+                "label": None,
+                "source_ref": ref,
+            })
+
+    rng = random.Random(42)
+    cases = []
+    for label in LABELS:
+        pool = [c for c in candidates if c["weak_label"] == label]
+        cases += rng.sample(pool, min(PER_LABEL, len(pool)))
+
+    with open(OUT / "candidates.jsonl", "w", encoding="utf-8") as f:
+        f.writelines(json.dumps(c, ensure_ascii=False) + "\n" for c in candidates)
+    with open(OUT / "cases.jsonl", "w", encoding="utf-8") as f:
+        f.writelines(json.dumps(c, ensure_ascii=False) + "\n" for c in cases)
+    summary = {
+        "candidates": len(candidates),
+        "cases": len(cases),
+        "skipped": dict(skipped),
+        "weak_label_x_lang": dict(collections.Counter(f"{c['weak_label']}/{c['lang']}" for c in candidates)),
+        "next_kind": dict(collections.Counter(c["next_kind"] for c in candidates)),
+        "cli": dict(collections.Counter(c["cli"] for c in candidates)),
+        "cases_weak_label_x_lang": dict(collections.Counter(f"{c['weak_label']}/{c['lang']}" for c in cases)),
+    }
+    (RESULTS / "dataset-summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == "__main__":
+    main()

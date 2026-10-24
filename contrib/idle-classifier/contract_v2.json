@@ -1,0 +1,49 @@
+{
+  "contract_version": "2-draft (hcom_dev prompt tuning; decoding and endpoint as v1)",
+  "endpoint": "POST http://127.0.0.1:11434/api/chat",
+  "input_max_chars": 3000,
+  "input_truncation": "keep the last input_max_chars characters of the last assistant message",
+  "user_message_template": "<message>\n{message}\n</message>",
+  "decision_field": "needs_user",
+  "request": {
+    "model": "<model tag>",
+    "stream": false,
+    "think": false,
+    "keep_alive": "2m",
+    "format": {
+      "type": "object",
+      "properties": {
+        "needs_user": {"type": "string", "enum": ["yes", "no"]},
+        "state": {"type": "string", "enum": ["done", "needs_user", "blocked", "waiting_agent"]}
+      },
+      "required": ["needs_user", "state"],
+      "additionalProperties": false
+    },
+    "logprobs": true,
+    "top_logprobs": 4,
+    "options": {
+      "temperature": 0,
+      "top_k": 1,
+      "top_p": 1,
+      "seed": 42,
+      "num_ctx": 4096,
+      "num_predict": 32
+    },
+    "messages": [
+      {
+        "role": "system",
+        "content": "An AI coding agent finished its turn and went idle. Below is its last message (Czech or English). Decide whether the human user must do something now.\n\nneeds_user = \"yes\" when anything in the message is left for the user, anywhere in the message, even if the rest is a finished report or the agent also waits for another agent:\n- a question to the user, direct or indirect, also inside a list or in the middle of the text;\n- a choice, decision, confirmation or approval the user has to make;\n- questions or decisions from earlier that are still open (\"otázka z minula pořád platí\", \"tvoje otázky jsou pořád otevřené\", \"open items\", \"Otevřené zůstává\");\n- a decision explicitly left to the user (\"rozhodnutí je na vás/tobě\", \"je to na tobě\", \"your call\");\n- proposed changes or a plan that was not applied and waits for approval (\"zatím jsem nic neaplikoval\", \"mám to provést?\", \"čekám na tvé potvrzení\");\n- an instruction or request for the user to do something (connect, run, provide, check, fix access, restart);\n- an obstacle the agent cannot remove itself (missing access or permission, denied command, unavailable service, missing file or credential).\n\nneeds_user = \"no\" only when nothing at all is left for the user: a finished report or answer, or the agent only waits for another agent's reply. A generic closing offer (\"Pokud chceš, můžu ...\", \"If you want, I can ...\") with no pending decision is \"no\".\nIf unsure, answer \"yes\".\n\nstate = the main reason: needs_user (something for the user), blocked (an obstacle the agent cannot remove), waiting_agent (waits only for another agent), done (nothing left for anyone).\n\nAnswer only with JSON: {\"needs_user\": \"yes\"|\"no\", \"state\": \"<label>\"}."
+      },
+      {
+        "role": "user",
+        "content": "<filled from user_message_template>"
+      }
+    ]
+  },
+  "response": {
+    "parse": "message.content is JSON matching request.format",
+    "probability": "P(yes) = sum of exp(logprob) over top_logprobs alternatives of the first token of the needs_user value that start with 'y'",
+    "highlight": "P(yes) >= threshold chosen on real data"
+  },
+  "client_timeout_s": 30
+}

@@ -2,6 +2,11 @@
 
 Fork-only extras that run on top of the `hcom` CLI and do not touch its code.
 
+## idle-classifier
+
+Evaluation scripts and metric-only results for classifying an idle agent's last message
+(does the user need to act?). See `idle-classifier/README.md`.
+
 ## hcom-gui
 
 Tk window listing every catalog agent (`hcom agent list --all --json`) and every live

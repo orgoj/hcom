@@ -1,0 +1,59 @@
+{
+  "contract": "contract_v2.json",
+  "model": "qwen3.5:4b",
+  "cases": 174,
+  "gold_attention": 94,
+  "gold_other": 80,
+  "by_answer": {
+    "missed": 0,
+    "false_highlight": 10
+  },
+  "lowest_p_yes_on_gold_attention": 0.6482377661120236,
+  "false_highlight_at_that_threshold": 6,
+  "threshold_sweep": [
+    {
+      "threshold": 0.01,
+      "missed": 0,
+      "false_highlight": 65
+    },
+    {
+      "threshold": 0.02,
+      "missed": 0,
+      "false_highlight": 62
+    },
+    {
+      "threshold": 0.05,
+      "missed": 0,
+      "false_highlight": 49
+    },
+    {
+      "threshold": 0.1,
+      "missed": 0,
+      "false_highlight": 37
+    },
+    {
+      "threshold": 0.2,
+      "missed": 0,
+      "false_highlight": 29
+    },
+    {
+      "threshold": 0.3,
+      "missed": 0,
+      "false_highlight": 20
+    },
+    {
+      "threshold": 0.5,
+      "missed": 0,
+      "false_highlight": 10
+    }
+  ],
+  "invalid": 0,
+  "missing_p_yes": 0,
+  "deterministic": true,
+  "latency_s": {
+    "p50": 0.99,
+    "p95": 1.772,
+    "max": 2.033
+  },
+  "missed_ids_by_answer": []
+}

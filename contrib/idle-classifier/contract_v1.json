@@ -1,0 +1,54 @@
+{
+  "contract_version": "1",
+  "endpoint": "POST http://127.0.0.1:11434/api/chat",
+  "input_max_chars": 3000,
+  "input_truncation": "keep the last input_max_chars characters of the last assistant message",
+  "user_message_template": "<message>\n{message}\n</message>",
+  "request": {
+    "model": "<model tag from the handover>",
+    "stream": false,
+    "think": false,
+    "keep_alive": "2m",
+    "format": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["done", "needs_user", "blocked", "waiting_agent"]
+        }
+      },
+      "required": ["state"],
+      "additionalProperties": false
+    },
+    "logprobs": true,
+    "top_logprobs": 4,
+    "options": {
+      "temperature": 0,
+      "top_k": 1,
+      "top_p": 1,
+      "seed": 42,
+      "num_ctx": 4096,
+      "num_predict": 24
+    },
+    "messages": [
+      {
+        "role": "system",
+        "content": "You classify the last message an AI coding agent wrote before it went idle. The message may be in Czech or English. Decide what the agent is waiting for now.\n\nLabels:\n- needs_user: the agent asks the user a direct question, or asks the user to choose, confirm, approve or provide information before it continues.\n- blocked: the agent cannot continue because of an obstacle it cannot remove itself (missing access or permission, a denied command, an unavailable service, a missing file or credential, a failing build it may not fix), even if it asks the user to fix it.\n- waiting_agent: the agent sent a request to another agent (often written as @name) and waits for that agent's reply.\n- done: the agent reports finished work or an answer and needs nothing more. A closing offer written as a statement (\"If you want, I can ...\", \"Pokud chceš, můžu ...\") is still done.\n\nRules: if a finished report ends with a direct question to the user, choose needs_user. If the agent mentions another agent only as a past fact and waits for nothing, choose done.\nAnswer only with JSON: {\"state\": \"<label>\"}."
+      },
+      {
+        "role": "user",
+        "content": "<filled from user_message_template>"
+      }
+    ]
+  },
+  "response": {
+    "parse": "message.content is JSON matching request.format; state is the label",
+    "confidence": "exp(logprob) of the first token of the state value, from the logprobs list; null if logprobs are absent",
+    "reject_as_no_state": [
+      "HTTP error, connection error or client timeout",
+      "message.content not valid JSON or state not in the enum",
+      "confidence below the threshold chosen by the consumer"
+    ]
+  },
+  "client_timeout_s": 30
+}

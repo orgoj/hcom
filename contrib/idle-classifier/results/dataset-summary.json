@@ -1,0 +1,34 @@
+{
+  "candidates": 622,
+  "cases": 174,
+  "skipped": {
+    "no_transcript": 22
+  },
+  "weak_label_x_lang": {
+    "done/cs": 335,
+    "needs_user/cs": 96,
+    "waiting_agent/cs": 43,
+    "done/en": 137,
+    "blocked/en": 2,
+    "blocked/cs": 9
+  },
+  "next_kind": {
+    "hcom": 236,
+    "human": 275,
+    "system": 111
+  },
+  "cli": {
+    "claude": 354,
+    "codex": 168,
+    "antigravity": 81,
+    "hermes": 19
+  },
+  "cases_weak_label_x_lang": {
+    "done/cs": 41,
+    "done/en": 19,
+    "needs_user/cs": 60,
+    "blocked/cs": 9,
+    "blocked/en": 2,
+    "waiting_agent/cs": 43
+  }
+}

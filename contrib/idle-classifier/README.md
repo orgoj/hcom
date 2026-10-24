@@ -1,0 +1,66 @@
+# Idle-agent classifier: evaluation
+
+Experiment for a future hcom-gui column: when an agent goes idle (`active` → `listening`),
+decide from its last message whether the user must act now. Other states (`blocked` on an
+approval, `active`) are deterministic in hcom and are not classified. Nothing here is wired
+into hcom or the gui yet.
+
+Requirement: no idle agent that waits for the user may stay unmarked. A few false highlights
+are acceptable.
+
+## Data and privacy
+
+- Message texts never enter this repository. `build_eval_set.py` writes them to
+  `$HCOM_DIR/tmp/idle-classifier/` (default `~/.hcom/tmp/idle-classifier/`): `cases.jsonl`,
+  labels, per-case runs and `review.jsonl`.
+- `results/` holds metrics only (counts, rates, latencies, case ids).
+- `label_haiku.py` sends case texts to Claude Haiku (cloud); the user approved that step.
+  Local model calls go only to the local Ollama.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `build_eval_set.py [HCOM_BIN]` | Idle points from hcom transcripts (`hcom transcript <name> 1- --json`, `final_text`, else `action`); weak label from the next user turn (human / hcom / system) and cs/en keyword cues; balanced sample of up to 60 per weak label. |
+| `label_haiku.py [MAX_BATCHES [OUT_STEM]]` | Second label from Haiku, batches of 10, with per-call metrics. |
+| `contract_v1.json` | local_models' contract v1 (4 labels, `qwen3.5:4b`), copied for reproducibility. |
+| `eval_local.py [MODEL [MAX_CASES]]` | v1 eval: accuracy, confusion, attention misses, threshold sweep; writes `review.jsonl`. |
+| `contract_v2.json` | Draft prompt v2: primary binary question `needs_user` yes/no, explicit implicit-ask rules, user need wins, "if unsure: yes". Decoding as v1. |
+| `eval_v2.py CONTRACT MODEL [MAX_CASES]` | Binary eval on P(yes) from the logprobs of the decision token. |
+
+Every new external call is verified on exactly one call (`MAX_BATCHES=1`, `MAX_CASES=1`)
+before a full run. Verification runs write `*-probe.jsonl` and never replace full-set results.
+File names carry the model as one safe component; a tag that needs escaping gets a digest of
+the raw name (`qwen3.5:4b` → `qwen3.5_4b-c57d0c95`).
+
+## Results (174 real cases, 2026-10-24)
+
+Dataset: 622 idle points from Claude, Codex, Antigravity and Hermes; the sample has
+done 60, needs_user 60, waiting_agent 43, blocked 11 by weak label. Gold for now = Haiku
+labels (94 attention = `needs_user` ∪ `blocked`, 80 other); the manual pass is pending.
+
+| `qwen3.5:4b` | contract v1 (4 labels) | prompt v2 (yes/no) |
+|---|---|---|
+| Missed attention | 6/94 | 0/94 |
+| False highlight | 5/80 | 10/80 |
+| Invalid / deterministic | 0 / yes | 0 / yes |
+| Warm latency p50 / p95 | 0.76 / 1.48 s | 0.99 / 1.77 s |
+
+- v1 misses were all Czech implicit asks: an earlier question restated as still open, a
+  decision left to the user, proposed changes not applied, an instruction for the user, an
+  "open items" list of questions. One miss had confidence 0.91, so no v1 threshold fixes it:
+  0 misses would need 52/80 false highlights.
+- v2: the lowest P(yes) on a gold attention case is 0.648; highlighting at P(yes) ≥ 0.5 gives
+  0 misses and 10 false highlights.
+- Haiku labeller: 18 calls (≤ 10 cases each), p50 5.1 s per call, about 0.017 USD for 174
+  cases, 168/174 identical labels across two runs. Regex weak labels agree with Haiku on 0.707.
+
+## Caveats
+
+- Gold is Haiku labelled with the v1 rules, so it shares their blind spots. Final gold needs
+  the user's manual pass, including a sample of cases where all labellers agree on "no".
+- Prompt v2 was written after seeing the v1 misses on this same set; its 0 misses may be
+  optimistic until measured on fresh cases.
+- Only 11 `blocked` cases by weak label (5 by Haiku).
+- The target is a small decision model with millisecond responses and minimal resources;
+  local_models owns that choice. `qwen3.5:4b` here is a baseline, not the target model.
