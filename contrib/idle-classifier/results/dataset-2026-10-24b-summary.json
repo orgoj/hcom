@@ -1,0 +1,25 @@
+{
+  "batch": "2026-10-24b",
+  "seen": 747,
+  "already_used": 606,
+  "new_candidates": 141,
+  "skipped": {
+    "no_transcript": 22
+  },
+  "lang": {
+    "cs": 125,
+    "en": 16
+  },
+  "cli": {
+    "claude": 118,
+    "codex": 17,
+    "hermes": 2,
+    "antigravity": 4
+  },
+  "weak_label_x_lang": {
+    "done/cs": 89,
+    "waiting_agent/cs": 16,
+    "needs_user/cs": 20,
+    "done/en": 16
+  }
+}

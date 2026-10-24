@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Independent labels from Claude Haiku (user-approved labelling step; texts go to the cloud).
 
-Usage: python3 -I label_haiku.py [--rules v1|v2] [--source cases|candidates] [--max-batches N]
+Usage: python3 -I label_haiku.py [--rules v1|v2] [--source cases|candidates|candidates-<batch>] [--max-batches N]
   v1: contract_v1 rules, 4-way state                       -> haiku_labels.jsonl (cases only)
   v2: contract_v2 rules, must_act (needs_user yes/no) + state -> haiku_v2_<source>-<rules hash>.jsonl
 
@@ -18,6 +18,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import statistics
 import subprocess
 import sys
@@ -72,9 +73,11 @@ def read_jsonl(path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rules", choices=["v1", "v2"], default="v1")
-    ap.add_argument("--source", choices=["cases", "candidates"], default="cases")
+    ap.add_argument("--source", default="cases", help="cases, candidates or candidates-<batch>")
     ap.add_argument("--max-batches", type=int, default=0, help="0 = all")
     args = ap.parse_args()
+    if not re.fullmatch(r"cases|candidates(-[\w.-]+)?", args.source):
+        sys.exit("--source must be cases, candidates or candidates-<batch>")
     if args.rules == "v1" and args.source != "cases":
         sys.exit("v1 labels exist for cases only")
     rules, schema = rules_and_schema(args.rules)

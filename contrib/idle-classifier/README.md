@@ -21,13 +21,13 @@ are acceptable.
 
 | File | Purpose |
 |---|---|
-| `build_eval_set.py [HCOM_BIN]` | Idle points from hcom transcripts (`hcom transcript <name> 1- --json`, `final_text`, else `action`); weak label from the next user turn (human / hcom / system) and cs/en keyword cues; balanced sample of up to 60 per weak label. |
+| `build_eval_set.py [--hcom BIN] [--batch NAME]` | Idle points from hcom transcripts (`hcom transcript <name> 1- --json`, `final_text`, else `action`); weak label from the next user turn (human / hcom / system) and cs/en keyword cues; balanced sample of up to 60 per weak label. `--batch` exports only texts no earlier export holds. Only the newest incarnation of each instance name is reachable. |
 | `label_haiku.py [--rules v1\|v2] [--source cases\|candidates] [--max-batches N]` | Labels from Haiku, batches of 10; per-call metrics and a run summary in `results/`. v2 = contract v2 rules with `must_act`. Resumes, never labels an id twice. |
 | `contract_v1.json` | local_models' contract v1 (4 labels, `qwen3.5:4b`), copied for reproducibility. |
 | `eval_local.py [MODEL [MAX_CASES]]` | v1 eval: accuracy, confusion, attention misses, threshold sweep; writes `review.jsonl`. |
 | `contract_v2.json` | Draft prompt v2: primary binary question `needs_user` yes/no, explicit implicit-ask rules, user need wins, "if unsure: yes". Decoding as v1. |
 | `eval_v2.py CONTRACT MODEL [MAX_CASES]` | Binary eval on P(yes) from the logprobs of the decision token. |
-| `attention_data.py export LABELS \| check LABELS SCORES` (LABELS `v1` = 174 cases, `v2` = all candidates with Haiku v2 `must_act`) | Labels for local_models' contract v2 (`attention.py`: frozen `ufal/robeczech-base` encoder + logistic head trained here); stratified 20 % holdout; held-out check. |
+| `attention_data.py export LABELS \| check LABELS SCORES \| fresh BATCH` (LABELS `v1` = 174 cases, `v2` = all candidates with Haiku v2 `must_act`) | Labels for local_models' `attention.py` (RobeCzech encoder + head); stratified 20 % holdout; held-out check; `fresh` turns a whole `--batch` export into an untouched held-out set. |
 
 Every new external call is verified on exactly one call before a full run. Local evals
 (`MAX_CASES=1`) write `*-probe.jsonl` and never replace full-set results. For Haiku the
@@ -84,6 +84,10 @@ the v1 attention labels except 7 cases v2 now marks must_act. Head on 497, 125 h
 | CV zero misses | threshold 0.0002, 247/292 false highlights |
 | CV 2 % / 5 % miss budget | 4 missed, 158 FH / 10 missed, 120 FH |
 | Held-out at default threshold | 0/52 missed, 60/73 false highlights |
+
+Fresh export `2026-10-24b`: 141 idle points no earlier export held (cs 125), Haiku v2: 65
+must_act; 15 calls, 0.028 USD (`results/dataset-2026-10-24b-summary.json`,
+`results/haiku_v2_candidates-2026-10-24b-*`). Kept whole as an untouched held-out set.
 
 AUC stays near 0.88 from 139 to 497 cases: the frozen encoder with a linear head, not the
 label count, limits it (`results/attention-head-v2-cv.json`,

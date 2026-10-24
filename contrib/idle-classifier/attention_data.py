@@ -4,6 +4,8 @@
 Usage:
   python3 -I attention_data.py export LABELS          # labels-train<sfx>.jsonl, labels-holdout<sfx>.jsonl
   python3 -I attention_data.py check LABELS SCORES    # SCORES = attention.py score output on the holdout
+  python3 -I attention_data.py fresh BATCH            # labels-fresh-BATCH.jsonl: a whole new export
+                                                      # (build_eval_set.py --batch) as untouched held-out
 
 LABELS v1: the 174 cases, must_act = Haiku v1 state in {needs_user, blocked} (no suffix).
 LABELS v2: all candidates, must_act from Haiku with contract v2 rules (suffix -v2).
@@ -15,6 +17,7 @@ import json
 import os
 import pathlib
 import random
+import re
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -58,12 +61,13 @@ SUFFIX = {"v1": "", "v2": "-v2"}
 HAIKU_V2_RULES = "6d617f6c"  # rules hash of the Haiku v2 run the v2 labels come from
 
 
-def gold_rows(labels):
+def gold_rows(labels, batch=None):
     if labels == "v1":
         source, haiku = "cases.jsonl", {r["id"]: r["haiku"] in ATTENTION for r in read_jsonl(OUT / "haiku_labels.jsonl")}
     else:
-        source = "candidates.jsonl"
-        haiku = {r["id"]: r["must_act"] for r in read_jsonl(OUT / f"haiku_v2_candidates-{HAIKU_V2_RULES}.jsonl")}
+        source = f"candidates-{batch}.jsonl" if batch else "candidates.jsonl"
+        haiku = {r["id"]: r["must_act"]
+                 for r in read_jsonl(OUT / f"haiku_v2_{source[:-len('.jsonl')]}-{HAIKU_V2_RULES}.jsonl")}
     # Manual review lives in cases.jsonl (a sampled copy), so it applies to candidates by id too.
     manual = {c["id"]: c["label"] for c in read_jsonl(OUT / "cases.jsonl") if c.get("label")}
     rows = []
@@ -90,6 +94,25 @@ def export(labels):
     count = lambda rs: {"n": len(rs), "must_act": sum(r["must_act"] for r in rs),
                         "cs": sum(r["lang"] == "cs" for r in rs)}
     print(json.dumps({"train": count(train), "holdout": count(holdout)}))
+
+
+def fresh(batch):
+    """A whole incremental export as one untouched held-out set (never used for training)."""
+    candidate_ids = [c["id"] for c in read_jsonl(OUT / f"candidates-{batch}.jsonl")]
+    label_ids = [r["id"] for r in read_jsonl(OUT / f"haiku_v2_candidates-{batch}-{HAIKU_V2_RULES}.jsonl")]
+    if len(set(label_ids)) != len(label_ids) or set(label_ids) != set(candidate_ids):
+        sys.exit("labels must cover every batch candidate exactly once; finish the Haiku run first")
+    rows = gold_rows("v2", batch)
+    path = OUT / f"labels-fresh-{batch}.jsonl"
+    content = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+    # A held-out set is frozen once written: only a byte-identical rebuild is accepted.
+    if path.exists():
+        if path.read_text(encoding="utf-8") != content:
+            sys.exit(f"{path.name} exists with different content; the held-out set is frozen")
+    else:
+        path.write_text(content, encoding="utf-8")
+    print(json.dumps({"fresh": {"n": len(rows), "must_act": sum(r["must_act"] for r in rows),
+                                "cs": sum(r["lang"] == "cs" for r in rows)}}))
 
 
 def check(labels, scores_path):
@@ -122,5 +145,7 @@ if __name__ == "__main__":
         export(sys.argv[2])
     elif sys.argv[1:2] == ["check"] and len(sys.argv) == 4 and sys.argv[2] in SUFFIX:
         check(sys.argv[2], sys.argv[3])
+    elif sys.argv[1:2] == ["fresh"] and len(sys.argv) == 3 and re.fullmatch(r"[\w.-]+", sys.argv[2]):
+        fresh(sys.argv[2])
     else:
         sys.exit(__doc__)

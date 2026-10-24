@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Build the weak-labelled real-data eval set for the idle-agent classifier.
 
-Usage: python3 -I build_eval_set.py [HCOM_BIN]   (HCOM_BIN needs `transcript --json` final_text)
+Usage: python3 -I build_eval_set.py [--hcom BIN] [--batch NAME]   (BIN needs transcript final_text)
 
 Every exchange that has a following exchange is one idle point: its final assistant text is the
 classifier input, the next user turn gives the weak label. Weak labels only pre-sort; `label`
-stays null until a gold labelling pass. Message texts stay in $HCOM_DIR/tmp/idle-classifier/:
-candidates.jsonl (all), cases.jsonl (balanced sample); counts go to results/dataset-summary.json.
+stays null until a gold labelling pass. Message texts stay in $HCOM_DIR/tmp/idle-classifier/.
+Without --batch (first export, refused when it exists): candidates.jsonl (all) and cases.jsonl
+(balanced sample), counts in results/dataset-summary.json.
+With --batch NAME: only idle points whose text is in no earlier export (candidates.jsonl,
+candidates-*.jsonl) go to candidates-NAME.jsonl, counts in results/dataset-NAME-summary.json.
 """
+import argparse
 import collections
 import datetime
 import hashlib
@@ -40,7 +44,7 @@ class PrivateDir:
 
 
 OUT = PrivateDir()
-HCOM = sys.argv[1] if len(sys.argv) > 1 else "hcom"
+HCOM = "hcom"
 MAX_CHARS = 3000  # contract input: last 3000 characters
 PER_LABEL = 60
 LABELS = ("done", "needs_user", "blocked", "waiting_agent")
@@ -112,8 +116,28 @@ def weak_label(text, kind):
     return "done"
 
 
+def read_jsonl(path):
+    with open(path, encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
 def main():
+    global HCOM
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--hcom", default="hcom")
+    ap.add_argument("--batch", help="name of an incremental export, e.g. 2026-10-24b")
+    args = ap.parse_args()
+    HCOM = args.hcom
+    if args.batch and not re.fullmatch(r"[\w.-]+", args.batch):
+        sys.exit("--batch must be a plain name")
     OUT.path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if args.batch:
+        out_name = f"candidates-{args.batch}.jsonl"
+        earlier = [OUT / "candidates.jsonl"] + [OUT / p.name for p in OUT.path.glob("candidates-*.jsonl")]
+        used = {c["text"] for path in earlier if path.exists() and path.name != out_name
+                for c in read_jsonl(path)}
+    elif (OUT / "candidates.jsonl").exists():
+        sys.exit("candidates.jsonl exists and is labelled; use --batch NAME for new idle points")
     candidates, skipped = [], collections.Counter()
     for name, tool in sorted(agents().items()):
         out = subprocess.run([HCOM, "transcript", name, "1-", "--json", "--full"],
@@ -148,6 +172,26 @@ def main():
                 "label": None,
                 "source_ref": ref,
             })
+
+    if args.batch:
+        new = [c for c in candidates if c["text"] not in used]
+        content = "".join(json.dumps(c, ensure_ascii=False) + "\n" for c in new)
+        # A batch may already be labelled or used as held-out: it never changes under its name.
+        if (OUT / out_name).exists():
+            if (OUT / out_name).read_text(encoding="utf-8") != content:
+                sys.exit(f"{out_name} exists with different content; use a new --batch name")
+        else:
+            (OUT / out_name).write_text(content, encoding="utf-8")
+        summary = {
+            "batch": args.batch, "seen": len(candidates), "already_used": len(candidates) - len(new),
+            "new_candidates": len(new), "skipped": dict(skipped),
+            "lang": dict(collections.Counter(c["lang"] for c in new)),
+            "cli": dict(collections.Counter(c["cli"] for c in new)),
+            "weak_label_x_lang": dict(collections.Counter(f"{c['weak_label']}/{c['lang']}" for c in new)),
+        }
+        (RESULTS / f"dataset-{args.batch}-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+        print(json.dumps(summary, indent=2))
+        return
 
     rng = random.Random(42)
     cases = []
