@@ -1,0 +1,22 @@
+{
+  "stem": "haiku_v2_candidates-6d617f6c",
+  "rules": "6d617f6c",
+  "source_cases": 622,
+  "labelled": 622,
+  "calls": 65,
+  "cost_usd": 0.1176,
+  "duration_ms_per_call": {
+    "p50": 5818,
+    "max": 12419
+  },
+  "ms_per_case": 600,
+  "input_tokens": 578256,
+  "output_tokens": 74298,
+  "states": {
+    "done": 255,
+    "needs_user": 245,
+    "blocked": 9,
+    "waiting_agent": 113
+  },
+  "must_act": 257
+}

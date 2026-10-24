@@ -1,0 +1,46 @@
+{
+ "contract_version": "2",
+ "encoder": {
+  "repo": "ufal/robeczech-base",
+  "revision": "98c2170e7b81703dce391ed4c43ac31460a80b1c",
+  "weights_sha256": "1471bbf101e701ff889b87a5dd0dc87bd862e688b77f30fdb5c78f571750a1b9"
+ },
+ "max_tokens": 512,
+ "truncation": "left (keep the end)",
+ "pooling": "mean",
+ "l2": 0.01,
+ "cv": {
+  "n": 497,
+  "positives": 205,
+  "folds": 5,
+  "auc": 0.8857,
+  "auc_by_lang": {
+   "cs": 0.8568,
+   "en": 0.7349
+  },
+  "thresholds": [
+   {
+    "miss_budget": 0.0,
+    "threshold": 0.0002,
+    "missed": 0,
+    "false_highlight": 247,
+    "negatives": 292
+   },
+   {
+    "miss_budget": 0.02,
+    "threshold": 0.0398,
+    "missed": 4,
+    "false_highlight": 158,
+    "negatives": 292
+   },
+   {
+    "miss_budget": 0.05,
+    "threshold": 0.0975,
+    "missed": 10,
+    "false_highlight": 120,
+    "negatives": 292
+   }
+  ]
+ },
+ "default_threshold": 0.0002
+}

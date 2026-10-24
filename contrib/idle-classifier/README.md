@@ -22,15 +22,16 @@ are acceptable.
 | File | Purpose |
 |---|---|
 | `build_eval_set.py [HCOM_BIN]` | Idle points from hcom transcripts (`hcom transcript <name> 1- --json`, `final_text`, else `action`); weak label from the next user turn (human / hcom / system) and cs/en keyword cues; balanced sample of up to 60 per weak label. |
-| `label_haiku.py [MAX_BATCHES [OUT_STEM]]` | Second label from Haiku, batches of 10, with per-call metrics. |
+| `label_haiku.py [--rules v1\|v2] [--source cases\|candidates] [--max-batches N]` | Labels from Haiku, batches of 10; per-call metrics and a run summary in `results/`. v2 = contract v2 rules with `must_act`. Resumes, never labels an id twice. |
 | `contract_v1.json` | local_models' contract v1 (4 labels, `qwen3.5:4b`), copied for reproducibility. |
 | `eval_local.py [MODEL [MAX_CASES]]` | v1 eval: accuracy, confusion, attention misses, threshold sweep; writes `review.jsonl`. |
 | `contract_v2.json` | Draft prompt v2: primary binary question `needs_user` yes/no, explicit implicit-ask rules, user need wins, "if unsure: yes". Decoding as v1. |
 | `eval_v2.py CONTRACT MODEL [MAX_CASES]` | Binary eval on P(yes) from the logprobs of the decision token. |
-| `attention_data.py export \| check SCORES` | Labels for local_models' contract v2 (`attention.py`: frozen `ufal/robeczech-base` encoder + logistic head trained here); stratified 20 % holdout; held-out check. |
+| `attention_data.py export LABELS \| check LABELS SCORES` (LABELS `v1` = 174 cases, `v2` = all candidates with Haiku v2 `must_act`) | Labels for local_models' contract v2 (`attention.py`: frozen `ufal/robeczech-base` encoder + logistic head trained here); stratified 20 % holdout; held-out check. |
 
-Every new external call is verified on exactly one call (`MAX_BATCHES=1`, `MAX_CASES=1`)
-before a full run. Verification runs write `*-probe.jsonl` and never replace full-set results.
+Every new external call is verified on exactly one call before a full run. Local evals
+(`MAX_CASES=1`) write `*-probe.jsonl` and never replace full-set results. For Haiku the
+verification is `--max-batches 1`, the first batch of the run itself, so no case is sent twice.
 File names carry the model as one safe component; a tag that needs escaping gets a digest of
 the raw name (`qwen3.5:4b` → `qwen3.5_4b-c57d0c95`).
 
@@ -69,8 +70,24 @@ withdrew the chat models. Head trained on 139 cases (75 must_act, 122 Czech), 35
 | Held-out at default threshold | 1/19 missed, 11/16 false highlights |
 | Latency | p50 19 ms per message |
 
-Not usable yet: zero misses costs about 78 % false highlights. The head needs more labelled
-real cases (`results/attention-head-cv.json`, `results/attention-holdout-summary.json`).
+Not usable yet: zero misses costs about 78 % false highlights
+(`results/attention-head-cv.json`, `results/attention-holdout-summary.json`).
+
+More labels: Haiku labelled all 622 candidates once with the contract v2 rules
+(`--rules v2 --source candidates`): 257 must_act; 65 calls, 0.118 USD, p50 5.8 s per call,
+about 0.6 s per case (`results/haiku_v2_candidates-*`). On the 174 shared cases it agrees with
+the v1 attention labels except 7 cases v2 now marks must_act. Head on 497, 125 held out:
+
+| | Result |
+|---|---|
+| CV AUC | 0.886 (cs 0.857, en 0.735) |
+| CV zero misses | threshold 0.0002, 247/292 false highlights |
+| CV 2 % / 5 % miss budget | 4 missed, 158 FH / 10 missed, 120 FH |
+| Held-out at default threshold | 0/52 missed, 60/73 false highlights |
+
+AUC stays near 0.88 from 139 to 497 cases: the frozen encoder with a linear head, not the
+label count, limits it (`results/attention-head-v2-cv.json`,
+`results/attention-holdout-v2-summary.json`).
 
 ## Caveats
 
