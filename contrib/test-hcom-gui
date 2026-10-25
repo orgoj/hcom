@@ -1070,8 +1070,8 @@ class App(unittest.TestCase):
         self.refreshed()
         self.assertEqual((self.idle_runs, self.idle_cell("a1|a1")), ([["a1"], ["a1"]], "waiting"))
 
-    def test_idle_waiting_classes_look_blocked(self):
-        for cls, tag in (("needs_user", "blocked"), ("waiting", "blocked"), ("done", "")):
+    def test_idle_needs_user_looks_blocked(self):
+        for cls, tag in (("needs_user", "blocked"), ("waiting", ""), ("done", "")):
             self.idle_answer = {"a1": cls}
             self.live("a1", status="active", status_age_seconds=3)
             self.refreshed()

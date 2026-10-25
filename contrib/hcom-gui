@@ -26,7 +26,7 @@ in the button label ("Zed (z)").
 "idle_seconds" (default 10): once an instance has been listening this long, the Idle column gets
 its class from contrib/idle-classifier/idle_check.py (needs_user, waiting, done; "-" none), once per
 listening period. Remote instances report no listening age: they count from the GUI's first sight.
-A needs_user or waiting row is highlighted like a blocked one.
+A needs_user row is highlighted like a blocked one.
 "columns" selects and orders the table columns (keys of COLUMNS; default: all); a choice
 made with the Columns… button is kept in gui-state.json and takes precedence (Reset drops it);
 a column added to hcom-gui after that choice is shown in its default place.
@@ -137,7 +137,6 @@ HCOM_ENV = {k: v for k, v in os.environ.items() if not k.startswith("HCOM_")}
 # symlink into the repository). Cell values: a class, "…" queued or running, "-" no class.
 IDLE_CHECK = os.path.join(os.path.dirname(os.path.realpath(__file__)), "idle-classifier", "idle_check.py")
 IDLE_CLASSES = ("needs_user", "waiting", "done")
-IDLE_WAITING = ("needs_user", "waiting")  # rows styled like blocked
 IDLE_RANK = {**{c: i for i, c in enumerate(IDLE_CLASSES)}, "-": 3, "…": 4, "": 5}
 IDLE_TIMEOUT_SECONDS = 180
 # A listening start that moved by more than this between refreshes is a new listening period.
@@ -924,9 +923,9 @@ class App(tk.Tk):
                                                   *r["groups"]]).lower():
                 continue
             # A catalog row has a status only while the agent runs under other names. An idle
-            # agent waiting for the user or something else looks blocked.
+            # agent that needs the user looks blocked.
             tag = r["state"] if r["state"] in ("active", "blocked", "error") else (
-                "blocked" if r["idle"] in IDLE_WAITING else
+                "blocked" if r["idle"] == "needs_user" else
                 "disabled" if r["disabled"] else "" if r["instance"] or r["status"] else "stopped")
             values = [cell(c, r) for c, _, _ in self.columns]
             self.tree.insert("", tk.END, iid=iid, values=values, tags=(tag,))

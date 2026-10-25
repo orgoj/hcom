@@ -58,7 +58,7 @@ shown. Detection follows the refresh interval, so a run starts up to `refresh_se
 `idle_seconds`. Remote (relay) instances report no listening age: they count from the first
 refresh that saw them listening, so after a GUI start they wait a full `idle_seconds`, and a
 remote listen–work–listen cycle within one refresh is not seen as a new period. Sorting by Idle
-orders needs_user, waiting, done, `-`. A needs_user or waiting row is highlighted like a blocked one
+orders needs_user, waiting, done, `-`. A needs_user row is highlighted like a blocked one
 (the Blocked only filter still shows only blocked instances). A catalog agent running only under other names (`--as`) keeps
 its row, not greyed, with Status `running as <names>`. After Start with `--as`, the new
 instance is selected once it appears, unless another row was selected meanwhile. When the
