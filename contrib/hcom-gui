@@ -26,7 +26,7 @@ in the button label ("Zed (z)").
 "idle_seconds" (default 10): once an instance has been listening this long, the Idle column gets
 its class from contrib/idle-classifier/idle_check.py (needs_user, waiting, done; "-" none), once per
 listening period. Remote instances report no listening age: they count from the GUI's first sight.
-A needs_user row is highlighted like a blocked one.
+A needs_user row is highlighted in blue, less loudly than a blocked one.
 "columns" selects and orders the table columns (keys of COLUMNS; default: all); a choice
 made with the Columns… button is kept in gui-state.json and takes precedence (Reset drops it);
 a column added to hcom-gui after that choice is shown in its default place.
@@ -686,6 +686,7 @@ class App(tk.Tk):
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.tag_configure("active", foreground="#1a7f37")
         self.tree.tag_configure("blocked", foreground="#d97706", font=("DejaVu Sans", 11, "bold"))
+        self.tree.tag_configure("needs_user", foreground="#2563eb")
         self.tree.tag_configure("error", foreground="red")
         self.tree.tag_configure("stopped", foreground="#888888")
         self.tree.tag_configure("disabled", foreground="#aaaaaa", font=("DejaVu Sans", 11, "overstrike"))
@@ -923,9 +924,9 @@ class App(tk.Tk):
                                                   *r["groups"]]).lower():
                 continue
             # A catalog row has a status only while the agent runs under other names. An idle
-            # agent that needs the user looks blocked.
+            # agent that needs the user gets its own, quieter highlight.
             tag = r["state"] if r["state"] in ("active", "blocked", "error") else (
-                "blocked" if r["idle"] == "needs_user" else
+                "needs_user" if r["idle"] == "needs_user" else
                 "disabled" if r["disabled"] else "" if r["instance"] or r["status"] else "stopped")
             values = [cell(c, r) for c, _, _ in self.columns]
             self.tree.insert("", tk.END, iid=iid, values=values, tags=(tag,))
