@@ -23,6 +23,9 @@ other terminals run DEFAULT_ATTACH.
 in the button label ("Zed (z)").
 "open_with" programs also start while an hcom command runs; a quick non-zero exit is logged.
 "stats_seconds" (default 60) is how often the usage columns reload life and message events.
+"idle_seconds" (default 10): once an instance has been listening this long, the Idle column gets
+its class from contrib/idle-classifier/idle_check.py (needs_user, waiting, done; "-" none), once per
+listening period. Remote instances report no listening age: they count from the GUI's first sight.
 "columns" selects and orders the table columns (keys of COLUMNS; default: all); a choice
 made with the Columns… button is kept in gui-state.json and takes precedence (Reset drops it).
 Heading clicks cycle the sort: ascending, descending, default. The Filter field matches
@@ -34,9 +37,12 @@ Window layout, columns, sort and filters (Running only, Blocked only, Hide disab
 
 import datetime
 import json
+import math
 import os
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -98,6 +104,7 @@ COLUMNS = [
     ("cli", "CLI", 80),
     ("status", "Status", 130),
     ("since", "Since", 70),
+    ("idle", "Idle", 100),
     ("age", "Age", 70),
     ("context", "Context", 90),
     ("quota", "Quota", 70),
@@ -123,6 +130,15 @@ DETACH_WATCH_SECONDS = 5
 
 # Run hcom as the human, not as the agent whose terminal started the GUI.
 HCOM_ENV = {k: v for k, v in os.environ.items() if not k.startswith("HCOM_")}
+
+# Idle column: contract v4 classifier of contrib/idle-classifier (the installed hcom-gui is a
+# symlink into the repository). Cell values: a class, "…" queued or running, "-" no class.
+IDLE_CHECK = os.path.join(os.path.dirname(os.path.realpath(__file__)), "idle-classifier", "idle_check.py")
+IDLE_CLASSES = ("needs_user", "waiting", "done")
+IDLE_RANK = {**{c: i for i, c in enumerate(IDLE_CLASSES)}, "-": 3, "…": 4, "": 5}
+IDLE_TIMEOUT_SECONDS = 180
+# A listening start that moved by more than this between refreshes is a new listening period.
+IDLE_START_TOLERANCE = 2
 
 
 def tilde(path):
@@ -370,6 +386,58 @@ def add_stats(rows, events):
     return rows
 
 
+def idle_check(names):
+    """{name: class or None} of the listening agents among names, from idle_check.py, or an error
+    text: its own stderr category line only, never other output (message text stays private)."""
+    try:
+        proc = subprocess.Popen([sys.executable, "-I", IDLE_CHECK, "--json", "--", *names], cwd=HOME, env=HCOM_ENV,
+                                start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+    except OSError as e:
+        return f"idle: {e.strerror or type(e).__name__}"
+    try:
+        out, err = proc.communicate(timeout=IDLE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:  # its own session: the scorer child goes too and frees its VRAM
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
+        return f"idle: timeout after {IDLE_TIMEOUT_SECONDS} s"
+    if proc.returncode != 0:
+        lines = [line for line in err.splitlines() if line.startswith("idle_check: ")]
+        return f"idle: {lines[-1][len('idle_check: '):]}" if lines else f"idle: exit {proc.returncode}"
+    try:
+        rows = json.loads(out)
+        return {r["name"]: r["class"] if r["class"] in IDLE_CLASSES else None for r in rows}
+    except (ValueError, TypeError, KeyError):
+        return "idle: output invalid"
+
+
+def idle_periods(periods, rows, now):
+    """The listening period of each listening instance row, kept from periods while it goes on:
+    {name: {"start", "fallback", "value"}}. Remote instances always report status age 0: there
+    the period counts from the first refresh that saw it listening ("fallback")."""
+    current = {}
+    for r in rows:
+        name = r["instance"]
+        if not name or r["state"] != "listening":
+            continue
+        p = periods.get(name)
+        if r["since"] > 0:
+            start = now - r["since"]
+            if p and (abs(start - p["start"]) <= IDLE_START_TOLERANCE if p["fallback"]
+                      else start <= p["start"] + IDLE_START_TOLERANCE):
+                if p["fallback"]:  # a local agent first seen at age 0: its real start from now on
+                    p["start"], p["fallback"] = start, False
+            else:
+                p = {"start": start, "fallback": False, "value": None}
+        elif not p or not p["fallback"]:  # none yet, or a local agent that re-entered listening
+            p = {"start": now, "fallback": True, "value": None}
+        current[name] = p
+    return current
+
+
 def where(lc):
     """Terminal of an instance's launch_context, with the Herdr workspace/tab: "herdr: ws/tab"."""
     terminal = lc.get("terminal_preset_effective") or ""
@@ -502,6 +570,11 @@ class App(tk.Tk):
         config = self._load_json(CONFIG_FILE)
         self.refresh_ms = int(float(config.get("refresh_seconds", 5)) * 1000)
         self.stats_seconds = float(config.get("stats_seconds", 60))
+        self.idle_seconds = config.get("idle_seconds", 10)
+        if (isinstance(self.idle_seconds, bool) or not isinstance(self.idle_seconds, (int, float))
+                or not math.isfinite(self.idle_seconds) or self.idle_seconds < 0):
+            self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: idle_seconds: not a number >= 0, using 10")
+            self.idle_seconds = 10
         open_with = config.get("open_with", DEFAULT_OPEN_WITH)
         attach = {}
         for terminal, cmd in (config.get("attach") or {}).items():
@@ -527,6 +600,9 @@ class App(tk.Tk):
         self.timer = None
         self.events, self.events_at = None, None  # cached (life, messages) for the usage columns
         self.last_error = None
+        self.idle = {}  # instance -> its listening period (idle_periods)
+        self.idle_batch = None  # names -> periods of the running idle_check
+        self.idle_error = None
         self.last_selected = None
         self.select_next = None  # row id selected once it appears (an instance started with --as)
         self.keep_agent = None  # agent of the last Start/Restart: its vanished row reselects the agent
@@ -714,6 +790,7 @@ class App(tk.Tk):
         else:
             self.last_error = None
             self.rows = {f"{r['agent']}|{r['instance']}": r for r in result}
+            self.update_idle(time.time())
             groups = (running_groups(result), running_tools(result))
             if groups != self.groups:
                 self.groups = groups
@@ -727,11 +804,61 @@ class App(tk.Tk):
                     self.group_menu.add_command(label=f"tool:{t} ({len(names)})",
                                                 command=lambda t=t, names=names: self.kill_group(f"tool:{t}", names))
             self.render()
+            self.run_idle()
         if self.refresh_again:
             self.refresh_again = False
             self.refresh()
         else:
             self.timer = self.after(self.refresh_ms, self.refresh)
+
+    # ── Idle column ────────────────────────────────────────────────────
+
+    def update_idle(self, now):
+        """Follow the listening periods; one that lasted idle_seconds without an attempt is queued
+        ("…"), only while the Idle column is shown."""
+        self.idle = idle_periods(self.idle, self.rows.values(), now)
+        if "idle" in self.tree["columns"]:
+            for p in self.idle.values():
+                if p["value"] is None and now - p["start"] >= self.idle_seconds:
+                    p["value"] = "…"
+        self.fill_idle()
+
+    def fill_idle(self):
+        for r in self.rows.values():
+            p = self.idle.get(r["instance"]) if r["instance"] else None
+            r["idle"] = (p["value"] or "") if p else ""
+            r["idle_rank"] = IDLE_RANK[r["idle"]]
+
+    def run_idle(self):
+        """Start one idle_check for every queued period, unless one runs: those queued meanwhile
+        form the next run."""
+        if self.idle_batch is not None or "idle" not in self.tree["columns"]:
+            return
+        batch = {name: p for name, p in self.idle.items() if p["value"] == "…"}
+        if not batch:
+            return
+        self.idle_batch = batch
+
+        def work():
+            self.after(0, self._idle_done, batch, idle_check(sorted(batch)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _idle_done(self, batch, result):
+        """Each period of the run gets its class or "-" (once: no retry in the same period); a
+        period that ended meanwhile is no longer in self.idle and stays dropped."""
+        self.idle_batch = None
+        if isinstance(result, str):
+            if result != self.idle_error:
+                self.write_log(f"ERROR: {result}")
+            self.idle_error, result = result, {}
+        else:
+            self.idle_error = None
+        for name, p in batch.items():
+            p["value"] = result.get(name) or "-"
+        self.fill_idle()
+        self.render()
+        self.run_idle()
 
     def sort_by(self, col):
         """Clicks on one heading cycle ascending, descending, default order."""
@@ -750,7 +877,7 @@ class App(tk.Tk):
             self.tree.heading(col, text=title + arrow)
         if self.sort_col:
             def key(r):
-                v = r[self.sort_col]
+                v = r["idle_rank"] if self.sort_col == "idle" else r[self.sort_col]
                 return (0, v, "") if isinstance(v, int) else (1, 0, str(v).lower())
         else:
             def key(r):

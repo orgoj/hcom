@@ -109,6 +109,14 @@ class Check(unittest.TestCase):
         self.assertEqual(got, {"left": (None, "stale"), "gone": (None, "stale"), "changed": (None, "stale"),
                                "failed": (None, "stale"), "remote": ("done", None)})
 
+    def test_names_filter(self):
+        listed = ok([agent("a"), agent("b"), agent("c", "active")])
+        fake = Fake([listed, listed], {"a": [ok([exchange("x")])], "b": [ok([exchange("y")])]},
+                    score=scores_for([("waiting", 0.2)]))
+        rows = idle_check.check(fake, "hcom", SCORER, {"b", "c", "unknown"})
+        self.assertEqual([(r["name"], r["class"]) for r in rows], [("b", "waiting")])
+        self.assertEqual([json.loads(line)["text"] for line in fake.score_stdin.splitlines()], ["y"])
+
     def test_bad_score_output_fails_without_text(self):
         good = json.dumps(score_row(0)) + "\n"
         cases = {

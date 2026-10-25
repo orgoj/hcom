@@ -242,6 +242,13 @@ class App(unittest.TestCase):
         self.patch("transcript_usage", lambda tool, path: {"context": (62000, 1_000_000), "quota": 48.6}
                    if path == "/t/a1.jsonl" else {})
         self.patch("threading", SyncThreading)
+        self.idle_runs, self.idle_answer = [], {}
+
+        def fake_idle_check(names):
+            self.idle_runs.append(list(names))
+            return self.idle_answer
+
+        self.patch("idle_check", fake_idle_check)
         self.asked, self.answer = [], True
 
         def askyesno(title, text, **_):
@@ -983,6 +990,212 @@ class App(unittest.TestCase):
         self.app.update()
         self.restart_row("r1|r1_proj_ab12")
         self.assertEqual(self.ran, [(["hcom", "agent", "r1", "--as", "r1_proj_ab12", "--restart"], "/p/proj")])
+
+    # ── Idle column ── a1 listens for 2 h (due at the first refresh, its run answered {});
+    # solo listens with age 0 (remote-like); a2x is active.
+
+    def live(self, name, **fields):
+        i = next(i for i in LIVE if i["name"] == name)
+        old = dict(i)
+        self.addCleanup(lambda: (i.clear(), i.update(old)))
+        i.update(fields)
+
+    def refreshed(self):
+        self.app.refresh()
+        self.app.update()
+
+    def idle_cell(self, iid):
+        return self.app.tree.set(iid, "idle")
+
+    def later(self, seconds):
+        """Let seconds pass for the shown rows: real ages grow with the clock, age 0 stays 0."""
+        self.offset = getattr(self, "offset", 0) + seconds
+        for r in self.app.rows.values():
+            if r["instance"] and r["since"] > 0:
+                r["since"] += seconds
+        self.app.update_idle(time.time() + self.offset)
+        self.app.run_idle()
+        self.app.update()
+
+    def test_idle_runs_once_and_a_missing_name_shows_dash(self):
+        self.assertEqual(self.idle_runs, [["a1"]])
+        self.assertEqual([self.idle_cell(i) for i in ("a1|a1", "a2|a2x", "|solo", "a3|")], ["-", "", "", ""])
+        self.idle_answer = {"a1": "needs_user"}
+        self.refreshed()
+        self.refreshed()
+        self.assertEqual((self.idle_runs, self.idle_cell("a1|a1")), ([["a1"]], "-"))
+
+    def test_idle_resets_when_listening_changes(self):
+        self.idle_answer = {"a1": "waiting"}
+        self.live("a1", status="active", status_age_seconds=3)
+        self.refreshed()
+        self.assertEqual((self.idle_runs, self.idle_cell("a1|a1")), ([["a1"]], ""))
+        self.live("a1", status="listening", status_age_seconds=20)
+        self.refreshed()
+        self.assertEqual((self.idle_runs, self.idle_cell("a1|a1")), ([["a1"], ["a1"]], "waiting"))
+
+    def test_idle_age_reset_between_refreshes_is_a_new_period(self):
+        self.idle_answer = {"a1": "done"}
+        self.live("a1", status_age_seconds=15)
+        self.refreshed()
+        self.assertEqual((self.idle_runs, self.idle_cell("a1|a1")), ([["a1"], ["a1"]], "done"))
+
+    def test_idle_waits_for_idle_seconds(self):
+        self.live("a2x", status="listening", status_age_seconds=5)
+        self.refreshed()
+        self.assertEqual(self.idle_runs, [["a1"]])
+        self.later(7)
+        self.assertEqual(self.idle_runs, [["a1"], ["a2x"]])
+
+    def test_idle_age_zero_counts_from_first_sight(self):
+        self.later(9)
+        self.assertEqual(self.idle_runs, [["a1"]])
+        self.later(2)
+        self.assertEqual((self.idle_runs, self.idle_cell("|solo")), ([["a1"], ["solo"]], "-"))
+
+    def test_idle_periods_with_and_without_age(self):
+        def rows(since, state="listening"):
+            return [{"instance": "r", "state": state, "since": since}]
+
+        p = gui.idle_periods({}, rows(0), 100)
+        self.assertEqual(p["r"], {"start": 100, "fallback": True, "value": None})
+        self.assertIs(gui.idle_periods(p, rows(0), 130)["r"], p["r"])  # remote: kept, counts from 100
+        self.assertEqual(gui.idle_periods(p, rows(0, "active"), 131), {})
+        local = gui.idle_periods({}, rows(0), 100)
+        same = gui.idle_periods(local, rows(5), 105)["r"]  # first seen at age 0, then age 5
+        self.assertIs(same, local["r"])
+        self.assertEqual((same["start"], same["fallback"]), (100, False))
+        again = gui.idle_periods({"r": same}, rows(0), 110)["r"]  # re-entered listening
+        self.assertIsNot(again, same)
+        self.assertEqual((again["start"], again["fallback"]), (110, True))
+        moved = gui.idle_periods({"r": same}, rows(1), 110)["r"]
+        self.assertIsNot(moved, same)
+        self.assertEqual(moved["start"], 109)
+
+    def test_idle_due_during_a_run_go_into_exactly_the_next_run(self):
+        running = {"x": {"start": 0, "fallback": False, "value": "…"}}
+        self.app.idle_batch = running
+        self.live("a2x", status="listening", status_age_seconds=50)
+        self.live("solo", status_age_seconds=40)
+        self.refreshed()
+        self.refreshed()
+        self.assertEqual(self.idle_runs, [["a1"]])
+        self.assertEqual((self.idle_cell("a2|a2x"), self.idle_cell("|solo")), ("…", "…"))
+        self.idle_answer = {"a2x": "needs_user", "solo": None}
+        self.app._idle_done(running, {})
+        self.app.update()
+        self.assertEqual(self.idle_runs, [["a1"], ["a2x", "solo"]])
+        self.assertEqual((self.idle_cell("a2|a2x"), self.idle_cell("|solo")), ("needs_user", "-"))
+
+    def test_idle_result_of_an_ended_period_is_dropped(self):
+        self.app.idle_batch = {}  # another run holds the slot
+        self.live("a2x", status="listening", status_age_seconds=50)
+        self.refreshed()
+        ended = self.app.idle["a2x"]
+        self.live("a2x", status="active", status_age_seconds=1)
+        self.refreshed()
+        self.app._idle_done({"a2x": ended}, {"a2x": "waiting"})
+        self.app.update()
+        self.assertEqual((self.idle_runs, self.idle_cell("a2|a2x")), ([["a1"]], ""))
+
+    def test_idle_failure_is_logged_once_and_shows_dash(self):
+        self.idle_answer = "idle: score failed (exit 1)"
+        for age in (20, 30):  # two periods, two runs
+            self.live("a2x", status="listening", status_age_seconds=age)
+            self.refreshed()
+            self.live("a2x", status="active")
+            self.refreshed()
+        self.live("a2x", status="listening", status_age_seconds=20)
+        self.refreshed()
+        self.assertEqual(self.idle_runs, [["a1"], ["a2x"], ["a2x"], ["a2x"]])
+        self.assertEqual(self.idle_cell("a2|a2x"), "-")
+        self.assertEqual(self.app.log.get("1.0", "end").count("ERROR: idle: score failed (exit 1)"), 1)
+
+    def test_idle_hidden_column_starts_no_run(self):
+        self.app.set_columns(["agent", "instance"])
+        self.live("a2x", status="listening", status_age_seconds=50)
+        self.refreshed()
+        self.assertEqual(self.idle_runs, [["a1"]])
+
+    def test_idle_seconds_from_gui_json(self):
+        for value, runs, error in ((0, [["a1", "solo"]], False), ("5", [["a1"]], True), (-1, [["a1"]], True),
+                                   (True, [["a1"]], True)):
+            with self.subTest(value):
+                with open(gui.CONFIG_FILE, "w") as f:
+                    f.write(gui.json.dumps({"idle_seconds": value}))
+                self.app.destroy()
+                self.idle_runs.clear()
+                self.app = gui.App()
+                self.app.update()
+                self.assertEqual(self.idle_runs, runs)
+                self.assertEqual("idle_seconds: not a number >= 0, using 10" in self.app.log.get("1.0", "end"),
+                                 error)
+
+    def test_idle_sorts_by_class_rank(self):
+        self.idle_answer = {"a2x": "done", "solo": "needs_user"}
+        self.live("a2x", status="listening", status_age_seconds=50)
+        self.live("solo", status_age_seconds=40)
+        self.refreshed()
+        self.app.sort_by("idle")
+        self.assertEqual([self.app.rows[i]["instance"] for i in self.app.tree.get_children()][:3],
+                         ["solo", "a2x", "a1"])
+
+
+class IdleCheck(unittest.TestCase):
+    """gui.idle_check against small stand-in scripts for idle_check.py."""
+
+    def script(self, body):
+        os.makedirs(os.path.join(REPO, "tmp"), exist_ok=True)
+        d = tempfile.TemporaryDirectory(dir=os.path.join(REPO, "tmp"))
+        self.addCleanup(d.cleanup)
+        path = os.path.join(d.name, "idle_check.py")
+        with open(path, "w") as f:
+            f.write("import json, subprocess, sys, time\nnames = sys.argv[3:]\n" + body)  # after --json --
+        old = gui.IDLE_CHECK
+        gui.IDLE_CHECK = path
+        self.addCleanup(setattr, gui, "IDLE_CHECK", old)
+        return d.name
+
+    def test_classes_by_name(self):
+        self.script('print(json.dumps([{"name": n, "class": "waiting" if n == "a" else None} for n in names]))')
+        self.assertEqual(gui.idle_check(["a", "b"]), {"a": "waiting", "b": None})
+
+    def test_failure_reports_only_the_category_line(self):
+        self.script('print("secret text", file=sys.stderr)\nprint("idle_check: score failed (exit 1)", '
+                    'file=sys.stderr)\nsys.exit(1)')
+        self.assertEqual(gui.idle_check(["a"]), "idle: score failed (exit 1)")
+        self.script('print("secret text", file=sys.stderr)\nsys.exit(2)')
+        self.assertEqual(gui.idle_check(["a"]), "idle: exit 2")
+        self.script('print("secret text")')
+        self.assertEqual(gui.idle_check(["a"]), "idle: output invalid")
+
+    def test_timeout_kills_the_process_group(self):
+        d = self.script('p = subprocess.Popen(["sleep", "30"])\nopen(names[0], "w").write(str(p.pid))\n'
+                        'time.sleep(30)')
+        old = gui.IDLE_TIMEOUT_SECONDS
+        gui.IDLE_TIMEOUT_SECONDS = 1
+        self.addCleanup(setattr, gui, "IDLE_TIMEOUT_SECONDS", old)
+        pidfile = os.path.join(d, "child.pid")
+        self.assertEqual(gui.idle_check([pidfile]), "idle: timeout after 1 s")
+        with open(pidfile) as f:
+            child = f.read()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:  # killed: gone, or a zombie until init reaps it
+            try:
+                with open(f"/proc/{child}/stat") as f:
+                    if f.read().split(") ")[1][0] == "Z":
+                        break
+            except FileNotFoundError:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("scorer stand-in still runs")
+
+    def test_launch_failure(self):
+        old = gui.sys
+        gui.sys = type("Sys", (), {"executable": "/nonexistent/python3"})
+        self.addCleanup(setattr, gui, "sys", old)
+        self.assertEqual(gui.idle_check(["a"]), "idle: No such file or directory")
 
 
 if __name__ == "__main__":

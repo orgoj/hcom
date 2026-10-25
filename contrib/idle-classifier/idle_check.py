@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Which idle (listening) hcom agents need a user decision, per local_models' contract v4.
 
-Usage: python3 -I idle_check.py [--json] [--hcom BIN] [--python PY] [--attention FILE] [--head DIR]
+Usage: python3 -I idle_check.py [--json] [--hcom BIN] [--python PY] [--attention FILE] [--head DIR] [NAME...]
 
-Each listening agent's last exchange (`hcom transcript NAME --last 1 --json --detailed`) becomes
-the classifier input exactly as final_inputs.py builds it; all inputs go to one
-`attention.py score HEAD` call (head.json `default_threshold`, no --threshold). Classes:
-needs_user / waiting / done. An agent that left listening, or whose last exchange changed, while
+Each listening agent's (only the NAMEs, when given) last exchange
+(`hcom transcript NAME --last 1 --json --detailed`) becomes the classifier input exactly as
+final_inputs.py builds it; all inputs go to one `attention.py score HEAD` call (head.json
+`default_threshold`, no --threshold). Classes: needs_user / waiting / done. An agent that left listening, or whose last exchange changed, while
 the model ran is reported `stale`, not with a score. Message text is never printed, and failures
 report a fixed category and exit code, never command output.
 """
@@ -107,10 +107,10 @@ def score(runner, scorer, texts):
     return [scores[str(i)] for i in range(len(texts))]
 
 
-def check(runner, hcom, scorer):
+def check(runner, hcom, scorer, names=None):
     rows, scored = [], []
     for name, agent in listing(runner, hcom).items():
-        if agent["status"] != "listening":
+        if agent["status"] != "listening" or (names and name not in names):
             continue
         row = {"name": name, "tool": agent.get("tool"), "class": None, "p_needs_user": None, "p": None,
                "input_kind": None, "status_age_seconds": None, "reason": None}
@@ -160,13 +160,14 @@ def main(argv=None, runner=run):
     ap.add_argument("--python", default=str(LOCAL_MODELS / ".venv" / "bin" / "python"))
     ap.add_argument("--attention", default=str(LOCAL_MODELS / "idle-classifier" / "attention.py"))
     ap.add_argument("--head", default=str(DEFAULT_HEAD))
+    ap.add_argument("names", nargs="*", metavar="NAME", help="check only these agents (default: all)")
     args = ap.parse_args(argv)
     try:
         for flag, path in (("--python", args.python), ("--attention", args.attention),
                            ("--head", pathlib.Path(args.head) / "head.json")):
             if not pathlib.Path(path).is_file():
                 raise Failure(f"{flag}: {path} not found")
-        rows = check(runner, args.hcom, [args.python, args.attention, "score", args.head])
+        rows = check(runner, args.hcom, [args.python, args.attention, "score", args.head], set(args.names))
     except Failure as e:
         print(f"idle_check: {e}", file=sys.stderr)
         return 1

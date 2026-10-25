@@ -44,7 +44,21 @@ Starts counts `created` events, Runtime sums each session from `created` to the 
 attempts started by `hcom handoff`), Msgs is sent/received messages, Last start the latest
 `created`, Stops the `stopped` events as `total: Nk Ni Ne` (killed, idle autokill, exit = every other end: the CLI exited, terminal closed, cleanup), Failed the
 `launch_failed` and `launch_blocked` events. A row without any events shows empty cells. Events
-reload at most every `stats_seconds` (default 60) in `gui.json`. A catalog agent running only under other names (`--as`) keeps
+reload at most every `stats_seconds` (default 60) in `gui.json`.
+Idle classifies an instance that has been listening for `idle_seconds` (default 10) in
+`gui.json`: the GUI runs `idle-classifier/idle_check.py --json <names>` (contract v4 model; needs
+the local-models setup described in `idle-classifier/README.md`) and shows `needs_user`,
+`waiting` or `done`, `…` while queued or running, `-` when no class came back (failure, stale,
+no exchange). It runs once per listening period: a status change, or a listening age that
+restarted between two refreshes, clears the cell and starts a new period. One run at a time
+(instances due meanwhile go into the next run), at most 180 s (then its process group is
+killed); each run loads the model (a few seconds, about 2.3 GB VRAM while it runs). Failures are
+logged as idle_check's category, never message text. New runs start only while the column is
+shown. Detection follows the refresh interval, so a run starts up to `refresh_seconds` after
+`idle_seconds`. Remote (relay) instances report no listening age: they count from the first
+refresh that saw them listening, so after a GUI start they wait a full `idle_seconds`, and a
+remote listen–work–listen cycle within one refresh is not seen as a new period. Sorting by Idle
+orders needs_user, waiting, done, `-`. A catalog agent running only under other names (`--as`) keeps
 its row, not greyed, with Status `running as <names>`. After Start with `--as`, the new
 instance is selected once it appears, unless another row was selected meanwhile. When the
 selected row disappears (Kill, Kill group, the instance ended, a filter hides it), the row
@@ -72,6 +86,7 @@ replaced by fixtures, commands are recorded, not run). Optional `~/.hcom/gui.jso
 {
   "refresh_seconds": 5,
   "stats_seconds": 60,
+  "idle_seconds": 10,
   "open_with": [
     {"label": "Zed",  "cmd": ["zed", "{dir}"], "key": "z"},
     {"label": "gitg", "cmd": ["gitg"], "cwd": "{dir}", "key": "g"},
@@ -103,7 +118,7 @@ and every text field of the instance's `launch_context` (`{pane_id}`,
 nothing, as does an entry that is not a list of strings.
 
 `columns` selects and orders the table columns; without it all are shown. Keys: `agent`,
-`instance`, `cli`, `status`, `since`, `age`, `context`, `quota`, `detail`, `unread`, `dir`,
+`instance`, `cli`, `status`, `since`, `idle`, `age`, `context`, `quota`, `detail`, `unread`, `dir`,
 `branch`, `git`, `where`, `config`. Unknown keys are reported in the log and skipped.
 The `Columns…` button opens a dialog to choose the visible columns and their order
 (Space or double-click toggles a column, Up/Down or Ctrl+Up/Down moves it, at least one
