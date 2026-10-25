@@ -1759,12 +1759,7 @@ fn reject_legacy_skills_dir(def: &AgentDef, owner: &str, path: &Path) -> Result<
 }
 
 fn discover_agent_skills(bundle: &str) -> (Vec<AgentSkill>, Vec<String>) {
-    let bundle = Path::new(bundle);
-    let canonical_bundle = match std::fs::canonicalize(bundle) {
-        Ok(path) => path,
-        Err(_) => return (Vec::new(), Vec::new()),
-    };
-    let root = bundle.join("skills");
+    let root = Path::new(bundle).join("skills");
     let Ok(entries) = std::fs::read_dir(&root) else {
         return (Vec::new(), Vec::new());
     };
@@ -1781,22 +1776,10 @@ fn discover_agent_skills(bundle: &str) -> (Vec<AgentSkill>, Vec<String>) {
         if !skill_file.is_file() {
             continue;
         }
-        let Ok(canonical) = std::fs::canonicalize(&skill_file) else {
-            warnings.push(format!(
-                "cannot canonicalize skill {}",
-                skill_file.display()
-            ));
-            continue;
-        };
-        if !canonical.starts_with(&canonical_bundle) {
-            warnings.push(format!(
-                "skipped skill outside bundle: {}",
-                canonical.display()
-            ));
-            continue;
-        }
-        let Ok(body) = std::fs::read_to_string(&canonical) else {
-            warnings.push(format!("cannot read skill {}", canonical.display()));
+        // Symlinked skills (skill-install) may resolve outside the bundle; keep
+        // the in-bundle path so CLIs reach it through the bundle's --add-dir.
+        let Ok(body) = std::fs::read_to_string(&skill_file) else {
+            warnings.push(format!("cannot read skill {}", skill_file.display()));
             continue;
         };
         let basename = dir.file_name().and_then(|s| s.to_str()).unwrap_or("skill");
@@ -1804,19 +1787,19 @@ fn discover_agent_skills(bundle: &str) -> (Vec<AgentSkill>, Vec<String>) {
         if !metadata_ok {
             warnings.push(format!(
                 "invalid or incomplete metadata in {}",
-                canonical.display()
+                skill_file.display()
             ));
         }
         if !names.insert(name.clone()) {
             warnings.push(format!(
                 "duplicate skill name '{name}' at {}",
-                canonical.display()
+                skill_file.display()
             ));
         }
         skills.push(AgentSkill {
             name,
             description,
-            path: canonical.to_string_lossy().into_owned(),
+            path: skill_file.to_string_lossy().into_owned(),
         });
     }
     (skills, warnings)
@@ -3861,21 +3844,26 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn skill_symlink_escape_is_skipped() {
+    fn skill_symlink_outside_bundle_loads_through_bundle_path() {
         use std::os::unix::fs::symlink;
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("reviewer");
         let outside = tmp.path().join("outside");
         std::fs::create_dir_all(bundle.join("skills")).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("SKILL.md"), "# Escape").unwrap();
-        symlink(&outside, bundle.join("skills/escape")).unwrap();
+        std::fs::write(
+            outside.join("SKILL.md"),
+            "---\nname: linked\ndescription: Linked skill\n---\n",
+        )
+        .unwrap();
+        symlink(&outside, bundle.join("skills/linked")).unwrap();
         let (skills, warnings) = discover_agent_skills(bundle.to_str().unwrap());
-        assert!(skills.is_empty());
-        assert!(
-            warnings
-                .iter()
-                .any(|warning| warning.contains("outside bundle"))
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "linked");
+        assert_eq!(
+            skills[0].path,
+            bundle.join("skills/linked/SKILL.md").to_string_lossy()
         );
     }
 

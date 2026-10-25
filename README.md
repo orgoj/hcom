@@ -426,7 +426,7 @@ For temporary changes without touching a tracked file, put a sidecar `<stem>.loc
 
 #### Bundles and instructions
 
-An `agents/<name>/SOUL.md` next to a catalog defines that agent too and is appended to its instructions after `system_prompt`. Skills in `agents/<name>/skills/*/SKILL.md` belong to it; Claude loads them natively through `--add-dir`. A top-level `"system_prompt_file"` sets a catalog-wide default from a file.
+An `agents/<name>/SOUL.md` next to a catalog defines that agent too and is appended to its instructions after `system_prompt`. Skills in `agents/<name>/skills/*/SKILL.md` belong to it (a skill directory may be a symlink to a skill elsewhere); Claude loads them natively through `--add-dir`. A top-level `"system_prompt_file"` sets a catalog-wide default from a file.
 
 #### Swapping a CLI locally
 
