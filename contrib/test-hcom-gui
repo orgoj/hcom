@@ -431,7 +431,7 @@ class App(unittest.TestCase):
         with open(gui.CONFIG_FILE, "w") as f:
             f.write(gui.json.dumps({"columns": ["agent", "status"]}))
         with open(gui.STATE_FILE, "w") as f:
-            f.write(gui.json.dumps({"columns": ["instance", "agent"]}))
+            f.write(gui.json.dumps({"columns": ["instance", "agent"], "columns_known": [c[0] for c in gui.COLUMNS]}))
         self.app.destroy()
         self.app = gui.App()
         self.app.update()
@@ -440,6 +440,42 @@ class App(unittest.TestCase):
         self.assertEqual(list(self.app.tree["columns"]), ["agent", "status"])
         self.restart()
         self.assertEqual(list(self.app.tree["columns"]), ["agent", "status"])
+
+    def test_legacy_state_columns_gain_only_idle(self):
+        chosen = ["git", "agent", "since", "status"]  # hides cli, age, ... on purpose
+        with open(gui.STATE_FILE, "w") as f:
+            f.write(gui.json.dumps({"columns": chosen}))
+        self.app.destroy()
+        self.app = gui.App()
+        self.app.update()
+        cols = list(self.app.tree["columns"])
+        self.assertEqual(cols, ["git", "agent", "since", "idle", "status"])
+        self.app.set_columns([c for c in cols if c != "idle"])
+        with open(gui.STATE_FILE) as f:
+            self.assertEqual(gui.json.load(f)["columns_known"], [c[0] for c in gui.COLUMNS])
+        self.restart()
+        self.assertEqual(list(self.app.tree["columns"]), ["git", "agent", "since", "status"])
+
+    def test_state_without_columns_keeps_configured_columns(self):
+        with open(gui.CONFIG_FILE, "w") as f:
+            f.write(gui.json.dumps({"columns": ["agent", "status"]}))
+        with open(gui.STATE_FILE, "w") as f:
+            f.write(gui.json.dumps({"columns_known": ["agent"]}))
+        self.app.destroy()
+        self.app = gui.App()
+        self.app.update()
+        self.assertEqual(list(self.app.tree["columns"]), ["agent", "status"])
+
+    def test_legacy_state_gains_columns_added_later_too(self):
+        self.patch("COLUMNS", gui.COLUMNS + [("foo", "Foo", 70)])
+        self.assertEqual(gui.with_new_columns(["agent", "since", "msgs"], None),
+                         ["agent", "since", "idle", "msgs", "foo"])
+
+    def test_new_columns_insert_after_shown_predecessor_or_first(self):
+        known = [c[0] for c in gui.COLUMNS if c[0] not in ("agent", "idle", "failed")]
+        once = gui.with_new_columns(["status", "msgs"], known)
+        self.assertEqual(once, ["agent", "status", "idle", "msgs", "failed"])
+        self.assertEqual(gui.with_new_columns(once, known), once)
 
     def test_columns_dialog_keeps_one_column_and_cancel_changes_nothing(self):
         self.app.set_columns(["agent"])

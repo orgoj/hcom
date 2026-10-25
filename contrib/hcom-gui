@@ -27,7 +27,8 @@ in the button label ("Zed (z)").
 its class from contrib/idle-classifier/idle_check.py (needs_user, waiting, done; "-" none), once per
 listening period. Remote instances report no listening age: they count from the GUI's first sight.
 "columns" selects and orders the table columns (keys of COLUMNS; default: all); a choice
-made with the Columns… button is kept in gui-state.json and takes precedence (Reset drops it).
+made with the Columns… button is kept in gui-state.json and takes precedence (Reset drops it);
+a column added to hcom-gui after that choice is shown in its default place.
 Heading clicks cycle the sort: ascending, descending, default. The Filter field matches
 agent, instance, dir and groups (case-insensitive).
 A disabled catalog agent's row is struck through; Hide disabled (on by default) hides it.
@@ -531,6 +532,29 @@ def pick_columns(keys):
     return [k for k in keys if k in known], [k for k in keys if k not in known]
 
 
+# Column keys of a gui-state.json "columns" choice saved without "columns_known" (before Idle).
+LEGACY_KNOWN_COLUMNS = frozenset((
+    "agent", "instance", "cli", "status", "since", "age", "context", "quota", "detail", "unread",
+    "dir", "branch", "git", "where", "config", "starts", "runtime", "handoffs", "msgs",
+    "last_start", "stops", "failed",
+))
+
+
+def with_new_columns(keys, known):
+    """keys plus every COLUMNS key that known (the keys when the choice was saved; without it,
+    LEGACY_KNOWN_COLUMNS) lacks, after its nearest preceding COLUMNS key in keys."""
+    if not keys:
+        return keys
+    known = {k for k in known if isinstance(k, str)} if isinstance(known, list) else LEGACY_KNOWN_COLUMNS
+    order = [c[0] for c in COLUMNS]
+    out = list(keys)
+    for i, key in enumerate(order):
+        if key not in known and key not in out:
+            prev = next((k for k in reversed(order[:i]) if k in out), None)
+            out.insert(out.index(prev) + 1 if prev else 0, key)
+    return out
+
+
 def column_specs(keys):
     """COLUMNS entries for keys in their order; all columns when keys is empty."""
     specs = {c[0]: c for c in COLUMNS}
@@ -590,7 +614,8 @@ class App(tk.Tk):
         if unknown:
             self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: unknown columns: {', '.join(unknown)}")
         # Chosen in the Columns dialog; overrides gui.json "columns".
-        self.state_columns = pick_columns(self._load_json(STATE_FILE).get("columns"))[0]
+        state = self._load_json(STATE_FILE)
+        self.state_columns = with_new_columns(pick_columns(state.get("columns"))[0], state.get("columns_known"))
         self.columns = column_specs(self.state_columns or self.config_columns)
 
         self.rows = {}
@@ -1211,6 +1236,7 @@ class App(tk.Tk):
         }
         if self.state_columns:
             state["columns"] = self.state_columns
+            state["columns_known"] = [c[0] for c in COLUMNS]
         try:
             with open(STATE_FILE, "w") as f:
                 json.dump(state, f)
