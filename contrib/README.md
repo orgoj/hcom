@@ -52,7 +52,9 @@ the local-models setup described in `idle-classifier/README.md`) and shows `need
 no exchange). It runs once per listening period: a status change, or a listening age that
 restarted between two refreshes, clears the cell and starts a new period. One run at a time
 (instances due meanwhile go into the next run), at most 180 s (then its process group is
-killed); each run loads the model (a few seconds, about 2.3 GB VRAM while it runs). Failures are
+killed); each run loads the model (a few seconds, about 2.3 GB VRAM while it runs), unless every
+text is already in idle_check's score cache. Right-click on a classified row corrects its class
+(`idle_check.py --label`); the cell shows the correction with `✓` once it is recorded. Failures are
 logged as idle_check's category, never message text. New runs start only while the column is
 shown. Detection follows the refresh interval, so a run starts up to `refresh_seconds` after
 `idle_seconds`. Remote (relay) instances report no listening age: they count from the first

@@ -26,7 +26,8 @@ in the button label ("Zed (z)").
 "idle_seconds" (default 10): once an instance has been listening this long, the Idle column gets
 its class from contrib/idle-classifier/idle_check.py (needs_user, waiting, done; "-" none), once per
 listening period. Remote instances report no listening age: they count from the GUI's first sight.
-A needs_user row is highlighted in blue, less loudly than a blocked one.
+A needs_user row is highlighted in blue, less loudly than a blocked one. Right-click on a classified
+row corrects its class (idle_check.py --label, shown with ✓).
 "columns" selects and orders the table columns (keys of COLUMNS; default: all); a choice
 made with the Columns… button is kept in gui-state.json and takes precedence (Reset drops it);
 a column added to hcom-gui after that choice is shown in its default place.
@@ -163,6 +164,8 @@ def cell(col, row):
     value = row[col]
     if col == "dir":
         return tilde(value)
+    if col == "idle" and row.get("idle_corrected"):
+        return f"{value} ✓"
     if col in ("since", "age") and value != "":
         return age(value)
     if col == "context" and value != "":
@@ -411,9 +414,24 @@ def idle_check(names):
         return f"idle: {lines[-1][len('idle_check: '):]}" if lines else f"idle: exit {proc.returncode}"
     try:
         rows = json.loads(out)
-        return {r["name"]: r["class"] if r["class"] in IDLE_CLASSES else None for r in rows}
-    except (ValueError, TypeError, KeyError):
+        return {r["name"]: {"class": r["class"] if r["class"] in IDLE_CLASSES else None,
+                            "text_sha1": r.get("text_sha1") if isinstance(r.get("text_sha1"), str) else None,
+                            "corrected": r.get("corrected") is True} for r in rows}
+    except (ValueError, TypeError, KeyError, AttributeError):
         return "idle: output invalid"
+
+
+def idle_label(sha, cls):
+    """Record the user's class of a classified text (idle_check.py --label): None, or an error text."""
+    try:
+        proc = subprocess.run([sys.executable, "-I", IDLE_CHECK, "--label", sha, cls], cwd=HOME, env=HCOM_ENV,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"idle label: {getattr(e, 'strerror', None) or type(e).__name__}"
+    if proc.returncode != 0:
+        lines = [line for line in proc.stderr.splitlines() if line.startswith("idle_check: ")]
+        return f"idle label: {lines[-1][len('idle_check: '):]}" if lines else f"idle label: exit {proc.returncode}"
+    return None
 
 
 def idle_periods(periods, rows, now):
@@ -702,6 +720,7 @@ class App(tk.Tk):
 
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Double-1>", lambda e: self.run_default())
+        self.tree.bind("<Button-3>", self.idle_menu)
         self.tree.bind("<Return>", lambda e: self.run_default())
         self.tree.bind("<KP_Enter>", lambda e: self.run_default())
         self.bind("<F5>", lambda e: self.refresh())
@@ -855,6 +874,7 @@ class App(tk.Tk):
             p = self.idle.get(r["instance"]) if r["instance"] else None
             r["idle"] = (p["value"] or "") if p else ""
             r["idle_rank"] = IDLE_RANK[r["idle"]]
+            r["idle_corrected"] = bool(p and p.get("corrected"))
 
     def run_idle(self):
         """Start one idle_check for every queued period, unless one runs: those queued meanwhile
@@ -882,10 +902,39 @@ class App(tk.Tk):
         else:
             self.idle_error = None
         for name, p in batch.items():
-            p["value"] = result.get(name) or "-"
+            got = result.get(name) or {}
+            p["value"], p["sha"], p["corrected"] = got.get("class") or "-", got.get("text_sha1"), got.get("corrected")
         self.fill_idle()
         self.render()
         self.run_idle()
+
+    def idle_menu(self, event):
+        """Right-click on a row the classifier scored: correct its Idle class (kept as training data)."""
+        iid = self.tree.identify_row(event.y)
+        row = self.rows.get(iid)
+        p = self.idle.get(row["instance"]) if row and row["instance"] else None
+        if not p or not p.get("sha"):
+            return
+        self.tree.selection_set(iid)
+        menu = tk.Menu(self.tree, tearoff=False)
+        for cls in IDLE_CLASSES:
+            menu.add_command(label=f"Idle: {cls}", command=lambda c=cls: self.label_idle(row["instance"], p, c))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def label_idle(self, name, p, cls):
+        def work():
+            self.after(0, self._label_done, name, p, cls, idle_label(p["sha"], cls))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _label_done(self, name, p, cls, error):
+        """The class shows only after it was recorded, and only while that listening period lasts."""
+        if error:
+            self.write_log(f"ERROR: {error}")
+        elif self.idle.get(name) is p:
+            p["value"], p["corrected"] = cls, True
+            self.fill_idle()
+            self.render()
 
     def sort_by(self, col):
         """Clicks on one heading cycle ascending, descending, default order."""

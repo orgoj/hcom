@@ -244,11 +244,21 @@ class App(unittest.TestCase):
         self.patch("threading", SyncThreading)
         self.idle_runs, self.idle_answer = [], {}
 
-        def fake_idle_check(names):
+        def fake_idle_check(names):  # idle_answer: {name: class} or an error text
             self.idle_runs.append(list(names))
-            return self.idle_answer
+            if isinstance(self.idle_answer, str):
+                return self.idle_answer
+            return {n: {"class": c, "text_sha1": f"sha-{n}" if c else None, "corrected": False}
+                    for n, c in self.idle_answer.items()}
 
         self.patch("idle_check", fake_idle_check)
+        self.labels, self.label_error = [], None
+
+        def fake_idle_label(sha, cls):
+            self.labels.append((sha, cls))
+            return self.label_error
+
+        self.patch("idle_label", fake_idle_label)
         self.asked, self.answer = [], True
 
         def askyesno(title, text, **_):
@@ -1079,6 +1089,69 @@ class App(unittest.TestCase):
             self.refreshed()
             self.assertEqual((self.idle_cell("a1|a1"), self.app.tree.item("a1|a1", "tags")), (cls, (tag,)))
 
+    def listening_with(self, cls):
+        self.idle_answer = {"a1": cls}
+        self.live("a1", status="active", status_age_seconds=3)
+        self.refreshed()
+        self.live("a1", status="listening", status_age_seconds=20)
+        self.refreshed()
+        return self.app.idle["a1"]
+
+    def test_idle_correction_shows_after_it_is_recorded(self):
+        p = self.listening_with("done")
+        self.app.label_idle("a1", p, "needs_user")
+        self.app.update()
+        self.assertEqual(self.labels, [("sha-a1", "needs_user")])
+        self.assertEqual((self.idle_cell("a1|a1"), self.app.tree.item("a1|a1", "tags")),
+                         ("needs_user ✓", ("needs_user",)))
+        self.app.sort_by("idle")
+        self.assertEqual(self.app.rows["a1|a1"]["idle_rank"], gui.IDLE_RANK["needs_user"])
+        self.assertEqual(self.app.tree.get_children()[0], "a1|a1")
+
+    def test_idle_right_click_offers_corrections_only_for_classified_rows(self):
+        menus = []
+
+        class Menu:
+            def __init__(self, *_, **__):
+                self.items, self.popped = [], False
+                menus.append(self)
+
+            def add_command(self, label, command):
+                self.items.append((label, command))
+
+            def tk_popup(self, *_):
+                self.popped = True
+
+        old = gui.tk.Menu
+        gui.tk.Menu = Menu
+        self.addCleanup(setattr, gui.tk, "Menu", old)
+        event = type("Event", (), {"y": 0, "x_root": 0, "y_root": 0})
+        self.listening_with("done")
+        self.app.tree.identify_row = lambda y: "a2|a2x"  # not listening: no class
+        self.app.idle_menu(event)
+        self.assertEqual(menus, [])
+        self.app.tree.identify_row = lambda y: "a1|a1"
+        self.app.idle_menu(event)
+        self.assertEqual(([label for label, _ in menus[0].items], menus[0].popped),
+                         (["Idle: needs_user", "Idle: waiting", "Idle: done"], True))
+        menus[0].items[1][1]()
+        self.app.update()
+        self.assertEqual((self.labels, self.idle_cell("a1|a1")), ([("sha-a1", "waiting")], "waiting ✓"))
+
+    def test_idle_correction_failure_or_ended_period_changes_nothing(self):
+        p = self.listening_with("done")
+        self.label_error = "idle label: live data write failed"
+        self.app.label_idle("a1", p, "waiting")
+        self.app.update()
+        self.assertEqual(self.idle_cell("a1|a1"), "done")
+        self.assertIn("ERROR: idle label: live data write failed", self.app.log.get("1.0", "end"))
+        self.label_error = None
+        self.live("a1", status="active", status_age_seconds=1)
+        self.refreshed()
+        self.app.label_idle("a1", p, "waiting")
+        self.app.update()
+        self.assertEqual((self.labels[-1], self.idle_cell("a1|a1"), p["value"]), (("sha-a1", "waiting"), "", "done"))
+
     def test_idle_age_reset_between_refreshes_is_a_new_period(self):
         self.idle_answer = {"a1": "done"}
         self.live("a1", status_age_seconds=15)
@@ -1139,7 +1212,7 @@ class App(unittest.TestCase):
         ended = self.app.idle["a2x"]
         self.live("a2x", status="active", status_age_seconds=1)
         self.refreshed()
-        self.app._idle_done({"a2x": ended}, {"a2x": "waiting"})
+        self.app._idle_done({"a2x": ended}, {"a2x": {"class": "waiting"}})
         self.app.update()
         self.assertEqual((self.idle_runs, self.idle_cell("a2|a2x")), ([["a1"]], ""))
 
@@ -1202,8 +1275,19 @@ class IdleCheck(unittest.TestCase):
         return d.name
 
     def test_classes_by_name(self):
-        self.script('print(json.dumps([{"name": n, "class": "waiting" if n == "a" else None} for n in names]))')
-        self.assertEqual(gui.idle_check(["a", "b"]), {"a": "waiting", "b": None})
+        self.script('print(json.dumps([{"name": n, "class": "waiting" if n == "a" else None, "text_sha1": "s" + n,'
+                    ' "corrected": n == "a"} for n in names]))')
+        self.assertEqual(gui.idle_check(["a", "b"]), {"a": {"class": "waiting", "text_sha1": "sa", "corrected": True},
+                                                      "b": {"class": None, "text_sha1": "sb", "corrected": False}})
+
+    def test_label(self):
+        d = self.script('open(sys.argv[0] + ".args", "w").write(json.dumps(sys.argv[1:]))')
+        self.assertIsNone(gui.idle_label("abc", "done"))
+        with open(os.path.join(d, "idle_check.py.args")) as f:
+            self.assertEqual(gui.json.load(f), ["--label", "abc", "done"])
+        self.script('print("secret", file=sys.stderr)\nprint("idle_check: live data write failed", file=sys.stderr)\n'
+                    'sys.exit(1)')
+        self.assertEqual(gui.idle_label("abc", "done"), "idle label: live data write failed")
 
     def test_failure_reports_only_the_category_line(self):
         self.script('print("secret text", file=sys.stderr)\nprint("idle_check: score failed (exit 1)", '

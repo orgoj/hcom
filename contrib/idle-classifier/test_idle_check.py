@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Fixture tests for idle_check.py and final_inputs.final_input: python3 -I test_idle_check.py"""
+import hashlib
 import io
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -64,6 +66,14 @@ def check(fake):
     return idle_check.check(fake, "hcom", SCORER)
 
 
+def sha(text):
+    return hashlib.sha1(text.encode()).hexdigest()
+
+
+def lines(path):
+    return path.read_text().splitlines() if path.exists() else []
+
+
 class Check(unittest.TestCase):
     def test_no_listening_agents_skips_scorer(self):
         fake = Fake([ok([agent("a", "active")])], score=lambda s: self.fail("scorer called"))
@@ -90,9 +100,11 @@ class Check(unittest.TestCase):
         self.assertEqual([(r["name"], r["class"]) for r in rows],
                          [("b", "needs_user"), ("c", "needs_user"), ("d", "waiting"), ("a", "done"), ("e", None)])
         self.assertEqual(set(rows[0]), {"name", "tool", "class", "p_needs_user", "p", "input_kind",
-                                        "status_age_seconds", "reason"})
+                                        "status_age_seconds", "reason", "text_sha1", "corrected"})
         self.assertEqual((rows[0]["p_needs_user"], rows[0]["input_kind"], rows[0]["status_age_seconds"],
-                          rows[0]["reason"]), (0.5, "final_text", 9, None))
+                          rows[0]["reason"], rows[0]["text_sha1"], rows[0]["corrected"]),
+                         (0.5, "final_text", 9, None, sha("two"), False))
+        self.assertEqual((rows[-1]["text_sha1"], rows[-1]["corrected"]), (None, False))
         self.assertEqual([json.loads(line) for line in fake.score_stdin.splitlines()],
                          [{"id": "0", "text": "two"}, {"id": "1", "text": "one"},
                           {"id": "2", "text": "three"}, {"id": "3", "text": "four"}])
@@ -147,7 +159,8 @@ class Check(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             for f in ("py", "attention.py", "head.json"):
                 pathlib.Path(tmp, f).touch()
-            flags = ["--python", f"{tmp}/py", "--attention", f"{tmp}/attention.py", "--head", tmp]
+            flags = ["--python", f"{tmp}/py", "--attention", f"{tmp}/attention.py", "--head", tmp,
+                     "--live", f"{tmp}/live"]
             scorer = [f"{tmp}/py", f"{tmp}/attention.py", "score", tmp]
 
             def runner(argv, stdin=None):
@@ -176,6 +189,153 @@ class Check(unittest.TestCase):
         with redirect_stderr(err):
             code = idle_check.main(["--python", "/nonexistent/py"], Fake([]))
         self.assertEqual((code, err.getvalue()), (1, "idle_check: --python: /nonexistent/py not found\n"))
+
+
+class Live(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = pathlib.Path(tmp.name)
+        self.store = idle_check.Store(self.dir / "live")
+        self.log = self.dir / "live" / "scores.jsonl"
+
+    def run_check(self, texts, score, model="m1"):
+        """check() over agents a, b, ... whose last exchanges are texts."""
+        names = [chr(ord("a") + i) for i in range(len(texts))]
+        listed = ok([agent(n) for n in names])
+        fake = Fake([listed, listed], {n: [ok([exchange(t)])] for n, t in zip(names, texts)}, score=score)
+        return idle_check.check(fake, "hcom", SCORER, None, self.store, model, "/heads/h"), fake
+
+    def test_cache_scores_each_text_once(self):
+        rows, _ = self.run_check(["one"], scores_for([("waiting", 0.2)]))
+        self.assertEqual([(r["class"], r["text_sha1"]) for r in rows], [("waiting", sha("one"))])
+        rows, fake = self.run_check(["one"], lambda s: self.fail("scorer called"))
+        self.assertEqual([r["class"] for r in rows], ["waiting"])
+        rows, fake = self.run_check(["one", "two"], scores_for([("done", 0.1)]))
+        self.assertEqual([json.loads(line)["text"] for line in fake.score_stdin.splitlines()], ["two"])
+        logged = [json.loads(line) for line in lines(self.log)]
+        self.assertEqual([(r["name"], r["text"], r["class"], r["model"], r["head"]) for r in logged],
+                         [("a", "one", "waiting", "m1", "/heads/h"), ("b", "two", "done", "m1", "/heads/h")])
+        self.assertEqual(set(logged[0]), {"ts", "name", "tool", "input_kind", "text_sha1", "text", "model", "head",
+                                          "p", "class"})
+        self.run_check(["one"], scores_for([("needs_user", 0.9)]), model="m2")  # another model scores again
+        self.assertEqual(len(lines(self.log)), 3)
+
+    def test_same_text_twice_in_a_batch_is_one_input(self):
+        rows, fake = self.run_check(["same", "same"], scores_for([("needs_user", 0.7)]))
+        self.assertEqual(len(fake.score_stdin.splitlines()), 1)
+        self.assertEqual([r["class"] for r in rows], ["needs_user", "needs_user"])
+        self.assertEqual(len(lines(self.log)), 1)
+
+    def test_a_concurrent_writer_is_not_duplicated(self):
+        other = scores_for([("done", 0.1)])
+
+        def score(stdin):  # another idle_check logs the same text while this one scores
+            idle_check.Store(self.dir / "live").add_scores("m1", [{
+                **score_row(0, "done", 0.1), "text_sha1": sha("one"), "model": "m1", "text": "one"}])
+            return other(stdin)
+
+        self.run_check(["one"], score)
+        self.assertEqual(len(lines(self.log)), 1)
+
+    def test_invalid_cached_rows_are_skipped(self):
+        self.log.parent.mkdir()
+        good = {"text_sha1": sha("one"), "model": "m1", **score_row(0, "done", 0.1)}
+        bad = [{**good, "class": "maybe"}, {**good, "p": {"needs_user": 2, "waiting": 0, "done": 0}},
+               {**good, "text_sha1": "x"}, [1], "text"]
+        self.log.write_text("".join(json.dumps(b) + "\n" for b in bad) + "{broken\n")
+        rows, fake = self.run_check(["one"], scores_for([("waiting", 0.3)]))
+        self.assertIsNotNone(fake.score_stdin)
+        self.assertEqual(rows[0]["class"], "waiting")
+
+    def test_torn_tail_does_not_eat_the_next_record(self):
+        self.log.parent.mkdir()
+        corrections = self.log.parent / "corrections.jsonl"
+        self.log.write_text('{"text_sha1": "')
+        corrections.write_text('{"ts": "x", "text_')
+        self.run_check(["one"], scores_for([("waiting", 0.3)]))
+        self.store.label(sha("one"), "done")
+        self.assertEqual(list(self.store.scores("m1")), [sha("one")])
+        self.assertEqual(self.store.corrections(), {sha("one"): "done"})
+
+    def test_files_are_private(self):
+        live = self.log.parent
+        live.mkdir(mode=0o755)
+        for f in ("scores.jsonl", "corrections.jsonl", ".lock"):
+            (live / f).touch(mode=0o644)
+        self.run_check(["one"], scores_for([("done", 0.1)]))
+        self.store.label(sha("one"), "done")
+        modes = {f.name: f.stat().st_mode & 0o777 for f in live.iterdir()}
+        self.assertEqual((live.stat().st_mode & 0o777, modes),
+                         (0o700, {"scores.jsonl": 0o600, "corrections.jsonl": 0o600, ".lock": 0o600}))
+
+    def test_a_cache_only_run_tightens_existing_files(self):
+        self.run_check(["one"], scores_for([("done", 0.1)]))
+        self.store.label(sha("one"), "waiting")
+        live = self.log.parent
+        for f in live.iterdir():
+            f.chmod(0o644)
+        live.chmod(0o755)
+        rows, _ = self.run_check(["one"], lambda s: self.fail("scorer called"))
+        self.assertEqual(rows[0]["class"], "waiting")
+        self.assertEqual((live.stat().st_mode & 0o777, {f.name: f.stat().st_mode & 0o777 for f in live.iterdir()}),
+                         (0o700, {"scores.jsonl": 0o600, "corrections.jsonl": 0o600, ".lock": 0o600}))
+
+    def test_last_correction_wins(self):
+        self.store.label(sha("one"), "needs_user")
+        self.store.label(sha("one"), "done")
+        rows, _ = self.run_check(["one", "two"], scores_for([("needs_user", 0.9), ("waiting", 0.2)]))
+        self.assertEqual([(r["name"], r["class"], r["corrected"], r["p_needs_user"]) for r in rows],
+                         [("b", "waiting", False, 0.2), ("a", "done", True, 0.9)])
+
+    def test_label_needs_no_model(self):
+        live = str(self.dir / "live")
+        missing = ["--python", "/nonexistent/py", "--attention", "/nonexistent/a.py", "--head", "/nonexistent"]
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(idle_check.main(missing + ["--live", live, "--label", sha("x"), "waiting"], Fake([])), 0)
+            for bad in (["XYZ", "waiting"], [sha("x"), "maybe"]):
+                self.assertEqual(idle_check.main(["--live", live, "--label", *bad], Fake([])), 1)
+        self.assertEqual(self.store.corrections(), {sha("x"): "waiting"})
+        self.assertEqual(err.getvalue().count("idle_check: --label:"), 2)
+
+    def test_model_id(self):
+        attention = self.dir / "attention.py"
+        attention.write_text("v1")
+        heads = []
+        for parent in ("x", "y"):
+            head = self.dir / parent / "head"
+            head.mkdir(parents=True)
+            (head / "head.json").write_text("{}")
+            (head / "head.safetensors").write_bytes(b"x")
+            os.utime(head / "head.safetensors", ns=(1, 1))
+            heads.append(head)
+        same = idle_check.model_id(attention, heads[0])
+        self.assertEqual(same, idle_check.model_id(attention, heads[1]))  # same content, other dir
+        (heads[1] / "head.safetensors").write_bytes(b"y")  # other weights, same name, size and mtime
+        os.utime(heads[1] / "head.safetensors", ns=(1, 1))
+        self.assertNotEqual(same, idle_check.model_id(attention, heads[1]))
+        (heads[0] / "head.json").write_text('{"v": 2}')
+        self.assertNotEqual(same, idle_check.model_id(attention, heads[0]))
+        second = idle_check.model_id(attention, heads[0])
+        attention.write_text("v2")
+        self.assertNotEqual(second, idle_check.model_id(attention, heads[0]))
+
+    def test_model_id_of_large_files_is_their_identity(self):
+        attention = self.dir / "attention.py"
+        attention.write_text("v1")
+        head = self.dir / "head"
+        head.mkdir()
+        (head / "head.json").write_text("{}")
+        (head / "model.safetensors").write_bytes(b"12345")
+        old = idle_check.HASH_LIMIT
+        idle_check.HASH_LIMIT = 4
+        self.addCleanup(setattr, idle_check, "HASH_LIMIT", old)
+        first = idle_check.model_id(attention, head)
+        self.assertEqual(first, idle_check.model_id(attention, head))
+        (head / "model.safetensors").write_bytes(b"54321")  # rewritten in place: ctime/mtime move
+        os.utime(head / "model.safetensors", ns=(1, 1))
+        self.assertNotEqual(first, idle_check.model_id(attention, head))
 
 
 class FinalInput(unittest.TestCase):
