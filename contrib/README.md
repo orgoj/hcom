@@ -5,7 +5,8 @@ Fork-only extras that run on top of the `hcom` CLI and do not touch its code.
 ## idle-classifier
 
 Evaluation scripts and metric-only results for classifying an idle agent's last message
-(does the user need to act?). See `idle-classifier/README.md`.
+(does the user need to act?), and `idle_check.py`, a CLI that lists which listening agents need
+a user decision. See `idle-classifier/README.md`.
 
 ## hcom-gui
 

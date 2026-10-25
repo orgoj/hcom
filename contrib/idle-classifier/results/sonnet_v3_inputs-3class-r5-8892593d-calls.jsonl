@@ -1,0 +1,2 @@
+{"rules": "8892593d", "cases": 10, "labels": 10, "models": ["claude-sonnet-5-5"], "duration_ms": 3169, "duration_api_ms": 2985, "ttft_ms": 3122, "cost_usd": 0.0294085, "input_tokens": 7695, "output_tokens": 263}
+{"rules": "8892593d", "cases": 8, "labels": 8, "models": ["claude-sonnet-5-5"], "duration_ms": 2615, "duration_api_ms": 2514, "ttft_ms": 2577, "cost_usd": 0.0253869, "input_tokens": 9041, "output_tokens": 221}

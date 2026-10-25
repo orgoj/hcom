@@ -91,6 +91,20 @@ def hcom_send(tool):
     return None
 
 
+def final_input(ex):
+    """(input_kind, text) of a `hcom transcript --json --detailed` exchange, as the docstring says."""
+    last = (ex.get("tools") or [{}])[-1]
+    if ex.get("final_text"):
+        kind, text = "final_text", ex["final_text"]
+    elif not ex.get("tools"):
+        kind, text = "tool_free", ex.get("action") or ""
+    elif send := hcom_send(last):
+        kind, text = "hcom_send", f"{ex.get('action') or ''}\n\n{send}"
+    else:
+        kind, text = "tool_ended_other", ex.get("action") or ""
+    return kind, text.strip()[-MAX_CHARS:]
+
+
 class PrivateDir:
     """$HCOM_DIR/tmp/idle-classifier: message texts live only here, never in the repository."""
 
@@ -212,16 +226,7 @@ def main():
                 times = idle.get(inst, [])
                 i = bisect.bisect_right(times, start)
                 final = i < len(times) and times[i] < end
-            last = (ex.get("tools") or [{}])[-1]
-            if ex.get("final_text"):
-                kind, text = "final_text", ex["final_text"]
-            elif not ex.get("tools"):
-                kind, text = "tool_free", ex.get("action") or ""
-            elif send := hcom_send(last):
-                kind, text = "hcom_send", f"{ex.get('action') or ''}\n\n{send}"
-            else:
-                kind, text = "tool_ended_other", ex.get("action") or ""
-            text = text.strip()[-MAX_CHARS:]
+            kind, text = final_input(ex)
             kinds[f"{kind}/final={final}"] += 1
             rows.append({"id": c["id"], "text": text, "lang": "cs" if CS_CHARS.search(text.lower()) else "en",
                          "final": final, "input_kind": kind, "cli": c["cli"], "export": export,
