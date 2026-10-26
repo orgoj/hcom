@@ -34,7 +34,7 @@ a column added to hcom-gui after that choice is shown in its default place.
 Heading clicks cycle the sort: ascending, descending, default. The Filter field matches
 agent, instance, dir and groups (case-insensitive).
 A disabled catalog agent's row is struck through; Hide disabled (on by default) hides it.
-Hide non-persistent hides instances without a catalog agent. The window title counts the shown rows.
+Hide non-persistent hides instances without a catalog agent. The toolbar counts the shown rows.
 Start: the empty Name field gets "<agent>__" on focus; left unchanged it counts as empty.
 Window layout, columns, sort and filters (Running only, Blocked only, Hide disabled, Hide
 non-persistent) are kept in ~/.hcom/gui-state.json.
@@ -696,6 +696,8 @@ class App(tk.Tk):
         self.filter_entry = ttk.Entry(toolbar, textvariable=self.filter_text, width=16)
         self.filter_entry.pack(side=tk.RIGHT, padx=2)
         ttk.Label(toolbar, text="Filter:").pack(side=tk.RIGHT, padx=2)
+        self.count_label = ttk.Label(toolbar)
+        self.count_label.pack(side=tk.RIGHT, padx=10)
 
         self.paned = ttk.PanedWindow(self, orient=tk.VERTICAL)
         self.paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -999,7 +1001,7 @@ class App(tk.Tk):
         if sel and self.tree.exists(sel[0]):
             self.tree.selection_set(sel[0])
             self.tree.focus(sel[0])
-        self.title(f"hcom-gui — {len(self.tree.get_children())} agents")
+        self.count_label.configure(text=f"{len(self.tree.get_children())} agents")
         self.update_buttons()
 
     # ── Actions ────────────────────────────────────────────────────────

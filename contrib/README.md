@@ -74,7 +74,7 @@ disabled, on by default, hides it. A running instance of a disabled agent stays 
 Hide non-persistent hides instances that no catalog agent launched (empty Agent column).
 The Filter field narrows the table as you type to rows whose agent, instance, directory
 or catalog groups contain the text (case-insensitive); it combines with the checkboxes.
-The window title shows how many rows the table shows after all filters.
+The toolbar, left of the Filter field, shows how many rows the table shows after all filters.
 In the Start dialog the Name field is empty; when it gets focus while empty it is prefilled
 with `<agent>__` (clone naming convention), and a name left at exactly that prefix counts as
 empty (the default name).
