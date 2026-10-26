@@ -657,6 +657,53 @@ class App(unittest.TestCase):
         self.app.after(200, type_prompt)
         return self.app.ask("Start", ["name", "prompt"] if key == "prompt" else [key], "a3", {})
 
+    def name_dialog(self, prefill, edit):
+        """Open the Start dialog for a3 (resume, name, dir); edit(entry, dlg) runs inside it."""
+        seen = {}
+
+        def inside():
+            dlg = next(w for w in self.app.winfo_children() if isinstance(w, gui.tk.Toplevel))
+            entry = next(w for w in dlg.winfo_children() if isinstance(w, gui.ttk.Entry))
+            seen["initial"] = entry.get()
+            edit(entry, dlg)
+            seen["text"], seen["cursor"] = entry.get(), entry.index(gui.tk.INSERT)
+            dlg.event_generate("<Return>", when="now")
+
+        self.app.after(200, inside)
+        result = self.app.ask("Start", ["resume", "name", "dir"], "a3", prefill)
+        return seen, result
+
+    def test_empty_name_gets_clone_prefix_on_focus(self):
+        def focus(entry, dlg):
+            self.assertEqual(entry.get(), "")
+            entry.focus_force()
+            entry.update()
+
+        seen, result = self.name_dialog({"dir": "/w"}, focus)
+        self.assertEqual((seen["initial"], seen["text"], seen["cursor"]), ("", "a3__", len("a3__")))
+        self.assertEqual(result["name"], "")  # the bare prefix counts as empty
+
+    def test_clone_prefix_by_keyboard_and_typed_name(self):
+        def tab_and_type(entry, dlg):
+            checkbox = next(w for w in dlg.winfo_children() if isinstance(w, gui.ttk.Checkbutton))
+            checkbox.focus_force()
+            checkbox.update()
+            checkbox.event_generate("<Tab>", when="now")
+            entry.update()
+            self.assertEqual(dlg.focus_get(), entry)
+            entry.insert(gui.tk.INSERT, "review")
+
+        seen, result = self.name_dialog({"dir": "/w"}, tab_and_type)
+        self.assertEqual(result["name"], "a3__review")
+
+    def test_name_with_text_is_not_changed_on_focus(self):
+        def focus(entry, dlg):
+            entry.focus_force()
+            entry.update()
+
+        seen, result = self.name_dialog({"name": "mine", "dir": "/w"}, focus)
+        self.assertEqual((seen["text"], result["name"]), ("mine", "mine"))
+
     def test_keypad_enter_confirms_dialog(self):
         def press():
             dlg = next(w for w in self.app.winfo_children() if isinstance(w, gui.tk.Toplevel))
@@ -987,6 +1034,37 @@ class App(unittest.TestCase):
         self.app.filter_text.set("~/PROJ")  # matches the shown ~ form too
         self.assertEqual(self.shown(), ["|solo"])
         self.app.filter_text.set("")
+        self.assertEqual(self.shown(), everything)
+
+    def test_title_counts_the_shown_rows(self):
+        self.assertEqual(self.app.title(), f"hcom-gui — {len(self.shown())} agents")
+        self.app.filter_entry.insert("end", "a2")  # a filter change recounts at once
+        self.assertEqual(self.app.title(), "hcom-gui — 2 agents")
+        self.app.running_only.set(True)
+        self.app.render()
+        self.assertEqual(self.app.title(), "hcom-gui — 1 agents")
+        started = {"name": "a2y", "tool": "codex", "status": "active", "launch_context": {"agent_name": "a2"}}
+        self.refresh_with(LIVE + [started])
+        self.assertEqual(self.app.title(), "hcom-gui — 2 agents")
+
+    def test_hide_non_persistent_hides_instances_without_catalog_agent_and_is_restored(self):
+        everything = self.shown()
+        self.assertFalse(self.app.hide_adhoc.get())
+        self.assertIn("|solo", everything)
+        self.app.hide_adhoc.set(True)
+        self.app.render()
+        self.assertEqual(self.shown(), [i for i in everything if i != "|solo"])
+        self.assertEqual(self.app.title(), f"hcom-gui — {len(everything) - 1} agents")
+        self.app.filter_text.set("a2")
+        self.assertEqual(sorted(self.shown()), ["a2|", "a2|a2x"])
+        self.app.filter_text.set("")
+        self.app._on_close()
+        self.app = gui.App()
+        self.app.update()
+        self.assertTrue(self.app.hide_adhoc.get())
+        self.assertNotIn("|solo", self.shown())
+        self.app.hide_adhoc.set(False)
+        self.app.render()
         self.assertEqual(self.shown(), everything)
 
     def test_text_filter_combines_with_checkboxes_and_survives_refresh(self):

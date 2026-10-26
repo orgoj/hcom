@@ -71,8 +71,13 @@ was the last one; after Start or Restart the selection stays on that agent inste
 catalog rows without an instance; Blocked only lists only instances in `blocked` status.
 A disabled catalog agent's row (`"disabled": true`) is struck through in light grey; Hide
 disabled, on by default, hides it. A running instance of a disabled agent stays visible.
+Hide non-persistent hides instances that no catalog agent launched (empty Agent column).
 The Filter field narrows the table as you type to rows whose agent, instance, directory
-or catalog groups contain the text (case-insensitive); it combines with both checkboxes.
+or catalog groups contain the text (case-insensitive); it combines with the checkboxes.
+The window title shows how many rows the table shows after all filters.
+In the Start dialog the Name field is empty; when it gets focus while empty it is prefilled
+with `<agent>__` (clone naming convention), and a name left at exactly that prefix counts as
+empty (the default name).
 Up/Down move through the rows from anywhere in the main window (e.g. the Filter field)
 and give the table keyboard focus.
 Sort, window layout and the filters are kept in `~/.hcom/gui-state.json`.

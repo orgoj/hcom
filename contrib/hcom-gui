@@ -34,8 +34,10 @@ a column added to hcom-gui after that choice is shown in its default place.
 Heading clicks cycle the sort: ascending, descending, default. The Filter field matches
 agent, instance, dir and groups (case-insensitive).
 A disabled catalog agent's row is struck through; Hide disabled (on by default) hides it.
-Window layout, columns, sort and filters (Running only, Blocked only, Hide disabled) are kept in
-~/.hcom/gui-state.json.
+Hide non-persistent hides instances without a catalog agent. The window title counts the shown rows.
+Start: the empty Name field gets "<agent>__" on focus; left unchanged it counts as empty.
+Window layout, columns, sort and filters (Running only, Blocked only, Hide disabled, Hide
+non-persistent) are kept in ~/.hcom/gui-state.json.
 """
 
 import datetime
@@ -686,6 +688,9 @@ class App(tk.Tk):
         self.hide_disabled = tk.BooleanVar(value=True)
         ttk.Checkbutton(toolbar, text="Hide disabled", variable=self.hide_disabled,
                         command=self.render).pack(side=tk.RIGHT, padx=10)
+        self.hide_adhoc = tk.BooleanVar(value=False)
+        ttk.Checkbutton(toolbar, text="Hide non-persistent", variable=self.hide_adhoc,
+                        command=self.render).pack(side=tk.RIGHT, padx=10)
         self.filter_text = tk.StringVar()
         self.filter_text.trace_add("write", lambda *_: self.render())
         self.filter_entry = ttk.Entry(toolbar, textvariable=self.filter_text, width=16)
@@ -969,6 +974,8 @@ class App(tk.Tk):
                 continue
             if self.hide_disabled.get() and r["disabled"]:
                 continue
+            if self.hide_adhoc.get() and not r["agent"]:  # an instance without a catalog agent
+                continue
             if needle and needle not in " ".join([r["agent"], r["instance"], r["dir"], tilde(r["dir"]),
                                                   *r["groups"]]).lower():
                 continue
@@ -992,6 +999,7 @@ class App(tk.Tk):
         if sel and self.tree.exists(sel[0]):
             self.tree.selection_set(sel[0])
             self.tree.focus(sel[0])
+        self.title(f"hcom-gui — {len(self.tree.get_children())} agents")
         self.update_buttons()
 
     # ── Actions ────────────────────────────────────────────────────────
@@ -1123,7 +1131,8 @@ class App(tk.Tk):
     def ask(self, title, keys, agent, prefill):
         """One entry per {ask:X}, prefilled from prefill; "dir" is browsable, "cli" a
         choice of installed CLIs, "resume" a checkbox ("1" when checked), "prompt" and "message"
-        multi-line (Shift+Enter: newline, Enter: OK). None on cancel."""
+        multi-line (Shift+Enter: newline, Enter: OK), an empty "name" gets "<agent>__" on focus.
+        None on cancel."""
         dlg = tk.Toplevel(self)
         dlg.title(f"{title} {agent}")
         dlg.transient(self)
@@ -1147,7 +1156,16 @@ class App(tk.Tk):
                 entries[k] = lambda t=text: t.get("1.0", "end-1c")
                 continue
             else:
-                ttk.Entry(dlg, textvariable=var, width=50).grid(row=n, column=1, sticky=tk.EW, padx=5, pady=5)
+                entry = ttk.Entry(dlg, textvariable=var, width=50)
+                entry.grid(row=n, column=1, sticky=tk.EW, padx=5, pady=5)
+                if k == "name":  # clone convention: "<agent>__"; left unchanged it counts as empty
+                    def clone_prefix(_event, var=var, entry=entry):
+                        if not var.get():
+                            var.set(f"{agent}__")
+                            entry.icursor(tk.END)
+                    entry.bind("<FocusIn>", clone_prefix)
+                    entries[k] = lambda var=var: "" if var.get().strip() == f"{agent}__" else var.get()
+                    continue
             if k == "dir":
                 def browse(var=var):
                     path = filedialog.askdirectory(parent=dlg, initialdir=var.get() or HOME)
@@ -1260,6 +1278,7 @@ class App(tk.Tk):
         self.running_only.set(state.get("running_only", False))
         self.blocked_only.set(state.get("blocked_only", False))
         self.hide_disabled.set(state.get("hide_disabled", True))
+        self.hide_adhoc.set(state.get("hide_adhoc", False))
         if state.get("sort_col") in self.tree["columns"]:
             self.sort_col, self.sort_reverse = state["sort_col"], bool(state.get("sort_reverse"))
 
@@ -1283,6 +1302,7 @@ class App(tk.Tk):
             "running_only": self.running_only.get(),
             "blocked_only": self.blocked_only.get(),
             "hide_disabled": self.hide_disabled.get(),
+            "hide_adhoc": self.hide_adhoc.get(),
             "sort_col": self.sort_col,
             "sort_reverse": self.sort_reverse,
             "column_widths": {c: self.tree.column(c, "width") for c in self.tree["columns"]},
