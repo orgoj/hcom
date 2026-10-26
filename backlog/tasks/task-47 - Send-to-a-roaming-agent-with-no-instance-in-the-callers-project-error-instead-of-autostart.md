@@ -6,7 +6,7 @@ title: >-
 status: Idea
 assignee: []
 created_date: '2026-10-26 20:34'
-updated_date: '2026-10-26 20:34'
+updated_date: '2026-10-26 21:02'
 labels: []
 dependencies: []
 priority: medium
@@ -25,9 +25,3 @@ Open question for the user: today a send to a roaming agent deliberately starts 
 
 Needs analysis before implementation.
 <!-- SECTION:DESCRIPTION:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-Addendum (user, via agent_coach): mark roaming agents in the human listings. Today only `hcom agent list --json` has `roaming: true`; plain `hcom agent list` shows it only in the description text, and `hcom list` not at all (e.g. sphere_dev_ansible_proweb_505 shows no link to its archetype sphere_dev). Both listings should show that an instance is roaming and which catalog agent it belongs to.
-<!-- SECTION:NOTES:END -->
