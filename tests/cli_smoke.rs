@@ -5856,6 +5856,155 @@ fn roaming_send_from_same_basename_roots_addresses_distinct_instances() {
             stdout.contains(own.as_str()) && !stdout.contains(other.as_str()),
             "stdout={stdout}"
         );
+        assert!(
+            stdout.contains(&format!(
+                "Note: @reviewer is a roaming agent; in this project it is {own} (use that name)."
+            )),
+            "stdout={stdout}"
+        );
+        assert!(!stderr.contains("roaming"), "stderr={stderr}");
+    }
+}
+
+#[test]
+fn roaming_send_autostarts_own_project_instance_while_another_project_runs_one() {
+    let h = Hcom::new();
+    let here = h.root_path().join("cca-manager");
+    let elsewhere = h.root_path().join("proweb");
+    std::fs::create_dir_all(here.join(".git")).expect("create first git marker");
+    std::fs::create_dir_all(elsewhere.join(".git")).expect("create second git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+    let own = roaming_instance("reviewer_cca_manager", &here);
+    let other = roaming_instance("reviewer_proweb", &elsewhere);
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "INSERT INTO instances (name, status, directory, created_at) \
+         VALUES (?1, 'listening', ?2, 1000.0)",
+        [other.as_str(), elsewhere.to_string_lossy().as_ref()],
+    )
+    .expect("insert other project reviewer");
+
+    let output = h
+        .cmd()
+        .current_dir(&here)
+        .args(["send", "--from", "bigboss", "@reviewer", "--", "inspect"])
+        .output()
+        .expect("send from project");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains(&format!(
+            "Note: @reviewer is a roaming agent; in this project it is {own} (use that name)."
+        )),
+        "stdout={stdout}"
+    );
+    assert!(!stderr.contains("roaming"), "stderr={stderr}");
+
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1", "--full"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
+    assert_eq!(event["data"]["delivered_to"], serde_json::json!([own]));
+    let (code, instances, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "instances={instances} stderr={stderr}");
+    let instances: serde_json::Value =
+        serde_json::from_str(&instances).expect("instance list JSON");
+    let started = instances
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["name"] == own.as_str()))
+        .expect("own project reviewer started");
+    assert_eq!(started["directory"], here.to_string_lossy().as_ref());
+}
+
+#[test]
+fn send_by_exact_or_non_roaming_name_prints_no_roaming_note() {
+    let h = Hcom::new();
+    let project = h.root_path().join("app");
+    std::fs::create_dir_all(project.join(".git")).expect("create git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex"},"solo":{"cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+    let instance = roaming_instance("reviewer_app", &project);
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    for name in [instance.as_str(), "solo"] {
+        conn.execute(
+            "INSERT INTO instances (name, status, directory, created_at) \
+             VALUES (?1, 'listening', ?2, 1000.0)",
+            [name, project.to_string_lossy().as_ref()],
+        )
+        .expect("insert instance");
+    }
+
+    for target in [format!("@{instance}"), "@solo".to_string()] {
+        let output = h
+            .cmd()
+            .current_dir(&project)
+            .args([
+                "send",
+                "--from",
+                "bigboss",
+                target.as_str(),
+                "--",
+                "inspect",
+            ])
+            .output()
+            .expect("send");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+        assert!(!stdout.contains("Note:"), "target={target} stdout={stdout}");
+    }
+}
+
+#[test]
+fn agent_launch_of_a_roaming_agent_notes_the_project_instance() {
+    let h = Hcom::new();
+    let project = h.root_path().join("forecast-service");
+    std::fs::create_dir_all(project.join(".git")).expect("create git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+    let instance = roaming_instance("reviewer_forecast_service", &project);
+
+    // --resume has nothing to resume here and fails as before, but takes the
+    // same launch path, so it still prints the note.
+    for (args, succeeds) in [
+        (vec!["agent", "reviewer", "--dry-run"], true),
+        (vec!["agent", "reviewer", "--resume", "--dry-run"], false),
+    ] {
+        let output = h
+            .cmd()
+            .current_dir(&project)
+            .args(&args)
+            .output()
+            .expect("launch roaming agent");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.success(),
+            succeeds,
+            "stdout={stdout} stderr={stderr}"
+        );
+        assert!(
+            stdout.contains(&format!(
+                "Note: reviewer is a roaming agent; in this project it runs as {instance}."
+            )),
+            "args={args:?} stdout={stdout}"
+        );
+        assert!(!stderr.contains("roaming"), "stderr={stderr}");
     }
 }
 

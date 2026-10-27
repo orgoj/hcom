@@ -28,7 +28,7 @@ Target matching:
   that first event's acknowledgement; otherwise it reports queued/pending.
   A catalog agent with \"roaming\": true resolves to <name>_<project>_<hash>
   (<hash> = 3-digit number from the root path's SHA-256) in the sender's Git/project root
-  and starts there when missing.
+  and starts there when missing; the output adds a Note line with that instance name.
   Running agents route first; the catalog is read only for unmatched names,
   tags (which include stopped catalog agents), stopped thread members, or
   --spawn-as; an unreadable catalog only warns. Broadcasts never start agents.
@@ -329,12 +329,16 @@ struct ResolvedDelivery {
     effective_mentions: Vec<String>,
     delivered_to: Vec<String>,
     catalog_starts: Vec<super::agent::CatalogRoute>,
+    /// Roaming catalog aliases the message addressed, with the per-project
+    /// instance each resolved to.
+    roaming_aliases: Vec<(String, String)>,
     is_thread_resolved: bool,
 }
 
 struct SendOutcome {
     delivered_to: Vec<String>,
     autostarted: Vec<String>,
+    roaming_aliases: Vec<(String, String)>,
     event_id: i64,
 }
 
@@ -424,6 +428,7 @@ fn resolve_delivery(
         thread_delivery_members.clone()
     };
     let mut effective_mentions = Vec::new();
+    let mut roaming_aliases = Vec::new();
     for mention in raw_mentions {
         // A running agent with this exact name routes first; only a name no
         // running agent holds can stand for a catalog alias.
@@ -433,11 +438,19 @@ fn resolve_delivery(
         {
             mention
         } else {
-            catalog_instances
+            match catalog_instances
                 .iter()
                 .find(|route| route.alias.eq_ignore_ascii_case(&mention))
-                .map(|route| route.instance.clone())
-                .unwrap_or(mention)
+            {
+                Some(route) => {
+                    // Only roaming routes resolve an alias to another name.
+                    if route.alias != route.instance {
+                        roaming_aliases.push((route.alias.clone(), route.instance.clone()));
+                    }
+                    route.instance.clone()
+                }
+                None => mention,
+            }
         };
         if !effective_mentions
             .iter()
@@ -514,6 +527,7 @@ fn resolve_delivery(
         effective_mentions,
         delivered_to,
         catalog_starts,
+        roaming_aliases,
         is_thread_resolved,
     })
 }
@@ -694,6 +708,7 @@ fn send_message_with_catalog_outcome(
             .into_iter()
             .map(|route| route.instance)
             .collect(),
+        roaming_aliases: delivery.roaming_aliases,
         event_id,
     })
 }
@@ -1513,7 +1528,7 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
         return 0;
     }
 
-    let feedback = get_recipient_feedback(
+    let mut feedback = get_recipient_feedback(
         db,
         &outcome.delivered_to,
         &pending_autostarts,
@@ -1522,6 +1537,11 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
             .as_deref()
             .filter(|_| preview_delivery.is_thread_resolved),
     );
+    for (alias, instance) in &outcome.roaming_aliases {
+        feedback.push_str(&format!(
+            "\nNote: @{alias} is a roaming agent; in this project it is {instance} (use that name)."
+        ));
+    }
 
     // Use the same adhoc-only receive policy as other commands. With --from,
     // the invoking instance receives while the outgoing author stays external.
@@ -2128,6 +2148,58 @@ mod tests {
         assert_eq!(delivery.effective_mentions, vec!["reviewer"]);
         assert_eq!(delivery.delivered_to, vec!["reviewer"]);
         assert!(delivery.catalog_starts.is_empty());
+        assert!(delivery.roaming_aliases.is_empty());
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn send_outcome_reports_roaming_aliases_from_the_delivery_it_sent() {
+        let (db, path, _env) = setup_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, created_at) \
+                 VALUES ('reviewer_weather', 'listening', 1000.0)",
+                [],
+            )
+            .unwrap();
+        let sender = SenderIdentity {
+            kind: SenderKind::External,
+            name: "bigboss".into(),
+            instance_data: None,
+            session_id: None,
+        };
+        let catalog = vec![crate::commands::agent::CatalogRoute {
+            alias: "reviewer".into(),
+            instance: "reviewer_weather".into(),
+            tag: None,
+            launch_name: "reviewer".into(),
+            launch_dir: Some(std::path::PathBuf::from("/projects/weather")),
+        }];
+
+        let outcome =
+            send_message_with_catalog_outcome(&db, &sender, "@reviewer one", None, None, &catalog)
+                .unwrap();
+        assert_eq!(outcome.delivered_to, vec!["reviewer_weather"]);
+        assert_eq!(
+            outcome.roaming_aliases,
+            vec![("reviewer".to_string(), "reviewer_weather".to_string())]
+        );
+
+        // A running agent named like the alias now takes the send: no note.
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, created_at) \
+                 VALUES ('reviewer', 'listening', 1000.0)",
+                [],
+            )
+            .unwrap();
+        let outcome =
+            send_message_with_catalog_outcome(&db, &sender, "@reviewer two", None, None, &catalog)
+                .unwrap();
+        assert_eq!(outcome.delivered_to, vec!["reviewer"]);
+        assert!(outcome.roaming_aliases.is_empty());
 
         cleanup_test_db(path);
     }

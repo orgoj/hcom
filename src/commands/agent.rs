@@ -133,6 +133,7 @@ Roaming agents:
   <name>_<project>_<hash>: <project> is the root's basename, <hash> a 3-digit
   number (100-999) from SHA-256 of its path, so roots with the same basename differ.
   Missing instances start in that root. Broadcasts never start them.
+  Send and hcom agent <name> print a Note line on stdout naming that instance.
   Catalog env values are passed to the materialized process; for an isolated Dippy
   policy use \"env\": {{\"DIPPY_CONFIG_ONLY\": \"/path/to/policy.dippy\"}}.
 
@@ -2487,6 +2488,10 @@ fn launch_named_with_roaming(
                     .expect("roaming definition must materialize")
             }
         };
+        // Send autostart passes the materialized instance and reports it itself.
+        if materialized.is_none() && cli.as_name.is_none() {
+            println!("Note: {name} is a roaming agent; in this project it runs as {instance}.");
+        }
         def.dir = Some(root.to_string_lossy().into_owned());
         roaming_root = Some(root);
         instance

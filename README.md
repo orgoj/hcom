@@ -420,6 +420,8 @@ For temporary changes without touching a tracked file, put a sidecar `<stem>.loc
 
 `"roaming": true` defines a project-local archetype with no `dir`, `session` or `window`. A targeted `hcom send @reviewer` from inside a Git project addresses `reviewer_<project>_<hash>` and starts it in that project's root if it is missing. `<project>` is the root's basename and `<hash>` a 3-digit number (100-999) derived from the SHA-256 of its path, so `~/.hcom` and `~/projects/hcom` get different instances (for example `reviewer_hcom_807`). Broadcasts never start roaming agents.
 
+A send to the catalog name, and `hcom agent reviewer`, print a stdout line such as `Note: @reviewer is a roaming agent; in this project it is reviewer_hcom_807 (use that name).` so the sender knows which instance it reached. Instances of the role in other projects are separate agents and never receive it. Sends to the exact instance name print no note.
+
 #### Disabled agents
 
 `"disabled": true` switches an agent off without deleting its entry. hcom then treats the name as undefined: no launch, resume, send autostart, roaming instance, group membership, `show`, listing or completion. The field merges like any other, so `"disabled": true` in `defaults` with `"disabled": false` on one entry keeps only that entry enabled. `hcom agent list --all` still shows disabled agents, marked `disabled`. A running instance stays an ordinary hcom agent: it receives messages and can be killed by name.

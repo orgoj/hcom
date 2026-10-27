@@ -306,7 +306,7 @@ const SEND_HELP: &[HelpEntry] = &[
     ),
     (
         "",
-        "A catalog agent with roaming=true materializes as <name>_<project>_<hash> in the sender's Git/project root.",
+        "A catalog agent with roaming=true materializes as <name>_<project>_<hash> in the sender's Git/project root; a Note line names that instance.",
     ),
     (
         "",
@@ -1323,7 +1323,8 @@ Commands:\n\
 \x20 config       Get/set global and per-agent settings (incl. idle_kill)\n\
 \x20 run          Execute workflow scripts\n\
 \x20 agent        Launch named agents from a JSON catalog (\"disabled\": true hides one;\n\
-\x20              roaming ones run as <name>_<project>_<hash>, <hash> = 3 digits;\n\
+\x20              roaming ones run as <name>_<project>_<hash>, <hash> = 3 digits,\n\
+\x20              and send/launch print a Note with that name;\n\
 \x20              <stem>.local.json beside a catalog overrides it)\n\
 \x20 relay        Cross-device sync + relay daemon\n\
 \x20 archive      Query past hcom sessions\n\
@@ -1825,13 +1826,23 @@ mod tests {
     fn help_documents_hashed_roaming_instance_names() {
         assert!(
             get_help_text()
-                .contains("roaming ones run as <name>_<project>_<hash>, <hash> = 3 digits;")
+                .contains("roaming ones run as <name>_<project>_<hash>, <hash> = 3 digits,")
         );
         assert!(get_command_help("agent").contains("roots with the same basename differ"));
         assert!(get_command_help("agent").contains("<hash> a 3-digit"));
         assert!(get_command_help("send").contains("<name>_<project>_<hash>"));
         assert!(!get_command_help("agent").contains("hex"));
         assert!(!get_command_help("send").contains("hex"));
+    }
+
+    #[test]
+    fn help_documents_the_roaming_note_line() {
+        assert!(get_help_text().contains("send/launch print a Note with that name;"));
+        assert!(
+            get_command_help("agent")
+                .contains("Send and hcom agent <name> print a Note line on stdout")
+        );
+        assert!(get_command_help("send").contains("a Note line"));
     }
 
     #[test]
