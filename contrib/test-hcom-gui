@@ -743,8 +743,8 @@ class App(unittest.TestCase):
         self.app.run_button(self.button("Inject"))
 
     def test_inject_button_sits_next_to_send(self):
-        widgets = self.button("Send")["widget"].master.pack_slaves()
-        self.assertIs(widgets[widgets.index(self.button("Send")["widget"]) + 1], self.button("Inject")["widget"])
+        items = self.app.toolbar_items
+        self.assertIs(items[items.index(self.button("Send")["widget"]) + 1], self.button("Inject")["widget"])
 
     def test_inject_types_text_and_enter_only_when_checked(self):
         cwd = self.app.rows["a2|a2x"]["cwd"]
@@ -1310,14 +1310,62 @@ class App(unittest.TestCase):
         self.app.filter_text.set("")
         self.assertEqual(self.shown(), everything)
 
-    def test_toolbar_has_a_button_row_and_a_filter_row_below_it(self):
-        buttons, filters = self.app.refresh_button.master, self.app.filter_entry.master
+    def test_toolbar_has_button_rows_and_a_filter_row_below_them(self):
+        buttons, filters = self.app.toolbar, self.app.filter_entry.master
+        self.assertIs(self.app.refresh_button.master, buttons)
         self.assertEqual({w.winfo_class() for w in buttons.winfo_children()},
-                         {"TButton", "TMenubutton", "TSeparator"})
+                         {"TButton", "TMenubutton", "TSeparator", "TFrame"})  # frames: the button rows
         self.assertEqual([w.winfo_class() for w in filters.winfo_children()],
                          ["TLabel", "TLabel", "TEntry"] + ["TCheckbutton"] * 5)
         self.assertIs(self.app.count_label.master, filters)
         self.assertGreater(filters.winfo_y(), buttons.winfo_y())
+
+    def toolbar_layout(self):
+        return [["|" if isinstance(w, gui.ttk.Separator) else w.cget("text") for w in row]
+                for row in self.app.toolbar_rows]
+
+    def test_toolbar_buttons_wrap_to_the_window_width(self):
+        everything = [w for w in self.app.toolbar_items if not isinstance(w, (str, gui.ttk.Separator))]
+        self.app.geometry("1200x700")
+        self.app.update()
+        wide = len(self.app.toolbar_rows)
+        self.app.geometry("400x700")
+        self.app.update()
+        rows = self.app.toolbar_rows
+        self.assertGreater(len(rows), wide)
+        self.assertEqual([w for row in rows for w in row if w in everything], everything)  # order kept
+        right = self.app.toolbar.winfo_rootx() + self.app.toolbar.winfo_width()
+        for row in rows:
+            self.assertNotIsInstance(row[0], gui.ttk.Separator)
+            self.assertNotIsInstance(row[-1], gui.ttk.Separator)
+            for w in row:
+                self.assertTrue(w.winfo_ismapped())
+                if len(row) > 1:  # a single button wider than the window cannot fit anyway
+                    self.assertLessEqual(w.winfo_rootx() + w.winfo_width(), right)
+        self.app.geometry("1200x700")
+        self.app.update()
+        self.assertEqual(len(self.app.toolbar_rows), wide)
+
+    def test_toolbar_breaks_start_a_row_after_named_buttons(self):
+        with open(gui.CONFIG_FILE, "w") as f:
+            f.write(gui.json.dumps({"commands": COMMANDS, "toolbar_breaks": ["Kill group", "Columns", "Nope"]}))
+        self.restart()
+        self.app._wrap_toolbar(0)  # unlimited width: only the configured breaks
+        layout = self.toolbar_layout()
+        self.assertEqual(len(layout), 3)
+        self.assertEqual(layout[0][-1], "Kill group ▾")
+        self.assertNotEqual(layout[1][0], "|")
+        self.assertEqual(layout[1][-1], "Columns…")
+        self.assertEqual(layout[2], ["Refresh (F5)"])
+        self.assertIn("toolbar_breaks: unknown buttons: Nope", self.app.log.get("1.0", "end"))
+
+    def test_toolbar_break_after_the_last_button_adds_no_empty_row(self):
+        with open(gui.CONFIG_FILE, "w") as f:
+            f.write(gui.json.dumps({"toolbar_breaks": ["Refresh"]}))
+        self.restart()
+        self.app._wrap_toolbar(0)
+        self.assertEqual(len(self.toolbar_layout()), 1)
+        self.assertEqual(len([w for w in self.app.toolbar.winfo_children() if isinstance(w, gui.ttk.Frame)]), 1)
 
     def test_toolbar_counts_the_shown_rows(self):
         self.assertEqual(self.app.count_label.cget("text"), f"{len(self.shown())} agents")

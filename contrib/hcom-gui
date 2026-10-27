@@ -19,6 +19,8 @@ Optional ~/.hcom/gui.json:
 "attach" maps the terminal an instance runs in (Where column) to the Attach command;
 other terminals run DEFAULT_ATTACH.
 "commands" run as written, without a selected row (optional: confirm, cwd, key).
+The toolbar buttons wrap into as many rows as the window width needs; "toolbar_breaks" (button
+labels without key or "…"/"▾", e.g. ["Kill group", "Columns"]) also starts a new row after each named button.
 "key" (any button) is a Tk event sequence bound in the table, e.g. "z" or "<F2>", shown
 in the button label ("Zed (z)").
 "open_with" programs also start while an hcom command runs; a quick non-zero exit is logged.
@@ -693,6 +695,13 @@ class App(tk.Tk):
         self.buttons += [{**b, "when": "dir", "detach": True} for b in open_with]
         if commands := config.get("commands"):
             self.buttons += ["---"] + [{**b, "when": "always"} for b in commands]
+        self.toolbar_breaks = config.get("toolbar_breaks") or []
+        if not isinstance(self.toolbar_breaks, list):
+            self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: toolbar_breaks: not a list of button labels")
+            self.toolbar_breaks = []
+        labels = {b["label"] for b in self.buttons if b != "---"} | {"Columns", "Refresh"}
+        if unknown := [str(x) for x in self.toolbar_breaks if x not in labels]:
+            self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: toolbar_breaks: unknown buttons: {', '.join(unknown)}")
         self.config_columns, unknown = pick_columns(config.get("columns"))
         if unknown:
             self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: unknown columns: {', '.join(unknown)}")
@@ -725,24 +734,32 @@ class App(tk.Tk):
     # ── Widgets ────────────────────────────────────────────────────────
 
     def _create_widgets(self):
-        toolbar = ttk.Frame(self)
-        toolbar.pack(fill=tk.X, padx=5, pady=5)
+        # Button rows: the buttons flow into as many rows as the window width needs (_wrap_toolbar).
+        self.toolbar = ttk.Frame(self)
+        self.toolbar.pack(fill=tk.X, padx=5, pady=5)
+        self.toolbar_items = []  # widget, None (separator) or "break" (gui.json toolbar_breaks)
         for b in self.buttons:
             if b == "---":
-                ttk.Separator(toolbar, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=10)
+                self.toolbar_items.append(ttk.Separator(self.toolbar, orient=tk.VERTICAL))
                 continue
             if b.get("menu"):
-                b["widget"] = ttk.Menubutton(toolbar, text=f"{b['label']} ▾")
+                b["widget"] = ttk.Menubutton(self.toolbar, text=f"{b['label']} ▾")
                 self.group_menu = tk.Menu(b["widget"], tearoff=False)
                 b["widget"]["menu"] = self.group_menu
             else:
                 text = f"{b['label']} ({key_label(b['key'])})" if b.get("key") else b["label"]
-                b["widget"] = ttk.Button(toolbar, text=text, command=lambda b=b: self.run_button(b))
-            b["widget"].pack(side=tk.LEFT, padx=2)
-        self.refresh_button = ttk.Button(toolbar, text=f"Refresh ({key_label('<F5>')})", command=self.refresh)
-        self.refresh_button.pack(side=tk.RIGHT, padx=2)
-        self.columns_button = ttk.Button(toolbar, text="Columns…", command=self.choose_columns)
-        self.columns_button.pack(side=tk.RIGHT, padx=2)
+                b["widget"] = ttk.Button(self.toolbar, text=text, command=lambda b=b: self.run_button(b))
+            self.toolbar_items.append(b["widget"])
+            if b["label"] in self.toolbar_breaks:
+                self.toolbar_items.append("break")
+        self.columns_button = ttk.Button(self.toolbar, text="Columns…", command=self.choose_columns)
+        self.refresh_button = ttk.Button(self.toolbar, text=f"Refresh ({key_label('<F5>')})", command=self.refresh)
+        self.toolbar_items.append(ttk.Separator(self.toolbar, orient=tk.VERTICAL))
+        for label, widget in (("Columns", self.columns_button), ("Refresh", self.refresh_button)):
+            self.toolbar_items += [widget, "break"] if label in self.toolbar_breaks else [widget]
+        self.toolbar_rows = None  # widgets per row of the current layout
+        self.toolbar.bind("<Configure>", lambda e: self._wrap_toolbar(e.width))
+        self._wrap_toolbar(0)
 
         # Second row: row count, filter field and the filter checkboxes.
         filters = ttk.Frame(self)
@@ -806,6 +823,46 @@ class App(tk.Tk):
         for b in self.buttons:
             if b != "---" and b.get("key"):
                 self.tree.bind(b["key"], lambda e, b=b: self.run_button(b))
+
+    def _wrap_toolbar(self, width):
+        """Lay the toolbar buttons out in rows no wider than width (0: unlimited), breaking also
+        after each gui.json toolbar_breaks button; a separator at a row's edge is left out."""
+        rows, x, sep = [[]], 0, None
+        for item in self.toolbar_items:
+            if item == "break":
+                if rows[-1]:
+                    rows.append([])
+                x, sep = 0, None
+            elif isinstance(item, ttk.Separator):
+                sep = item if rows[-1] else None
+            else:
+                need = item.winfo_reqwidth() + 4 + (sep.winfo_reqwidth() + 20 if sep else 0)
+                if width and rows[-1] and x + need > width:
+                    rows.append([])
+                    x, sep = 0, None
+                    need = item.winfo_reqwidth() + 4
+                rows[-1] += [sep, item] if sep else [item]
+                x, sep = x + need, None
+        if not rows[-1] and len(rows) > 1:  # a break after the last button
+            rows.pop()
+        if rows == self.toolbar_rows:
+            return
+        self.toolbar_rows = rows
+        for item in self.toolbar_items:
+            if item != "break":
+                item.pack_forget()
+        for frame in self.toolbar.winfo_children():
+            if isinstance(frame, ttk.Frame):
+                frame.destroy()
+        for widgets in rows:
+            frame = ttk.Frame(self.toolbar)
+            frame.pack(fill=tk.X)
+            for w in widgets:
+                if isinstance(w, ttk.Separator):
+                    w.pack(in_=frame, side=tk.LEFT, fill=tk.Y, padx=10)
+                else:
+                    w.pack(in_=frame, side=tk.LEFT, padx=2)
+                w.lift(frame)  # a widget packed into a later-created frame would sit below it
 
     def _step_row(self, event, step):
         """Up/Down outside the table, or in it with no row selected: move the selection and focus the table."""

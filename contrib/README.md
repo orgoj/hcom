@@ -85,8 +85,9 @@ running instances with `↻`. A roaming agent's catalog row always stays a separ
 to its instances (status `running as …`), as the archetype for other projects.
 The Filter field narrows the table as you type to rows whose agent, instance, directory
 or catalog groups contain the text (case-insensitive); it combines with the checkboxes.
-The toolbar has two rows: the first holds the buttons, the second the count of rows the table
-shows after all filters, the Filter field and the filter checkboxes.
+The toolbar holds the buttons, wrapped into as many rows as the window width needs (also
+after each button named in `toolbar_breaks`), and below them a row with the count of rows the
+table shows after all filters, the Filter field and the filter checkboxes.
 In the Start dialog the Name field is empty; when it gets focus while empty it is prefilled
 with `<agent>__` (clone naming convention), and a name left at exactly that prefix counts as
 empty (the default name).
@@ -126,6 +127,7 @@ replaced by fixtures, commands are recorded, not run). Optional `~/.hcom/gui.jso
     {"label": "Kill WDT", "cmd": ["hcom", "kill", "@wdt_all"], "confirm": true, "cwd": "~/projects/wdt"}
   ],
   "columns": ["agent", "instance", "cli", "status", "since", "context", "quota", "dir", "git"],
+  "toolbar_breaks": ["Kill group"],
   "attach": {
     "herdr": ["sh", "-c", "hcom agent attach \"$1\" && wmctrl -x -a herdr.herdr", "_", "{instance}"]
   }
@@ -164,3 +166,7 @@ the button is enabled. The button label shows it, e.g. `Zed (z)`, `Kill (Del)`,
 non-zero within 5 seconds writes its exit code and stderr to the log.
 Without `open_with`, the toolbar offers `xdg-open` and `x-terminal-emulator`. Further hcom
 buttons go into `BUTTONS` at the top of the script.
+`toolbar_breaks` lists button labels (built-in such as `Kill group`, `Columns`, `Refresh`,
+or `open_with`/`commands` labels; without the key, `…` or `▾` shown on the button) after which the
+buttons continue on a new row, e.g. a fixed layout for a portrait monitor; the rows still
+wrap when the window is narrower. An unknown label is reported in the log.
