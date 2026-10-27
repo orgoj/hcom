@@ -1254,6 +1254,15 @@ class App(unittest.TestCase):
         self.app.filter_text.set("")
         self.assertEqual(self.shown(), everything)
 
+    def test_toolbar_has_a_button_row_and_a_filter_row_below_it(self):
+        buttons, filters = self.app.refresh_button.master, self.app.filter_entry.master
+        self.assertEqual({w.winfo_class() for w in buttons.winfo_children()},
+                         {"TButton", "TMenubutton", "TSeparator"})
+        self.assertEqual([w.winfo_class() for w in filters.winfo_children()],
+                         ["TLabel", "TLabel", "TEntry"] + ["TCheckbutton"] * 5)
+        self.assertIs(self.app.count_label.master, filters)
+        self.assertGreater(filters.winfo_y(), buttons.winfo_y())
+
     def test_toolbar_counts_the_shown_rows(self):
         self.assertEqual(self.app.count_label.cget("text"), f"{len(self.shown())} agents")
         self.assertEqual(self.app.title(), "hcom-gui")  # inside the window, not the title bar

@@ -737,28 +737,26 @@ class App(tk.Tk):
         self.refresh_button.pack(side=tk.RIGHT, padx=2)
         self.columns_button = ttk.Button(toolbar, text="Columns…", command=self.choose_columns)
         self.columns_button.pack(side=tk.RIGHT, padx=2)
-        self.empty_last = tk.BooleanVar(value=True)
-        ttk.Checkbutton(toolbar, text="Empty last", variable=self.empty_last,
-                        command=self.render).pack(side=tk.RIGHT, padx=10)
-        self.running_only = tk.BooleanVar(value=False)
-        ttk.Checkbutton(toolbar, text="Running only", variable=self.running_only,
-                        command=self.render).pack(side=tk.RIGHT, padx=10)
-        self.blocked_only = tk.BooleanVar(value=False)
-        ttk.Checkbutton(toolbar, text="Blocked only", variable=self.blocked_only,
-                        command=self.render).pack(side=tk.RIGHT, padx=10)
-        self.hide_disabled = tk.BooleanVar(value=True)
-        ttk.Checkbutton(toolbar, text="Hide disabled", variable=self.hide_disabled,
-                        command=self.render).pack(side=tk.RIGHT, padx=10)
-        self.hide_adhoc = tk.BooleanVar(value=False)
-        ttk.Checkbutton(toolbar, text="Hide non-persistent", variable=self.hide_adhoc,
-                        command=self.render).pack(side=tk.RIGHT, padx=10)
+
+        # Second row: row count, filter field and the filter checkboxes.
+        filters = ttk.Frame(self)
+        filters.pack(fill=tk.X, padx=5)
+        self.count_label = ttk.Label(filters)
+        self.count_label.pack(side=tk.LEFT, padx=(2, 10))
+        ttk.Label(filters, text="Filter:").pack(side=tk.LEFT, padx=2)
         self.filter_text = tk.StringVar()
         self.filter_text.trace_add("write", lambda *_: self.render())
-        self.filter_entry = ttk.Entry(toolbar, textvariable=self.filter_text, width=16)
-        self.filter_entry.pack(side=tk.RIGHT, padx=2)
-        ttk.Label(toolbar, text="Filter:").pack(side=tk.RIGHT, padx=2)
-        self.count_label = ttk.Label(toolbar)
-        self.count_label.pack(side=tk.RIGHT, padx=10)
+        self.filter_entry = ttk.Entry(filters, textvariable=self.filter_text, width=16)
+        self.filter_entry.pack(side=tk.LEFT, padx=2)
+        self.hide_adhoc = tk.BooleanVar(value=False)
+        self.hide_disabled = tk.BooleanVar(value=True)
+        self.blocked_only = tk.BooleanVar(value=False)
+        self.running_only = tk.BooleanVar(value=False)
+        self.empty_last = tk.BooleanVar(value=True)
+        for text, var in (("Hide non-persistent", self.hide_adhoc), ("Hide disabled", self.hide_disabled),
+                          ("Blocked only", self.blocked_only), ("Running only", self.running_only),
+                          ("Empty last", self.empty_last)):
+            ttk.Checkbutton(filters, text=text, variable=var, command=self.render).pack(side=tk.LEFT, padx=10)
 
         self.paned = ttk.PanedWindow(self, orient=tk.VERTICAL)
         self.paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
