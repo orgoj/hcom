@@ -736,6 +736,62 @@ class App(unittest.TestCase):
         self.assertEqual(self.ran, [])
         self.assertEqual(str(self.button("Send")["widget"].cget("state")), "disabled")
 
+    def inject(self, row, answer):
+        self.app.ask = lambda title, keys, agent, prefill: self.asked.append((title, keys, agent)) or answer
+        self.app.tree.selection_set(row)
+        self.app.update()
+        self.app.run_button(self.button("Inject"))
+
+    def test_inject_button_sits_next_to_send(self):
+        widgets = self.button("Send")["widget"].master.pack_slaves()
+        self.assertIs(widgets[widgets.index(self.button("Send")["widget"]) + 1], self.button("Inject")["widget"])
+
+    def test_inject_types_text_and_enter_only_when_checked(self):
+        cwd = self.app.rows["a2|a2x"]["cwd"]
+        self.inject("a2|a2x", {"text": "yes", "enter": "1"})
+        self.assertEqual(self.asked, [("Inject", ["text", "enter"], "a2x")])
+        self.inject("a2|a2x", {"text": "yes", "enter": ""})
+        self.assertEqual(self.ran, [(["hcom", "term", "inject", "a2x", "yes", "--enter"], cwd),
+                                    (["hcom", "term", "inject", "a2x", "yes"], cwd)])
+
+    def test_inject_empty_text_runs_nothing(self):
+        self.inject("a2|a2x", {"text": "", "enter": "1"})
+        self.assertEqual(self.ran, [])
+        self.assertIn("Inject: empty text, nothing run", self.app.log.get("1.0", "end"))
+
+    def test_inject_needs_a_running_instance(self):
+        self.inject("a3|", {"text": "yes", "enter": "1"})
+        self.assertEqual(self.ran, [])
+        self.assertEqual(str(self.button("Inject")["widget"].cget("state")), "disabled")
+        self.app.tree.selection_set("a2|a2x")
+        self.app.update()
+        self.assertEqual(str(self.button("Inject")["widget"].cget("state")), "normal")
+
+    def test_inject_dialog_enter_checkbox_starts_checked(self):
+        def inside():
+            dlg = next(w for w in self.app.winfo_children() if isinstance(w, gui.tk.Toplevel))
+            try:
+                box = next(w for w in dlg.winfo_children() if isinstance(w, gui.ttk.Checkbutton))
+                seen.append(box.instate(["selected"]))
+                box.invoke()  # uncheck
+                dlg.winfo_children()[-1].winfo_children()[0].invoke()  # OK in the button frame
+            finally:
+                if dlg.winfo_exists():
+                    dlg.destroy()
+
+        seen = []
+        self.app.after(200, inside)
+        result = self.app.ask("Inject", ["text", "enter"], "a2x", {})
+        self.assertEqual((seen, result), ([True], {"text": "", "enter": ""}))
+
+    def test_inject_failure_is_logged(self):
+        del self.app.run_command  # the real one, with a failing hcom
+        done = subprocess.CompletedProcess([], 1, stdout="", stderr="Error: a2x has no terminal\n")
+        self.patch("subprocess", type("Sub", (), {"run": staticmethod(lambda *a, **k: done)}))
+        self.inject("a2|a2x", {"text": "yes", "enter": "1"})
+        self.app.update()
+        self.assertIn("Error: a2x has no terminal\n[exit 1]", self.app.log.get("1.0", "end"))
+
     def type_prompt(self, enter, key="prompt"):
         def type_prompt():
             dlg = next(w for w in self.app.winfo_children() if isinstance(w, gui.tk.Toplevel))

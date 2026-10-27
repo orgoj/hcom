@@ -24,6 +24,10 @@ empty, the catalog `prompt` (if any) applies.
 Send (running instances) asks for a multi-line message the same way and runs
 `hcom send -b @<instance> -- <text>` (sender `bigboss`, the human); an empty text sends
 nothing.
+Inject (running instances) asks for a text and an Enter checkbox (checked by default) and
+runs `hcom term inject <instance> <text>`, with `--enter` when checked: the text is typed
+straight into the agent's terminal (PTY instances only; hcom's error goes to the Log); an
+empty text runs nothing.
 Restart (running instances of a catalog agent, including `--as` names), after
 confirming, runs `hcom agent <agent> --as <instance> --restart`: it kills the instance,
 waits for it to exit and launches the agent again under the same name, with the

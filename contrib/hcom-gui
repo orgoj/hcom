@@ -38,6 +38,8 @@ A disabled catalog agent's row is struck through; Hide disabled (on by default) 
 Hide non-persistent hides instances without a catalog agent. The toolbar counts the shown rows.
 Start: the empty Name field gets "<agent>__" on focus; left unchanged it counts as empty.
 Model and reasoning are prefilled from the catalog; only a changed value is passed.
+Inject types a text into the selected instance's terminal (`hcom term inject`), with Enter
+when its checkbox (checked by default) is on.
 The bottom panel has tabs Screen (`hcom term <instance>`), Transcript (`hcom transcript <instance>`),
 Events (`hcom events --agent <instance> --last 50`, one line per event) for the selected row's
 running instance, and Log (command output and errors). The open agent tab reloads in the background
@@ -71,10 +73,12 @@ STATE_FILE = os.path.join(HCOM_DIR, "gui-state.json")
 # {herdr_workspace}, ...), {ask:X} asked in a dialog (an empty answer drops it and its preceding --flag;
 # after a bare "--" it is required: an empty answer runs nothing).
 # An answer equal to its prefill (dir, cli, model, reasoning) is treated as empty. {ask:resume} is a checkbox:
-# --resume, or --continue when another cli is chosen (a session cannot move between CLIs).
+# --resume, or --continue when another cli is chosen (a session cannot move between CLIs). {ask:enter} is a
+# checkbox, checked by default: --enter.
 # when: catalog | running | live (running catalog agent) | stopped | dir. Optional: confirm,
 # key (Tk event), default (running | stopped: double-click/Enter on such a row), detach (start without waiting), cwd,
-# if_exists (a path with {dir}; the button is enabled only while it exists).
+# if_exists (a path with {dir}; the button is enabled only while it exists), required (ask keys whose empty
+# answer runs nothing, like after "--").
 BUTTONS = [
     {
         "label": "Start",
@@ -87,6 +91,8 @@ BUTTONS = [
     "---",
     {"label": "Attach", "attach": True, "when": "running", "default": "running"},  # cmd from "attach"
     {"label": "Send", "cmd": ["hcom", "send", "-b", "@{instance}", "--", "{ask:message}"], "when": "running"},
+    {"label": "Inject", "cmd": ["hcom", "term", "inject", "{instance}", "{ask:text}", "{ask:enter}"], "when": "running",
+     "required": ["text"]},
     "---",
     {"label": "Kill", "cmd": ["hcom", "kill", "{instance}"], "when": "running", "confirm": True, "key": "<Delete>"},
     {"label": "Restart", "cmd": ["hcom", "agent", "{agent}", "--as", "{instance}", "--restart"], "when": "live",
@@ -1184,12 +1190,14 @@ class App(tk.Tk):
             if answers is None:
                 return
             values.update({f"ask:{k}": "" if v == prefill.get(k) else v for k, v in answers.items()})
-            required = [t for prev, t in zip(template, template[1:]) if prev == "--" and t.startswith("{ask:")]
-            if empty := [t[5:-1] for t in required if not values.get(t[1:-1])]:
+            required = [t[5:-1] for prev, t in zip(template, template[1:]) if prev == "--" and t.startswith("{ask:")]
+            if empty := [k for k in required + b.get("required", []) if not values.get(f"ask:{k}")]:
                 self.write_log(f"{b['label']}: empty {', '.join(empty)}, nothing run")
                 return
             if values.get("ask:resume"):
                 values["ask:resume"] = "--continue" if values.get("ask:cli") else "--resume"
+            if values.get("ask:enter"):
+                values["ask:enter"] = "--enter"
         cmd = []
         for token in template:
             if token.startswith("{ask:"):
@@ -1278,7 +1286,7 @@ class App(tk.Tk):
     def ask(self, title, keys, agent, prefill):
         """One entry per {ask:X}, prefilled from prefill; "dir" is browsable, "cli" a
         choice of installed CLIs, "model" and "reasoning" editable with suggestions (catalog
-        models, REASONING_LEVELS), "resume" a checkbox ("1" when checked), "prompt" and "message"
+        models, REASONING_LEVELS), "resume" and "enter" (checked at start) checkboxes ("1" when checked), "prompt" and "message"
         multi-line (Shift+Enter: newline, Enter: OK), an empty "name" gets "<agent>__" on focus.
         None on cancel."""
         dlg = tk.Toplevel(self)
@@ -1287,8 +1295,8 @@ class App(tk.Tk):
         entries, result = {}, {}
         for n, k in enumerate(keys):
             ttk.Label(dlg, text=k).grid(row=n, column=0, sticky=tk.W, padx=5, pady=5)
-            var = tk.StringVar(value=prefill.get(k, ""))
-            if k == "resume":
+            var = tk.StringVar(value="1" if k == "enter" else prefill.get(k, ""))  # enter: checked by default
+            if k in ("resume", "enter"):
                 ttk.Checkbutton(dlg, variable=var, onvalue="1", offvalue="").grid(
                     row=n, column=1, sticky=tk.W, padx=5, pady=5)
             elif k == "cli":
