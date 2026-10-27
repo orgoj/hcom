@@ -69,7 +69,9 @@ instance is selected once it appears, unless another row was selected meanwhile.
 selected row disappears (Kill, Kill group, the instance ended, a filter hides it), the row
 now at the same position in the current sort and filter is selected, or the last row when it
 was the last one; after Start or Restart the selection stays on that agent instead. Clicking a column heading sorts ascending (▲), again descending
-(▼), a third time back to the default order (agent, then instance). Running only hides
+(▼), a third time back to the default order (agent, then instance). Empty last, on by default,
+puts rows whose cell in the sort column is empty (e.g. stopped agents when sorting by Instance)
+after all others, ascending and descending; the default order is not affected. Running only hides
 catalog rows without an instance; Blocked only lists only instances in `blocked` status.
 A disabled catalog agent's row (`"disabled": true`) is struck through in light grey; Hide
 disabled, on by default, hides it. A running instance of a disabled agent stays visible.
@@ -85,7 +87,7 @@ with `<agent>__` (clone naming convention), and a name left at exactly that pref
 empty (the default name).
 Up/Down move through the rows from anywhere in the main window (e.g. the Filter field)
 and give the table keyboard focus.
-Sort, window layout and the filters are kept in `~/.hcom/gui-state.json`.
+Sort, Empty last, window layout and the filters are kept in `~/.hcom/gui-state.json`.
 
 ```sh
 ln -s "$PWD/contrib/hcom-gui" ~/.local/bin/hcom-gui

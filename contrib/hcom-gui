@@ -31,14 +31,15 @@ row corrects its class (idle_check.py --label, shown with ✓).
 "columns" selects and orders the table columns (keys of COLUMNS; default: all); a choice
 made with the Columns… button is kept in gui-state.json and takes precedence (Reset drops it);
 a column added to hcom-gui after that choice is shown in its default place.
-Heading clicks cycle the sort: ascending, descending, default. The Filter field matches
+Heading clicks cycle the sort: ascending, descending, default; Empty last (on by default) puts
+rows with an empty cell in the sort column last in both directions. The Filter field matches
 agent, instance, dir and groups (case-insensitive).
 A disabled catalog agent's row is struck through; Hide disabled (on by default) hides it.
 Hide non-persistent hides instances without a catalog agent. The toolbar counts the shown rows.
 Start: the empty Name field gets "<agent>__" on focus; left unchanged it counts as empty.
 Model and reasoning are prefilled from the catalog; only a changed value is passed.
-Window layout, columns, sort and filters (Running only, Blocked only, Hide disabled, Hide
-non-persistent) are kept in ~/.hcom/gui-state.json.
+Window layout, columns, sort, Empty last and filters (Running only, Blocked only, Hide disabled,
+Hide non-persistent) are kept in ~/.hcom/gui-state.json.
 """
 
 import datetime
@@ -692,6 +693,9 @@ class App(tk.Tk):
         self.refresh_button.pack(side=tk.RIGHT, padx=2)
         self.columns_button = ttk.Button(toolbar, text="Columns…", command=self.choose_columns)
         self.columns_button.pack(side=tk.RIGHT, padx=2)
+        self.empty_last = tk.BooleanVar(value=True)
+        ttk.Checkbutton(toolbar, text="Empty last", variable=self.empty_last,
+                        command=self.render).pack(side=tk.RIGHT, padx=10)
         self.running_only = tk.BooleanVar(value=False)
         ttk.Checkbutton(toolbar, text="Running only", variable=self.running_only,
                         command=self.render).pack(side=tk.RIGHT, padx=10)
@@ -982,7 +986,11 @@ class App(tk.Tk):
         sel = self.tree.selection()
         index = self.tree.index(sel[0]) if sel else 0
         self.tree.delete(*self.tree.get_children())
-        for iid, r in sorted(self.rows.items(), key=lambda kv: key(kv[1]), reverse=self.sort_reverse):
+        ordered = sorted(self.rows.items(), key=lambda kv: key(kv[1]), reverse=self.sort_reverse)
+        if self.sort_col and self.empty_last.get():  # empty cells last in both directions
+            ordered = ([kv for kv in ordered if kv[1][self.sort_col] != ""]
+                       + [kv for kv in ordered if kv[1][self.sort_col] == ""])
+        for iid, r in ordered:
             if self.running_only.get() and not r["instance"]:
                 continue
             if self.blocked_only.get() and r["state"] != "blocked":
@@ -1301,6 +1309,7 @@ class App(tk.Tk):
         self.blocked_only.set(state.get("blocked_only", False))
         self.hide_disabled.set(state.get("hide_disabled", True))
         self.hide_adhoc.set(state.get("hide_adhoc", False))
+        self.empty_last.set(state.get("empty_last", True))
         if state.get("sort_col") in self.tree["columns"]:
             self.sort_col, self.sort_reverse = state["sort_col"], bool(state.get("sort_reverse"))
 
@@ -1325,6 +1334,7 @@ class App(tk.Tk):
             "blocked_only": self.blocked_only.get(),
             "hide_disabled": self.hide_disabled.get(),
             "hide_adhoc": self.hide_adhoc.get(),
+            "empty_last": self.empty_last.get(),
             "sort_col": self.sort_col,
             "sort_reverse": self.sort_reverse,
             "column_widths": {c: self.tree.column(c, "width") for c in self.tree["columns"]},

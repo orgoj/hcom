@@ -399,6 +399,30 @@ class App(unittest.TestCase):
         self.assertEqual(self.headings(), {"agent": "Agent", "since": "Since ▼"})
         self.assertEqual(list(self.app.tree.get_children()), order)
 
+    def instances(self):
+        return [self.app.rows[i]["instance"] for i in self.app.tree.get_children()]
+
+    def test_empty_last_puts_empty_cells_last_in_both_directions(self):
+        self.assertTrue(self.app.empty_last.get())
+        self.app.sort_by("instance")
+        self.assertEqual(self.instances(), ["a1", "a2x", "solo", "", ""])
+        self.app.sort_by("instance")
+        self.assertEqual(self.instances(), ["solo", "a2x", "a1", "", ""])
+
+    def test_empty_last_off_keeps_the_plain_sort(self):
+        self.app.empty_last.set(False)
+        self.app.sort_by("instance")
+        self.assertEqual(self.instances(), ["", "", "a1", "a2x", "solo"])
+        self.app.sort_by("instance")
+        self.assertEqual(self.instances(), ["solo", "a2x", "a1", "", ""])
+
+    def test_empty_last_is_restored_on_start(self):
+        self.app.empty_last.set(False)
+        self.app._on_close()
+        self.app = gui.App()
+        self.app.update()
+        self.assertFalse(self.app.empty_last.get())
+
     def test_context_column_shows_tokens_and_percent(self):
         self.assertEqual(self.app.tree.set("a1|a1", "context"), "62k 6%")
         self.assertEqual(self.app.tree.set("|solo", "context"), "")
@@ -873,6 +897,7 @@ class App(unittest.TestCase):
         self.assertEqual(self.refresh_with(LIVE + [started]), ("a3|a3",))
 
     def test_instance_started_with_as_later_vanishing_keeps_its_index(self):
+        self.app.empty_last.set(False)  # the indexes below assume empty statuses first
         self.app.sort_by("status")  # by agent a3| would be selected
         self.app.ask = lambda title, keys, agent, prefill: {**prefill, "resume": "", "name": "x", "prompt": ""}
         self.select("a3|")
@@ -883,6 +908,7 @@ class App(unittest.TestCase):
 
     def test_detached_command_after_start_drops_the_agent_follow(self):
         self.fake_popen()
+        self.app.empty_last.set(False)  # the indexes below assume empty statuses first
         self.app.sort_by("status")
         self.app.ask = lambda title, keys, agent, prefill: {**prefill, "resume": "", "name": "", "prompt": ""}
         self.select("a3|")
