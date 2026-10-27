@@ -212,6 +212,10 @@ const EVENTS_SUB_PAGE: &[&[HelpEntry]] = &[
 
 const LIST_HELP: &[HelpEntry] = &[
     ("list", "All alive agents, read receipts"),
+    (
+        "",
+        "  A roaming catalog instance shows ↻<catalog name> after its name",
+    ),
     ("  -v", "Verbose (directory, session, etc)"),
     ("  --json", "JSON array of all agents"),
     ("  --names", "Just names, one per line"),
@@ -1313,7 +1317,7 @@ Launch:\n\
 Commands:\n\
 \x20 send         Send message (@name, @tag-, @group)\n\
 \x20 listen       Block until message or event arrives\n\
-\x20 list         Show agents, status, unread counts\n\
+\x20 list         Show agents, status, unread counts (↻<agent> marks roaming)\n\
 \x20 events       Query event stream, manage subscriptions\n\
 \x20 bundle       Structured context packages for handoffs\n\
 \x20 transcript   Read another agent's conversation\n\
@@ -1833,6 +1837,13 @@ mod tests {
         assert!(get_command_help("send").contains("<name>_<project>_<hash>"));
         assert!(!get_command_help("agent").contains("hex"));
         assert!(!get_command_help("send").contains("hex"));
+    }
+
+    #[test]
+    fn help_documents_roaming_listing_markers() {
+        assert!(get_help_text().contains("(↻<agent> marks roaming)"));
+        assert!(get_command_help("list").contains("shows ↻<catalog name> after its name"));
+        assert!(get_command_help("agent").contains("\"● 2 roaming: a, b\"; --json: \"instances\""));
     }
 
     #[test]

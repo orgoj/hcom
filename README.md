@@ -422,6 +422,8 @@ For temporary changes without touching a tracked file, put a sidecar `<stem>.loc
 
 A send to the catalog name, and `hcom agent reviewer`, print a stdout line such as `Note: @reviewer is a roaming agent; in this project it is reviewer_hcom_807 (use that name).` so the sender knows which instance it reached. Instances of the role in other projects are separate agents and never receive it. Sends to the exact instance name print no note.
 
+`hcom list` marks each running roaming instance with its catalog agent (`reviewer_hcom_807 ↻reviewer`). In the `hcom agent list` table the roaming entry keeps `<project>` as DIR and shows its running instances in STATUS (`● 2 roaming: reviewer_hcom_807, reviewer_app_412`); `hcom agent list --json` lists them in `instances`.
+
 #### Disabled agents
 
 `"disabled": true` switches an agent off without deleting its entry. hcom then treats the name as undefined: no launch, resume, send autostart, roaming instance, group membership, `show`, listing or completion. The field merges like any other, so `"disabled": true` in `defaults` with `"disabled": false` on one entry keeps only that entry enabled. `hcom agent list --all` still shows disabled agents, marked `disabled`. A running instance stays an ordinary hcom agent: it receives messages and can be killed by name.

@@ -5924,6 +5924,157 @@ fn roaming_send_autostarts_own_project_instance_while_another_project_runs_one()
 }
 
 #[test]
+fn listings_mark_roaming_instances_with_their_catalog_agent() {
+    let h = Hcom::new();
+    let project = h.root_path().join("app");
+    std::fs::create_dir_all(project.join(".git")).expect("create git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex"},
+            "auditor":{"roaming":true,"cli":"codex"},"solo":{"cli":"codex"}}}"#,
+    )
+    .expect("write catalog");
+    let instance = roaming_instance("reviewer_app", &project);
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    let now = chrono::Utc::now().timestamp();
+    for (name, agent) in [
+        (instance.as_str(), "reviewer"),
+        ("helper", "solo"),
+        ("plain", ""),
+    ] {
+        conn.execute(
+            "INSERT INTO instances \
+             (name, status, status_time, created_at, tool, directory, launch_context) \
+             VALUES (?1, 'listening', ?2, ?2, 'codex', ?3, ?4)",
+            rusqlite::params![
+                name,
+                now,
+                project.to_string_lossy(),
+                format!(r#"{{"agent_name":"{agent}"}}"#),
+            ],
+        )
+        .expect("insert instance");
+    }
+
+    let (code, stdout, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let line = |name: &str| {
+        stdout
+            .lines()
+            .find(|line| line.contains(&format!(" {name}")))
+            .unwrap_or_else(|| panic!("no line for {name}: {stdout}"))
+            .to_string()
+    };
+    assert!(
+        line(&instance).contains(&format!("{instance} ↻reviewer ")),
+        "stdout={stdout}"
+    );
+    assert!(!line("helper").contains('↻'), "stdout={stdout}");
+    assert!(!line("plain").contains('↻'), "stdout={stdout}");
+    // The badge widens the name column (padded by at least two spaces):
+    // status text stays aligned.
+    let status_column = |line: String, name: &str| {
+        let gap = line.find(name).unwrap() + line[line.find(name).unwrap()..].find("  ").unwrap();
+        let status = gap + line[gap..].find(|c: char| c != ' ').unwrap();
+        line[..status].chars().count()
+    };
+    assert_eq!(
+        status_column(line(&instance), &instance),
+        status_column(line("helper"), "helper"),
+        "stdout={stdout}"
+    );
+
+    let (code, stdout, stderr) = h.run(["agent", "list", "--for-humans"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let row = |name: &str| {
+        stdout
+            .lines()
+            .find(|line| line.starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("no row for {name}: {stdout}"))
+            .to_string()
+    };
+    assert!(
+        row("reviewer").contains(&format!("● 1 roaming: {instance}")),
+        "stdout={stdout}"
+    );
+    assert!(row("reviewer").contains("<project>"), "stdout={stdout}");
+    assert!(row("auditor").contains("○ -"), "stdout={stdout}");
+    assert!(row("solo").contains("○ -"), "stdout={stdout}");
+
+    let (code, stdout, stderr) = h.run(["agent", "list", "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let agents: serde_json::Value = serde_json::from_str(&stdout).expect("agent list JSON");
+    let entry = |name: &str| {
+        agents
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["name"] == name))
+            .cloned()
+            .unwrap_or_else(|| panic!("no entry for {name}: {stdout}"))
+    };
+    assert_eq!(
+        entry("reviewer")["instances"],
+        serde_json::json!([instance])
+    );
+    assert_eq!(entry("auditor")["instances"], serde_json::json!([]));
+    assert!(entry("solo").get("instances").is_none(), "stdout={stdout}");
+    assert!(entry("reviewer")["status"].is_null(), "stdout={stdout}");
+
+    // An exact running `reviewer` does not hide the roaming instances, and a
+    // dead roaming row (exited, no process) does not count as running.
+    let auditor = roaming_instance("auditor_app", &project);
+    for (name, agent, status, context) in [
+        ("reviewer", "reviewer", "listening", ""),
+        (auditor.as_str(), "auditor", "inactive", "exit:closed"),
+    ] {
+        conn.execute(
+            "INSERT INTO instances (name, status, status_context, status_time, created_at, \
+             tool, directory, launch_context) VALUES (?1, ?2, ?3, ?4, ?4, 'codex', ?5, ?6)",
+            rusqlite::params![
+                name,
+                status,
+                context,
+                now,
+                project.to_string_lossy(),
+                format!(r#"{{"agent_name":"{agent}"}}"#),
+            ],
+        )
+        .expect("insert instance");
+    }
+    let (code, stdout, stderr) = h.run(["agent", "list", "--for-humans"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let row = |name: &str| {
+        stdout
+            .lines()
+            .find(|line| line.starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("no row for {name}: {stdout}"))
+            .to_string()
+    };
+    assert!(
+        row("reviewer").contains(&format!("● 1 roaming: {instance}")),
+        "stdout={stdout}"
+    );
+    assert!(row("auditor").contains("○ -"), "stdout={stdout}");
+    let (code, stdout, stderr) = h.run(["agent", "list", "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let agents: serde_json::Value = serde_json::from_str(&stdout).expect("agent list JSON");
+    let auditor_entry = agents
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["name"] == "auditor"))
+        .expect("auditor entry");
+    assert_eq!(auditor_entry["instances"], serde_json::json!([]));
+    let dead_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM instances WHERE name = ?1",
+            [auditor.as_str()],
+            |row| row.get(0),
+        )
+        .expect("count dead row");
+    assert_eq!(dead_rows, 1, "the dead roaming row must still exist");
+}
+
+#[test]
 fn send_by_exact_or_non_roaming_name_prints_no_roaming_note() {
     let h = Hcom::new();
     let project = h.root_path().join("app");

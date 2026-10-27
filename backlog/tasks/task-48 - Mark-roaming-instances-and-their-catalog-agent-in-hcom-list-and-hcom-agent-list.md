@@ -3,10 +3,11 @@ id: TASK-48
 title: >-
   Mark roaming instances and their catalog agent in hcom list and hcom agent
   list
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@hcom_dev'
 created_date: '2026-10-26 21:02'
-updated_date: '2026-10-27 05:25'
+updated_date: '2026-10-27 06:04'
 labels: []
 dependencies: []
 priority: medium
@@ -30,13 +31,13 @@ Risk: hcom list rendering is upstream code; keep the fork touch to a minimal hoo
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 hcom list shows '↻<catalog name>' after the name of every running instance whose launch_context.agent_name is a roaming catalog agent and whose name differs from it
-- [ ] #2 hcom list shows no such badge for non-roaming instances, including catalog agents started with --as
-- [ ] #3 hcom agent list shows in the STATUS of a roaming entry '● <N> roaming: <instance names>' for its running instances, and '○ -' when none runs
-- [ ] #4 hcom agent list --json gives each roaming entry an instances array with the names of its running instances
-- [ ] #5 Built-in help, README and skills/hcom-agent-messaging describe both markers; cli_smoke tests cover each case above
-- [ ] #6 hcom agent list keeps '<project>' in the DIR column of roaming entries
-- [ ] #7 hcom-gui keeps working unchanged: it reads only hcom agent list --json and hcom list --json; the JSON change is additive (new instances key, existing keys and their values unchanged) and contrib/test-hcom-gui passes
+- [x] #1 hcom list shows '↻<catalog name>' after the name of every running instance whose launch_context.agent_name is a roaming catalog agent and whose name differs from it
+- [x] #2 hcom list shows no such badge for non-roaming instances, including catalog agents started with --as
+- [x] #3 hcom agent list shows in the STATUS of a roaming entry '● <N> roaming: <instance names>' for its running instances, and '○ -' when none runs
+- [x] #4 hcom agent list --json gives each roaming entry an instances array with the names of its running instances
+- [x] #5 Built-in help, README and skills/hcom-agent-messaging describe both markers; cli_smoke tests cover each case above
+- [x] #6 hcom agent list keeps '<project>' in the DIR column of roaming entries
+- [x] #7 hcom-gui keeps working unchanged: it reads hcom only as JSON (hcom agent list --json, hcom list --json, hcom events); the JSON change is additive (new instances key, existing keys and their values unchanged) and contrib/test-hcom-gui passes
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -47,3 +48,9 @@ Risk: hcom list rendering is upstream code; keep the fork touch to a minimal hoo
 3. agent list STATUS + JSON instances.
 4. cli_smoke cases, docs/help.
 <!-- SECTION:PLAN:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+hcom list shows ' ↻<catalog>' after running roaming instances (width included); hcom agent list table shows '● N roaming: <instances>' for roaming entries (running = not launcher::instance_is_replaceable; takes precedence over an exact-name row), '○ -' otherwise, DIR stays <project>; --json adds instances for roaming entries. Brief name/description view (agents, pipes) unchanged by scope (human listings). Verified with cli_smoke listings_mark_roaming_instances_with_their_catalog_agent (badge, no badge for --as/plain, alignment, STATUS N/none, dead row, exact-name coexistence, JSON), help_documents_roaming_listing_markers; fmt, clippy, cargo test --bin hcom, cli_smoke roaming/list/agent/help/send, contrib/test-hcom-gui green. Reviewed by agent_review.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -487,10 +487,19 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
         }
     }
 
+    // Roaming catalog agent each instance belongs to (fork: catalog roaming)
+    let roaming_agents = crate::commands::agent::roaming_agent_names();
+    let roaming_badge = |data: &InstanceRow| {
+        data.catalog_agent_name()
+            .filter(|agent| agent != &data.name && roaming_agents.contains(agent))
+            .map(|agent| format!(" ↻{agent}"))
+            .unwrap_or_default()
+    };
+
     // Compute name column width
     let mut max_name_len = 0;
     for data in &sorted_instances {
-        let mut n = get_full_name(data).len();
+        let mut n = get_full_name(data).len() + roaming_badge(data).chars().count();
         if data.background != 0 {
             n += 11; // " [headless]"
         }
@@ -584,7 +593,10 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
             String::new()
         };
 
-        let name_part = format!("{name}{headless_badge}{remote_badge}{unread_str}");
+        let name_part = format!(
+            "{name}{}{headless_badge}{remote_badge}{unread_str}",
+            roaming_badge(data)
+        );
         let status_text =
             format!("{age_display}{desc_sep}{description}{listening_since}{timeout_marker}");
 

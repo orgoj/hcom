@@ -134,6 +134,8 @@ Roaming agents:
   number (100-999) from SHA-256 of its path, so roots with the same basename differ.
   Missing instances start in that root. Broadcasts never start them.
   Send and hcom agent <name> print a Note line on stdout naming that instance.
+  The agent list table shows its running instances in STATUS
+  (\"● 2 roaming: a, b\"; --json: \"instances\"); hcom list marks each with ↻<name>.
   Catalog env values are passed to the materialized process; for an isolated Dippy
   policy use \"env\": {{\"DIPPY_CONFIG_ONLY\": \"/path/to/policy.dippy\"}}.
 
@@ -1358,6 +1360,38 @@ pub(crate) fn catalog_message_targets(
     Ok(CatalogTargets { routes, unroutable })
 }
 
+/// Names of the roaming catalog agents, for the `hcom list` badge.
+pub(crate) fn roaming_agent_names() -> BTreeSet<String> {
+    let Ok(catalogs) = Catalogs::load(false, None) else {
+        return BTreeSet::new();
+    };
+    catalogs
+        .names()
+        .into_keys()
+        .filter(|name| {
+            catalogs
+                .resolve(name)
+                .is_some_and(|def| def.roaming == Some(true))
+        })
+        .collect()
+}
+
+/// Running instances of the roaming catalog agent `name`, sorted.
+fn roaming_instances(name: &str, live: &BTreeMap<String, LiveAgent>) -> Vec<String> {
+    live.values()
+        .filter(|agent| {
+            !agent.replaceable
+                && agent.name != name
+                && agent
+                    .launch_context
+                    .get("agent_name")
+                    .and_then(|v| v.as_str())
+                    == Some(name)
+        })
+        .map(|agent| agent.name.clone())
+        .collect()
+}
+
 /// Members of a catalog group in the sender's scope, for `hcom send @<group>`.
 /// A catalog agent with the group's name keeps precedence, and members hidden
 /// by a selective import stay out, so the send reveals no out-of-scope agent.
@@ -2356,11 +2390,14 @@ struct LiveAgent {
     directory: String,
     launch_context: serde_json::Value,
     pid: Option<u32>,
+    /// A dead or failed row a new launch may take over (not running).
+    replaceable: bool,
 }
 
 impl LiveAgent {
     fn from_instance(data: &crate::db::InstanceRow, status: String) -> Self {
         Self {
+            replaceable: false,
             name: data.name.clone(),
             status,
             tool: data.tool.clone(),
@@ -2404,7 +2441,11 @@ fn live_agents() -> Vec<LiveAgent> {
         .iter()
         .map(|data| {
             let computed = crate::instance_lifecycle::get_instance_status(data, &db);
-            LiveAgent::from_instance(data, computed.status)
+            let replaceable = crate::launcher::instance_is_replaceable(data, &computed);
+            LiveAgent {
+                replaceable,
+                ..LiveAgent::from_instance(data, computed.status)
+            }
         })
         .collect()
 }
@@ -2991,7 +3032,7 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
             let def = catalogs.resolve_any(name).unwrap_or_default();
             let disabled = def.disabled == Some(true);
             let eff = effective(name, def, &Cli::default());
-            out.push(serde_json::json!({
+            let mut entry = serde_json::json!({
                 "name": name,
                 "disabled": disabled,
                 "roaming": eff.roaming,
@@ -3009,7 +3050,11 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
                 "terminal": eff.terminal,
                 "groups": eff.groups,
                 "status": live.get(name).map(|a| a.status.clone()),
-            }));
+            });
+            if eff.roaming {
+                entry["instances"] = serde_json::json!(roaming_instances(name, &live));
+            }
+            out.push(entry);
         }
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(0);
@@ -3030,7 +3075,15 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
                 (None, Some(t)) => t.clone(),
                 (None, None) => "-".to_string(),
             };
+            let instances = if eff.roaming {
+                roaming_instances(name, &live)
+            } else {
+                Vec::new()
+            };
             let status = match live.get(name) {
+                _ if !instances.is_empty() => {
+                    format!("● {} roaming: {}", instances.len(), instances.join(", "))
+                }
                 Some(a) => format!("● {}", a.status),
                 None => "○ -".to_string(),
             };
@@ -3442,6 +3495,7 @@ mod tests {
             directory: "/tmp/project".to_string(),
             launch_context: serde_json::json!({}),
             pid: None,
+            replaceable: false,
         }
     }
 
