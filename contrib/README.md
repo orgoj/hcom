@@ -72,6 +72,9 @@ catalog rows without an instance; Blocked only lists only instances in `blocked`
 A disabled catalog agent's row (`"disabled": true`) is struck through in light grey; Hide
 disabled, on by default, hides it. A running instance of a disabled agent stays visible.
 Hide non-persistent hides instances that no catalog agent launched (empty Agent column).
+The Roaming column marks a roaming catalog agent (`"roaming": true`) and each of its
+running instances with `↻`. A roaming agent's catalog row always stays a separate row next
+to its instances (status `running as …`), as the archetype for other projects.
 The Filter field narrows the table as you type to rows whose agent, instance, directory
 or catalog groups contain the text (case-insensitive); it combines with the checkboxes.
 The toolbar, left of the Filter field, shows how many rows the table shows after all filters.
@@ -126,7 +129,7 @@ and every text field of the instance's `launch_context` (`{pane_id}`,
 nothing, as does an entry that is not a list of strings.
 
 `columns` selects and orders the table columns; without it all are shown. Keys: `agent`,
-`instance`, `cli`, `status`, `since`, `idle`, `age`, `context`, `quota`, `detail`, `unread`, `dir`,
+`instance`, `roaming`, `cli`, `status`, `since`, `idle`, `age`, `context`, `quota`, `detail`, `unread`, `dir`,
 `branch`, `git`, `where`, `config`. Unknown keys are reported in the log and skipped.
 The `Columns…` button opens a dialog to choose the visible columns and their order
 (Space or double-click toggles a column, Up/Down or Ctrl+Up/Down moves it, at least one

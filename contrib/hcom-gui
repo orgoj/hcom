@@ -106,6 +106,7 @@ CLI_BINARIES = {
 COLUMNS = [
     ("agent", "Agent", 140),
     ("instance", "Instance", 140),
+    ("roaming", "Roaming", 80),
     ("cli", "CLI", 80),
     ("status", "Status", 130),
     ("since", "Since", 70),
@@ -479,6 +480,7 @@ def build_rows(catalog, live):
         rows.append({
             "agent": d["name"] if d else "",
             "instance": i["name"],
+            "roaming": "↻" if d and d.get("roaming") else "",
             "cli": i.get("tool") or "",
             "catalog_cli": (d or {}).get("cli") or "",
             "groups": (d or {}).get("groups") or [],
@@ -501,11 +503,13 @@ def build_rows(catalog, live):
         })
     for d in catalog:
         names = running.get(d["name"], [])
-        if d["name"] in names:
+        # A roaming agent's row is the archetype for other projects: never merged into an instance.
+        if d["name"] in names and not d.get("roaming"):
             continue
         rows.append({
             "agent": d["name"],
             "instance": "",
+            "roaming": "↻" if d.get("roaming") else "",
             "cli": d.get("cli") or "",
             "catalog_cli": d.get("cli") or "",
             "groups": d.get("groups") or [],

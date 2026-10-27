@@ -90,6 +90,25 @@ class RunningGroups(unittest.TestCase):
         rows = gui.build_rows(CATALOG, LIVE)
         self.assertEqual(gui.running_groups(rows), {"persistent": ["a1", "a2x"], "wdt_all": ["a2x"]})
 
+    def test_roaming_column_marks_roaming_agent_and_its_instances(self):
+        catalog = CATALOG + [{"name": "r1", "cli": "claude", "roaming": True, "source": "global"}]
+        live = LIVE + [{"name": "r1_proj_123", "tool": "claude", "status": "listening",
+                        "launch_context": {"agent_name": "r1"}}]
+        rows = {(r["agent"], r["instance"]): r for r in gui.build_rows(catalog, live)}
+        self.assertEqual(rows[("r1", "r1_proj_123")]["roaming"], "↻")
+        self.assertEqual(rows[("r1", "")]["roaming"], "↻")
+        self.assertEqual(rows[("a1", "a1")]["roaming"], "")
+        self.assertEqual(rows[("a3", "")]["roaming"], "")
+
+    def test_one_running_roaming_instance_keeps_its_catalog_row(self):
+        catalog = CATALOG + [{"name": "r1", "cli": "claude", "roaming": True, "source": "global"}]
+        for instance in ("r1_proj_123", "r1"):  # also when an instance holds the catalog name
+            live = LIVE + [{"name": instance, "tool": "claude", "status": "listening",
+                            "launch_context": {"agent_name": "r1"}}]
+            r1 = [r for r in gui.build_rows(catalog, live) if r["agent"] == "r1"]
+            self.assertEqual(sorted(r["instance"] for r in r1), sorted(["", instance]))
+            self.assertEqual(next(r for r in r1 if not r["instance"])["status"], f"running as {instance}")
+
     def test_tools_hold_only_running_instances(self):
         rows = gui.build_rows(CATALOG, LIVE)
         self.assertEqual(gui.running_tools(rows), {"claude": ["a1", "solo"], "codex": ["a2x"]})
@@ -451,7 +470,7 @@ class App(unittest.TestCase):
         self.restart()
         self.assertEqual(list(self.app.tree["columns"]), ["agent", "status"])
 
-    def test_legacy_state_columns_gain_only_idle(self):
+    def test_legacy_state_columns_gain_only_columns_added_later(self):
         chosen = ["git", "agent", "since", "status"]  # hides cli, age, ... on purpose
         with open(gui.STATE_FILE, "w") as f:
             f.write(gui.json.dumps({"columns": chosen}))
@@ -459,8 +478,8 @@ class App(unittest.TestCase):
         self.app = gui.App()
         self.app.update()
         cols = list(self.app.tree["columns"])
-        self.assertEqual(cols, ["git", "agent", "since", "idle", "status"])
-        self.app.set_columns([c for c in cols if c != "idle"])
+        self.assertEqual(cols, ["git", "agent", "roaming", "since", "idle", "status"])
+        self.app.set_columns([c for c in cols if c not in ("idle", "roaming")])
         with open(gui.STATE_FILE) as f:
             self.assertEqual(gui.json.load(f)["columns_known"], [c[0] for c in gui.COLUMNS])
         self.restart()
@@ -479,7 +498,7 @@ class App(unittest.TestCase):
     def test_legacy_state_gains_columns_added_later_too(self):
         self.patch("COLUMNS", gui.COLUMNS + [("foo", "Foo", 70)])
         self.assertEqual(gui.with_new_columns(["agent", "since", "msgs"], None),
-                         ["agent", "since", "idle", "msgs", "foo"])
+                         ["agent", "roaming", "since", "idle", "msgs", "foo"])
 
     def test_new_columns_insert_after_shown_predecessor_or_first(self):
         known = [c[0] for c in gui.COLUMNS if c[0] not in ("agent", "idle", "failed")]
