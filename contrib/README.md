@@ -14,7 +14,9 @@ Tk window listing every catalog agent (`hcom agent list --all --json`) and every
 instance (`hcom list --json`), including instances started with `--as`. Buttons run
 existing commands (`hcom agent`, `kill`, Restart, Attach as configured per terminal) and log
 their output; others open the selected agent's directory in configured applications. The Start dialog sets `--as`,
-`--dir`, `--cli` (CLIs installed on PATH), a resume checkbox (`--resume`, or
+`--dir`, `--cli` (CLIs installed on PATH), `--model` and `--reasoning` (editable, prefilled
+from the catalog; offered are the catalog's models and the levels minimal to max; a value left
+at the catalog's or emptied passes no flag, so the catalog applies), a resume checkbox (`--resume`, or
 `--continue` when another CLI is chosen) and a multi-line prompt (Shift+Enter for a new
 line, Enter or keypad Enter starts): `--hcom-prompt`, the agent's first message, which
 replaces the catalog `prompt` for this launch and leaves `system_prompt` alone; left

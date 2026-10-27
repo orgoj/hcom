@@ -31,8 +31,10 @@ loader.exec_module(gui)
 
 CATALOG = [
     {"name": "a1", "cli": "claude", "groups": ["persistent"], "source": "global", "dir": "/w"},
-    {"name": "a2", "cli": "codex", "groups": ["persistent", "wdt_all"], "source": "global", "dir": "/w"},
-    {"name": "a3", "cli": "claude", "groups": ["wdt_all"], "source": "global", "dir": "/w"},
+    {"name": "a2", "cli": "codex", "groups": ["persistent", "wdt_all"], "source": "global", "dir": "/w",
+     "model": "gpt-x"},
+    {"name": "a3", "cli": "claude", "groups": ["wdt_all"], "source": "global", "dir": "/w",
+     "model": "sonnet", "reasoning": "high"},
 ]
 LIVE = [
     {"name": "a1", "tool": "claude", "status": "listening",
@@ -620,8 +622,9 @@ class App(unittest.TestCase):
         self.assertEqual(opened, [])
         self.assertIn("ERROR: no space", self.app.log.get("1.0", "end"))
 
-    def start(self, prompt):
-        self.app.ask = lambda title, keys, agent, prefill: {**prefill, "resume": "", "name": "", "prompt": prompt}
+    def start(self, prompt, **answers):
+        self.app.ask = lambda title, keys, agent, prefill: {**prefill, "resume": "", "name": "", "prompt": prompt,
+                                                            **answers}
         self.app.tree.selection_set("a3|")
         self.app.update()
         self.app.run_button(self.button("Start"))
@@ -632,6 +635,34 @@ class App(unittest.TestCase):
 
     def test_start_without_prompt_omits_flag(self):
         self.assertEqual(self.start(""), ["hcom", "agent", "a3"])
+
+    def test_start_passes_only_changed_model_and_reasoning(self):
+        self.assertEqual(self.start("", model="opus", reasoning="max"),
+                         ["hcom", "agent", "a3", "--model", "opus", "--reasoning", "max"])
+        self.assertEqual(self.start("", model="sonnet", reasoning="low"), ["hcom", "agent", "a3", "--reasoning", "low"])
+        self.assertEqual(self.start("", model="", reasoning=""), ["hcom", "agent", "a3"])
+
+    def test_model_and_reasoning_are_editable_with_suggestions(self):
+        seen = {}
+
+        def inside():
+            dlg = next(w for w in self.app.winfo_children() if isinstance(w, gui.tk.Toplevel))
+            try:
+                boxes = [w for w in dlg.winfo_children() if isinstance(w, gui.ttk.Combobox)]
+                for box in boxes:
+                    seen[box.get()] = (str(box.cget("state")), list(self.app.tk.splitlist(box.cget("values"))))
+                boxes[0].focus_force()
+                boxes[0].update()
+                boxes[0].event_generate("<Return>", when="now")
+            finally:  # a failure must not leave the dialog waiting forever
+                if dlg.winfo_exists():
+                    dlg.destroy()
+
+        self.app.after(200, inside)
+        result = self.app.ask("Start", ["model", "reasoning"], "a3", {"model": "sonnet", "reasoning": "high"})
+        self.assertEqual(seen, {"sonnet": ("normal", ["gpt-x", "sonnet"]),
+                                "high": ("normal", list(gui.REASONING_LEVELS))})
+        self.assertEqual(result, {"model": "sonnet", "reasoning": "high"})
 
     def test_prompt_is_multiline_and_enter_confirms(self):
         for enter in ("<Return>", "<KP_Enter>"):

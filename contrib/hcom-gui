@@ -36,6 +36,7 @@ agent, instance, dir and groups (case-insensitive).
 A disabled catalog agent's row is struck through; Hide disabled (on by default) hides it.
 Hide non-persistent hides instances without a catalog agent. The toolbar counts the shown rows.
 Start: the empty Name field gets "<agent>__" on focus; left unchanged it counts as empty.
+Model and reasoning are prefilled from the catalog; only a changed value is passed.
 Window layout, columns, sort and filters (Running only, Blocked only, Hide disabled, Hide
 non-persistent) are kept in ~/.hcom/gui-state.json.
 """
@@ -63,7 +64,7 @@ STATE_FILE = os.path.join(HCOM_DIR, "gui-state.json")
 # directory, {terminal} and every text field of the instance's launch_context ({pane_id},
 # {herdr_workspace}, ...), {ask:X} asked in a dialog (an empty answer drops it and its preceding --flag;
 # after a bare "--" it is required: an empty answer runs nothing).
-# An answer equal to its prefill (dir, cli) is treated as empty. {ask:resume} is a checkbox:
+# An answer equal to its prefill (dir, cli, model, reasoning) is treated as empty. {ask:resume} is a checkbox:
 # --resume, or --continue when another cli is chosen (a session cannot move between CLIs).
 # when: catalog | running | live (running catalog agent) | stopped | dir. Optional: confirm,
 # key (Tk event), default (running | stopped: double-click/Enter on such a row), detach (start without waiting), cwd,
@@ -72,7 +73,8 @@ BUTTONS = [
     {
         "label": "Start",
         "cmd": ["hcom", "agent", "{agent}", "{ask:resume}", "--as", "{ask:name}", "--dir", "{ask:dir}",
-                "--cli", "{ask:cli}", "--hcom-prompt", "{ask:prompt}"],
+                "--cli", "{ask:cli}", "--model", "{ask:model}", "--reasoning", "{ask:reasoning}",
+                "--hcom-prompt", "{ask:prompt}"],
         "when": "catalog",
         "default": "stopped",
     },
@@ -102,6 +104,9 @@ CLI_BINARIES = {
     "kilo": "kilo", "agy": "agy", "cursor": "cursor-agent", "kimi": "kimi", "pi": "pi",
     "omp": "omp", "copilot": "copilot", "hermes": "hermes", "qoder": "qodercli", "grok": "grok",
 }
+
+# Offered for {ask:reasoning} (Claude --effort and Codex model_reasoning_effort levels); any text is accepted.
+REASONING_LEVELS = ("minimal", "low", "medium", "high", "xhigh", "max")
 
 COLUMNS = [
     ("agent", "Agent", 140),
@@ -483,6 +488,8 @@ def build_rows(catalog, live):
             "roaming": "↻" if d and d.get("roaming") else "",
             "cli": i.get("tool") or "",
             "catalog_cli": (d or {}).get("cli") or "",
+            "catalog_model": (d or {}).get("model") or "",
+            "catalog_reasoning": (d or {}).get("reasoning") or "",
             "groups": (d or {}).get("groups") or [],
             "status": i.get("status", ""),
             "state": i.get("status", ""),
@@ -512,6 +519,8 @@ def build_rows(catalog, live):
             "roaming": "↻" if d.get("roaming") else "",
             "cli": d.get("cli") or "",
             "catalog_cli": d.get("cli") or "",
+            "catalog_model": d.get("model") or "",
+            "catalog_reasoning": d.get("reasoning") or "",
             "groups": d.get("groups") or [],
             "status": f"running as {', '.join(names)}" if names else "",
             "state": "",
@@ -1038,7 +1047,8 @@ class App(tk.Tk):
         }
         asks = [t[5:-1] for t in template if t.startswith("{ask:") and t.endswith("}")]
         if asks:
-            prefill = {"dir": values["dir"], "cli": row["catalog_cli"]}
+            prefill = {"dir": values["dir"], "cli": row["catalog_cli"], "model": row["catalog_model"],
+                       "reasoning": row["catalog_reasoning"]}
             answers = self.ask(b["label"], asks, row["instance"] if b["when"] == "running" else row["agent"], prefill)
             if answers is None:
                 return
@@ -1136,7 +1146,8 @@ class App(tk.Tk):
 
     def ask(self, title, keys, agent, prefill):
         """One entry per {ask:X}, prefilled from prefill; "dir" is browsable, "cli" a
-        choice of installed CLIs, "resume" a checkbox ("1" when checked), "prompt" and "message"
+        choice of installed CLIs, "model" and "reasoning" editable with suggestions (catalog
+        models, REASONING_LEVELS), "resume" a checkbox ("1" when checked), "prompt" and "message"
         multi-line (Shift+Enter: newline, Enter: OK), an empty "name" gets "<agent>__" on focus.
         None on cancel."""
         dlg = tk.Toplevel(self)
@@ -1152,6 +1163,11 @@ class App(tk.Tk):
             elif k == "cli":
                 choices = [c for c, exe in CLI_BINARIES.items() if c == var.get() or shutil.which(exe)]
                 ttk.Combobox(dlg, textvariable=var, values=choices, state="readonly", width=48).grid(
+                    row=n, column=1, sticky=tk.EW, padx=5, pady=5)
+            elif k in ("model", "reasoning"):  # editable: any value, these are suggestions
+                choices = (sorted({r["catalog_model"] for r in self.rows.values()} - {""}) if k == "model"
+                           else REASONING_LEVELS)
+                ttk.Combobox(dlg, textvariable=var, values=choices, width=48).grid(
                     row=n, column=1, sticky=tk.EW, padx=5, pady=5)
             elif k in ("prompt", "message"):
                 text = tk.Text(dlg, width=50, height=6, wrap=tk.WORD)
