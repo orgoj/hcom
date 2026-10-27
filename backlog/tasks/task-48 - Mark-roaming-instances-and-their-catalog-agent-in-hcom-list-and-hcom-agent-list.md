@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-26 21:02'
-updated_date: '2026-10-27 05:20'
+updated_date: '2026-10-27 05:25'
 labels: []
 dependencies: []
 priority: medium
@@ -35,6 +35,8 @@ Risk: hcom list rendering is upstream code; keep the fork touch to a minimal hoo
 - [ ] #3 hcom agent list shows in the STATUS of a roaming entry '● <N> roaming: <instance names>' for its running instances, and '○ -' when none runs
 - [ ] #4 hcom agent list --json gives each roaming entry an instances array with the names of its running instances
 - [ ] #5 Built-in help, README and skills/hcom-agent-messaging describe both markers; cli_smoke tests cover each case above
+- [ ] #6 hcom agent list keeps '<project>' in the DIR column of roaming entries
+- [ ] #7 hcom-gui keeps working unchanged: it reads only hcom agent list --json and hcom list --json; the JSON change is additive (new instances key, existing keys and their values unchanged) and contrib/test-hcom-gui passes
 <!-- AC:END -->
 
 ## Implementation Plan
