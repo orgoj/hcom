@@ -38,7 +38,12 @@ A disabled catalog agent's row is struck through; Hide disabled (on by default) 
 Hide non-persistent hides instances without a catalog agent. The toolbar counts the shown rows.
 Start: the empty Name field gets "<agent>__" on focus; left unchanged it counts as empty.
 Model and reasoning are prefilled from the catalog; only a changed value is passed.
-Window layout, columns, sort, Empty last and filters (Running only, Blocked only, Hide disabled,
+The bottom panel has tabs Screen (`hcom term <instance>`), Transcript (`hcom transcript <instance>`),
+Events (`hcom events --agent <instance> --last 50`, one line per event) for the selected row's
+running instance, and Log (command output and errors). The open agent tab reloads in the background
+on selection change and every refresh; it stays at the end unless scrolled away. A new ERROR log
+line while another tab is open puts a red dot on the Log tab; opening Log clears it.
+Window layout, bottom tab, columns, sort, Empty last and filters (Running only, Blocked only, Hide disabled,
 Hide non-persistent) are kept in ~/.hcom/gui-state.json.
 """
 
@@ -327,6 +332,43 @@ def add_usage(rows):
         r["context"], r["context_window"] = usage.get("context", ("", 0))
         r["quota"] = usage.get("quota", "")
     return rows
+
+
+def hcom_text(*args):
+    out = subprocess.run(["hcom", *args], cwd=HOME, env=HCOM_ENV, capture_output=True, text=True, timeout=30)
+    if out.returncode != 0:  # hcom term reports a failure on stdout
+        raise RuntimeError(f"hcom {' '.join(args)}: {out.stderr.strip() or out.stdout.strip() or out.returncode}")
+    return out.stdout
+
+
+def format_events(stdout):
+    """`hcom events` JSON lines -> one "HH:MM:SS type detail" line per event (local time)."""
+    lines = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+            d = e.get("data") or {}
+            kind = e.get("type", "")
+            if kind == "status":
+                detail = f"{d.get('status', '')} {d.get('context', '')}: {d.get('detail', '')}"
+            elif kind == "message":
+                detail = f"{d.get('from', '')}: {d.get('text', '')}"
+            elif kind == "life":
+                detail = d.get("action", "") + (f" by {d['by']}" if d.get("by") else "")
+            else:
+                detail = json.dumps(d, ensure_ascii=False)
+            when = datetime.datetime.fromtimestamp(ts_epoch(e["ts"])).strftime("%H:%M:%S")
+            lines.append(" ".join(f"{when} {kind} {detail}".split()))
+        except (ValueError, KeyError, TypeError, AttributeError):
+            lines.append(line)
+    return "\n".join(lines)
+
+
+# Bottom panel tabs that show the selected instance: hcom command, the instance name is appended.
+AGENT_TABS = {"Screen": ["term"], "Transcript": ["transcript"], "Events": ["events", "--last", "50", "--agent"]}
+LOG_TAB = "Log"
 
 
 def hcom_jsonl(*args):
@@ -666,6 +708,8 @@ class App(tk.Tk):
         self.last_selected = None
         self.select_next = None  # row id selected once it appears (an instance started with --as)
         self.keep_agent = None  # agent of the last Start/Restart: its vanished row reselects the agent
+        self.tab_shown = {}  # agent tab -> instance its text belongs to
+        self.tab_loading = self.tab_again = False
 
         self._create_widgets()
         self._restore_state()
@@ -734,14 +778,18 @@ class App(tk.Tk):
         self.tree.tag_configure("disabled", foreground="#aaaaaa", font=("DejaVu Sans", 11, "overstrike"))
         self.paned.add(frame, weight=3)
 
-        frame = ttk.Frame(self.paned)
-        self.log = tk.Text(frame, height=8, font=("DejaVu Sans Mono", 10), state=tk.DISABLED, wrap=tk.WORD)
-        scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.log.yview)
-        self.log.configure(yscrollcommand=scroll.set)
-        self.log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.paned.add(frame, weight=1)
+        self.notebook = ttk.Notebook(self.paned)
+        self.tabs = {label: self._text_tab(label, tk.NONE if label == "Screen" else tk.WORD)
+                     for label in [*AGENT_TABS, LOG_TAB]}
+        self.log = self.tabs[LOG_TAB]
+        self.error_dot = tk.PhotoImage(width=10, height=10)  # kept here: Tk drops an unreferenced image
+        for x in range(10):
+            for y in range(10):
+                if (x - 4.5) ** 2 + (y - 4.5) ** 2 <= 16:
+                    self.error_dot.put("#dc2626", (x, y))
+        self.paned.add(self.notebook, weight=1)
 
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab)
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
         self.tree.bind("<Double-1>", lambda e: self.run_default())
         self.tree.bind("<Button-3>", self.idle_menu)
@@ -789,11 +837,84 @@ class App(tk.Tk):
         self.render()
         self._save_state()
 
+    def _text_tab(self, label, wrap):
+        frame = ttk.Frame(self.notebook)
+        text = tk.Text(frame, height=8, font=("DejaVu Sans Mono", 10), state=tk.DISABLED, wrap=wrap)
+        scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        if wrap == tk.NONE:
+            xscroll = ttk.Scrollbar(frame, orient=tk.HORIZONTAL, command=text.xview)
+            text.configure(xscrollcommand=xscroll.set)
+            xscroll.pack(side=tk.BOTTOM, fill=tk.X)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.notebook.add(frame, text=label)
+        return text
+
+    def current_tab(self):
+        return self.notebook.tab(self.notebook.select(), "text")
+
     def write_log(self, text):
         self.log.configure(state=tk.NORMAL)
         self.log.insert(tk.END, text.rstrip("\n") + "\n")
         self.log.see(tk.END)
         self.log.configure(state=tk.DISABLED)
+        if text.startswith("ERROR") and self.current_tab() != LOG_TAB:
+            self.notebook.tab(self.log.master, image=self.error_dot, compound=tk.LEFT)
+
+    def _on_tab(self, _event):
+        if self.current_tab() == LOG_TAB:
+            self.notebook.tab(self.log.master, image="")
+        self.load_tab()
+
+    def load_tab(self):
+        """Reload the open agent tab for the selected instance in the background, one load at a time."""
+        tab = self.current_tab()
+        if tab not in AGENT_TABS:
+            return
+        row = self.selected()
+        instance = row["instance"] if row else ""
+        if self.tab_shown.get(tab) != instance:
+            self.tab_shown[tab] = instance
+            self.fill_tab(tab, "")
+        if not instance:
+            return
+        if self.tab_loading:
+            self.tab_again = True
+            return
+        self.tab_loading = True
+
+        def work():
+            try:
+                out = hcom_text(*AGENT_TABS[tab], instance)
+                text = format_events(out) if tab == "Events" else out
+            except Exception as e:  # shown in the tab
+                text = f"ERROR: {e}"
+            self.after(0, self._tab_done, tab, instance, text)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _tab_done(self, tab, instance, text):
+        self.tab_loading = False
+        row = self.selected()
+        if tab == self.current_tab() and instance == (row["instance"] if row else ""):
+            self.fill_tab(tab, text)
+        if self.tab_again:
+            self.tab_again = False
+            self.load_tab()
+
+    def fill_tab(self, tab, text):
+        """Replace the tab's text; stay at the end unless the user scrolled away from it."""
+        w = self.tabs[tab]
+        top, bottom = w.yview()
+        w.configure(state=tk.NORMAL)
+        w.delete("1.0", tk.END)
+        w.insert(tk.END, text.rstrip("\n"))
+        w.configure(state=tk.DISABLED)
+        if bottom >= 1.0:
+            w.see(tk.END)
+        else:
+            w.yview_moveto(top)
 
     def selected(self):
         sel = self.tree.selection()
@@ -816,8 +937,11 @@ class App(tk.Tk):
                 self.keep_agent = None
             if row["detail"]:
                 self.write_log(f"{row['instance']}: {row['detail']}")
+        changed = (sel[0] if sel else None) != self.last_selected
         self.last_selected = sel[0] if sel else None
         self.update_buttons()
+        if changed:
+            self.load_tab()
 
     # ── Refresh ────────────────────────────────────────────────────────
 
@@ -875,6 +999,7 @@ class App(tk.Tk):
                                                 command=lambda t=t, names=names: self.kill_group(f"tool:{t}", names))
             self.render()
             self.run_idle()
+        self.load_tab()
         if self.refresh_again:
             self.refresh_again = False
             self.refresh()
@@ -1312,6 +1437,8 @@ class App(tk.Tk):
         self.empty_last.set(state.get("empty_last", True))
         if state.get("sort_col") in self.tree["columns"]:
             self.sort_col, self.sort_reverse = state["sort_col"], bool(state.get("sort_reverse"))
+        tab = state.get("bottom_tab")
+        self.notebook.select(self.tabs[tab if tab in self.tabs else LOG_TAB].master)
 
         def layout():
             if "sash_pos" in state:
@@ -1338,6 +1465,7 @@ class App(tk.Tk):
             "sort_col": self.sort_col,
             "sort_reverse": self.sort_reverse,
             "column_widths": {c: self.tree.column(c, "width") for c in self.tree["columns"]},
+            "bottom_tab": self.current_tab(),
         }
         if self.state_columns:
             state["columns"] = self.state_columns

@@ -87,7 +87,14 @@ with `<agent>__` (clone naming convention), and a name left at exactly that pref
 empty (the default name).
 Up/Down move through the rows from anywhere in the main window (e.g. the Filter field)
 and give the table keyboard focus.
-Sort, Empty last, window layout and the filters are kept in `~/.hcom/gui-state.json`.
+The bottom panel has tabs Screen, Transcript, Events and Log. For the selected row's running
+instance, Screen shows `hcom term <instance>`, Transcript `hcom transcript <instance>` and
+Events `hcom events --agent <instance> --last 50` as one `HH:MM:SS type detail` line per event;
+a row without a running instance leaves them empty. Only the open tab loads, in the background,
+on selection change and on every refresh; it stays at the end unless you scrolled away, and a
+failed command shows its error in the tab. Log holds command output and errors; a new ERROR
+line while another tab is open marks the Log tab with a red dot, and opening Log clears it.
+Sort, Empty last, window layout, the bottom tab and the filters are kept in `~/.hcom/gui-state.json`.
 
 ```sh
 ln -s "$PWD/contrib/hcom-gui" ~/.local/bin/hcom-gui
