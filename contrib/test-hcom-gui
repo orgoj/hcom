@@ -742,9 +742,45 @@ class App(unittest.TestCase):
         self.app.update()
         self.app.run_button(self.button("Inject"))
 
-    def test_inject_button_sits_next_to_send(self):
-        items = self.app.toolbar_items
-        self.assertIs(items[items.index(self.button("Send")["widget"]) + 1], self.button("Inject")["widget"])
+    KEYS = {"Esc": "\x1b", "↑": "\x1b[A", "↓": "\x1b[B", "←": "\x1b[D", "→": "\x1b[C", "Tab": "\t",
+            "Shift+Tab": "\x1b[Z", "Enter": "--enter", "1": "1", "2": "2", "3": "3"}
+
+    def test_screen_bar_holds_inject_and_key_buttons_not_the_toolbar(self):
+        bar = self.app.screen_bar
+        self.assertIs(bar.master, self.app.tabs["Screen"].master)
+        self.assertEqual([w.cget("text") for w in bar.pack_slaves()], ["Inject", *self.KEYS])
+        self.assertFalse(set(bar.pack_slaves()) & set(self.app.toolbar_items))
+        self.assertEqual(bar.master.pack_slaves()[0], bar)  # packed first at the bottom: under the scrollbar
+        self.assertEqual(bar.pack_info()["side"], "bottom")
+
+    def test_key_buttons_inject_their_key_alone(self):
+        self.app.tree.selection_set("a2|a2x")
+        self.app.update()
+        for label in self.KEYS:
+            self.app.run_button(self.button(label))
+        cwd = self.app.rows["a2|a2x"]["cwd"]
+        self.assertEqual(self.ran, [(["hcom", "term", "inject", "a2x", keys], cwd) for keys in self.KEYS.values()])
+
+    def test_key_buttons_need_a_running_instance(self):
+        self.app.tree.selection_set("a3|")
+        self.app.update()
+        for label in self.KEYS:
+            self.app.run_button(self.button(label))
+            self.assertEqual(str(self.button(label)["widget"].cget("state")), "disabled")
+        self.assertEqual(self.ran, [])
+        self.app.tree.selection_set("a2|a2x")
+        self.app.update()
+        for label in self.KEYS:
+            self.assertEqual(str(self.button(label)["widget"].cget("state")), "normal")
+
+    def test_log_escapes_control_keys(self):
+        del self.app.run_command  # the real one
+        done = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        self.patch("subprocess", type("Sub", (), {"run": staticmethod(lambda *a, **k: done)}))
+        self.app.tree.selection_set("a2|a2x")
+        self.app.update()
+        self.app.run_button(self.button("↑"))
+        self.assertIn("$ hcom term inject a2x '\\x1b[A'\n", self.app.log.get("1.0", "end"))
 
     def test_inject_types_text_and_enter_only_when_checked(self):
         cwd = self.app.rows["a2|a2x"]["cwd"]

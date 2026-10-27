@@ -24,10 +24,14 @@ empty, the catalog `prompt` (if any) applies.
 Send (running instances) asks for a multi-line message the same way and runs
 `hcom send -b @<instance> -- <text>` (sender `bigboss`, the human); an empty text sends
 nothing.
-Inject (running instances) asks for a text and an Enter checkbox (checked by default) and
-runs `hcom term inject <instance> <text>`, with `--enter` when checked: the text is typed
-straight into the agent's terminal (PTY instances only; hcom's error goes to the Log); an
-empty text runs nothing.
+A bar under the Screen tab acts on the selected running instance. Inject asks for a text
+and an Enter checkbox (checked by default) and runs `hcom term inject <instance> <text>`,
+with `--enter` when checked: the text is typed straight into the agent's terminal (PTY
+instances only; hcom's error goes to the Log); an empty text runs nothing. The key buttons
+Esc, ↑, ↓, ←, →, Tab, Shift+Tab, Enter, 1, 2, 3 send that key alone with
+`hcom term inject` (e.g. to move through and pick in a TUI menu). Arrows go out as
+`ESC [ A`, which Claude Code, Codex and pi read in either cursor mode; a program that
+reads only `ESC O A` in application cursor mode does not react to them.
 Restart (running instances of a catalog agent, including `--as` names), after
 confirming, runs `hcom agent <agent> --as <instance> --restart`: it kills the instance,
 waits for it to exit and launches the agent again under the same name, with the

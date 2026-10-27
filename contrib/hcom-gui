@@ -40,8 +40,9 @@ A disabled catalog agent's row is struck through; Hide disabled (on by default) 
 Hide non-persistent hides instances without a catalog agent. The toolbar counts the shown rows.
 Start: the empty Name field gets "<agent>__" on focus; left unchanged it counts as empty.
 Model and reasoning are prefilled from the catalog; only a changed value is passed.
-Inject types a text into the selected instance's terminal (`hcom term inject`), with Enter
-when its checkbox (checked by default) is on.
+A bar under the Screen tab holds Inject, which types a text into the selected instance's terminal
+(`hcom term inject`), with Enter when its checkbox (checked by default) is on, and key buttons
+Esc, arrows, Tab, Shift+Tab, Enter, 1, 2, 3 that send that key alone.
 The bottom panel has tabs Screen (`hcom term <instance>`), Transcript (`hcom transcript <instance>`),
 Events (`hcom events --agent <instance> --last 50`, one line per event) for the selected row's
 running instance, and Log (command output and errors). The open agent tab reloads in the background
@@ -80,7 +81,9 @@ STATE_FILE = os.path.join(HCOM_DIR, "gui-state.json")
 # when: catalog | running | live (running catalog agent) | stopped | dir. Optional: confirm,
 # key (Tk event), default (running | stopped: double-click/Enter on such a row), detach (start without waiting), cwd,
 # if_exists (a path with {dir}; the button is enabled only while it exists), required (ask keys whose empty
-# answer runs nothing, like after "--").
+# answer runs nothing, like after "--"), bar ("screen": in the bar under the Screen tab, not in the toolbar).
+# Key buttons send arrows as CSI (ESC [ A); a program that reads only ESC O A in application cursor mode
+# does not react to them.
 BUTTONS = [
     {
         "label": "Start",
@@ -94,7 +97,11 @@ BUTTONS = [
     {"label": "Attach", "attach": True, "when": "running", "default": "running"},  # cmd from "attach"
     {"label": "Send", "cmd": ["hcom", "send", "-b", "@{instance}", "--", "{ask:message}"], "when": "running"},
     {"label": "Inject", "cmd": ["hcom", "term", "inject", "{instance}", "{ask:text}", "{ask:enter}"], "when": "running",
-     "required": ["text"]},
+     "required": ["text"], "bar": "screen"},
+    *[{"label": label, "cmd": ["hcom", "term", "inject", "{instance}", keys], "when": "running", "bar": "screen"}
+      for label, keys in (("Esc", "\x1b"), ("↑", "\x1b[A"), ("↓", "\x1b[B"), ("←", "\x1b[D"), ("→", "\x1b[C"),
+                          ("Tab", "\t"), ("Shift+Tab", "\x1b[Z"), ("Enter", "--enter"),
+                          ("1", "1"), ("2", "2"), ("3", "3"))],
     "---",
     {"label": "Kill", "cmd": ["hcom", "kill", "{instance}"], "when": "running", "confirm": True, "key": "<Delete>"},
     {"label": "Restart", "cmd": ["hcom", "agent", "{agent}", "--as", "{instance}", "--restart"], "when": "live",
@@ -699,7 +706,7 @@ class App(tk.Tk):
         if not isinstance(self.toolbar_breaks, list):
             self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: toolbar_breaks: not a list of button labels")
             self.toolbar_breaks = []
-        labels = {b["label"] for b in self.buttons if b != "---"} | {"Columns", "Refresh"}
+        labels = {b["label"] for b in self.buttons if b != "---" and not b.get("bar")} | {"Columns", "Refresh"}
         if unknown := [str(x) for x in self.toolbar_breaks if x not in labels]:
             self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: toolbar_breaks: unknown buttons: {', '.join(unknown)}")
         self.config_columns, unknown = pick_columns(config.get("columns"))
@@ -741,6 +748,8 @@ class App(tk.Tk):
         for b in self.buttons:
             if b == "---":
                 self.toolbar_items.append(ttk.Separator(self.toolbar, orient=tk.VERTICAL))
+                continue
+            if b.get("bar"):  # created with the Screen tab
                 continue
             if b.get("menu"):
                 b["widget"] = ttk.Menubutton(self.toolbar, text=f"{b['label']} ▾")
@@ -803,6 +812,13 @@ class App(tk.Tk):
         self.tabs = {label: self._text_tab(label, tk.NONE if label == "Screen" else tk.WORD)
                      for label in [*AGENT_TABS, LOG_TAB]}
         self.log = self.tabs[LOG_TAB]
+        screen = self.tabs["Screen"].master
+        self.screen_bar = ttk.Frame(screen)
+        self.screen_bar.pack(side=tk.BOTTOM, fill=tk.X, before=screen.pack_slaves()[0])
+        for b in self.buttons:
+            if b != "---" and b.get("bar") == "screen":
+                b["widget"] = ttk.Button(self.screen_bar, text=b["label"], command=lambda b=b: self.run_button(b))
+                b["widget"].pack(side=tk.LEFT, padx=2, pady=2)
         self.error_dot = tk.PhotoImage(width=10, height=10)  # kept here: Tk drops an unreferenced image
         for x in range(10):
             for y in range(10):
@@ -1319,7 +1335,7 @@ class App(tk.Tk):
         self.busy = True
         self.update_buttons()
         self.config(cursor="watch")
-        self.write_log(f"$ {' '.join(cmd)}")
+        self.write_log(f"$ {' '.join(t if t.isprintable() else repr(t) for t in cmd)}")
 
         def work():
             try:
