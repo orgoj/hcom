@@ -3500,6 +3500,34 @@ fn agent_catalog_system_prompt_file_renders_and_reaches_spawn_script() {
 }
 
 #[test]
+fn agent_catalog_system_prompt_precedes_initial_prompt_separator() {
+    // `hcom handoff` relaunches with --hcom-prompt; the system prompt flag must
+    // stay before `--`, or Claude reads it as part of the initial prompt.
+    let h = Hcom::new();
+    std::fs::write(h.path().join("SYSTEM_PROMPT.md"), "Catalog rules.\n")
+        .expect("write system prompt");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"system_prompt_file":"SYSTEM_PROMPT.md",
+            "agents":{"solo":{"dir":"/tmp","cli":"claude",
+                "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let (code, stdout, stderr) = h.run(["agent", "solo", "--hcom-prompt", "Continue."]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let script = std::fs::read_dir(h.path().join(".tmp/launch"))
+        .expect("read launch directory")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .find(|text| text.contains("Continue."))
+        .expect("launch script with the initial prompt");
+    let flag = script.find("--append-system-prompt").expect(&script);
+    let separator = script.find(" -- ").expect(&script);
+    assert!(flag < separator, "system prompt after `--`: {script}");
+}
+
+#[test]
 fn launch_scripts_export_catalog_agent_name_and_instance_name() {
     let h = Hcom::new();
     std::fs::write(

@@ -684,11 +684,16 @@ fn apply_agent_instructions(
     env: &mut HashMap<String, String>,
     args: &mut Vec<String>,
 ) {
+    // Flags go before `--`: after it the CLI reads everything as the prompt.
+    let flags_end = args.iter().position(|a| a == "--").unwrap_or(args.len());
     match tool {
         LaunchTool::Claude | LaunchTool::ClaudePty | LaunchTool::Pi => {
-            args.extend(["--append-system-prompt".into(), instructions.into()]);
+            args.splice(
+                flags_end..flags_end,
+                ["--append-system-prompt".into(), instructions.into()],
+            );
         }
-        LaunchTool::Omp => args.push(format!("--append-system-prompt={instructions}")),
+        LaunchTool::Omp => args.insert(flags_end, format!("--append-system-prompt={instructions}")),
         LaunchTool::Gemini => {
             let path = write_system_prompt_file(instructions, "gemini", instance);
             env.insert("GEMINI_SYSTEM_MD".into(), path);
@@ -3123,7 +3128,25 @@ mod tests {
             let mut args = vec!["user".into()];
             apply_agent_instructions(&tool, "luna", "rules", &mut env, &mut args);
             assert_eq!(args, ["user", "--append-system-prompt", "rules"]);
+
+            // An initial prompt after `--` (e.g. `hcom handoff`) stays last.
+            let mut args = vec!["user".into(), "--".into(), "hello".into()];
+            apply_agent_instructions(&tool, "luna", "rules", &mut env, &mut args);
+            assert_eq!(
+                args,
+                ["user", "--append-system-prompt", "rules", "--", "hello"]
+            );
         }
+
+        let mut args = vec!["--".into(), "hello".into()];
+        apply_agent_instructions(
+            &LaunchTool::Omp,
+            "luna",
+            "rules",
+            &mut HashMap::new(),
+            &mut args,
+        );
+        assert_eq!(args, ["--append-system-prompt=rules", "--", "hello"]);
 
         let mut env = HashMap::new();
         let mut args = Vec::new();
