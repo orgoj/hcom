@@ -611,7 +611,14 @@ class App(unittest.TestCase):
         texts = {b["label"]: b["widget"].cget("text") for b in self.app.buttons if b != "---"}
         self.assertEqual([texts[k] for k in ("Start", "Kill", "Zed", "gitg", "Kill all")],
                          ["Start", "Kill (Del)", "Zed (z)", "gitg", "Kill all (Ctrl+F2)"])
-        self.assertEqual(self.app.refresh_button.cget("text"), "Refresh (F5)")
+        self.assertEqual(self.app.refresh_button.cget("text"), "Refresh (Ctrl+R)")
+
+    def test_ctrl_r_refreshes_and_f5_does_not(self):
+        refreshed = []
+        self.app.refresh = lambda: refreshed.append(1)
+        for key in ("<Control-r>", "<Control-R>", "<KeyPress-F5>"):
+            self.app.tree.event_generate(key, when="now")
+        self.assertEqual(refreshed, [1, 1])
 
     def test_open_with_runs_while_a_command_runs(self):
         self.open_with(["zed", "{dir}"])
@@ -752,6 +759,43 @@ class App(unittest.TestCase):
         self.assertFalse(set(bar.pack_slaves()) & set(self.app.toolbar_items))
         self.assertEqual(bar.master.pack_slaves()[0], bar)  # packed first at the bottom: under the scrollbar
         self.assertEqual(bar.pack_info()["side"], "bottom")
+
+    def screen_bar(self, value):
+        with open(gui.CONFIG_FILE, "w") as f:
+            f.write(gui.json.dumps({"screen_bar": value}))
+        self.restart()
+        self.app.run_command = lambda cmd, cwd, select=None: self.ran.append((cmd, cwd))
+        return [w.cget("text") for w in self.app.screen_bar.pack_slaves()]
+
+    def test_screen_bar_picks_orders_and_adds_key_buttons(self):
+        self.assertEqual(self.screen_bar(["Enter", "Esc", {"label": "y", "keys": "y"}, "1"]), ["Enter", "Esc", "y", "1"])
+        self.assertEqual([b["label"] for b in self.app.buttons if b != "---" and b.get("bar")], ["Enter", "Esc", "y", "1"])
+        self.app.tree.selection_set("a2|a2x")
+        self.app.update()
+        self.app.run_button(self.button("y"))
+        self.assertEqual(self.ran, [(["hcom", "term", "inject", "a2x", "y"], self.app.rows["a2|a2x"]["cwd"])])
+        self.app.tree.selection_set("a3|")
+        self.app.update()
+        self.assertEqual(str(self.button("y")["widget"].cget("state")), "disabled")
+
+    def test_screen_bar_empty_list_empties_the_bar(self):
+        self.assertEqual(self.screen_bar([]), [])
+        self.assertNotIn("screen_bar", self.app.log.get("1.0", "end"))
+
+    def test_screen_bar_skips_invalid_items_and_duplicates(self):
+        bar = self.screen_bar(["Nope", 1, None, ["Esc"], {"label": "x"}, {"label": "x", "keys": 3},
+                               {"label": "", "keys": "x"}, "Esc", "Esc", {"label": "Esc", "keys": "e"}])
+        self.assertEqual(bar, ["Esc"])
+        log = self.app.log.get("1.0", "end")
+        for item in ('"Nope"', "1", "null", '["Esc"]', '{"label": "x"}', '{"label": "x", "keys": 3}',
+                     '{"label": "", "keys": "x"}'):
+            self.assertIn(f"screen_bar: skipped {item}\n", log)
+        self.assertEqual(log.count("screen_bar: duplicate Esc skipped"), 2)
+
+    def test_screen_bar_not_a_list_keeps_the_default_bar(self):
+        for value in (None, "Esc"):
+            self.assertEqual(self.screen_bar(value), ["Inject", *self.KEYS])
+            self.assertIn("screen_bar: not a list, using the default bar", self.app.log.get("1.0", "end"))
 
     def test_key_buttons_inject_their_key_alone(self):
         self.app.tree.selection_set("a2|a2x")
@@ -995,13 +1039,19 @@ class App(unittest.TestCase):
 
     def test_bottom_tabs_in_order_log_first_and_kept_in_state(self):
         self.assertEqual([self.app.notebook.tab(t, "text") for t in self.app.notebook.tabs()],
-                         ["Screen", "Transcript", "Events", "Log"])
+                         ["Screen (F5)", "Transcript (F6)", "Events (F7)", "Log (F8)"])
         self.assertEqual(self.app.current_tab(), "Log")
         self.tab("Events")
         self.restart()
         self.assertEqual(self.app.current_tab(), "Events")
         with open(gui.STATE_FILE) as f:
             self.assertEqual(gui.json.load(f)["bottom_tab"], "Events")
+
+    def test_f5_to_f8_open_the_bottom_tabs(self):
+        for key, label in (("F5", "Screen"), ("F6", "Transcript"), ("F7", "Events"), ("F8", "Log")):
+            self.app.tree.event_generate(f"<KeyPress-{key}>", when="now")
+            self.app.update()
+            self.assertEqual(self.app.current_tab(), label)
 
     def test_agent_tabs_show_hcom_output_of_the_selected_instance(self):
         self.text_answer = {"events": '{"ts": "2026-10-27T10:00:00", "type": "life", "data": {"action": "ready"}}\n'}
@@ -1392,7 +1442,7 @@ class App(unittest.TestCase):
         self.assertEqual(layout[0][-1], "Kill group ▾")
         self.assertNotEqual(layout[1][0], "|")
         self.assertEqual(layout[1][-1], "Columns…")
-        self.assertEqual(layout[2], ["Refresh (F5)"])
+        self.assertEqual(layout[2], ["Refresh (Ctrl+R)"])
         self.assertIn("toolbar_breaks: unknown buttons: Nope", self.app.log.get("1.0", "end"))
 
     def test_toolbar_break_after_the_last_button_adds_no_empty_row(self):

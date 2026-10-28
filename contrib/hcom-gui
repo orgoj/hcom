@@ -42,12 +42,14 @@ Start: the empty Name field gets "<agent>__" on focus; left unchanged it counts 
 Model and reasoning are prefilled from the catalog; only a changed value is passed.
 A bar under the Screen tab holds Inject, which types a text into the selected instance's terminal
 (`hcom term inject`), with Enter when its checkbox (checked by default) is on, and key buttons
-Esc, arrows, Tab, Shift+Tab, Enter, 1, 2, 3 that send that key alone.
+Esc, arrows, Tab, Shift+Tab, Enter, 1, 2, 3 that send that key alone. "screen_bar" picks and orders
+the bar buttons: a built-in label, or {"label": "y", "keys": "y"} for a button that injects keys
+alone; an unknown or invalid item is logged and skipped.
 The bottom panel has tabs Screen (`hcom term <instance>`), Transcript (`hcom transcript <instance>`),
 Events (`hcom events --agent <instance> --last 50`, one line per event) for the selected row's
-running instance, and Log (command output and errors). The open agent tab reloads in the background
-on selection change and every refresh; it stays at the end unless scrolled away. A new ERROR log
-line while another tab is open puts a red dot on the Log tab; opening Log clears it.
+running instance, and Log (command output and errors), opened with F5, F6, F7, F8; Ctrl+R refreshes.
+The open agent tab reloads in the background on selection change and every refresh; it stays at the
+end unless scrolled away. A new ERROR log line while another tab is open puts a red dot on the Log tab; opening Log clears it.
 Window layout, bottom tab, columns, sort, Empty last and filters (Running only, Blocked only, Hide disabled,
 Hide non-persistent) are kept in ~/.hcom/gui-state.json.
 """
@@ -384,6 +386,8 @@ def format_events(stdout):
 # Bottom panel tabs that show the selected instance: hcom command, the instance name is appended.
 AGENT_TABS = {"Screen": ["term"], "Transcript": ["transcript"], "Events": ["events", "--last", "50", "--agent"]}
 LOG_TAB = "Log"
+TAB_KEYS = ["<F5>", "<F6>", "<F7>", "<F8>"]  # Screen, Transcript, Events, Log
+REFRESH_KEY = "<Control-R>"  # bound with <Control-r>: Ctrl+R with or without Caps Lock
 
 
 def hcom_jsonl(*args):
@@ -702,6 +706,7 @@ class App(tk.Tk):
         self.buttons += [{**b, "when": "dir", "detach": True} for b in open_with]
         if commands := config.get("commands"):
             self.buttons += ["---"] + [{**b, "when": "always"} for b in commands]
+        self.buttons = [b for b in self.buttons if b == "---" or not b.get("bar")] + self._screen_bar(config)
         self.toolbar_breaks = config.get("toolbar_breaks") or []
         if not isinstance(self.toolbar_breaks, list):
             self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: toolbar_breaks: not a list of button labels")
@@ -738,6 +743,32 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.refresh()
 
+    def _screen_bar(self, config):
+        """The Screen bar buttons in gui.json "screen_bar" order: a built-in label or {"label", "keys"}."""
+        builtin = {b["label"]: b for b in BUTTONS if b != "---" and b.get("bar") == "screen"}
+        if "screen_bar" not in config:
+            return list(builtin.values())
+        items = config["screen_bar"]
+        if not isinstance(items, list):
+            self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: screen_bar: not a list, using the default bar")
+            return list(builtin.values())
+        bar = []
+        for item in items:
+            if isinstance(item, str) and item in builtin:
+                b = builtin[item]
+            elif (isinstance(item, dict) and set(item) == {"label", "keys"}
+                  and all(isinstance(v, str) and v for v in item.values())):
+                b = {"label": item["label"], "cmd": ["hcom", "term", "inject", "{instance}", item["keys"]],
+                     "when": "running", "bar": "screen"}
+            else:
+                self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: screen_bar: skipped {json.dumps(item)}")
+                continue
+            if b["label"] in {x["label"] for x in bar}:
+                self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: screen_bar: duplicate {b['label']} skipped")
+                continue
+            bar.append(b)
+        return bar
+
     # ── Widgets ────────────────────────────────────────────────────────
 
     def _create_widgets(self):
@@ -762,7 +793,7 @@ class App(tk.Tk):
             if b["label"] in self.toolbar_breaks:
                 self.toolbar_items.append("break")
         self.columns_button = ttk.Button(self.toolbar, text="Columns…", command=self.choose_columns)
-        self.refresh_button = ttk.Button(self.toolbar, text=f"Refresh ({key_label('<F5>')})", command=self.refresh)
+        self.refresh_button = ttk.Button(self.toolbar, text=f"Refresh ({key_label(REFRESH_KEY)})", command=self.refresh)
         self.toolbar_items.append(ttk.Separator(self.toolbar, orient=tk.VERTICAL))
         for label, widget in (("Columns", self.columns_button), ("Refresh", self.refresh_button)):
             self.toolbar_items += [widget, "break"] if label in self.toolbar_breaks else [widget]
@@ -809,8 +840,8 @@ class App(tk.Tk):
         self.paned.add(frame, weight=3)
 
         self.notebook = ttk.Notebook(self.paned)
-        self.tabs = {label: self._text_tab(label, tk.NONE if label == "Screen" else tk.WORD)
-                     for label in [*AGENT_TABS, LOG_TAB]}
+        self.tabs = {label: self._text_tab(label, tk.NONE if label == "Screen" else tk.WORD, key)
+                     for label, key in zip([*AGENT_TABS, LOG_TAB], TAB_KEYS)}
         self.log = self.tabs[LOG_TAB]
         screen = self.tabs["Screen"].master
         self.screen_bar = ttk.Frame(screen)
@@ -832,7 +863,8 @@ class App(tk.Tk):
         self.tree.bind("<Button-3>", self.idle_menu)
         self.tree.bind("<Return>", lambda e: self.run_default())
         self.tree.bind("<KP_Enter>", lambda e: self.run_default())
-        self.bind("<F5>", lambda e: self.refresh())
+        for key in (REFRESH_KEY, "<Control-r>"):
+            self.bind(key, lambda e: self.refresh())
         for widget in (self, self.tree):  # tree: before its class binding moves from a stale focus row
             widget.bind("<Up>", lambda e: self._step_row(e, -1))
             widget.bind("<Down>", lambda e: self._step_row(e, 1))
@@ -914,7 +946,7 @@ class App(tk.Tk):
         self.render()
         self._save_state()
 
-    def _text_tab(self, label, wrap):
+    def _text_tab(self, label, wrap, key):
         frame = ttk.Frame(self.notebook)
         text = tk.Text(frame, height=8, font=("DejaVu Sans Mono", 10), state=tk.DISABLED, wrap=wrap)
         scroll = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=text.yview)
@@ -925,11 +957,12 @@ class App(tk.Tk):
             xscroll.pack(side=tk.BOTTOM, fill=tk.X)
         text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self.notebook.add(frame, text=label)
+        self.notebook.add(frame, text=f"{label} ({key_label(key)})")
+        self.bind(key, lambda e: self.notebook.select(frame))
         return text
 
     def current_tab(self):
-        return self.notebook.tab(self.notebook.select(), "text")
+        return list(self.tabs)[self.notebook.index("current")]
 
     def write_log(self, text):
         self.log.configure(state=tk.NORMAL)

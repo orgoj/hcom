@@ -31,7 +31,8 @@ instances only; hcom's error goes to the Log); an empty text runs nothing. The k
 Esc, ↑, ↓, ←, →, Tab, Shift+Tab, Enter, 1, 2, 3 send that key alone with
 `hcom term inject` (e.g. to move through and pick in a TUI menu). Arrows go out as
 `ESC [ A`, which Claude Code, Codex and pi read in either cursor mode; a program that
-reads only `ESC O A` in application cursor mode does not react to them.
+reads only `ESC O A` in application cursor mode does not react to them. `screen_bar` in
+`gui.json` chooses the bar buttons and their order (see below).
 Restart (running instances of a catalog agent, including `--as` names), after
 confirming, runs `hcom agent <agent> --as <instance> --restart`: it kills the instance,
 waits for it to exit and launches the agent again under the same name, with the
@@ -165,7 +166,8 @@ output in the log; `cwd` (default `~`) decides which project catalogs `@group` r
 `confirm` asks first. `key` on any `open_with` or `commands` entry is a keyboard shortcut
 in the table: a Tk event sequence such as `z` or `<F2>`; it runs the button only while
 the button is enabled. The button label shows it, e.g. `Zed (z)`, `Kill (Del)`,
-`Kill all (Ctrl+F2)`; built-in keys too: `Refresh (F5)`.
+`Kill all (Ctrl+F2)`; built-in keys too: `Refresh (Ctrl+R)`. The bottom tabs open with
+F5 (Screen), F6 (Transcript), F7 (Events) and F8 (Log), shown in their labels.
 `open_with` programs start independently, also while an hcom command runs; one that exits
 non-zero within 5 seconds writes its exit code and stderr to the log.
 Without `open_with`, the toolbar offers `xdg-open` and `x-terminal-emulator`. Further hcom
@@ -174,3 +176,12 @@ buttons go into `BUTTONS` at the top of the script.
 or `open_with`/`commands` labels; without the key, `…` or `▾` shown on the button) after which the
 buttons continue on a new row, e.g. a fixed layout for a portrait monitor; the rows still
 wrap when the window is narrower. An unknown label is reported in the log.
+
+`screen_bar` lists the buttons of the bar under the Screen tab in order, e.g.
+`["Inject", "Esc", "Enter", "1", "2", {"label": "y", "keys": "y"}, {"label": "Ctrl+C", "keys": "\u0003"}]`.
+A string names a built-in button (`Inject`, `Esc`, `↑`, `↓`, `←`, `→`, `Tab`,
+`Shift+Tab`, `Enter`, `1`, `2`, `3`); an object adds a button that sends `keys` alone
+with `hcom term inject <instance> <keys>` to the selected running instance (control
+characters as JSON escapes). Without `screen_bar` all built-ins are shown; `[]` empties
+the bar. An unknown name, any other item or a repeated label is reported in the log and
+skipped; a `screen_bar` that is not a list keeps the default bar.
