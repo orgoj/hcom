@@ -155,6 +155,33 @@ fn title_write_safe(pending_utf8: u8, pending_escape: PendingEscape) -> bool {
     pending_utf8 == 0 && pending_escape == PendingEscape::None
 }
 
+/// Wait out a delivery init that missed `start_delivery_thread`'s first timeout,
+/// up to the DB busy timeout in total: an init still waiting for the hcom.db
+/// write lock, which SQLite itself would wait for, must not kill the session.
+/// A failed init or one still stuck after that aborts it.
+#[cfg(unix)]
+fn finish_pending_delivery(
+    handle: std::thread::JoinHandle<()>,
+    init_rx: std::sync::mpsc::Receiver<Result<()>>,
+) -> Result<std::thread::JoinHandle<()>> {
+    let rest = crate::db::BUSY_TIMEOUT.saturating_sub(shared::DELIVERY_INIT_TIMEOUT);
+    match init_rx.recv_timeout(rest) {
+        Ok(Ok(())) => {
+            crate::log::log_info(
+                "native",
+                "delivery.init.late_success",
+                "Delivery thread initialized after the first timeout",
+            );
+            Ok(handle)
+        }
+        Ok(Err(e)) => bail!("delivery start failed: {e:#}"),
+        Err(_) => bail!(
+            "delivery start timed out after {}s",
+            crate::db::BUSY_TIMEOUT.as_secs()
+        ),
+    }
+}
+
 /// Detect the submit edge from input text snapshots.
 ///
 /// The prompt can briefly become undetectable while a TUI redraws, so treat
@@ -1070,10 +1097,8 @@ impl Proxy {
                                 self.delivery_handle = Some(h);
                             }
                             shared::DeliveryStart::Disabled => {}
-                            shared::DeliveryStart::Pending(_h, _init_rx) => {
-                                // Preserve the Unix behavior a delivery-init
-                                // timeout has always had here: abort the session.
-                                bail!("delivery start timed out");
+                            shared::DeliveryStart::Pending(h, init_rx) => {
+                                self.delivery_handle = Some(finish_pending_delivery(h, init_rx)?);
                             }
                         }
                         delivery_started = true;
@@ -1275,11 +1300,9 @@ impl Proxy {
                                         self.delivery_handle = Some(h);
                                     }
                                     shared::DeliveryStart::Disabled => {}
-                                    shared::DeliveryStart::Pending(_h, _init_rx) => {
-                                        // Preserve the Unix behavior a
-                                        // delivery-init timeout has always had
-                                        // here: abort the session.
-                                        bail!("delivery start timed out");
+                                    shared::DeliveryStart::Pending(h, init_rx) => {
+                                        self.delivery_handle =
+                                            Some(finish_pending_delivery(h, init_rx)?);
                                     }
                                 }
                                 delivery_started = true;
@@ -2091,6 +2114,32 @@ mod tests {
         }
         data.push(0xE2); // Start of next ─
         assert_eq!(pending_utf8_bytes(&data), 2);
+    }
+
+    // ---- finish_pending_delivery tests ----
+
+    #[test]
+    fn pending_delivery_that_initializes_late_keeps_the_session() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let _ = tx.send(Ok(()));
+        });
+        let handle = super::finish_pending_delivery(handle, rx).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn pending_delivery_that_fails_or_vanishes_aborts_the_session() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Err(anyhow::anyhow!("db locked"))).unwrap();
+        let err = super::finish_pending_delivery(std::thread::spawn(|| {}), rx).unwrap_err();
+        assert_eq!(err.to_string(), "delivery start failed: db locked");
+
+        let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<()>>();
+        drop(tx);
+        let err = super::finish_pending_delivery(std::thread::spawn(|| {}), rx).unwrap_err();
+        assert_eq!(err.to_string(), "delivery start timed out after 30s");
     }
 
     // ---- title_write_safe tests ----

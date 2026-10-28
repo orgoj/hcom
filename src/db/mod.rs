@@ -37,12 +37,31 @@ pub use instances::InstanceRow;
 pub use instances::InstanceStatus;
 pub use instances::observe_pid_identity;
 
-/// Pragmas applied to every read-write connection. busy_timeout is 30s rather
-/// than SQLite's usual few seconds: with many agents' hooks writing at once, a
-/// 5s timeout failed the PTY launcher's PID write and killed a freshly spawned
-/// agent.
+/// busy_timeout of every read-write connection: 30s rather than SQLite's usual
+/// few seconds: with many agents' hooks writing at once, a 5s timeout failed
+/// the PTY launcher's PID write and killed a freshly spawned agent.
+pub const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Pragmas applied to every read-write connection after BUSY_TIMEOUT.
+/// synchronous=NORMAL: in WAL mode a commit no longer waits for an fsync
+/// (checkpoints still sync); the database stays consistent, and only the last
+/// commits before an OS crash or power loss can be lost. Every commit holds the
+/// write lock, and on a slow or full disk an fsync per commit took 0.5-1s, so
+/// writers queued for seconds behind each other.
 const CONNECTION_PRAGMAS: &str =
-    "PRAGMA busy_timeout=30000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;";
+    "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;";
+
+/// Set busy_timeout first: converting a fresh db to WAL takes a brief exclusive
+/// lock, so with a 0 timeout a concurrent first-open (or heavy load) fails
+/// instantly with SQLITE_BUSY. `nosync` (tests) turns syncing off entirely.
+fn apply_connection_pragmas(conn: &Connection, nosync: bool) -> rusqlite::Result<()> {
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    conn.execute_batch(CONNECTION_PRAGMAS)?;
+    if nosync {
+        conn.execute_batch("PRAGMA synchronous=OFF;")?;
+    }
+    Ok(())
+}
 
 /// Schema version - bump on any schema change.
 const SCHEMA_VERSION: i32 = 20;
@@ -159,14 +178,10 @@ impl HcomDb {
         // unit suite's runtime, serialized behind the test env lock. Tests
         // never exercise crash durability, so skip the syncs. Integration
         // fixtures opt their hcom processes in via HCOM_TEST_DB_NOSYNC.
-        if cfg!(test) || std::env::var_os("HCOM_TEST_DB_NOSYNC").is_some() {
-            conn.execute_batch("PRAGMA synchronous=OFF;")?;
-        }
-        // busy_timeout first: converting a fresh db to WAL takes a brief
-        // exclusive lock, so with a 0 timeout a concurrent first-open (or heavy
-        // load) fails instantly with SQLITE_BUSY. Setting the timeout up front
-        // makes the WAL conversion retry instead.
-        conn.execute_batch(CONNECTION_PRAGMAS)?;
+        apply_connection_pragmas(
+            &conn,
+            cfg!(test) || std::env::var_os("HCOM_TEST_DB_NOSYNC").is_some(),
+        )?;
 
         Ok(conn)
     }
@@ -275,7 +290,7 @@ impl HcomDb {
         }
         match Connection::open(&self.db_path) {
             Ok(new_conn) => {
-                if let Err(e) = new_conn.execute_batch(CONNECTION_PRAGMAS) {
+                if let Err(e) = apply_connection_pragmas(&new_conn, false) {
                     use crate::log::log_warn;
                     log_warn(
                         "native",
@@ -1058,6 +1073,28 @@ pub(super) mod tests {
     fn mode(path: &std::path::Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn connection_pragmas_set_busy_timeout_wal_and_normal_sync() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pragma = |conn: &Connection, name: &str| -> String {
+            conn.query_row(&format!("PRAGMA {name}"), [], |row| {
+                row.get::<_, rusqlite::types::Value>(0)
+            })
+            .map(|v| format!("{v:?}"))
+            .unwrap()
+        };
+        let conn = Connection::open(tmp.path().join("a.db")).unwrap();
+        apply_connection_pragmas(&conn, false).unwrap();
+        assert_eq!(pragma(&conn, "busy_timeout"), "Integer(30000)");
+        assert_eq!(pragma(&conn, "journal_mode"), "Text(\"wal\")");
+        assert_eq!(pragma(&conn, "synchronous"), "Integer(1)"); // NORMAL
+        assert_eq!(pragma(&conn, "foreign_keys"), "Integer(1)");
+
+        let conn = Connection::open(tmp.path().join("b.db")).unwrap();
+        apply_connection_pragmas(&conn, true).unwrap();
+        assert_eq!(pragma(&conn, "synchronous"), "Integer(0)"); // OFF
     }
 
     #[cfg(unix)]

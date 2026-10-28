@@ -38,6 +38,10 @@ pub(super) const USER_ACTIVITY_COOLDOWN_MS: u64 = 500;
 /// logs where startup got to, while it is still running.
 const STARTUP_NOT_READY_AFTER: Duration = Duration::from_secs(15);
 
+/// How long `start_delivery_thread` waits for the delivery thread's init
+/// before returning [`DeliveryStart::Pending`].
+pub(super) const DELIVERY_INIT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Output chunks after spawn that are logged individually with a preview.
 const STARTUP_TRACED_CHUNKS: usize = 8;
 
@@ -586,7 +590,7 @@ pub(super) fn start_delivery_thread(
     });
 
     // Wait for initialization result (with timeout to avoid blocking forever)
-    match init_rx.recv_timeout(Duration::from_secs(5)) {
+    match init_rx.recv_timeout(DELIVERY_INIT_TIMEOUT) {
         Ok(Ok(())) => {
             log_info(
                 "native",
@@ -607,7 +611,10 @@ pub(super) fn start_delivery_thread(
             log_error(
                 "native",
                 "delivery.init.timeout",
-                "Delivery thread init timed out after 5s",
+                &format!(
+                    "Delivery thread init timed out after {}s",
+                    DELIVERY_INIT_TIMEOUT.as_secs()
+                ),
             );
             // Detached thread is still running; keep the handle so shutdown can
             // join it, and flag as non-retryable (Pending).
