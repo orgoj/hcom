@@ -184,8 +184,10 @@ F5 (Screen), F6 (Transcript), F7 (Events), F8 (Log) and F9 (Report), shown in th
 `open_with` programs start independently, also while an hcom command runs; one that exits
 non-zero within 5 seconds writes its exit code and stderr to the log.
 Without `open_with`, the toolbar offers `xdg-open` and `x-terminal-emulator`. Further hcom
-buttons go into `BUTTONS` at the top of the script.
-`toolbar_breaks` lists button labels (built-in such as `Kill group`, `Columns`, `Refresh`,
+buttons go into `BUTTONS` at the top of the script. `Restart GUI` (after `Refresh`, no key, no
+confirmation) saves the window state and restarts hcom-gui, which then runs the current script
+and reads `gui.json` again.
+`toolbar_breaks` lists button labels (built-in such as `Kill group`, `Columns`, `Refresh`, `Restart GUI`,
 or `open_with`/`commands` labels; without the key, `…` or `▾` shown on the button) after which the
 buttons continue on a new row, e.g. a fixed layout for a portrait monitor; the rows still
 wrap when the window is narrower. An unknown label is reported in the log.

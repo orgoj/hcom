@@ -326,6 +326,19 @@ class App(unittest.TestCase):
     def button(self, label):
         return next(b for b in self.app.buttons if b != "---" and b["label"] == label)
 
+    def test_restart_gui_saves_state_and_reexecs_without_asking(self):
+        calls = []
+        self.addCleanup(setattr, gui.os, "execv", gui.os.execv)
+        gui.os.execv = lambda *a: calls.append(a)
+        items = [w for w in self.app.toolbar_items if isinstance(w, gui.ttk.Button)]
+        self.assertEqual([w.cget("text") for w in items][-3:], ["Columns…", "Refresh (Ctrl+R)", "Restart GUI"])
+        self.tab("Events")
+        items[-1].invoke()
+        self.assertEqual(calls, [(gui.sys.executable, gui.sys.orig_argv)])
+        self.assertEqual(self.asked, [])
+        with open(gui.STATE_FILE) as f:
+            self.assertEqual(gui.json.load(f)["bottom_tab"], "Events")
+
     def test_group_menu_lists_running_groups(self):
         menu = self.app.group_menu
         labels = [menu.entrycget(i, "label") if menu.type(i) == "command" else "---"
@@ -1571,12 +1584,12 @@ class App(unittest.TestCase):
         self.assertEqual(layout[0][-1], "Kill group ▾")
         self.assertNotEqual(layout[1][0], "|")
         self.assertEqual(layout[1][-1], "Columns…")
-        self.assertEqual(layout[2], ["Refresh (Ctrl+R)"])
+        self.assertEqual(layout[2], ["Refresh (Ctrl+R)", "Restart GUI"])
         self.assertIn("toolbar_breaks: unknown buttons: Nope", self.app.log.get("1.0", "end"))
 
     def test_toolbar_break_after_the_last_button_adds_no_empty_row(self):
         with open(gui.CONFIG_FILE, "w") as f:
-            f.write(gui.json.dumps({"toolbar_breaks": ["Refresh"]}))
+            f.write(gui.json.dumps({"toolbar_breaks": ["Restart GUI"]}))
         self.restart()
         self.app._wrap_toolbar(0)
         self.assertEqual(len(self.toolbar_layout()), 1)

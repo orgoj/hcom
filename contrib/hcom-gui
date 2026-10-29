@@ -21,6 +21,7 @@ other terminals run DEFAULT_ATTACH.
 "commands" run as written, without a selected row (optional: confirm, cwd, key).
 The toolbar buttons wrap into as many rows as the window width needs; "toolbar_breaks" (button
 labels without key or "…"/"▾", e.g. ["Kill group", "Columns"]) also starts a new row after each named button.
+Restart GUI (after Refresh) saves the state and restarts hcom-gui with the current script and gui.json.
 "key" (any button) is a Tk event sequence bound in the table, e.g. "z" or "<F2>", shown
 in the button label ("Zed (z)").
 "open_with" programs also start while an hcom command runs; a quick non-zero exit is logged.
@@ -770,7 +771,7 @@ class App(tk.Tk):
         if not isinstance(self.toolbar_breaks, list):
             self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: toolbar_breaks: not a list of button labels")
             self.toolbar_breaks = []
-        labels = {b["label"] for b in self.buttons if b != "---" and not b.get("bar")} | {"Columns", "Refresh"}
+        labels = {b["label"] for b in self.buttons if b != "---" and not b.get("bar")} | {"Columns", "Refresh", "Restart GUI"}
         if unknown := [str(x) for x in self.toolbar_breaks if x not in labels]:
             self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: toolbar_breaks: unknown buttons: {', '.join(unknown)}")
         self.config_columns, unknown = pick_columns(config.get("columns"))
@@ -866,8 +867,10 @@ class App(tk.Tk):
                 self.toolbar_items.append("break")
         self.columns_button = ttk.Button(self.toolbar, text="Columns…", command=self.choose_columns)
         self.refresh_button = ttk.Button(self.toolbar, text=f"Refresh ({key_label(REFRESH_KEY)})", command=self.refresh)
+        self.restart_button = ttk.Button(self.toolbar, text="Restart GUI", command=self.restart_gui)
         self.toolbar_items.append(ttk.Separator(self.toolbar, orient=tk.VERTICAL))
-        for label, widget in (("Columns", self.columns_button), ("Refresh", self.refresh_button)):
+        for label, widget in (("Columns", self.columns_button), ("Refresh", self.refresh_button),
+                              ("Restart GUI", self.restart_button)):
             self.toolbar_items += [widget, "break"] if label in self.toolbar_breaks else [widget]
         self.toolbar_rows = None  # widgets per row of the current layout
         self.toolbar.bind("<Configure>", lambda e: self._wrap_toolbar(e.width))
@@ -1694,6 +1697,12 @@ class App(tk.Tk):
     def _on_close(self):
         self._save_state()
         self.destroy()
+
+    def restart_gui(self):
+        """Save the state and replace this process with a new hcom-gui (same interpreter and
+        arguments), which loads the current script and gui.json."""
+        self._save_state()
+        os.execv(sys.executable, sys.orig_argv)
 
     def _save_state(self):
         state = {
