@@ -529,7 +529,12 @@ fn route_claude_hook(
             let (code, stdout) = handle_stop_failure(db, payload, instance_name);
             (code, stdout, None)
         }
-        HOOK_POLL => handle_poll(db, ctx, instance_name, &instance_data),
+        HOOK_POLL => {
+            if let Some(text) = payload.raw["last_assistant_message"].as_str() {
+                crate::status_columns::record_reply(db, instance_name, text);
+            }
+            handle_poll(db, ctx, instance_name, &instance_data)
+        }
         HOOK_NOTIFY => {
             let (code, stdout) = handle_notify(db, payload, instance_name, &updates);
             (code, stdout, None)
@@ -5264,6 +5269,38 @@ mod tests {
             ("HCOM_PTY_MODE".to_string(), "1".to_string()),
         ]);
         HcomContext::from_env(&env, PathBuf::from("/tmp"))
+    }
+
+    #[test]
+    #[serial]
+    fn stop_records_status_columns_from_last_assistant_message() {
+        let (dir, _guard, db) = make_isolated_test_db();
+        std::fs::write(
+            dir.path().join(".hcom/config.toml"),
+            "[[status_column]]\nname = \"status\"\nregex = '^STATUS:\\s*(\\S+)'\n",
+        )
+        .unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, session_id, tool, status, status_time, last_seen, created_at)
+                 VALUES ('nova', 'sess-1', 'claude', 'active', 0, 0, 0)",
+                [],
+            )
+            .unwrap();
+        bind_validated_session(&db, "sess-1", "nova");
+
+        let raw = serde_json::json!({
+            "session_id": "sess-1",
+            "hook_event_name": "Stop",
+            "last_assistant_message": "Done.\n\nSTATUS: WAITING\nNext: bin",
+        });
+        let mut payload = HookPayload::from_claude(raw);
+        let _ = route_claude_hook(&db, &make_pty_ctx(), HOOK_POLL, &mut payload);
+
+        let stored = crate::status_columns::stored(&db);
+        assert_eq!(stored.len(), 1, "{:?}", db.kv_prefix("status_columns:"));
+        assert_eq!(stored[0].0, "nova");
+        assert_eq!(stored[0].2["status"]["value"], "WAITING");
     }
 
     fn insert_broadcast_from_luna(db: &HcomDb, text: &str) {

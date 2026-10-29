@@ -121,7 +121,7 @@ pub fn bash_completion_script() -> &'static str {
                     if [[ "$cur" == @* ]]; then
                         COMPREPLY=( $(compgen -W "$(hcom agent list --groups 2>/dev/null)" -- "$cur") )
                     else
-                        COMPREPLY=( $(compgen -W "--all --local --json --names --groups --for-agents --for-humans $(hcom agent list --groups 2>/dev/null)" -- "$cur") )
+                        COMPREPLY=( $(compgen -W "--all --local --json --names --groups --for-agents --for-humans --status $(hcom agent list --groups 2>/dev/null)" -- "$cur") )
                     fi
                     ;;
                 show)

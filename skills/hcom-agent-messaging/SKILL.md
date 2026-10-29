@@ -85,6 +85,8 @@ tell any agent:
 
 **Roaming catalog agent**: `"roaming": true` makes `@<name>` address `<name>_<project>_<hash>` for the sender's Git/project root (`<hash>` = 3-digit number from SHA-256 of the root path, so roots with the same basename get different instances) and start it there when missing. Send and `hcom agent <name>` print a `Note:` line on stdout with that instance name; address it by that name. Instances of the role in other projects are separate agents. `hcom list` marks each instance `↻<name>`; `hcom agent list --json` gives a roaming entry's running `instances`.
 
+**Agent status columns**: `[[status_column]]` tables in `~/.hcom/config.toml` (`name`, `regex`, `reset = "keep" | "turn"`) take values from each agent's last reply when it goes idle. `hcom agent list --status` shows the latest values per catalog agent (also for stopped ones); `--status --json` adds `status_columns` with full values per instance and `latest`. Remote (relay) agents are not covered.
+
 **Disabled catalog agent**: `"disabled": true` in `agents.json` (entry or `defaults`; a later layer's `false` re-enables) makes hcom treat the agent as undefined: no launch, send autostart, group membership or listing; `hcom agent list --all` shows it marked `disabled`. A running instance keeps receiving messages and can be killed by name.
 
 **Catalog sidecar**: `<stem>.local.json` next to any catalog (`agents.json` → `agents.local.json`, usually gitignored) is merged into it for temporary changes: same fields, may add or disable agents, same scope as its catalog, no `imports`. `hcom agent show <name>` lists it under `sources`.

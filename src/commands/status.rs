@@ -240,6 +240,7 @@ pub fn cmd_status(db: &HcomDb, args: &StatusArgs, _ctx: Option<&CommandContext>)
     let config_errors: Vec<String> = crate::config::HcomConfig::load_with_errors(None)
         .1
         .into_values()
+        .chain(crate::status_columns::load().1)
         .collect();
     let config_valid = config_errors.is_empty();
     let bootstrap_exclude = crate::config::HcomConfig::load(None).bootstrap_exclude;

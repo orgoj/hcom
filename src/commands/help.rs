@@ -1329,7 +1329,8 @@ Commands:\n\
 \x20 agent        Launch named agents from a JSON catalog (\"disabled\": true hides one;\n\
 \x20              roaming ones run as <name>_<project>_<hash>, <hash> = 3 digits,\n\
 \x20              and send/launch print a Note with that name;\n\
-\x20              <stem>.local.json beside a catalog overrides it)\n\
+\x20              <stem>.local.json beside a catalog overrides it;\n\
+\x20              agent list --status: values from each agent's last reply)\n\
 \x20 relay        Cross-device sync + relay daemon\n\
 \x20 archive      Query past hcom sessions\n\
 \x20 reset        Archive and clear database\n\
@@ -1813,8 +1814,19 @@ mod tests {
     }
 
     #[test]
+    fn help_documents_agent_list_status_columns() {
+        assert!(
+            get_help_text().contains("agent list --status: values from each agent's last reply")
+        );
+        let help = get_command_help("agent");
+        assert!(help.contains("[--for-agents|--for-humans] [--status]"));
+        assert!(help.contains("[[status_column]] tables in config.toml"));
+        assert!(help.contains("Remote (relay) agents and instances without a"));
+    }
+
+    #[test]
     fn help_documents_catalog_sidecar() {
-        assert!(get_help_text().contains("<stem>.local.json beside a catalog overrides it)"));
+        assert!(get_help_text().contains("<stem>.local.json beside a catalog overrides it;"));
         let help = get_command_help("agent");
         assert!(help.contains("Sidecar: <stem>.local.json beside any catalog"));
         assert!(help.contains("It may not use \"imports\""));

@@ -3360,6 +3360,163 @@ fn agent_dry_run_renders_the_hcom_command_without_launching() {
     assert_eq!(list.trim(), "[]", "dry-run must not create an instance");
 }
 
+/// Catalog `rev` (roaming, two stored instances) and `solo` (no values), two
+/// status columns, values seeded as the Stop hook stores them.
+fn status_columns_fixture() -> Hcom {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"rev":{"cli":"codex","roaming":true},"solo":{"dir":"/tmp","cli":"claude"}}}"#,
+    )
+    .expect("write catalog");
+    std::fs::write(
+        h.path().join("config.toml"),
+        "[[status_column]]\nname = \"status\"\nregex = '^STATUS:\\s*(\\S+)'\n\n\
+         [[status_column]]\nname = \"next\"\nregex = '^Next:\\s*(.*)$'\n",
+    )
+    .expect("write config");
+    let (code, _out, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "init db: {stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open db");
+    let next = "wait for bin to finish the long update-all run and check the log";
+    for (instance, entry) in [
+        (
+            "rev_old",
+            serde_json::json!({"agent": "rev", "columns": {
+                "status": {"value": "DONE", "updated_at": 100}}}),
+        ),
+        (
+            "rev_new",
+            serde_json::json!({"agent": "rev", "columns": {
+                "status": {"value": "WAITING", "updated_at": 200},
+                "next": {"value": next, "updated_at": 200},
+                "removed": {"value": "x", "updated_at": 200}}}),
+        ),
+        // An adhoc instance under a catalog name: not attributed to the catalog agent.
+        (
+            "solo",
+            serde_json::json!({"agent": null, "columns": {
+                "status": {"value": "ADHOC", "updated_at": 300}}}),
+        ),
+    ] {
+        conn.execute(
+            "INSERT INTO kv (key, value) VALUES (?1, ?2)",
+            rusqlite::params![format!("status_columns:{instance}"), entry.to_string()],
+        )
+        .expect("seed kv");
+    }
+    h
+}
+
+#[test]
+fn agent_list_without_status_flag_is_unchanged() {
+    let h = status_columns_fixture();
+    let (code, stdout, stderr) = h.run(["agent", "list", "--json"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(!stdout.contains("status_columns"), "stdout={stdout}");
+    let (code, stdout, _) = h.run(["agent", "list", "--for-humans"]);
+    assert_eq!(code, 0);
+    assert!(!stdout.contains("WAITING"), "stdout={stdout}");
+    let (code, stdout, _) = h.run(["agent", "list", "--for-agents"]);
+    assert_eq!(code, 0);
+    assert!(!stdout.contains("WAITING"), "stdout={stdout}");
+}
+
+#[test]
+fn agent_list_status_shows_latest_values_of_stored_instances() {
+    let h = status_columns_fixture();
+
+    let (code, stdout, stderr) = h.run(["agent", "list", "--status", "--for-humans"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let header = stdout.lines().next().unwrap_or("");
+    assert!(
+        header.contains("STATUS") && header.ends_with("next"),
+        "stdout={stdout}"
+    );
+    let rev = stdout.lines().find(|l| l.starts_with("rev ")).unwrap();
+    assert!(rev.contains("WAITING"), "stdout={stdout}");
+    assert!(
+        rev.contains("wait for bin to finish the long update-…"),
+        "table value is shortened: {stdout}"
+    );
+    let solo = stdout.lines().find(|l| l.starts_with("solo ")).unwrap();
+    assert!(
+        solo.split_whitespace().rev().take(2).all(|c| c == "-"),
+        "stdout={stdout}"
+    );
+
+    let (code, stdout, _) = h.run(["agent", "list", "--status", "--for-agents"]);
+    assert_eq!(code, 0);
+    let rev = stdout.lines().find(|l| l.starts_with("rev ")).unwrap();
+    assert!(
+        rev.ends_with("[status: WAITING; next: wait for bin to finish the long update-…]"),
+        "stdout={stdout}"
+    );
+    assert!(!stdout.contains("removed"), "stdout={stdout}");
+
+    let (code, stdout, _) = h.run(["agent", "list", "--status", "--json"]);
+    assert_eq!(code, 0);
+    let agents: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    let rev = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "rev")
+        .unwrap();
+    let sc = &rev["status_columns"];
+    assert_eq!(sc["latest"], "rev_new");
+    assert_eq!(sc["instances"]["rev_old"][0]["value"], "DONE");
+    assert_eq!(
+        sc["instances"]["rev_old"][1]["value"],
+        serde_json::Value::Null
+    );
+    let new = &sc["instances"]["rev_new"];
+    assert_eq!(
+        new.as_array().unwrap().len(),
+        2,
+        "only configured columns: {new}"
+    );
+    assert_eq!(new[1]["name"], "next");
+    assert_eq!(
+        new[1]["value"],
+        "wait for bin to finish the long update-all run and check the log"
+    );
+    assert_eq!(new[1]["updated_at"], 200);
+    let solo = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "solo")
+        .unwrap();
+    assert_eq!(
+        solo["status_columns"],
+        serde_json::json!({"columns": ["status", "next"], "latest": null, "instances": {}})
+    );
+    assert!(!stdout.contains("ADHOC"), "stdout={stdout}");
+
+    let (code, _, stderr) = h.run(["agent", "list", "--status", "--names"]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("--status cannot be used"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
+fn status_reports_an_invalid_status_column() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("config.toml"),
+        "[[status_column]]\nname = \"bad\"\nregex = '('\n",
+    )
+    .expect("write config");
+    let (_code, stdout, stderr) = h.run(["status"]);
+    assert!(
+        stdout.contains("status_column 'bad': invalid regex"),
+        "stdout={stdout} stderr={stderr}"
+    );
+}
+
 #[test]
 fn agent_dry_run_exports_the_catalog_name_separately_from_the_instance_name() {
     let h = Hcom::new();

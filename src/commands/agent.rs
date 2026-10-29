@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 use crate::db::HcomDb;
 use crate::shared::{SenderIdentity, SenderKind};
+use crate::status_columns::StoredColumns;
 
 const GLOBAL_FILE: &str = "agents.json";
 const PROJECT_DIR: &str = ".hcom";
@@ -44,7 +45,7 @@ pub fn help_text() -> String {
   hcom agent <name> [flags] [tool-args...]   Launch a catalog agent (no-op if already running)
   hcom agent @<group> [flags]                Launch every agent in a catalog group
   hcom agent list [@<group>] [--all] [--local] [--json] [--names|--groups]
-                 [--for-agents|--for-humans]
+                 [--for-agents|--for-humans] [--status]
                                              Catalog entries, filtered names, or reachable groups
   hcom agent show <name> [flags]             Effective config and the exact command
   hcom agent attach <name> [flags]           Focus a running agent's Herdr pane
@@ -161,6 +162,14 @@ Listing:
   --for-humans              Full table, even when output is not a terminal
   Without either flag, a terminal gets the table and anything else --for-agents.
   Table output shows the effective model; JSON also includes reasoning.
+  --status                  Add status columns: values taken from each agent's
+                            last reply by [[status_column]] tables in config.toml
+                            (name, regex, reset = \"keep\" | \"turn\"). The table and
+                            --for-agents show the latest instance's values shortened;
+                            --json adds \"status_columns\": {{\"columns\", \"latest\",
+                            \"instances\": {{<instance>: [{{name, value, updated_at}}]}}}}
+                            in full. Remote (relay) agents and instances without a
+                            catalog agent are not covered.
 
 Flags:
   --cli, --tool <tool>      claude | codex | gemini | ... (default: {DEFAULT_CLI})
@@ -2892,6 +2901,7 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
     let local = cli.passthrough.iter().any(|a| a == "--local");
     let for_agents = cli.passthrough.iter().any(|a| a == "--for-agents");
     let for_humans = cli.passthrough.iter().any(|a| a == "--for-humans");
+    let with_status = cli.passthrough.iter().any(|a| a == "--status");
     let group_filters: Vec<&str> = cli
         .passthrough
         .iter()
@@ -2908,6 +2918,9 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
     }
     if for_agents && for_humans {
         bail!("--for-agents and --for-humans cannot be used together");
+    }
+    if with_status && (names_only || groups_only) {
+        bail!("--status cannot be used with --names or --groups");
     }
     // Without an explicit choice, an interactive terminal gets the full table and
     // everything else (an agent's shell, a pipe) gets the name/description view.
@@ -3000,6 +3013,12 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
         return Ok(0);
     }
 
+    let status_columns = if with_status {
+        AgentStatusColumns::load()
+    } else {
+        AgentStatusColumns::default()
+    };
+
     if brief && !json {
         let width = names
             .keys()
@@ -3016,7 +3035,21 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
             let description = effective(name, def, &Cli::default())
                 .description
                 .unwrap_or_else(|| "-".to_string());
-            println!("{name:<width$}  {marker}{description}");
+            let values = status_columns
+                .latest_cells(name)
+                .into_iter()
+                .zip(&status_columns.names)
+                .filter(|(value, _)| value != "-")
+                .map(|(value, column)| format!("{column}: {value}"))
+                .collect::<Vec<_>>();
+            if values.is_empty() {
+                println!("{name:<width$}  {marker}{description}");
+            } else {
+                println!(
+                    "{name:<width$}  {marker}{description}  [{}]",
+                    values.join("; ")
+                );
+            }
         }
         return Ok(0);
     }
@@ -3054,13 +3087,16 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
             if eff.roaming {
                 entry["instances"] = serde_json::json!(roaming_instances(name, &live));
             }
+            if with_status {
+                entry["status_columns"] = status_columns.json(name);
+            }
             out.push(entry);
         }
         println!("{}", serde_json::to_string_pretty(&out)?);
         return Ok(0);
     }
 
-    let rows: Vec<[String; 6]> = names
+    let rows: Vec<Vec<String>> = names
         .iter()
         .map(|(name, source)| {
             let def = catalogs.resolve_any(name).unwrap_or_default();
@@ -3087,7 +3123,7 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
                 Some(a) => format!("● {}", a.status),
                 None => "○ -".to_string(),
             };
-            [
+            let mut row = vec![
                 name.clone(),
                 eff.cli,
                 eff.model.unwrap_or_else(|| "-".to_string()),
@@ -3098,18 +3134,23 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
                     shorten_home(&eff.dir)
                 },
                 format!("{status}  [{source}]{marker}"),
-            ]
+            ];
+            row.extend(status_columns.latest_cells(name));
+            row
         })
         .collect();
 
-    let headers = ["NAME", "CLI", "MODEL", "WHERE", "DIR", "STATUS"];
-    let mut widths = headers.map(str::len);
+    let mut headers: Vec<String> = ["NAME", "CLI", "MODEL", "WHERE", "DIR", "STATUS"]
+        .map(String::from)
+        .to_vec();
+    headers.extend(status_columns.names.iter().cloned());
+    let mut widths: Vec<usize> = headers.iter().map(|h| h.chars().count()).collect();
     for row in &rows {
         for (i, cell) in row.iter().enumerate() {
             widths[i] = widths[i].max(cell.chars().count());
         }
     }
-    let render = |cells: &[String; 6]| {
+    let render = |cells: &[String]| {
         let mut line = String::new();
         for (i, cell) in cells.iter().enumerate() {
             if i + 1 == cells.len() {
@@ -3120,11 +3161,114 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
         }
         line
     };
-    println!("{}", render(&headers.map(String::from)));
+    println!("{}", render(&headers));
     for row in &rows {
         println!("{}", render(row));
     }
     Ok(0)
+}
+
+/// Stored status column values (`hcom agent list --status`), grouped by
+/// catalog agent; only currently configured columns are shown.
+#[derive(Default)]
+struct AgentStatusColumns {
+    /// Configured column names in config order.
+    names: Vec<String>,
+    /// Catalog agent -> (instance, column -> {value, updated_at}).
+    by_agent: BTreeMap<String, Vec<(String, StoredColumns)>>,
+}
+
+impl AgentStatusColumns {
+    fn load() -> Self {
+        let names: Vec<String> = crate::status_columns::columns()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        let mut by_agent: BTreeMap<String, Vec<_>> = BTreeMap::new();
+        if !names.is_empty()
+            && let Ok(db) = HcomDb::open()
+        {
+            // An instance without a catalog agent is not covered, even under a catalog name.
+            for (instance, agent, columns) in crate::status_columns::stored(&db) {
+                if let Some(agent) = agent {
+                    by_agent.entry(agent).or_default().push((instance, columns));
+                }
+            }
+        }
+        Self { names, by_agent }
+    }
+
+    fn updated_at(&self, columns: &StoredColumns) -> i64 {
+        self.names
+            .iter()
+            .filter_map(|n| columns.get(n)?["updated_at"].as_i64())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The agent's most recently updated instance that has a configured value.
+    fn latest(&self, agent: &str) -> Option<&(String, StoredColumns)> {
+        self.by_agent
+            .get(agent)?
+            .iter()
+            .filter(|(_, columns)| self.updated_at(columns) > 0)
+            .max_by_key(|(instance, columns)| (self.updated_at(columns), instance.clone()))
+    }
+
+    /// One table cell per configured column: the latest instance's value on
+    /// one line, shortened; "-" when there is none.
+    fn latest_cells(&self, agent: &str) -> Vec<String> {
+        let latest = self.latest(agent);
+        self.names
+            .iter()
+            .map(|n| {
+                latest
+                    .and_then(|(_, columns)| columns.get(n)?["value"].as_str())
+                    .map(shorten_cell)
+                    .unwrap_or_else(|| "-".to_string())
+            })
+            .collect()
+    }
+
+    /// `{"columns": [name], "latest": instance|null,
+    /// "instances": {instance: [{name, value, updated_at}]}}`.
+    fn json(&self, agent: &str) -> serde_json::Value {
+        let mut instances = serde_json::Map::new();
+        for (instance, columns) in self.by_agent.get(agent).into_iter().flatten() {
+            if self.updated_at(columns) == 0 {
+                continue;
+            }
+            let list: Vec<serde_json::Value> = self
+                .names
+                .iter()
+                .map(|n| {
+                    let stored = columns.get(n);
+                    serde_json::json!({
+                        "name": n,
+                        "value": stored.map(|v| v["value"].clone()).unwrap_or(serde_json::Value::Null),
+                        "updated_at": stored.map(|v| v["updated_at"].clone()).unwrap_or(serde_json::Value::Null),
+                    })
+                })
+                .collect();
+            instances.insert(instance.clone(), serde_json::Value::Array(list));
+        }
+        serde_json::json!({
+            "columns": self.names,
+            "latest": self.latest(agent).map(|(instance, _)| instance),
+            "instances": instances,
+        })
+    }
+}
+
+const STATUS_CELL_MAX: usize = 40;
+
+fn shorten_cell(value: &str) -> String {
+    let line = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= STATUS_CELL_MAX {
+        return line;
+    }
+    let cut: String = line.chars().take(STATUS_CELL_MAX - 1).collect();
+    format!("{cut}…")
 }
 
 fn shorten_home(path: &str) -> String {

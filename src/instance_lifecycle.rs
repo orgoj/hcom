@@ -737,6 +737,7 @@ pub fn try_set_status(
     let (status_changed, event) = committed?;
     if status_changed {
         crate::notify::wake(db, instance_name, crate::notify::WakeKind::DELIVERY_LOOPS);
+        crate::status_columns::on_status_change(db, instance_name, status);
     }
     if let Some((event_id, data)) = event {
         db.after_event_logged(event_id, "status", instance_name, &data);

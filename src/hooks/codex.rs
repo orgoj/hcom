@@ -943,6 +943,9 @@ fn handle_stop(db: &HcomDb, ctx: &HcomContext, payload: &HookPayload) -> HookRes
         None => return hook_noop(),
     };
 
+    if let Some(text) = payload.raw["last_assistant_message"].as_str() {
+        crate::status_columns::record_reply(db, &instance.name, text);
+    }
     lifecycle::set_status(db, &instance.name, ST_LISTENING, "", Default::default());
     common::notify_hook_instance_with_db(db, &instance.name);
     hook_noop()
@@ -1969,6 +1972,49 @@ mod tests {
             .collect();
         let ctx = HcomContext::from_env(&env, dir.path().to_path_buf());
         (dir, db, ctx)
+    }
+
+    #[test]
+    #[serial]
+    fn stop_records_status_columns_from_last_assistant_message() {
+        let (_dir, hcom_dir, _home, _guard) = isolated_test_env();
+        std::fs::write(
+            hcom_dir.join("config.toml"),
+            "[[status_column]]\nname = \"status\"\nregex = '^STATUS:\\s*(\\S+)'\n",
+        )
+        .unwrap();
+        let db = HcomDb::open_raw(&hcom_dir.join("test.db")).unwrap();
+        db.init_db().unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, tool, status, status_context, status_time, created_at, session_id, directory, transcript_path)
+                 VALUES ('luna', 'codex', 'active', '', 0, 0, 'main-sid', '/work', '/rollout-main.jsonl')",
+                [],
+            )
+            .unwrap();
+        db.set_process_binding("proc-1", "main-sid", "luna")
+            .unwrap();
+        let env = [("HCOM_PROCESS_ID".to_string(), "proc-1".to_string())]
+            .into_iter()
+            .collect();
+        let ctx = HcomContext::from_env(&env, hcom_dir.clone());
+
+        let payload = HookPayload::from_codex_native(
+            "Stop",
+            serde_json::json!({
+                "session_id": "main-sid",
+                "last_assistant_message": "done\nSTATUS: DONE_FOLLOWUP",
+            }),
+        );
+        handle_stop(&db, &ctx, &payload);
+
+        let stored = crate::status_columns::stored(&db);
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].2["status"]["value"], "DONE_FOLLOWUP");
+        assert_eq!(
+            db.get_instance_full("luna").unwrap().unwrap().status,
+            ST_LISTENING
+        );
     }
 
     fn assert_main_thread_untouched(db: &HcomDb, label: &str) {

@@ -33,6 +33,7 @@ mod runtime_env;
 pub mod scripts;
 pub mod shared;
 mod shell_env;
+mod status_columns;
 mod sys;
 pub mod terminal;
 mod tool;

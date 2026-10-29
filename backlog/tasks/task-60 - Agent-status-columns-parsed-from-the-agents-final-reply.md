@@ -1,11 +1,11 @@
 ---
 id: TASK-60
 title: Agent status columns parsed from the agent's final reply
-status: To Do
+status: Done
 assignee:
   - '@hcom_dev'
 created_date: '2026-10-29 05:22'
-updated_date: '2026-10-29 05:45'
+updated_date: '2026-10-29 06:32'
 labels: []
 dependencies: []
 priority: medium
@@ -33,14 +33,14 @@ Risks: confirm on a real Claude Stop payload that last_assistant_message is pres
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 With [[status_column]] name="status" regex="^STATUS:\s*(\S+)" configured, after an agent's turn ending with 'STATUS: WAITING' 'hcom agent list --status' shows WAITING for that agent
-- [ ] #2 Claude and Codex values come from the Stop payload last_assistant_message; another transcript-backed CLI gets its value from the last transcript exchange; tests cover both paths
-- [ ] #3 reset=keep: a later reply without a match leaves the previous value; reset=turn: the value is empty once the agent starts a new turn
-- [ ] #4 A stopped agent still shows its last values in 'hcom agent list --status'
-- [ ] #5 The table and brief (non-TTY) view shorten long values; --json carries full values and updated_at per column
-- [ ] #6 No [[status_column]] configured: hooks do no extraction work and 'hcom agent list' output is unchanged; an invalid regex is reported by hcom (status/config check) and does not break hooks
-- [ ] #7 Built-in help, README, docs and skills/hcom-agent-messaging describe the config and --status, including that remote/relay agents are not implemented
-- [ ] #8 --json lists, for each catalog agent, the values of every instance that has any (live and stopped, roaming included) keyed by instance name, with the most recent instance marked, so hcom-gui can fill per-instance rows
+- [x] #1 With [[status_column]] name="status" regex="^STATUS:\s*(\S+)" configured, after an agent's turn ending with 'STATUS: WAITING' 'hcom agent list --status' shows WAITING for that agent
+- [x] #2 Claude and Codex values come from the Stop payload last_assistant_message; another transcript-backed CLI gets its value from the last transcript exchange; tests cover both paths
+- [x] #3 reset=keep: a later reply without a match leaves the previous value; reset=turn: the value is empty once the agent starts a new turn
+- [x] #4 A stopped agent still shows its last values in 'hcom agent list --status'
+- [x] #5 The table and brief (non-TTY) view shorten long values; --json carries full values and updated_at per column
+- [x] #6 No [[status_column]] configured: hooks do no extraction work and 'hcom agent list' output is unchanged; an invalid regex is reported by hcom (status/config check) and does not break hooks
+- [x] #7 Built-in help, README, docs and skills/hcom-agent-messaging describe the config and --status, including that remote/relay agents are not implemented
+- [x] #8 --json lists, for each catalog agent, the values of every instance that has any (live and stopped, roaming included) keyed by instance name, with the most recent instance marked, so hcom-gui can fill per-instance rows
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -56,3 +56,9 @@ User decisions (2026-10-29): extract at idle and store; staleness handled per co
 
 Spec addition for TASK-61: hcom-gui rows are per instance (roaming has several), so --json carries per-instance values; instances without a catalog agent (adhoc) are not covered.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+New fork module src/status_columns.rs: [[status_column]] (name, regex, reset keep|turn) from config.toml; values from the Claude/Codex Stop payload last_assistant_message, other CLIs from the last transcript exchange when they go idle; stored per instance in kv (status_columns:<instance>, with catalog agent); reset=turn cleared on a new turn. Upstream touch: one call each in try_set_status, the Claude Stop dispatch and Codex handle_stop, plus hcom status listing invalid entries. hcom agent list --status: shortened latest values in table and --for-agents view, --json status_columns {columns, latest, instances}; adhoc instances excluded. Verified: unit tests (parse, extract, keep/turn, no-config no-op, Claude and Codex payload, Pi transcript fallback), cli_smoke agent_list_* and status_reports_an_invalid_status_column, full cargo test --bin hcom, clippy 0; fallback read 9-16 ms on real antigravity/hermes transcripts. Reviewed by agent_review.
+<!-- SECTION:FINAL_SUMMARY:END -->

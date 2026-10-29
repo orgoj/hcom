@@ -358,12 +358,28 @@ hcom agent list                  # table in a terminal, name + description elsew
 hcom agent list --all            # also agents hidden by selective imports, and disabled ones
 hcom agent list --local          # project agents only
 hcom agent list @review --names  # one group, names only
+hcom agent list --status         # add status columns from each agent's last reply
 hcom agent attach docs           # focus the running agent's Herdr pane
 hcom agent edit [--project]      # open the global (or project) catalog in $VISUAL/$EDITOR
 hcom agent completions bash      # completion for agent and group names (bash|zsh|fish)
 ```
 
 `show` and `attach` accept the same flags as a launch (`--as`, `--cli`, `--catalog`, ...), so `hcom agent show docs --as docs2` previews that variant. `list` also takes `--json`, `--groups`, `--for-agents` and `--for-humans`.
+
+**Status columns.** Agents often end each turn with a fixed block (`STATUS: WAITING`, `Next: ...`). Define columns for it in `~/.hcom/config.toml`; when an agent goes idle, hcom applies each regex to its last reply (Claude and Codex: the Stop hook's `last_assistant_message`; other CLIs: the transcript's last exchange) and stores the value per instance, so it survives a stop:
+
+```toml
+[[status_column]]
+name = "status"
+regex = '^STATUS:\s*(\S+)'      # multi-line; capture group 1 (or the whole match) of the last match
+
+[[status_column]]
+name = "next"
+regex = '^Next:\s*(.*)$'
+reset = "turn"                  # "keep" (default): stays until a later reply matches again
+```
+
+`hcom agent list --status` adds one column per entry with the values of the agent's most recently updated instance, shortened to one line (also in the `--for-agents` view). `--json` adds `"status_columns": {"columns": [<name>], "latest": <instance>, "instances": {<instance>: [{"name", "value", "updated_at"}]}}` (columns in config order) with full values for every stored instance, roaming ones included. Without `--status` the output is unchanged. `hcom status` reports invalid entries. Remote (relay) agents and instances without a catalog agent are not covered.
 
 Launch flags override the catalog for one run: `--cli` (alias `--tool`), `--dir`, `--model`, `--reasoning`, `--tag`, `--terminal`, `--terminal-command`, `--session`, `--window`, `--hcom-prompt`, `--hcom-system-prompt`, `--env K=V`, `--inherit-env VAR`, `--attach`, `--clean`, `--last N`. `--catalog <file>` replaces the project catalog and `--no-project` ignores it. hcom forwards every other flag to the tool. `hcom agent --help` has the full reference.
 
