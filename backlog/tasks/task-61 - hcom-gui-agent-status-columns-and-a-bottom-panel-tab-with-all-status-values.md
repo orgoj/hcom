@@ -4,7 +4,7 @@ title: 'hcom-gui: agent status columns and a bottom panel tab with all status va
 status: Idea
 assignee: []
 created_date: '2026-10-29 05:39'
-updated_date: '2026-10-29 05:41'
+updated_date: '2026-10-29 05:42'
 labels: []
 dependencies:
   - TASK-60
@@ -23,4 +23,6 @@ Follow-up to TASK-60 (agent status columns parsed from the final reply), consumi
 
 <!-- SECTION:NOTES:BEGIN -->
 User decision (2026-10-29): the tab order is an explicit list in ~/.hcom/gui.json, independent of the table columns, because the tab must put different values first than the columns show. Proposed: values not in the list follow in [[status_column]] config order (to confirm at specification).
+
+User decision (2026-10-29, replaces the proposal above): with the gui.json list defined, the tab shows only the listed values in list order; without it, the default shows everything: values enabled as table columns first (in column order), then the rest in [[status_column]] config order.
 <!-- SECTION:NOTES:END -->
