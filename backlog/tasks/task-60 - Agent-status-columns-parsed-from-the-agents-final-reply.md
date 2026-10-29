@@ -5,7 +5,7 @@ status: To Do
 assignee:
   - '@hcom_dev'
 created_date: '2026-10-29 05:22'
-updated_date: '2026-10-29 05:32'
+updated_date: '2026-10-29 05:45'
 labels: []
 dependencies: []
 priority: medium
@@ -40,6 +40,7 @@ Risks: confirm on a real Claude Stop payload that last_assistant_message is pres
 - [ ] #5 The table and brief (non-TTY) view shorten long values; --json carries full values and updated_at per column
 - [ ] #6 No [[status_column]] configured: hooks do no extraction work and 'hcom agent list' output is unchanged; an invalid regex is reported by hcom (status/config check) and does not break hooks
 - [ ] #7 Built-in help, README, docs and skills/hcom-agent-messaging describe the config and --status, including that remote/relay agents are not implemented
+- [ ] #8 --json lists, for each catalog agent, the values of every instance that has any (live and stopped, roaming included) keyed by instance name, with the most recent instance marked, so hcom-gui can fill per-instance rows
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -52,4 +53,6 @@ Risks: confirm on a real Claude Stop payload that last_assistant_message is pres
 
 <!-- SECTION:NOTES:BEGIN -->
 User decisions (2026-10-29): extract at idle and store; staleness handled per column definition: option whether the value persists until a later reply matches again (default, because a turn triggered by another agent's message may not repeat the block) or is cleared when the agent starts a new turn; 'hcom agent list --status' joining the catalog with each agent's last instance, plus --json; no tool call (passive regexp only); fork fallback with minimal upstream touch. Table shows values shortened, full values only in --json. One global column list in hcom config. Remote/relay agents out of scope (document as not implemented).
+
+Spec addition for TASK-61: hcom-gui rows are per instance (roaming has several), so --json carries per-instance values; instances without a catalog agent (adhoc) are not covered.
 <!-- SECTION:NOTES:END -->
