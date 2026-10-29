@@ -98,13 +98,15 @@ with `<agent>__` (clone naming convention), and a name left at exactly that pref
 empty (the default name).
 Up/Down move through the rows from anywhere in the main window (e.g. the Filter field)
 and give the table keyboard focus.
-The bottom panel has tabs Screen, Transcript, Events and Log. For the selected row's running
+The bottom panel has tabs Screen, Transcript, Events, Log and Report. For the selected row's running
 instance, Screen shows `hcom term <instance>`, Transcript `hcom transcript <instance>` and
 Events `hcom events --agent <instance> --last 50` as one `HH:MM:SS type detail` line per event;
 a row without a running instance leaves them empty. Only the open tab loads, in the background,
 on selection change and on every refresh; it stays at the end unless you scrolled away, and a
 failed command shows its error in the tab. Log holds command output and errors; a new ERROR
 line while another tab is open marks the Log tab with a red dot, and opening Log clears it.
+Report shows the selected row's status values (see `report` below), each with its name, age
+and full wrapped text, taken from the last refresh without another hcom call.
 Sort, Empty last, window layout, the bottom tab and the filters are kept in `~/.hcom/gui-state.json`.
 
 ```sh
@@ -154,6 +156,15 @@ nothing, as does an entry that is not a list of strings.
 `columns` selects and orders the table columns; without it all are shown. Keys: `agent`,
 `instance`, `roaming`, `cli`, `status`, `since`, `idle`, `age`, `context`, `quota`, `detail`, `unread`, `dir`,
 `branch`, `git`, `where`, `config`. Unknown keys are reported in the log and skipped.
+Status columns: every `[[status_column]]` in hcom's `config.toml` (values from each agent's
+last reply, `hcom agent list --status`) is a column with key `status:<name>`, titled with its
+name and holding the value on one line; a row without a running instance shows its agent's
+most recently updated instance. The names arrive with the first refresh; a `status:` key
+whose column hcom no longer configures is then dropped without an error.
+
+`report` (a list of status column names, e.g. `["next", "status"]`) makes the Report tab show
+exactly those values in that order. Without it the tab shows every value: the status columns
+shown in the table first, in column order, then the rest in hcom's config order.
 The `Columns…` button opens a dialog to choose the visible columns and their order
 (Space or double-click toggles a column, Up/Down or Ctrl+Up/Down moves it, at least one
 stays visible). That choice is a per-user preference saved right away in
@@ -167,7 +178,7 @@ output in the log; `cwd` (default `~`) decides which project catalogs `@group` r
 in the table: a Tk event sequence such as `z` or `<F2>`; it runs the button only while
 the button is enabled. The button label shows it, e.g. `Zed (z)`, `Kill (Del)`,
 `Kill all (Ctrl+F2)`; built-in keys too: `Refresh (Ctrl+R)`. The bottom tabs open with
-F5 (Screen), F6 (Transcript), F7 (Events) and F8 (Log), shown in their labels.
+F5 (Screen), F6 (Transcript), F7 (Events), F8 (Log) and F9 (Report), shown in their labels.
 `open_with` programs start independently, also while an hcom command runs; one that exits
 non-zero within 5 seconds writes its exit code and stderr to the log.
 Without `open_with`, the toolbar offers `xdg-open` and `x-terminal-emulator`. Further hcom

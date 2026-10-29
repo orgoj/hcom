@@ -1,10 +1,11 @@
 ---
 id: TASK-61
 title: 'hcom-gui: agent status columns and a bottom panel tab with all status values'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@hcom_dev'
 created_date: '2026-10-29 05:39'
-updated_date: '2026-10-29 05:45'
+updated_date: '2026-10-29 06:52'
 labels: []
 dependencies:
   - TASK-60
@@ -31,12 +32,12 @@ Risks: dynamic column keys vs gui-state.json columns_known and LEGACY_KNOWN_COLU
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Each configured status column appears in the Columns dialog and can be shown, hidden and ordered; gui.json 'columns' accepts its key status:<name>
-- [ ] #2 A shown status column cell holds the instance's value shortened to one line; a stopped catalog row holds its agent's most recent values
-- [ ] #3 The Report tab (F9, after Log) shows for the selected row each value with its name, age since updated_at and full wrapped text
-- [ ] #4 With gui.json 'report' set, the tab shows exactly those values in that order; without it, shown status columns first in column order, then the remaining values in config order
-- [ ] #5 A saved column choice referring to a status column no longer configured loads without error and drops that column
-- [ ] #6 contrib/test-hcom-gui covers each AC; contrib/README.md and the module docstring document the columns, the tab and 'report'
+- [x] #1 Each configured status column appears in the Columns dialog and can be shown, hidden and ordered; gui.json 'columns' accepts its key status:<name>
+- [x] #2 A shown status column cell holds the instance's value shortened to one line; a stopped catalog row holds its agent's most recent values
+- [x] #3 The Report tab (F9, after Log) shows for the selected row each value with its name, age since updated_at and full wrapped text
+- [x] #4 With gui.json 'report' set, the tab shows exactly those values in that order; without it, shown status columns first in column order, then the remaining values in config order
+- [x] #5 A saved column choice referring to a status column no longer configured loads without error and drops that column
+- [x] #6 contrib/test-hcom-gui covers each AC; contrib/README.md and the module docstring document the columns, the tab and 'report'
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -52,3 +53,9 @@ User decision (2026-10-29): the tab order is an explicit list in ~/.hcom/gui.jso
 
 User decision (2026-10-29, replaces the proposal above): with the gui.json list defined, the tab shows only the listed values in list order; without it, the default shows everything: values enabled as table columns first (in column order), then the rest in [[status_column]] config order.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+contrib/hcom-gui: refresh calls hcom agent list --all --status --json; each configured status column is a table column status:<name> (one-line value; a row without a running instance shows its agent's newest instance), selectable in Columns and gui.json columns; status keys wait for the first refresh, stale ones are dropped silently, saved widths/sort apply when the names arrive. New Report tab (F9, after Log): name, age and full wrapped text per value, order from gui.json report or shown columns then config order, no hcom call. Tests: contrib/test-hcom-gui 157 OK (5 new cases). Docs: contrib/README.md, module docstring. Reviewed by agent_review.
+<!-- SECTION:FINAL_SUMMARY:END -->

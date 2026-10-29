@@ -33,6 +33,10 @@ row corrects its class (idle_check.py --label, shown with ✓).
 "columns" selects and orders the table columns (keys of COLUMNS; default: all); a choice
 made with the Columns… button is kept in gui-state.json and takes precedence (Reset drops it);
 a column added to hcom-gui after that choice is shown in its default place.
+Status columns: each [[status_column]] of hcom config.toml (`hcom agent list --status`) is a column
+with key "status:<name>", titled <name>, holding the row's value on one line; a row without a
+running instance shows its agent's most recently updated instance. A status column no longer
+configured in hcom is dropped from "columns" and the saved choice.
 Heading clicks cycle the sort: ascending, descending, default; Empty last (on by default) puts
 rows with an empty cell in the sort column last in both directions. The Filter field matches
 agent, instance, dir and groups (case-insensitive).
@@ -47,7 +51,10 @@ the bar buttons: a built-in label, or {"label": "y", "keys": "y"} for a button t
 alone; an unknown or invalid item is logged and skipped.
 The bottom panel has tabs Screen (`hcom term <instance>`), Transcript (`hcom transcript <instance>`),
 Events (`hcom events --agent <instance> --last 50`, one line per event) for the selected row's
-running instance, and Log (command output and errors), opened with F5, F6, F7, F8; Ctrl+R refreshes.
+running instance, Log (command output and errors) and Report, opened with F5, F6, F7, F8, F9;
+Ctrl+R refreshes. Report shows the selected row's status values, each with its name, age and full
+text: "report" (a list of status column names) shows exactly those in that order; without it the
+shown status columns come first in column order, then the rest in config order.
 The open agent tab reloads in the background on selection change and every refresh; it stays at the
 end unless scrolled away. A new ERROR log line while another tab is open puts a red dot on the Log tab; opening Log clears it.
 Window layout, bottom tab, columns, sort, Empty last and filters (Running only, Blocked only, Hide disabled,
@@ -158,6 +165,9 @@ COLUMNS = [
     ("failed", "Failed", 70),
 ]
 STATS = ("starts", "runtime", "handoffs", "msgs", "last_start", "stops", "failed")
+# Key prefix of the status columns ([[status_column]] in hcom config.toml), titled by their name.
+STATUS_PREFIX = "status:"
+STATUS_WIDTH = 160
 
 # A detached program that exits non-zero within this time gets its exit code and stderr logged.
 DETACH_WATCH_SECONDS = 5
@@ -386,7 +396,9 @@ def format_events(stdout):
 # Bottom panel tabs that show the selected instance: hcom command, the instance name is appended.
 AGENT_TABS = {"Screen": ["term"], "Transcript": ["transcript"], "Events": ["events", "--last", "50", "--agent"]}
 LOG_TAB = "Log"
-TAB_KEYS = ["<F5>", "<F6>", "<F7>", "<F8>"]  # Screen, Transcript, Events, Log
+# Status values of the selected row (hcom agent list --status), filled from the refresh, no command.
+REPORT_TAB = "Report"
+TAB_KEYS = ["<F5>", "<F6>", "<F7>", "<F8>", "<F9>"]  # Screen, Transcript, Events, Log, Report
 REFRESH_KEY = "<Control-R>"  # bound with <Control-r>: Ctrl+R with or without Caps Lock
 
 
@@ -535,8 +547,39 @@ def where(lc):
     return f"{terminal}: {place}" if terminal and place else terminal
 
 
+def status_column_names(catalog):
+    """Configured status column names in config order, from hcom agent list --status."""
+    return next((d["status_columns"].get("columns") or [] for d in catalog if d.get("status_columns")), [])
+
+
+def status_values(d, instance):
+    """[{name, value, updated_at}] with a value of the instance, or for a row without one, of the
+    agent's most recently updated instance."""
+    sc = (d or {}).get("status_columns") or {}
+    key = instance or sc.get("latest") or ""
+    return [v for v in (sc.get("instances") or {}).get(key, []) if v.get("value") is not None]
+
+
+def with_status(row, names, values):
+    """Every status:<name> key (the value on one line, or empty) and "report" (the full values)."""
+    by_name = {v["name"]: v["value"] for v in values}
+    for name in names:
+        row[STATUS_PREFIX + name] = " ".join(str(by_name.get(name, "")).split())
+    row["report"] = values
+    return row
+
+
+def report_values(values, shown, names, report):
+    """Values for the Report tab: with report (gui.json) exactly those names in its order;
+    without it the shown status columns in column order, then the rest in config order."""
+    by_name = {v["name"]: v for v in values}
+    order = report if report is not None else list(dict.fromkeys([*shown, *names]))
+    return [by_name[n] for n in order if n in by_name]
+
+
 def build_rows(catalog, live):
     defs = {d["name"]: d for d in catalog}
+    status_names = status_column_names(catalog)
     rows = []
     running = {}  # catalog name -> its running instance names
     for i in live:
@@ -544,7 +587,7 @@ def build_rows(catalog, live):
         d = defs.get(lc.get("agent_name") or "")
         if d:
             running.setdefault(d["name"], []).append(i["name"])
-        rows.append({
+        rows.append(with_status({
             "agent": d["name"] if d else "",
             "instance": i["name"],
             "roaming": "↻" if d and d.get("roaming") else "",
@@ -569,13 +612,13 @@ def build_rows(catalog, live):
             "cwd": (i.get("directory") if d and d.get("roaming") else None)
                    or (catalog_cwd(d["source"]) if d else HOME),
             "disabled": False,  # a running instance is shown even when its agent is disabled
-        })
+        }, status_names, status_values(d, i["name"])))
     for d in catalog:
         names = running.get(d["name"], [])
         # A roaming agent's row is the archetype for other projects: never merged into an instance.
         if d["name"] in names and not d.get("roaming"):
             continue
-        rows.append({
+        rows.append(with_status({
             "agent": d["name"],
             "instance": "",
             "roaming": "↻" if d.get("roaming") else "",
@@ -598,7 +641,7 @@ def build_rows(catalog, live):
             "config": catalog_label(d["source"]),
             "cwd": catalog_cwd(d["source"]),
             "disabled": bool(d.get("disabled")),
-        })
+        }, status_names, status_values(d, "")))
     return rows
 
 
@@ -621,11 +664,24 @@ def running_tools(rows):
     return {t: sorted(names) for t, names in sorted(tools.items())}
 
 
+def all_columns(status_names):
+    """COLUMNS followed by one status column per configured name."""
+    return COLUMNS + [(STATUS_PREFIX + n, n, STATUS_WIDTH) for n in status_names]
+
+
 def pick_columns(keys):
-    """Known column keys of keys in order without duplicates, and the unknown ones."""
+    """Known column keys of keys in order without duplicates, and the unknown ones. Status
+    column keys stay: their names arrive only with the first refresh (reconcile_status_keys)."""
     known = {c[0] for c in COLUMNS}
     keys = list(dict.fromkeys(keys or []))
-    return [k for k in keys if k in known], [k for k in keys if k not in known]
+    ok = [k for k in keys if k in known or (isinstance(k, str) and k.startswith(STATUS_PREFIX))]
+    return ok, [k for k in keys if k not in ok]
+
+
+def reconcile_status_keys(keys, status_names):
+    """keys without the status column keys that status_names does not configure."""
+    configured = {STATUS_PREFIX + n for n in status_names}
+    return [k for k in keys if not k.startswith(STATUS_PREFIX) or k in configured]
 
 
 # Column keys of a gui-state.json "columns" choice saved without "columns_known" (before Idle).
@@ -651,10 +707,12 @@ def with_new_columns(keys, known):
     return out
 
 
-def column_specs(keys):
-    """COLUMNS entries for keys in their order; all columns when keys is empty."""
-    specs = {c[0]: c for c in COLUMNS}
-    return [specs[k] for k in keys] or COLUMNS
+def column_specs(keys, status_names=()):
+    """Column entries for keys in their order (status keys not configured yet are left out);
+    all columns when none is left."""
+    columns = all_columns(status_names)
+    specs = {c[0]: c for c in columns}
+    return [specs[k] for k in keys if k in specs] or columns
 
 
 def enabled(button, row):
@@ -721,6 +779,15 @@ class App(tk.Tk):
         state = self._load_json(STATE_FILE)
         self.state_columns = with_new_columns(pick_columns(state.get("columns"))[0], state.get("columns_known"))
         self.columns = column_specs(self.state_columns or self.config_columns)
+        self.status_names = None  # configured status columns, known after the first refresh
+        # Saved widths and sort of status columns wait for that refresh too.
+        self.saved_widths = state.get("column_widths") if isinstance(state.get("column_widths"), dict) else {}
+        self.saved_sort = (state.get("sort_col"), bool(state.get("sort_reverse")))
+        self.report = config.get("report")
+        if self.report is not None and not (isinstance(self.report, list)
+                                            and all(isinstance(n, str) for n in self.report)):
+            self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: report: not a list of status column names")
+            self.report = None
 
         self.rows = {}
         self.groups = ({}, {})  # running_groups, running_tools
@@ -841,7 +908,7 @@ class App(tk.Tk):
 
         self.notebook = ttk.Notebook(self.paned)
         self.tabs = {label: self._text_tab(label, tk.NONE if label == "Screen" else tk.WORD, key)
-                     for label, key in zip([*AGENT_TABS, LOG_TAB], TAB_KEYS)}
+                     for label, key in zip([*AGENT_TABS, LOG_TAB, REPORT_TAB], TAB_KEYS)}
         self.log = self.tabs[LOG_TAB]
         screen = self.tabs["Screen"].master
         self.screen_bar = ttk.Frame(screen)
@@ -939,12 +1006,30 @@ class App(tk.Tk):
         """Show keys (visible columns in order) and save them; None returns to gui.json/default."""
         widths = {c: self.tree.column(c, "width") for c in self.tree["columns"]}
         self.state_columns = keys
-        self.columns = column_specs(keys or self.config_columns)
+        self.columns = column_specs(keys or self.config_columns, self.status_names or ())
         self._configure_columns(widths)
         if self.sort_col not in self.tree["columns"]:
             self.sort_col, self.sort_reverse = None, False
         self.render()
         self._save_state()
+
+    def set_status_names(self, names):
+        """Status columns configured in hcom (first refresh, or the names changed): saved and
+        gui.json status column keys that are no longer configured are dropped, the rest shown."""
+        if names == self.status_names:
+            return
+        first = self.status_names is None
+        self.status_names = names
+        if self.state_columns:
+            self.state_columns = reconcile_status_keys(self.state_columns, names)
+        self.config_columns = reconcile_status_keys(self.config_columns, names)
+        widths = {**self.saved_widths, **{c: self.tree.column(c, "width") for c in self.tree["columns"]}}
+        self.columns = column_specs(self.state_columns or self.config_columns, names)
+        self._configure_columns(widths)
+        if first and self.saved_sort[0] in self.tree["columns"] and not self.sort_col:
+            self.sort_col, self.sort_reverse = self.saved_sort
+        if self.sort_col not in self.tree["columns"]:
+            self.sort_col, self.sort_reverse = None, False
 
     def _text_tab(self, label, wrap, key):
         frame = ttk.Frame(self.notebook)
@@ -980,6 +1065,9 @@ class App(tk.Tk):
     def load_tab(self):
         """Reload the open agent tab for the selected instance in the background, one load at a time."""
         tab = self.current_tab()
+        if tab == REPORT_TAB:
+            self.fill_report()
+            return
         if tab not in AGENT_TABS:
             return
         row = self.selected()
@@ -1025,6 +1113,15 @@ class App(tk.Tk):
             w.see(tk.END)
         else:
             w.yview_moveto(top)
+
+    def fill_report(self):
+        """Report tab: the selected row's status values, name, age and full text each."""
+        row = self.selected()
+        shown = [k[len(STATUS_PREFIX):] for k in self.tree["columns"] if k.startswith(STATUS_PREFIX)]
+        values = report_values(row["report"] if row else [], shown, self.status_names or [], self.report)
+        now = time.time()
+        self.fill_tab(REPORT_TAB, "\n\n".join(
+            f"{v['name']}  ({age(now - v['updated_at'])} ago)\n{v['value']}" for v in values))
 
     def selected(self):
         sel = self.tree.selection()
@@ -1075,8 +1172,9 @@ class App(tk.Tk):
                 except Exception as e:  # the usage columns keep the last events
                     self.after(0, self.write_log, f"ERROR: usage statistics: {e}")
             try:
-                result = add_stats(add_usage(add_git(build_rows(hcom_json("agent", "list", "--all", "--json"),
-                                                                  hcom_json("list", "--json")))), events)
+                catalog = hcom_json("agent", "list", "--all", "--status", "--json")
+                result = (add_stats(add_usage(add_git(build_rows(catalog, hcom_json("list", "--json")))), events),
+                          status_column_names(catalog))
             except Exception as e:  # shown in the log, next refresh retries
                 result = e
             self.after(0, self._apply, result, stats_due, events)
@@ -1093,6 +1191,8 @@ class App(tk.Tk):
             self.last_error = str(result)
         else:
             self.last_error = None
+            result, status_names = result
+            self.set_status_names(status_names)
             self.rows = {f"{r['agent']}|{r['instance']}": r for r in result}
             self.update_idle(time.time())
             groups = (running_groups(result), running_tools(result))
@@ -1461,9 +1561,10 @@ class App(tk.Tk):
     def choose_columns(self):
         """Visible columns and their order: Space or double-click toggles, Up/Down (Ctrl+Up/Down)
         move, Reset returns to the gui.json/default set. At least one column stays visible."""
-        titles = {k: t for k, t, _ in COLUMNS}
+        columns = all_columns(self.status_names or ())
+        titles = {k: t for k, t, _ in columns}
         shown = list(self.tree["columns"])
-        items = [[k, True] for k in shown] + [[k, False] for k, _, _ in COLUMNS if k not in shown]
+        items = [[k, True] for k in shown] + [[k, False] for k, _, _ in columns if k not in shown]
         dlg = tk.Toplevel(self)
         dlg.title("Columns")
         dlg.transient(self)
@@ -1576,7 +1677,8 @@ class App(tk.Tk):
             "empty_last": self.empty_last.get(),
             "sort_col": self.sort_col,
             "sort_reverse": self.sort_reverse,
-            "column_widths": {c: self.tree.column(c, "width") for c in self.tree["columns"]},
+            "column_widths": {**self.saved_widths,  # keeps status column widths before the first refresh
+                              **{c: self.tree.column(c, "width") for c in self.tree["columns"]}},
             "bottom_tab": self.current_tab(),
         }
         if self.state_columns:

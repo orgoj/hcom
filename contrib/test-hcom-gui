@@ -1039,7 +1039,7 @@ class App(unittest.TestCase):
 
     def test_bottom_tabs_in_order_log_first_and_kept_in_state(self):
         self.assertEqual([self.app.notebook.tab(t, "text") for t in self.app.notebook.tabs()],
-                         ["Screen (F5)", "Transcript (F6)", "Events (F7)", "Log (F8)"])
+                         ["Screen (F5)", "Transcript (F6)", "Events (F7)", "Log (F8)", "Report (F9)"])
         self.assertEqual(self.app.current_tab(), "Log")
         self.tab("Events")
         self.restart()
@@ -1047,11 +1047,102 @@ class App(unittest.TestCase):
         with open(gui.STATE_FILE) as f:
             self.assertEqual(gui.json.load(f)["bottom_tab"], "Events")
 
-    def test_f5_to_f8_open_the_bottom_tabs(self):
-        for key, label in (("F5", "Screen"), ("F6", "Transcript"), ("F7", "Events"), ("F8", "Log")):
+    def test_f5_to_f9_open_the_bottom_tabs(self):
+        for key, label in (("F5", "Screen"), ("F6", "Transcript"), ("F7", "Events"), ("F8", "Log"),
+                           ("F9", "Report")):
             self.app.tree.event_generate(f"<KeyPress-{key}>", when="now")
             self.app.update()
             self.assertEqual(self.app.current_tab(), label)
+
+    # ── Status columns (hcom agent list --status) ──────────────────────
+
+    def status_app(self, config=None, state=None):
+        """Restart with a1 (running) and a3 (stopped, newest instance a3y) carrying status values."""
+        now = time.time()
+
+        def values(**kv):
+            return [{"name": n, "value": v, "updated_at": now - 300 if v is not None else None}
+                    for n, v in kv.items()]
+
+        sc = {"columns": ["status", "next"], "latest": None, "instances": {}}
+        catalog = [dict(d, status_columns=dict(sc)) for d in CATALOG]
+        catalog[0]["status_columns"] = {**sc, "latest": "a1",
+                                        "instances": {"a1": values(status="WAITING", next="ask bin\nthen  log")}}
+        catalog[2]["status_columns"] = {**sc, "latest": "a3y",
+                                        "instances": {"a3x": values(status="DONE", next=None),
+                                                      "a3y": values(status="NEEDS_USER", next="approve")}}
+        self.patch("hcom_json", lambda *a: catalog if a[:2] == ("agent", "list") else LIVE)
+        for path, data in ((gui.CONFIG_FILE, config), (gui.STATE_FILE, state)):
+            if data is not None:
+                with open(path, "w") as f:
+                    f.write(gui.json.dumps(data))
+        self.app.destroy()
+        self.app = gui.App()
+        self.app.update()
+
+    def test_status_columns_are_columns_with_one_line_values(self):
+        self.status_app()
+        cols = list(self.app.tree["columns"])
+        self.assertEqual(cols[-2:], ["status:status", "status:next"])
+        self.assertEqual(self.app.tree.heading("status:next", "text"), "next")
+        self.assertEqual(self.app.tree.set("a1|a1", "status:next"), "ask bin then log")
+        self.assertEqual(self.app.tree.set("a3|", "status:status"), "NEEDS_USER")  # stopped: newest
+        self.assertEqual(self.app.tree.set("|solo", "status:status"), "")  # no catalog agent
+        titles = []
+
+        def drive():
+            dlg = next(w for w in self.app.winfo_children() if isinstance(w, gui.tk.Toplevel))
+            lb = next(w for w in dlg.winfo_children() if isinstance(w, gui.tk.Listbox))
+            titles.extend(lb.get(i)[2:] for i in range(lb.size()))
+            dlg.destroy()
+
+        self.app.after(200, drive)
+        self.app.choose_columns()
+        self.assertEqual(titles[-2:], ["status", "next"])
+        self.app.sort_by("status:status")
+        self.assertEqual(self.app.sort_col, "status:status")
+
+    def test_configured_and_saved_status_columns_wait_for_the_first_refresh(self):
+        self.status_app(config={"columns": ["agent", "status:next", "status:gone"]})
+        self.assertEqual(list(self.app.tree["columns"]), ["agent", "status:next"])
+        self.assertNotIn("status:gone", self.app.log.get("1.0", "end"))
+        builtin = [c[0] for c in gui.COLUMNS]  # wider than the window: no stretch changes widths
+        self.status_app(config={}, state={"columns": ["status:status", *builtin, "status:old"],
+                                           "columns_known": builtin,
+                                           "column_widths": {"status:status": 222}})
+        self.assertEqual(list(self.app.tree["columns"]), ["status:status", *builtin])
+        self.assertEqual(self.app.tree.column("status:status", "width"), 222)
+        self.assertNotIn("status:old", self.app.log.get("1.0", "end"))
+
+    def test_report_tab_shows_name_age_and_full_text(self):
+        self.status_app()
+        self.tab("Report")
+        self.select("a1|a1")
+        self.assertEqual(self.tab_text("Report"), "status  (5m ago)\nWAITING\n\nnext  (5m ago)\nask bin\nthen  log")
+        self.assertEqual(self.app.tabs["Report"].cget("wrap"), "word")
+        self.select("a3|")
+        self.assertEqual(self.tab_text("Report"), "status  (5m ago)\nNEEDS_USER\n\nnext  (5m ago)\napprove")
+        self.select("|solo")
+        self.assertEqual(self.tab_text("Report"), "")
+        self.assertEqual(self.text_calls, [])  # no hcom command
+
+    def test_report_order_follows_shown_columns_or_the_report_list(self):
+        self.status_app(config={"columns": ["agent", "status:next"]})
+        self.tab("Report")
+        self.select("a1|a1")
+        self.assertTrue(self.tab_text("Report").startswith("next "))
+        self.assertIn("\n\nstatus ", self.tab_text("Report"))
+        self.status_app(config={"report": ["status"]})
+        self.tab("Report")
+        self.select("a1|a1")
+        self.assertEqual(self.tab_text("Report"), "status  (5m ago)\nWAITING")
+
+    def test_invalid_report_setting_is_logged_and_ignored(self):
+        self.status_app(config={"report": "status"})
+        self.assertIn("report: not a list", self.app.log.get("1.0", "end"))
+        self.tab("Report")
+        self.select("a1|a1")
+        self.assertTrue(self.tab_text("Report").startswith("status "))
 
     def test_agent_tabs_show_hcom_output_of_the_selected_instance(self):
         self.text_answer = {"events": '{"ts": "2026-10-27T10:00:00", "type": "life", "data": {"action": "ready"}}\n'}
