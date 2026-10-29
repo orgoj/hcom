@@ -1114,35 +1114,73 @@ class App(unittest.TestCase):
         self.assertEqual(self.app.tree.column("status:status", "width"), 222)
         self.assertNotIn("status:old", self.app.log.get("1.0", "end"))
 
-    def test_report_tab_shows_name_age_and_full_text(self):
+    def report_lines(self):
+        """(key, value) per Report line; a continuation line of a value has an empty key."""
+        return [tuple(line.split("\t", 1)) for line in self.tab_text("Report").split("\n")]
+
+    def test_report_tab_lists_every_column_shown_ones_first(self):
+        self.status_app(config={"columns": ["status:next", "agent"]})
+        self.tab("Report")
+        self.select("a1|a1")
+        lines = self.report_lines()
+        keys = [k for k, _ in lines if k]
+        titles = {k: t for k, t, _ in gui.all_columns(["status", "next"])}
+        rest = [titles[c[0]] for c in gui.all_columns(["status", "next"]) if c[0] not in ("status:next", "agent")]
+        self.assertEqual(keys, ["next", "Agent", *rest])
+        self.assertEqual(lines[:3], [("next", "ask bin"), ("", "then  log  (5m ago)"), ("Agent", "a1")])
+        self.assertIn(("CLI", "claude"), lines)
+        self.assertIn(("status", "WAITING  (5m ago)"), lines)
+        self.assertEqual(self.text_calls, [])  # no hcom command
+
+    def test_report_values_hang_under_an_aligned_value_column(self):
         self.status_app()
         self.tab("Report")
         self.select("a1|a1")
-        self.assertEqual(self.tab_text("Report"), "status  (5m ago)\nWAITING\n\nnext  (5m ago)\nask bin\nthen  log")
-        self.assertEqual(self.app.tabs["Report"].cget("wrap"), "word")
-        self.select("a3|")
-        self.assertEqual(self.tab_text("Report"), "status  (5m ago)\nNEEDS_USER\n\nnext  (5m ago)\napprove")
-        self.select("|solo")
-        self.assertEqual(self.tab_text("Report"), "")
-        self.assertEqual(self.text_calls, [])  # no hcom command
+        w = self.app.tabs["Report"]
+        self.assertEqual(w.cget("wrap"), "word")
+        stop = w.tk.splitlist(w.tag_cget("kv", "tabs"))[0]
+        self.assertEqual(str(w.tag_cget("kv", "lmargin2")), str(stop))
+        self.assertGreater(int(float(str(stop))), gui.tkfont.Font(font=w.cget("font")).measure("Last start"))
+        self.assertIn("key", w.tag_names("1.0"))
 
-    def test_report_order_follows_shown_columns_or_the_report_list(self):
-        self.status_app(config={"columns": ["agent", "status:next"]})
+    def test_report_list_picks_keys_and_drops_stale_status_keys(self):
+        self.status_app(config={"report": ["status:status", "dir", "bogus", "status:gone"]})
+        log = self.app.log.get("1.0", "end")
+        self.assertIn("report: unknown columns: bogus", log)
+        self.assertNotIn("status:gone", log)
+        self.assertEqual(self.app.report, ["status:status", "dir"])
+        self.tab("Report")
+        self.select("a3|")
+        self.assertEqual(self.report_lines(), [("status", "NEEDS_USER  (5m ago)"), ("Dir", "/w")])
+        self.app.tree.selection_set(())
+        self.app.update()
+        self.app.load_tab()
+        self.assertEqual(self.tab_text("Report"), "")
+
+    def test_report_stays_at_the_end_unless_scrolled_away(self):
+        self.status_app()
         self.tab("Report")
         self.select("a1|a1")
-        self.assertTrue(self.tab_text("Report").startswith("next "))
-        self.assertIn("\n\nstatus ", self.tab_text("Report"))
-        self.status_app(config={"report": ["status"]})
-        self.tab("Report")
-        self.select("a1|a1")
-        self.assertEqual(self.tab_text("Report"), "status  (5m ago)\nWAITING")
+        w = self.app.tabs["Report"]
+        w.see("end")
+        self.app.update()
+        row = self.app.selected()
+        row["report"] = [{**row["report"][1], "value": "\n".join(f"line {n}" for n in range(30))}]
+        self.app.fill_report()
+        self.app.update()
+        self.assertEqual(w.yview()[1], 1.0)
+        w.yview_moveto(0)
+        self.app.update()
+        self.app.fill_report()
+        self.app.update()
+        self.assertEqual(w.yview()[0], 0.0)
 
     def test_invalid_report_setting_is_logged_and_ignored(self):
         self.status_app(config={"report": "status"})
         self.assertIn("report: not a list", self.app.log.get("1.0", "end"))
         self.tab("Report")
         self.select("a1|a1")
-        self.assertTrue(self.tab_text("Report").startswith("status "))
+        self.assertEqual(self.report_lines()[0][0], "Agent")
 
     def test_agent_tabs_show_hcom_output_of_the_selected_instance(self):
         self.text_answer = {"events": '{"ts": "2026-10-27T10:00:00", "type": "life", "data": {"action": "ready"}}\n'}

@@ -52,9 +52,10 @@ alone; an unknown or invalid item is logged and skipped.
 The bottom panel has tabs Screen (`hcom term <instance>`), Transcript (`hcom transcript <instance>`),
 Events (`hcom events --agent <instance> --last 50`, one line per event) for the selected row's
 running instance, Log (command output and errors) and Report, opened with F5, F6, F7, F8, F9;
-Ctrl+R refreshes. Report shows the selected row's status values, each with its name, age and full
-text: "report" (a list of status column names) shows exactly those in that order; without it the
-shown status columns come first in column order, then the rest in config order.
+Ctrl+R refreshes. Report is a key-value table of the selected row: column title, then the full
+value in an aligned column (wrapped lines hang under it; status values with their age). By default
+it lists every column, those shown in the table first in table order, then the rest; "report"
+(column keys like "columns") shows exactly those in that order.
 The open agent tab reloads in the background on selection change and every refresh; it stays at the
 end unless scrolled away. A new ERROR log line while another tab is open puts a red dot on the Log tab; opening Log clears it.
 Window layout, bottom tab, columns, sort, Empty last and filters (Running only, Blocked only, Hide disabled,
@@ -73,7 +74,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 HOME = os.path.expanduser("~")
 HCOM_DIR = os.path.join(HOME, ".hcom")
@@ -569,12 +570,12 @@ def with_status(row, names, values):
     return row
 
 
-def report_values(values, shown, names, report):
-    """Values for the Report tab: with report (gui.json) exactly those names in its order;
-    without it the shown status columns in column order, then the rest in config order."""
-    by_name = {v["name"]: v for v in values}
-    order = report if report is not None else list(dict.fromkeys([*shown, *names]))
-    return [by_name[n] for n in order if n in by_name]
+def report_keys(shown, all_keys, report):
+    """Column keys of the Report tab: with report (gui.json) exactly those (known ones) in its
+    order; without it the shown columns in table order, then the rest in default order."""
+    if report is not None:
+        return [k for k in report if k in all_keys]
+    return list(dict.fromkeys([*shown, *all_keys]))
 
 
 def build_rows(catalog, live):
@@ -783,11 +784,15 @@ class App(tk.Tk):
         # Saved widths and sort of status columns wait for that refresh too.
         self.saved_widths = state.get("column_widths") if isinstance(state.get("column_widths"), dict) else {}
         self.saved_sort = (state.get("sort_col"), bool(state.get("sort_reverse")))
-        self.report = config.get("report")
-        if self.report is not None and not (isinstance(self.report, list)
-                                            and all(isinstance(n, str) for n in self.report)):
-            self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: report: not a list of status column names")
-            self.report = None
+        # Report tab keys (like "columns"); None shows every column.
+        report = config.get("report")
+        self.report = None
+        if report is not None and not (isinstance(report, list) and all(isinstance(k, str) for k in report)):
+            self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: report: not a list of column keys")
+        elif report is not None:
+            self.report, unknown = pick_columns(report)
+            if unknown:
+                self.after(0, self.write_log, f"ERROR: {CONFIG_FILE}: report: unknown columns: {', '.join(unknown)}")
 
         self.rows = {}
         self.groups = ({}, {})  # running_groups, running_tools
@@ -1023,6 +1028,8 @@ class App(tk.Tk):
         if self.state_columns:
             self.state_columns = reconcile_status_keys(self.state_columns, names)
         self.config_columns = reconcile_status_keys(self.config_columns, names)
+        if self.report is not None:
+            self.report = reconcile_status_keys(self.report, names)
         widths = {**self.saved_widths, **{c: self.tree.column(c, "width") for c in self.tree["columns"]}}
         self.columns = column_specs(self.state_columns or self.config_columns, names)
         self._configure_columns(widths)
@@ -1115,13 +1122,35 @@ class App(tk.Tk):
             w.yview_moveto(top)
 
     def fill_report(self):
-        """Report tab: the selected row's status values, name, age and full text each."""
+        """Report tab: one key-value line per column of the selected row, the value in an aligned
+        column; wrapped and further lines of a value hang under it."""
         row = self.selected()
-        shown = [k[len(STATUS_PREFIX):] for k in self.tree["columns"] if k.startswith(STATUS_PREFIX)]
-        values = report_values(row["report"] if row else [], shown, self.status_names or [], self.report)
-        now = time.time()
-        self.fill_tab(REPORT_TAB, "\n\n".join(
-            f"{v['name']}  ({age(now - v['updated_at'])} ago)\n{v['value']}" for v in values))
+        w = self.tabs[REPORT_TAB]
+        top, bottom = w.yview()  # every refresh refills it: keep the place, as fill_tab does
+        w.configure(state=tk.NORMAL)
+        w.delete("1.0", tk.END)
+        if row:
+            columns = all_columns(self.status_names or ())
+            titles = {k: t for k, t, _ in columns}
+            keys = report_keys(list(self.tree["columns"]), [c[0] for c in columns], self.report)
+            status = {STATUS_PREFIX + v["name"]: v for v in row["report"]}
+            font = tkfont.Font(font=w.cget("font"))
+            x = max((font.measure(titles[k]) for k in keys), default=0) + font.measure("    ")
+            w.tag_configure("kv", tabs=(x,), lmargin2=x)
+            w.tag_configure("key", font=(font.actual("family"), font.actual("size"), "bold"))
+            now = time.time()
+            for n, key in enumerate(keys):
+                if v := status.get(key):
+                    value = f"{v['value']}  ({age(now - v['updated_at'])} ago)"
+                else:
+                    value = str(cell(key, row)) if key in row else ""
+                w.insert(tk.END, ("\n" if n else "") + titles[key], ("kv", "key"))
+                w.insert(tk.END, "\t" + value.replace("\n", "\n\t"), "kv")
+        w.configure(state=tk.DISABLED)
+        if bottom >= 1.0:
+            w.see(tk.END)
+        else:
+            w.yview_moveto(top)
 
     def selected(self):
         sel = self.tree.selection()

@@ -105,8 +105,9 @@ a row without a running instance leaves them empty. Only the open tab loads, in 
 on selection change and on every refresh; it stays at the end unless you scrolled away, and a
 failed command shows its error in the tab. Log holds command output and errors; a new ERROR
 line while another tab is open marks the Log tab with a red dot, and opening Log clears it.
-Report shows the selected row's status values (see `report` below), each with its name, age
-and full wrapped text, taken from the last refresh without another hcom call.
+Report is a key-value table of the selected row (see `report` below): each column's title,
+then its full value in an aligned column; long or multi-line values wrap under that column,
+status values show their age. It uses the last refresh, without another hcom call.
 Sort, Empty last, window layout, the bottom tab and the filters are kept in `~/.hcom/gui-state.json`.
 
 ```sh
@@ -162,9 +163,10 @@ name and holding the value on one line; a row without a running instance shows i
 most recently updated instance. The names arrive with the first refresh; a `status:` key
 whose column hcom no longer configures is then dropped without an error.
 
-`report` (a list of status column names, e.g. `["next", "status"]`) makes the Report tab show
-exactly those values in that order. Without it the tab shows every value: the status columns
-shown in the table first, in column order, then the rest in hcom's config order.
+`report` (column keys like `columns`, e.g. `["status:next", "agent", "dir"]`) makes the Report
+tab show exactly those columns in that order; unknown keys are reported in the log, and
+`status:` keys hcom no longer configures are dropped without an error. Without it the tab
+lists every column: the ones shown in the table first, in table order, then the rest.
 The `Columns…` button opens a dialog to choose the visible columns and their order
 (Space or double-click toggles a column, Up/Down or Ctrl+Up/Down moves it, at least one
 stays visible). That choice is a per-user preference saved right away in
