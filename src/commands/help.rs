@@ -1335,6 +1335,8 @@ Commands:\n\
 \x20              and send/launch print a Note with that name;\n\
 \x20              send --project-dir <DIR> picks another project for them;\n\
 \x20              <stem>.local.json beside a catalog overrides it;\n\
+\x20              Herdr workspace defaults to the agent's dir name,\n\
+\x20              or the caller's project name when it has no dir;\n\
 \x20              agent list --status: values from each agent's last reply)\n\
 \x20 relay        Cross-device sync + relay daemon\n\
 \x20 archive      Query past hcom sessions\n\
@@ -1832,6 +1834,8 @@ mod tests {
     #[test]
     fn help_documents_catalog_sidecar() {
         assert!(get_help_text().contains("<stem>.local.json beside a catalog overrides it;"));
+        assert!(get_help_text().contains("Herdr workspace defaults to the agent's dir name,"));
+        assert!(get_help_text().contains("or the caller's project name when it has no dir;"));
         let help = get_command_help("agent");
         assert!(help.contains("Sidecar: <stem>.local.json beside any catalog"));
         assert!(help.contains("It may not use \"imports\""));

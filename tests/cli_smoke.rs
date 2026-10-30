@@ -5410,6 +5410,75 @@ fn agent_dry_run_selects_the_effective_cli_tool_profile() {
 }
 
 #[test]
+fn agent_herdr_default_space_is_the_agent_directory_not_the_caller_project() {
+    let h = Hcom::new();
+    let own = h.path().join("own-repo");
+    let project = h.path().join("caller-project");
+    let subdir = project.join("sub");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::create_dir_all(subdir.join("x")).unwrap();
+    std::fs::create_dir_all(project.join(".hcom")).unwrap();
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"agents":{{"solo":{{"cli":"codex","dir":"{}"}}}}}}"#,
+            own.display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".hcom/agents.json"),
+        r#"{"agents":{"local":{"cli":"codex"}}}"#,
+    )
+    .unwrap();
+    let show = |name: &str, cwd: &std::path::Path| -> String {
+        let out = h
+            .cmd()
+            .current_dir(cwd)
+            .env("HCOM_TERMINAL", "herdr")
+            .args(["agent", "show", name])
+            .output()
+            .expect("run agent show");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(out.status.success(), "stdout={stdout}");
+        stdout
+    };
+
+    // An agent with its own directory names the workspace, not the caller's project.
+    let stdout = show("solo", &subdir);
+    assert!(
+        stdout.contains("HCOM_HERDR_WORKSPACE=own-repo"),
+        "stdout={stdout}"
+    );
+    assert!(
+        !stdout.contains("HCOM_HERDR_WORKSPACE=caller-project"),
+        "stdout={stdout}"
+    );
+
+    // An agent without a directory runs in the caller's project subdirectory.
+    let stdout = show("local", &subdir.join("x"));
+    assert!(
+        stdout.contains("HCOM_HERDR_WORKSPACE=caller-project"),
+        "stdout={stdout}"
+    );
+
+    // A dir inside the caller's project still names the workspace itself.
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"agents":{{"solo":{{"cli":"codex","dir":"{}"}}}}}}"#,
+            subdir.display()
+        ),
+    )
+    .unwrap();
+    let stdout = show("solo", &project);
+    assert!(
+        stdout.contains("HCOM_HERDR_WORKSPACE=sub"),
+        "stdout={stdout}"
+    );
+}
+
+#[test]
 fn agent_show_uses_configured_herdr_placement_instead_of_parent_placement() {
     let h = Hcom::new();
     std::fs::write(

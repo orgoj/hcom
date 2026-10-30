@@ -393,7 +393,7 @@ Launch flags override the catalog for one run: `--cli` (alias `--tool`), `--dir`
 | `model`, `reasoning` | Model and reasoning effort (`--effort` for Claude/Antigravity, `model_reasoning_effort` for Codex) |
 | `prompt`, `system_prompt` | Initial user prompt and agent instructions; `system_prompt` replaces earlier layers, `""` clears it |
 | `terminal`, `terminal_command` | hcom terminal preset, or a raw command with `{script}` |
-| `session`, `window` | Herdr workspace and tab (tab defaults to the agent name) |
+| `session`, `window` | Herdr workspace and tab (workspace defaults to the agent's `dir` name, a roaming agent's project, or without `dir` the caller's project name; tab defaults to the agent name) |
 | `tag` | Runtime messaging tag, as with `hcom --tag` |
 | `groups` | Catalog groups for `hcom agent @group`, `hcom send @group` and `hcom kill @group` |
 | `env`, `inherit_env`, `args` | Extra environment, variables copied from the caller, extra tool arguments |

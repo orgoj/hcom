@@ -79,7 +79,7 @@ tell any agent:
 
 **Subscribe** and notify on status changes, file edits, collisions, specific events. React automatically. Scripts can stream matching events as JSON Lines with `hcom events --follow`.
 
-**Spawn**, **fork**, **resume**, **kill** in any terminal emulator or headless. In Herdr, `hcom r` returns an agent to its recorded tab and `hcom f` opens a tab named after the fork; neither inherits your tab. `hcom kill` takes names, `@group`, `tag:<tag>`, `tool:<cli>` (e.g. `tool:agy`) or `SELF` (the calling agent ends itself). Add `--json` to a launch, `hcom r`, `hcom f` or `hcom kill` to get the outcome as one JSON object.
+**Spawn**, **fork**, **resume**, **kill** in any terminal emulator or headless. In Herdr, a catalog agent without `session` lands in the workspace named after its own `dir` (a roaming agent: the project it runs for; no `dir`: the caller's project); `hcom r` returns an agent to its recorded tab and `hcom f` opens a tab named after the fork; neither inherits your tab. `hcom kill` takes names, `@group`, `tag:<tag>`, `tool:<cli>` (e.g. `tool:agy`) or `SELF` (the calling agent ends itself). Add `--json` to a launch, `hcom r`, `hcom f` or `hcom kill` to get the outcome as one JSON object.
 
 **Idle autokill**: `hcom config -i <name|self> idle_kill <seconds>` (or catalog `"idle_kill"`) kills a local agent (not a remote one or a subagent) that stays idle that long; `0` clears. An agent waiting for a reply to its own `--intent request` message, or with unread messages, is not killed.
 

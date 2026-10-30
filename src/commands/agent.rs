@@ -223,6 +223,8 @@ Terminal strategy, in order:
 
 For Herdr, session selects the space (workspace), window selects the tab, and the agent
 runs in a split pane. Other presets ignore session and window.
+Without session, the workspace is named after the agent's dir (a roaming agent's dir is
+its project); an agent without dir uses the caller's project name.
 Configured-default Herdr launches use the catalog placement, not a parent agent's location.
 `hcom r` returns an agent to its recorded workspace and tab; `hcom f` opens a tab named
 after the fork in that workspace. No launch inherits its caller's placement.
@@ -1751,6 +1753,8 @@ struct Effective {
     description: Option<String>,
     cli: String,
     dir: String,
+    /// `dir` came from the catalog or `--dir`, not the caller's CWD.
+    dir_explicit: bool,
     catalog_dir: Option<String>,
     skills: Vec<AgentSkill>,
     skill_warnings: Vec<String>,
@@ -2049,6 +2053,7 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
         roaming: def.roaming.unwrap_or(false),
         description: nonempty(def.description).map(|text| single_line(&text)),
         cli: selected_cli,
+        dir_explicit: def.dir.as_deref().is_some_and(|d| !d.is_empty()),
         dir: nonempty(def.dir).unwrap_or_else(|| {
             std::env::current_dir()
                 .map(|p| p.to_string_lossy().into_owned())
@@ -2703,7 +2708,12 @@ fn apply_herdr_placement(
         return;
     }
     if eff.session.is_none() {
-        eff.session = project_root
+        // An agent with its own directory is named after it; one without runs
+        // in the caller's CWD, so the caller's project names the workspace.
+        eff.session = eff
+            .dir_explicit
+            .then_some(Path::new(&eff.dir))
+            .or(project_root)
             .and_then(Path::file_name)
             .and_then(|name| name.to_str())
             .filter(|name| !name.is_empty())
@@ -4641,6 +4651,42 @@ mod tests {
     }
 
     #[test]
+    fn herdr_default_space_is_the_agent_directory_not_the_caller_project() {
+        let caller = Some(Path::new("/work/ansible-wdt"));
+        let mut eff = eff_of(r#"{"dir":"/home/u/projects/hcom","terminal":"herdr"}"#, &[]);
+        apply_herdr_placement(&mut eff, caller, false, None);
+        assert_eq!(eff.session.as_deref(), Some("hcom"));
+
+        let mut eff = eff_of(r#"{"terminal":"herdr"}"#, &["--dir", "/srv/wiki"]);
+        apply_herdr_placement(&mut eff, caller, false, None);
+        assert_eq!(eff.session.as_deref(), Some("wiki"));
+
+        let mut eff = eff_of(
+            r#"{"dir":"/work/ansible-wdt/roles","terminal":"herdr"}"#,
+            &[],
+        );
+        apply_herdr_placement(&mut eff, caller, false, None);
+        assert_eq!(eff.session.as_deref(), Some("roles"));
+
+        let mut eff = eff_of(
+            r#"{"dir":"/srv/wiki","session":"x","terminal":"herdr"}"#,
+            &[],
+        );
+        apply_herdr_placement(&mut eff, caller, false, None);
+        assert_eq!(eff.session.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn herdr_default_space_without_dir_is_the_caller_project() {
+        // No dir: the agent runs in the caller's CWD (possibly a project
+        // subdirectory), so the caller's project names the workspace.
+        let mut eff = eff_of(r#"{"terminal":"herdr"}"#, &[]);
+        assert!(!eff.dir_explicit);
+        apply_herdr_placement(&mut eff, Some(Path::new("/work/ansible-wdt")), false, None);
+        assert_eq!(eff.session.as_deref(), Some("ansible-wdt"));
+    }
+
+    #[test]
     fn configured_herdr_overrides_parent_placement() {
         let mut eff = eff_of(
             r#"{"dir":"/work/repo","session":"child-space","env":{"HCOM_HERDR_WORKSPACE":"parent-space","HCOM_HERDR_TAB":"parent-tab"}}"#,
@@ -4931,6 +4977,7 @@ mod tests {
         assert!(help.contains("not a parent agent's location"));
         assert!(help.contains("`hcom r` returns an agent to its recorded workspace and tab"));
         assert!(help.contains("No launch inherits its caller's placement."));
+        assert!(help.contains("an agent without dir uses the caller's project name."));
         assert!(help.contains("HCOM_AGENT_NAME (the catalog name it started from"));
     }
 }
