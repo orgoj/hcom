@@ -93,7 +93,8 @@ The Filter field narrows the table as you type to rows whose agent, instance, di
 or catalog groups contain the text (case-insensitive); it combines with the checkboxes.
 `/` (when the focus is not in an editable text input) moves the focus into the Filter field with its
 text selected; the `✕` button after it clears it. `Alt+X` empties the focused text input in
-any window (Filter field, dialog fields); read-only fields stay unchanged.
+any window (Filter field, dialog fields); read-only fields stay unchanged. Elsewhere in the
+main window (table, read-only tabs) `Alt+X` clears the Filter field.
 The toolbar holds the buttons, wrapped into as many rows as the window width needs (also
 after each button named in `toolbar_breaks`), and below them a row with the count of rows the
 table shows after all filters, the Filter field and the filter checkboxes.

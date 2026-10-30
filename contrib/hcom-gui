@@ -41,8 +41,8 @@ configured in hcom is dropped from "columns" and the saved choice.
 Heading clicks cycle the sort: ascending, descending, default; Empty last (on by default) puts
 rows with an empty cell in the sort column last in both directions. The Filter field matches
 agent, instance, dir and groups (case-insensitive); / focuses it (outside an editable text input), ✕ clears it.
-Alt+X empties the focused text input in any window. Kill group ▾ → Filtered (N) kills the running
-instances of the rows shown after all filters.
+Alt+X empties the focused text input in any window, elsewhere in the main window the Filter field.
+Kill group ▾ → Filtered (N) kills the running instances of the rows shown after all filters.
 A disabled catalog agent's row is struck through; Hide disabled (on by default) hides it.
 Hide non-persistent hides instances without a catalog agent. The toolbar counts the shown rows.
 Start: the empty Name field gets "<agent>__" on focus; left unchanged it counts as empty.
@@ -416,10 +416,11 @@ def editable(w):
 
 
 def clear_input(event):
-    """Alt+X: empty the focused text input."""
+    """Alt+X: empty the focused text input; a read-only one passes it on to its window."""
     w = event.widget
-    if editable(w):
-        w.delete("1.0" if w.winfo_class() == "Text" else 0, tk.END)
+    if not editable(w):
+        return None
+    w.delete("1.0" if w.winfo_class() == "Text" else 0, tk.END)
     return "break"
 
 
@@ -963,9 +964,10 @@ class App(tk.Tk):
         for key in (REFRESH_KEY, "<Control-r>"):
             self.bind(key, lambda e: self.refresh())
         self.bind("<slash>", self._focus_filter)
-        for cls in TEXT_INPUTS:  # all windows: the dialogs share the Tk interpreter
-            for key in ("<Alt-x>", "<Alt-X>"):  # with or without Caps Lock
+        for key in ("<Alt-x>", "<Alt-X>"):  # with or without Caps Lock
+            for cls in TEXT_INPUTS:  # all windows: the dialogs share the Tk interpreter
                 self.bind_class(cls, key, clear_input)
+            self.bind(key, lambda e: self.filter_text.set(""))  # elsewhere in the main window
         for widget in (self, self.tree):  # tree: before its class binding moves from a stale focus row
             widget.bind("<Up>", lambda e: self._step_row(e, -1))
             widget.bind("<Down>", lambda e: self._step_row(e, 1))

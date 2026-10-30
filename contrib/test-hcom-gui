@@ -1577,8 +1577,17 @@ class App(unittest.TestCase):
         self.assertEqual(readonly.get(), "a")
         log = self.app.tabs[gui.LOG_TAB]
         before = log.get("1.0", "end")
-        self.key(log, "<Alt-X>")  # Caps Lock; the disabled tab keeps its text
+        self.app.filter_text.set("WDT")
+        self.key(log, "<Alt-X>")  # Caps Lock; the disabled tab keeps its text, the filter is cleared
         self.assertEqual(log.get("1.0", "end"), before)
+        self.assertEqual(self.app.filter_text.get(), "")
+
+    def test_alt_x_outside_text_inputs_clears_the_filter(self):
+        everything = self.shown()
+        self.app.filter_text.set("WDT")
+        self.key(self.app.tree, "<Alt-x>")
+        self.assertEqual(self.app.filter_text.get(), "")
+        self.assertEqual(self.shown(), everything)
 
     def test_alt_x_empties_dialog_fields(self):
         seen = {}
