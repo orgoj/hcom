@@ -40,7 +40,9 @@ running instance shows its agent's most recently updated instance. A status colu
 configured in hcom is dropped from "columns" and the saved choice.
 Heading clicks cycle the sort: ascending, descending, default; Empty last (on by default) puts
 rows with an empty cell in the sort column last in both directions. The Filter field matches
-agent, instance, dir and groups (case-insensitive).
+agent, instance, dir and groups (case-insensitive); / focuses it (outside an editable text input), ✕ clears it.
+Alt+X empties the focused text input in any window. Kill group ▾ → Filtered (N) kills the running
+instances of the rows shown after all filters.
 A disabled catalog agent's row is struck through; Hide disabled (on by default) hides it.
 Hide non-persistent hides instances without a catalog agent. The toolbar counts the shown rows.
 Start: the empty Name field gets "<agent>__" on focus; left unchanged it counts as empty.
@@ -402,6 +404,23 @@ LOG_TAB = "Log"
 REPORT_TAB = "Report"
 TAB_KEYS = ["<F5>", "<F6>", "<F7>", "<F8>", "<F9>"]  # Screen, Transcript, Events, Log, Report
 REFRESH_KEY = "<Control-R>"  # bound with <Control-r>: Ctrl+R with or without Caps Lock
+TEXT_INPUTS = ("TEntry", "TCombobox", "Text")  # widget classes Alt+X clears and "/" types into
+
+
+def editable(w):
+    """A text input the user can type into now (not read-only or disabled)."""
+    cls = w.winfo_class()
+    if cls == "Text":
+        return str(w.cget("state")) == tk.NORMAL
+    return cls in TEXT_INPUTS and not w.instate(["readonly"]) and not w.instate(["disabled"])
+
+
+def clear_input(event):
+    """Alt+X: empty the focused text input."""
+    w = event.widget
+    if editable(w):
+        w.delete("1.0" if w.winfo_class() == "Text" else 0, tk.END)
+    return "break"
 
 
 def hcom_jsonl(*args):
@@ -857,7 +876,8 @@ class App(tk.Tk):
                 continue
             if b.get("menu"):
                 b["widget"] = ttk.Menubutton(self.toolbar, text=f"{b['label']} ▾")
-                self.group_menu = tk.Menu(b["widget"], tearoff=False)
+                self.group_menu = tk.Menu(b["widget"], tearoff=False, postcommand=self._label_filtered)
+                self.group_menu.add_command(label="Filtered", command=self.kill_filtered)
                 b["widget"]["menu"] = self.group_menu
             else:
                 text = f"{b['label']} ({key_label(b['key'])})" if b.get("key") else b["label"]
@@ -886,6 +906,8 @@ class App(tk.Tk):
         self.filter_text.trace_add("write", lambda *_: self.render())
         self.filter_entry = ttk.Entry(filters, textvariable=self.filter_text, width=16)
         self.filter_entry.pack(side=tk.LEFT, padx=2)
+        self.clear_filter_button = ttk.Button(filters, text="✕", width=2, command=lambda: self.filter_text.set(""))
+        self.clear_filter_button.pack(side=tk.LEFT)
         self.hide_adhoc = tk.BooleanVar(value=False)
         self.hide_disabled = tk.BooleanVar(value=True)
         self.blocked_only = tk.BooleanVar(value=False)
@@ -940,6 +962,10 @@ class App(tk.Tk):
         self.tree.bind("<KP_Enter>", lambda e: self.run_default())
         for key in (REFRESH_KEY, "<Control-r>"):
             self.bind(key, lambda e: self.refresh())
+        self.bind("<slash>", self._focus_filter)
+        for cls in TEXT_INPUTS:  # all windows: the dialogs share the Tk interpreter
+            for key in ("<Alt-x>", "<Alt-X>"):  # with or without Caps Lock
+                self.bind_class(cls, key, clear_input)
         for widget in (self, self.tree):  # tree: before its class binding moves from a stale focus row
             widget.bind("<Up>", lambda e: self._step_row(e, -1))
             widget.bind("<Down>", lambda e: self._step_row(e, 1))
@@ -986,6 +1012,14 @@ class App(tk.Tk):
                 else:
                     w.pack(in_=frame, side=tk.LEFT, padx=2)
                 w.lift(frame)  # a widget packed into a later-created frame would sit below it
+
+    def _focus_filter(self, event):
+        """/ outside an editable text input: focus the Filter field with its text selected."""
+        if editable(event.widget):
+            return None
+        self.filter_entry.focus_set()
+        self.filter_entry.select_range(0, tk.END)
+        return "break"
 
     def _step_row(self, event, step):
         """Up/Down outside the table, or in it with no row selected: move the selection and focus the table."""
@@ -1230,7 +1264,10 @@ class App(tk.Tk):
             groups = (running_groups(result), running_tools(result))
             if groups != self.groups:
                 self.groups = groups
-                self.group_menu.delete(0, tk.END)
+                if self.group_menu.index(tk.END):  # keeps Filtered: delete(1, END) clamps 1 to 0
+                    self.group_menu.delete(1, tk.END)
+                if groups[0] or groups[1]:
+                    self.group_menu.add_separator()
                 for g, names in groups[0].items():
                     self.group_menu.add_command(label=f"@{g} ({len(names)})",
                                                 command=lambda g=g, names=names: self.kill_group(f"@{g}", names))
@@ -1494,6 +1531,19 @@ class App(tk.Tk):
             return
         self.keep_agent = None
         self.run_command(["hcom", "kill", *names], HOME)
+
+    def filtered_instances(self):
+        """Running instances of the rows the table shows now, after all filters."""
+        return sorted({self.rows[i]["instance"] for i in self.tree.get_children() if self.rows[i]["instance"]})
+
+    def _label_filtered(self):
+        n = len(self.filtered_instances())
+        self.group_menu.entryconfigure(0, label=f"Filtered ({n})", state=tk.NORMAL if n else tk.DISABLED)
+
+    def kill_filtered(self):
+        names = self.filtered_instances()
+        if names:
+            self.kill_group("filtered", names)
 
     def run_command(self, cmd, cwd, select=None):
         """select: the pending row id this command creates; dropped if the command fails."""

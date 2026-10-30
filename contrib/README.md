@@ -38,9 +38,10 @@ confirming, runs `hcom agent <agent> --as <instance> --restart`: it kills the in
 waits for it to exit and launches the agent again under the same name, with the
 catalog's resume/continue setting. hcom commands of a roaming agent's instance run in
 its directory, since a roaming agent resolves its project from there.
-`Kill group ▾` lists each catalog group with running members (`@persistent (3)`), then
-each CLI with running instances (`tool:claude (2)`), and, after confirming the names,
-kills exactly those instances. Since is the age of the
+`Kill group ▾` starts with `Filtered (N)`, the running instances of the rows the table
+shows after all filters (disabled when there are none), then lists each catalog group with
+running members (`@persistent (3)`) and each CLI with running instances (`tool:claude (2)`);
+after confirming the names, it kills exactly those instances. Since is the age of the
 current status, Age the time since the instance started; both sort numerically. Context is the input size of the latest model call
 and its share of the window, read from the tail of Claude and Codex transcripts (Claude
 transcripts lack the window, so 1M is assumed). Quota is the used share of Codex's
@@ -90,6 +91,9 @@ running instances with `↻`. A roaming agent's catalog row always stays a separ
 to its instances (status `running as …`), as the archetype for other projects.
 The Filter field narrows the table as you type to rows whose agent, instance, directory
 or catalog groups contain the text (case-insensitive); it combines with the checkboxes.
+`/` (when the focus is not in an editable text input) moves the focus into the Filter field with its
+text selected; the `✕` button after it clears it. `Alt+X` empties the focused text input in
+any window (Filter field, dialog fields); read-only fields stay unchanged.
 The toolbar holds the buttons, wrapped into as many rows as the window width needs (also
 after each button named in `toolbar_breaks`), and below them a row with the count of rows the
 table shows after all filters, the Filter field and the filter checkboxes.
