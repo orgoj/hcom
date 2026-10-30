@@ -6260,6 +6260,157 @@ fn listings_mark_roaming_instances_with_their_catalog_agent() {
 }
 
 #[test]
+fn roaming_send_with_project_dir_materializes_the_agent_in_that_project() {
+    let h = Hcom::new();
+    let own = h.root_path().join("own-project");
+    let other = h.root_path().join("other-project");
+    std::fs::create_dir_all(own.join(".git")).expect("create own git marker");
+    std::fs::create_dir_all(other.join(".git")).expect("create other git marker");
+    std::fs::create_dir_all(other.join("sub")).expect("create nested directory");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+    let sender = h.start_with_process_id("project-dir-sender-process");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "UPDATE instances SET directory = ?1 WHERE name = ?2",
+        rusqlite::params![own.to_string_lossy().as_ref(), sender],
+    )
+    .expect("move sender context to own project");
+
+    // A relative DIR resolves from the process CWD, not the sender's recorded directory.
+    let output = h
+        .cmd()
+        .current_dir(h.root_path())
+        .env("HCOM_PROCESS_ID", "project-dir-sender-process")
+        .args(["send", "--project-dir", "other-project/sub"])
+        .args(["@reviewer", "--", "inspect"])
+        .output()
+        .expect("send with --project-dir");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+    let instance = roaming_instance("reviewer_other_project", &other);
+    assert!(stdout.contains(&instance), "stdout={stdout}");
+    assert!(!stdout.contains("reviewer_own_project"), "stdout={stdout}");
+
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1", "--full"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
+    assert_eq!(event["data"]["delivered_to"], serde_json::json!([instance]));
+
+    let (code, instances, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "instances={instances} stderr={stderr}");
+    let instances: serde_json::Value =
+        serde_json::from_str(&instances).expect("instance list JSON");
+    let reviewer = instances
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["name"] == instance.as_str()))
+        .expect("materialized reviewer instance");
+    assert_eq!(reviewer["directory"], other.to_string_lossy().as_ref());
+}
+
+#[test]
+fn send_spawn_as_keeps_the_project_dir_of_a_roaming_target() {
+    let h = Hcom::new();
+    let own = h.root_path().join("own-project");
+    let other = h.root_path().join("other-project");
+    std::fs::create_dir_all(own.join(".git")).expect("create own git marker");
+    std::fs::create_dir_all(other.join(".git")).expect("create other git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+
+    let output = h
+        .cmd()
+        .current_dir(&own)
+        .args(["send", "--from", "bigboss", "--project-dir"])
+        .arg(&other)
+        .args(["@reviewer", "--spawn-as", "revclone", "--", "inspect"])
+        .output()
+        .expect("send with --spawn-as and --project-dir");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+
+    let (code, instances, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "instances={instances} stderr={stderr}");
+    let instances: serde_json::Value =
+        serde_json::from_str(&instances).expect("instance list JSON");
+    let clone = instances
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["name"] == "revclone"))
+        .expect("spawned clone instance");
+    assert_eq!(clone["directory"], other.to_string_lossy().as_ref());
+}
+
+#[test]
+fn send_project_dir_that_is_not_a_directory_fails_only_for_roaming_targets() {
+    let h = Hcom::new();
+    let project = h.root_path().join("app");
+    std::fs::create_dir_all(project.join(".git")).expect("create git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex"},
+            "solo":{"cli":"codex"},
+            "helper":{"cli":"codex","terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+    let (code, _, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "INSERT INTO instances (name, status, directory, created_at) \
+         VALUES ('solo', 'listening', ?1, 1000.0)",
+        [project.to_string_lossy().as_ref()],
+    )
+    .expect("insert running solo");
+    let missing = h.root_path().join("missing-project");
+
+    // A running agent and a stopped non-roaming catalog agent ignore the flag.
+    for target in ["@solo", "@helper"] {
+        let output = h
+            .cmd()
+            .current_dir(&project)
+            .args(["send", "--from", "bigboss", "--project-dir"])
+            .arg(&missing)
+            .args([target, "--", "inspect"])
+            .output()
+            .expect("send");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "target={target} stdout={stdout} stderr={stderr}"
+        );
+    }
+
+    let output = h
+        .cmd()
+        .current_dir(&project)
+        .args(["send", "--from", "bigboss", "--project-dir"])
+        .arg(&missing)
+        .args(["@reviewer", "--", "lost"])
+        .output()
+        .expect("send to roaming agent");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "stderr={stderr}");
+    assert!(
+        stderr.contains("does not exist or is not a directory"),
+        "stderr={stderr}"
+    );
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1", "--full"]);
+    assert_eq!(code, 0, "events={events} stderr={stderr}");
+    assert!(!events.contains("lost"), "events={events}");
+}
+
+#[test]
 fn send_by_exact_or_non_roaming_name_prints_no_roaming_note() {
     let h = Hcom::new();
     let project = h.root_path().join("app");

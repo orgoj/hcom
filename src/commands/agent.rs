@@ -1135,8 +1135,15 @@ fn canonical_directory(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| normalize(path))
 }
 
-fn roaming_context_directory(identity: &SenderIdentity) -> Result<PathBuf> {
-    let raw = if identity.kind == SenderKind::Instance {
+/// Directory whose project a roaming target resolves to: `project_dir`
+/// (`send --project-dir`) when given, else the sender's working directory.
+fn roaming_context_directory(
+    identity: &SenderIdentity,
+    project_dir: Option<&Path>,
+) -> Result<PathBuf> {
+    let raw = if let Some(dir) = project_dir {
+        dir.to_path_buf()
+    } else if identity.kind == SenderKind::Instance {
         identity
             .instance_data
             .as_ref()
@@ -1273,6 +1280,7 @@ fn materialize_roaming_definition(
 fn roaming_route(
     db: &HcomDb,
     identity: &SenderIdentity,
+    project_dir: Option<&Path>,
     name: &str,
     def: &AgentDef,
 ) -> Result<Option<CatalogRoute>> {
@@ -1280,8 +1288,12 @@ fn roaming_route(
         validate_roaming_definition(name, def)?;
         return Ok(None);
     }
-    let Some((instance, root)) =
-        materialize_roaming_definition(db, name, def, &roaming_context_directory(identity)?)?
+    let Some((instance, root)) = materialize_roaming_definition(
+        db,
+        name,
+        def,
+        &roaming_context_directory(identity, project_dir)?,
+    )?
     else {
         return Ok(None);
     };
@@ -1315,9 +1327,11 @@ pub(crate) struct CatalogTargets {
 }
 
 /// Catalog agent identities available for message routing, including stopped agents.
+/// `project_dir` overrides the sender's directory for roaming agents only.
 pub(crate) fn catalog_message_targets(
     db: &HcomDb,
     identity: &SenderIdentity,
+    project_dir: Option<&Path>,
 ) -> Result<CatalogTargets> {
     let catalogs = Catalogs::load(false, None)?;
     let mut routes = Vec::new();
@@ -1326,12 +1340,12 @@ pub(crate) fn catalog_message_targets(
         let Some(def) = catalogs.resolve(name) else {
             continue;
         };
-        let roaming = match roaming_route(db, identity, name, &def) {
+        let roaming = match roaming_route(db, identity, project_dir, name, &def) {
             Ok(route) => route,
             Err(e) => {
                 let tag = effective(name, def.clone(), &Cli::default()).tag;
                 let mut names = vec![name.clone()];
-                if let Some(slug) = roaming_context_directory(identity)
+                if let Some(slug) = roaming_context_directory(identity, project_dir)
                     .ok()
                     .and_then(|dir| roaming_project_slug(&roaming_project_root(&dir)).ok())
                 {
@@ -3566,7 +3580,7 @@ mod tests {
             session_id: None,
         };
 
-        let context = roaming_context_directory(&sender).unwrap();
+        let context = roaming_context_directory(&sender, None).unwrap();
         let root = roaming_project_root(&context);
         assert_eq!(root, canonical_directory(&project));
         assert!(
@@ -3574,6 +3588,25 @@ mod tests {
                 .unwrap()
                 .starts_with("weather_app_")
         );
+    }
+
+    #[test]
+    fn roaming_context_project_dir_overrides_the_sender_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let own = tmp.path().join("own");
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let sender = SenderIdentity {
+            kind: SenderKind::Instance,
+            name: "developer".into(),
+            instance_data: Some(serde_json::json!({"directory": own})),
+            session_id: None,
+        };
+
+        let context = roaming_context_directory(&sender, Some(&other)).unwrap();
+        assert_eq!(context, canonical_directory(&other));
+        assert!(roaming_context_directory(&sender, Some(&tmp.path().join("missing"))).is_err());
     }
 
     #[test]

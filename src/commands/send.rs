@@ -29,6 +29,8 @@ Target matching:
   A catalog agent with \"roaming\": true resolves to <name>_<project>_<hash>
   (<hash> = 3-digit number from the root path's SHA-256) in the sender's Git/project root
   and starts there when missing; the output adds a Note line with that instance name.
+  --project-dir <DIR> uses DIR's Git/project root instead of the sender's (roaming
+  targets only; the catalog still comes from the sender's CWD).
   Running agents route first; the catalog is read only for unmatched names,
   tags (which include stopped catalog agents), stopped thread members, or
   --spawn-as; an unreadable catalog only warns. Broadcasts never start agents.
@@ -106,6 +108,10 @@ pub struct SendArgs {
     /// Autostart a targeted catalog agent under this instance name if not already running
     #[arg(long, visible_alias = "as")]
     pub spawn_as: Option<String>,
+
+    /// Resolve roaming catalog targets in this directory's Git/project root instead of the sender's
+    #[arg(long, value_name = "DIR")]
+    pub project_dir: Option<std::path::PathBuf>,
 
     // ── Sender ──
     /// External sender identity
@@ -1257,7 +1263,11 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
             })
         });
     let mut catalog_instances = if needs_catalog {
-        match super::agent::catalog_message_targets(db, &sender_identity) {
+        match super::agent::catalog_message_targets(
+            db,
+            &sender_identity,
+            args.project_dir.as_deref(),
+        ) {
             Ok(targets) => {
                 // A thread-only send addresses the thread's members.
                 let mut addressed = requested.clone();

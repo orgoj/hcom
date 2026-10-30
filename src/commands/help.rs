@@ -320,6 +320,10 @@ const SEND_HELP: &[HelpEntry] = &[
         "  --spawn-as <name>",
         "Autostart targeted catalog agent under this instance name (alias: --as)",
     ),
+    (
+        "  --project-dir <DIR>",
+        "Resolve roaming targets in DIR's Git/project root instead of the sender's",
+    ),
     ("", ""),
     ("Envelope:", ""),
     ("  --intent <type>", "request | inform | ack"),
@@ -1329,6 +1333,7 @@ Commands:\n\
 \x20 agent        Launch named agents from a JSON catalog (\"disabled\": true hides one;\n\
 \x20              roaming ones run as <name>_<project>_<hash>, <hash> = 3 digits,\n\
 \x20              and send/launch print a Note with that name;\n\
+\x20              send --project-dir <DIR> picks another project for them;\n\
 \x20              <stem>.local.json beside a catalog overrides it;\n\
 \x20              agent list --status: values from each agent's last reply)\n\
 \x20 relay        Cross-device sync + relay daemon\n\
@@ -1866,6 +1871,14 @@ mod tests {
                 .contains("Send and hcom agent <name> print a Note line on stdout")
         );
         assert!(get_command_help("send").contains("a Note line"));
+    }
+
+    #[test]
+    fn help_documents_send_project_dir_for_roaming_targets() {
+        assert!(
+            get_help_text().contains("send --project-dir <DIR> picks another project for them;")
+        );
+        assert!(get_command_help("send").contains("--project-dir <DIR>"));
     }
 
     #[test]
