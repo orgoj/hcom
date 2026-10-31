@@ -212,6 +212,7 @@ Messages instantly and automatically arrive via <hcom> tags — end your turn to
 
 1. Never use `sleep [sec]` instead use `hcom listen [sec]` (returns early when msg arrives)
 2. Only use `hcom listen` when you are waiting for something not related to hcom and were going to use `sleep`
+3. `hcom listen` consumes the messages it prints: never redirect its output (`>/dev/null`) and never run it in a background command or loop; there use plain `sleep`
 - Waiting for hcom message → end your turn
 - Waiting for agent progress → `hcom events sub`, end your turn"#;
 
@@ -234,6 +235,7 @@ CONNECTED MODE:
 2. When it returns, read/handle the output, then you MUST manually run `hcom listen` again.
 3. You MUST repeat steps 1 and 2 until the user says stop.
 - Do not wrap `hcom listen` in `while`, `watch`, `xargs`, tmux helpers, or background jobs.
+- `hcom listen` consumes the messages it prints: never redirect its output (`>/dev/null`).
 
 WRONG: hcom listen & (background)
 RIGHT: hcom listen --timeout [sec] (blocking)
@@ -264,6 +266,7 @@ Messages instantly auto-arrive via <hcom> tags — end your turn to receive them
 
 - For hcom message waiting: end your turn (do not run `hcom listen`).
 - For non-hcom pause/yield, use `hcom listen` instead of `sleep`.
+- `hcom listen` consumes the messages it prints: never redirect its output (`>/dev/null`) and never run it in a background command or loop; there use plain `sleep`.
 
 Response rules:
 - From {SENDER} or intent=request → always respond
@@ -909,6 +912,14 @@ mod tests {
                 "{}",
                 spec.name
             );
+            // A discarded listen loses the messages it consumed.
+            for text in [&launched, &unlaunched] {
+                assert!(
+                    text.contains("never redirect its output (`>/dev/null`)"),
+                    "{}",
+                    spec.name
+                );
+            }
             let auto = launched.contains("Messages instantly and automatically arrive");
             assert_eq!(auto, spec.tool != Tool::Adhoc, "{}", spec.name);
             assert_eq!(
