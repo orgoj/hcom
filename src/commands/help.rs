@@ -539,7 +539,7 @@ const HANDOFF_HELP: &[HelpEntry] = &[
     ),
     (
         "",
-        "Logs life action 'handoff' once the relaunch starts; a failing successor is in logs/handoff-<name>.log.",
+        "Logs life action 'handoff' once the relaunch starts; a failing successor is in ~/.hcom/.tmp/logs/handoff-<name>.log.",
     ),
 ];
 
