@@ -1206,8 +1206,9 @@ class App(tk.Tk):
     def _on_select(self, _event):
         sel = self.tree.selection()
         if sel and sel[0] != self.last_selected:  # render() re-selects on every refresh
-            self.select_next = None  # another row chosen: do not jump to a started instance
             row = self.rows[sel[0]]
+            if self.select_next and self.select_next.split("|")[0] != row["agent"]:
+                self.select_next = None  # another agent chosen: do not jump to a started instance
             if row["agent"] != self.keep_agent:
                 self.keep_agent = None
             if row["detail"]:
@@ -1510,8 +1511,9 @@ class App(tk.Tk):
                 threading.Thread(target=self._watch_detached, args=(b["label"], proc, err), daemon=True).start()
             self.refresh()
             return
-        select = f"{row['agent']}|{values['ask:name']}" if values.get("ask:name") else None
-        if asks:  # a Start replaces the pending selection of an earlier one
+        select = (f"{row['agent']}|{values['ask:name']}" if values.get("ask:name")
+                  else f"{row['agent']}|{row['instance']}" if b["when"] == "live" else None)  # Restart: same name
+        if asks or select:  # a Start replaces the pending selection of an earlier one
             self.select_next = select
         self.run_command(cmd, row["cwd"], select)
 

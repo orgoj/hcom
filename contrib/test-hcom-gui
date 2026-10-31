@@ -1348,6 +1348,13 @@ class App(unittest.TestCase):
         self.app.sort_by("status")  # by index a3| would be selected
         self.restart_row("a2|a2x")
         self.assertEqual(self.refresh_with(self.without("a2x")), ("a2|",))
+        self.assertEqual(self.refresh_with(LIVE), ("a2|a2x",))  # relaunched under the same name
+
+    def test_selecting_another_agent_while_restarting_cancels_the_jump(self):
+        self.restart_row("a2|a2x")
+        self.assertEqual(self.refresh_with(self.without("a2x")), ("a2|",))
+        self.select("a1|a1")
+        self.assertEqual(self.refresh_with(LIVE), ("a1|a1",))
 
     def test_killed_middle_row_keeps_its_index(self):
         self.app.running_only.set(True)
