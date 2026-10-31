@@ -48,7 +48,7 @@ transcripts lack the window, so 1M is assumed). Quota is the used share of Codex
 primary (5h) rate limit from the same transcript. The Branch and Git columns show each directory's current branch and its
 state: `*` uncommitted changes, `↑2 ↓1` commits ahead of/behind the upstream (one
 `git status` per directory on every refresh). Where is the terminal an
-instance was launched in, with the Herdr workspace/tab (`herdr: cc-hcom/hcom_dev`, `kitty`).
+instance was launched in, with the Herdr workspace/tab (`herdr: myproject/luna`, `kitty`).
 The usage columns come from the life and message events of the live database (`hcom events`;
 history restarts after `hcom reset`), per instance name, and a catalog row uses its agent name:
 Starts counts `created` events, Runtime sums each session from `created` to the next `stopped`
@@ -137,7 +137,7 @@ replaced by fixtures, commands are recorded, not run). Optional `~/.hcom/gui.jso
   ],
   "commands": [
     {"label": "Kill persistent", "cmd": ["hcom", "kill", "@persistent"], "confirm": true},
-    {"label": "Kill WDT", "cmd": ["hcom", "kill", "@wdt_all"], "confirm": true, "cwd": "~/projects/wdt"}
+    {"label": "Kill ops", "cmd": ["hcom", "kill", "@ops"], "confirm": true, "cwd": "~/work/ops"}
   ],
   "columns": ["agent", "instance", "cli", "status", "since", "context", "quota", "dir", "git"],
   "toolbar_breaks": ["Kill group"],

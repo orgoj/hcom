@@ -142,7 +142,7 @@ hcom relay status    # check cross-device relay
 ```
 
 still broken? Report the failing command, its output and the three status
-results to the user or the hcom owner agent (`@hcom_dev` where it exists).
+results to the user or the agent that maintains hcom on this machine, if any.
 Never run `hcom reset` yourself: it replaces the shared database and config
 for every agent on the machine, and only the user decides that.
 

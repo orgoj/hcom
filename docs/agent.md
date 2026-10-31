@@ -3,22 +3,22 @@
 `hcom agent` launches recurring agents from JSON catalogs and editable bundles. A catalog stores launch settings; `agents/<name>/SOUL.md` stores evolving instructions and references supporting files in the same bundle.
 
 ```bash
-hcom agent wdt_main                 # launch, or report that it is already running
-hcom agent @wdt                     # launch every member of the wdt catalog group
-hcom agent wdt_main --as wdt_review # same config, independent instance named wdt_review
-hcom agent wdt_main --cli codex     # override the configured CLI
-hcom agent wdt_main --restart       # kill the running instance, wait, launch again
+hcom agent ops_main                 # launch, or report that it is already running
+hcom agent @ops                     # launch every member of the ops catalog group
+hcom agent ops_main --as ops_review # same config, independent instance named ops_review
+hcom agent ops_main --cli codex     # override the configured CLI
+hcom agent ops_main --restart       # kill the running instance, wait, launch again
 hcom agent list                     # catalog entries, effective CLI/model, status, and source
 hcom agent list --status            # add status columns taken from each agent's last reply
 hcom agent list --for-agents        # only names and descriptions, for another agent to read
-hcom agent list @wdt                # show only members of the wdt catalog group
+hcom agent list @ops                # show only members of the ops catalog group
 hcom agent list --all               # include agents hidden by recursive selective imports
 hcom agent list --local             # only direct and imported agents from this project
 hcom agent list --json              # full JSON output with effective config and status
 hcom agent list --names             # output agent names only
 hcom agent list --groups            # output catalog group names only
-hcom agent show wdt_main            # effective configuration and exact command
-hcom agent attach wdt_main          # focus its Herdr pane
+hcom agent show ops_main            # effective configuration and exact command
+hcom agent attach ops_main          # focus its Herdr pane
 hcom agent edit                     # edit the global catalog
 hcom agent edit --project           # edit the current project's catalog
 hcom agent completions bash         # output shell completions for bash, zsh, or fish
@@ -205,7 +205,7 @@ coordinator is published outside its repository:
       "dir": "~/work/research",
       "cli": "agy"
     },
-    "agent_coach": {
+    "catalog_maintainer": {
       "description": "Maintain local agent catalogs and bundles",
       "dir": "~",
       "cli": "claude"
@@ -289,15 +289,15 @@ In a recurring agent fleet, this enables a self-improving autonomy loop:
     "idle_kill": 3600
   },
   "agents": {
-    "wdt_main": {
-      "description": "WDT infrastructure: Ansible roles, deployments, runbooks",
-      "dir": "~/work/wdt/ansible-wdt",
+    "ops_main": {
+      "description": "Operations: Ansible roles, deployments, runbooks",
+      "dir": "~/work/ops",
       "cli": "codex",
-      "session": "wdt",
+      "session": "ops",
       "window": "review",
       "terminal": "herdr",
-      "groups": ["wdt", "review"],
-      "env": { "AWS_PROFILE": "wdt" },
+      "groups": ["ops", "review"],
+      "env": { "AWS_PROFILE": "ops" },
       "inherit_env": ["SSH_AUTH_SOCK"],
       "prompt": "Review the current change",
       "system_prompt": "Concentrate on deployment safety",
@@ -497,7 +497,7 @@ variables or provide a permission engine itself.
 | `--status` | Add status columns, see [Status columns](#status-columns) |
 
 `hcom agent show <name>` and `hcom agent attach <name>` accept the launch flags (`--as`, `--cli`,
-`--catalog`, ...), so `hcom agent show wdt_main --as wdt_review` previews that variant.
+`--catalog`, ...), so `hcom agent show ops_main --as ops_review` previews that variant.
 
 ## Imports
 
@@ -507,8 +507,8 @@ A catalog can import all agents or a selected subset from another catalog:
 {
   "imports": [
     {
-      "from": "~/work/wdt/ansible-wdt/.hcom/agents.json",
-      "agents": ["wdt_main"]
+      "from": "~/work/ops/.hcom/agents.json",
+      "agents": ["ops_main"]
     },
     { "from": "../shared/.hcom/agents.json" }
   ],
@@ -557,7 +557,7 @@ removing the prompt manifest. Recheck this snapshot when either CLI changes. See
 Use one child directory per skill:
 
 ```text
-.hcom/agents/wdt_main/skills/
+.hcom/agents/ops_main/skills/
 ├── review/
 │   ├── SKILL.md
 │   └── references/
@@ -599,29 +599,29 @@ An hcom-managed agent can invoke another AI CLI directly (`codex exec`, `opencod
 An instance name is unique. Launching an already-running name reports its status and exits without opening another instance. To run one catalog definition concurrently, assign each instance a different name:
 
 ```bash
-hcom agent wdt_main --as wdt_review
-hcom agent wdt_main --as wdt_backend
-hcom agent show wdt_main --as wdt_review # inspect the aliased command
+hcom agent ops_main --as ops_review
+hcom agent ops_main --as ops_backend
+hcom agent show ops_main --as ops_review # inspect the aliased command
 ```
 
-`wdt_main` remains the catalog key used to resolve configuration. The `--as` value becomes the runtime identity used by `hcom list`, messages, duplicate detection, `--restart`, `--attach`, and resume history. It is also the default Herdr tab name; an explicit catalog or CLI `window` still takes precedence. Address an aliased instance directly, for example `hcom send @wdt_review -- "Review this"`. Catalog-driven message startup uses the canonical catalog name and does not invent or restart aliases unless requested via `--spawn-as`.
+`ops_main` remains the catalog key used to resolve configuration. The `--as` value becomes the runtime identity used by `hcom list`, messages, duplicate detection, `--restart`, `--attach`, and resume history. It is also the default Herdr tab name; an explicit catalog or CLI `window` still takes precedence. Address an aliased instance directly, for example `hcom send @ops_review -- "Review this"`. Catalog-driven message startup uses the canonical catalog name and does not invent or restart aliases unless requested via `--spawn-as`.
 
 To start a catalog agent under an adhoc clone/alias name directly via send, use `--spawn-as <name>` (alias `--as <name>`):
 
 ```bash
-hcom send @wdt_main --spawn-as wdt_main_review --intent request -- "Review the current change"
+hcom send @ops_main --spawn-as ops_main_review --intent request -- "Review the current change"
 # or with the --as alias:
-hcom send @wdt_main --as wdt_main_review --intent request -- "Review the current change"
+hcom send @ops_main --as ops_main_review --intent request -- "Review the current change"
 ```
 
-If `wdt_main_review` is already running, `hcom send` delivers directly to it without relaunching. If stopped or not yet running, it autostarts the catalog agent under that instance name and delivers the message once ready.
+If `ops_main_review` is already running, `hcom send` delivers directly to it without relaunching. If stopped or not yet running, it autostarts the catalog agent under that instance name and delivers the message once ready.
 
 To launch several named agents together, add `groups` to their catalog definitions and target the group with `@`:
 
 ```bash
-hcom agent @wdt
-hcom agent @wdt --dry-run
-hcom agent @wdt --restart --clean
+hcom agent @ops
+hcom agent @ops --dry-run
+hcom agent @ops --restart --clean
 ```
 
 Flags are shared by every member, except `--as` and `--attach`, which are invalid for group launches. Members are processed in name order; already-running agents count as successful. A failure does not prevent subsequent members from launching, but the command returns exit code 1 after printing its summary. Group launches require separate terminal panes and reject `terminal: here`.
@@ -629,7 +629,7 @@ Flags are shared by every member, except `--as` and `--attach`, which are invali
 A targeted message starts a missing or stopped catalog agent before delivery:
 
 ```bash
-hcom send @wdt_main --intent request -- "Review the current change"
+hcom send @ops_main --intent request -- "Review the current change"
 ```
 
 This works for direct names, catalog tag groups, multiple recipients, and stopped catalog members in an existing thread. Unknown names fail without storing the message. Broadcasts address only currently deliverable instances and never start the whole catalog.

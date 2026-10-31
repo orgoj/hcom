@@ -144,8 +144,8 @@ owning project while an external client can compose a private address book:
 {
   "imports": [
     {
-      "from": "~/work/wdt/ansible-wdt/.hcom/agents.json",
-      "agents": ["wdt_main"]
+      "from": "~/work/ops/.hcom/agents.json",
+      "agents": ["ops_main"]
     }
   ]
 }
@@ -155,7 +155,7 @@ Point only that client's process at the overlay while retaining normal global ag
 
 ```bash
 export HCOM_AGENT_CATALOGS="$HOME/.hermes/profiles/main/hcom-agents.json"
-hcom send @wdt_main --intent request -- "Review the deployment"
+hcom send @ops_main --intent request -- "Review the deployment"
 ```
 
 Multiple additive catalogs are separated by `:`. Their precedence is global catalog, additive catalogs from left to right, project
@@ -169,8 +169,8 @@ imports none. Imported agents retain their source catalog's defaults and relativ
 An import's `agents` list is a scope boundary, for `hcom send` as much as for `hcom agent`, and the
 isolation is deliberate. An agent defined only in a project catalog is addressable from inside that
 project, and from another directory only if a catalog in scope imports it: in the example above
-`wdt_main` is reachable from anywhere while the project's other agents stay reachable only from
-inside `ansible-wdt`. hcom never scans the filesystem for unrelated project catalogs. A name out of
+`ops_main` is reachable from anywhere while the project's other agents stay reachable only from
+inside `~/work/ops`. hcom never scans the filesystem for unrelated project catalogs. A name out of
 scope is reported as unknown plus a note that scope depends on the directory; hcom does not tell a
 caller out of scope which catalog defines that name, so do not read "unknown" from outside a
 project as the entry having been removed, and do not build tooling that works around the boundary.
@@ -251,9 +251,9 @@ its alias, such as `hcom send @review_api -- "Review this"`.
 To autostart a catalog agent under an adhoc clone/alias name directly via send, use `--spawn-as <name>` (alias `--as <name>`):
 
 ```bash
-hcom send @wdt_main --spawn-as review_api -- "Review this"
+hcom send @ops_main --spawn-as review_api -- "Review this"
 # or with the alias:
-hcom send @wdt_main --as review_api -- "Review this"
+hcom send @ops_main --as review_api -- "Review this"
 ```
 
 If `review_api` is already running, send delivers directly without relaunching. If stopped or not yet running, it autostarts the catalog agent under that instance name. Targeted sends without `--spawn-as` only auto-start the canonical catalog instance.
