@@ -16,7 +16,7 @@ Use it to coordinate multi-agent pipelines, run different AI CLIs as each other'
 
 Works with: `claude`, `codex`, `opencode`, `copilot`, `qoder`, `grok`, `hermes`, `pi`, `omp`, `agy`, `cursor`, `kimi`, `kilo`, `gemini`
 
-This is the [orgoj fork](https://github.com/orgoj/hcom) of [aannoo/hcom](https://github.com/aannoo/hcom). Upstream behavior runs unchanged; the fork adds named agents from a JSON catalog (`hcom agent`, under Reference below), catalog groups and roaming agents, send autostart, idle autokill, `hcom handoff`, and a desktop window for the catalog ([contrib/hcom-gui](contrib/README.md)).
+This is the [orgoj fork](https://github.com/orgoj/hcom) of [aannoo/hcom](https://github.com/aannoo/hcom). Upstream behavior runs unchanged; the fork adds named agents from a JSON catalog (`hcom agent`, under Reference below; full reference in [docs/agent.md](docs/agent.md)), catalog groups and roaming agents, send autostart, idle autokill, `hcom handoff`, and a desktop window for the catalog ([contrib/hcom-gui](contrib/README.md)).
 
 https://github.com/user-attachments/assets/1ce23ed9-f529-4be0-8124-816aa4c2fd43
 
@@ -318,7 +318,7 @@ hcom update                    # install the latest orgoj/hcom release
 
 ### Agent catalog
 
-`hcom agent` launches named agents from a JSON catalog. Each entry fixes the CLI, directory, model, terminal placement and prompts, so `hcom agent docs` starts the same agent every time, and `hcom send @docs` starts it if it is not running.
+`hcom agent` launches named agents from a JSON catalog. Each entry fixes the CLI, directory, model, terminal placement and prompts, so `hcom agent docs` starts the same agent every time, and `hcom send @docs` starts it if it is not running. The full reference, including bundles with file-based memory and instruction transport per CLI, is [docs/agent.md](docs/agent.md).
 
 ```json
 {
@@ -448,7 +448,7 @@ A send to the catalog name, and `hcom agent reviewer`, print a stdout line such 
 
 #### Bundles and instructions
 
-An `agents/<name>/SOUL.md` next to a catalog defines that agent too and is appended to its instructions after `system_prompt`. Skills in `agents/<name>/skills/*/SKILL.md` belong to it (a skill directory may be a symlink to a skill elsewhere); Claude loads them natively through `--add-dir`. A top-level `"system_prompt_file"` sets a catalog-wide default from a file.
+An `agents/<name>/SOUL.md` next to a catalog defines that agent too and is appended to its instructions after `system_prompt`. Skills in `agents/<name>/skills/*/SKILL.md` belong to it (a skill directory may be a symlink to a skill elsewhere); Claude loads them natively through `--add-dir`. A top-level `"system_prompt_file"` sets a catalog-wide default from a file. hcom rereads the bundle on every clean start and named resume, so an agent can keep its own memory there: `SOUL.md` for its stable role, `NOTES.md` and `MEMORY/` as ordinary files its instructions tell it to read and update. See [Agent bundles](docs/agent.md#agent-bundles).
 
 #### Swapping a CLI locally
 
@@ -456,7 +456,7 @@ Only the global catalog accepts `"cli_overrides": {"codex": "claude"}`. It maps 
 
 #### Environment and handoff
 
-Every launched agent gets `HCOM_INSTANCE_NAME` (its instance name) and `HCOM_AGENT_NAME` (the catalog entry it came from; they differ under `--as` and for roaming agents). An agent started by `hcom agent` or send autostart can restart itself in a clean session with `hcom handoff <prompt>`, keeping its name and catalog entry. Each handoff that passes validation logs a life event with action `handoff` when the relaunch starts (`hcom events --action handoff`); it counts attempts, and a successor that fails afterwards is reported in `~/.hcom/logs/handoff-<name>.log`.
+Every launched agent gets `HCOM_INSTANCE_NAME` (its instance name) and `HCOM_AGENT_NAME` (the catalog entry it came from; they differ under `--as` and for roaming agents). An agent started by `hcom agent` or send autostart can restart itself in a clean session with `hcom handoff <prompt>`, keeping its name and catalog entry. Each handoff that passes validation logs a life event with action `handoff` when the relaunch starts (`hcom events --action handoff`); it counts attempts, and a successor that fails afterwards is reported in `~/.hcom/.tmp/logs/handoff-<name>.log`.
 
 </details>
 

@@ -91,6 +91,10 @@ tell any agent:
 
 **Catalog sidecar**: `<stem>.local.json` next to any catalog (`agents.json` → `agents.local.json`, usually gitignored) is merged into it for temporary changes: same fields, may add or disable agents, same scope as its catalog, no `imports`. `hcom agent show <name>` lists it under `sources`.
 
+**Agent bundles**: `agents/<name>/SOUL.md` next to a catalog defines a persistent agent and is injected into its instructions on every clean start and named resume; `NOTES.md` and `MEMORY/` beside it are a file-based memory convention the agent's instructions must name.
+
+Read `references/named-agents.md` when defining or launching recurring agents with `hcom agent`: catalogs and precedence, imports and scope, bundles and memory, roaming, start modes, handoff, per-CLI `tools` profiles.
+
 run `hcom --help` for full command syntax and flags.
 
 ---
