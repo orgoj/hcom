@@ -31,9 +31,9 @@ loader.exec_module(gui)
 
 CATALOG = [
     {"name": "a1", "cli": "claude", "groups": ["persistent"], "source": "global", "dir": "/w"},
-    {"name": "a2", "cli": "codex", "groups": ["persistent", "wdt_all"], "source": "global", "dir": "/w",
+    {"name": "a2", "cli": "codex", "groups": ["persistent", "web_all"], "source": "global", "dir": "/w",
      "model": "gpt-x"},
-    {"name": "a3", "cli": "claude", "groups": ["wdt_all"], "source": "global", "dir": "/w",
+    {"name": "a3", "cli": "claude", "groups": ["web_all"], "source": "global", "dir": "/w",
      "model": "sonnet", "reasoning": "high"},
 ]
 LIVE = [
@@ -90,7 +90,7 @@ class SyncThreading:
 class RunningGroups(unittest.TestCase):
     def test_groups_hold_only_running_instances(self):
         rows = gui.build_rows(CATALOG, LIVE)
-        self.assertEqual(gui.running_groups(rows), {"persistent": ["a1", "a2x"], "wdt_all": ["a2x"]})
+        self.assertEqual(gui.running_groups(rows), {"persistent": ["a1", "a2x"], "web_all": ["a2x"]})
 
     def test_roaming_column_marks_roaming_agent_and_its_instances(self):
         catalog = CATALOG + [{"name": "r1", "cli": "claude", "roaming": True, "source": "global"}]
@@ -343,7 +343,7 @@ class App(unittest.TestCase):
         menu = self.app.group_menu
         labels = [menu.entrycget(i, "label") if menu.type(i) == "command" else "---"
                   for i in range(menu.index("end") + 1)]
-        self.assertEqual(labels, ["Filtered", "---", "@persistent (2)", "@wdt_all (1)", "---",
+        self.assertEqual(labels, ["Filtered", "---", "@persistent (2)", "@web_all (1)", "---",
                                   "tool:claude (2)", "tool:codex (1)"])
 
     def test_tool_menu_kills_confirmed_names(self):
@@ -1535,7 +1535,7 @@ class App(unittest.TestCase):
 
     def test_text_filter_matches_agent_instance_dir_and_groups(self):
         everything = self.shown()
-        self.app.filter_entry.insert("end", "WDT")  # the table narrows at once
+        self.app.filter_entry.insert("end", "WEB")  # the table narrows at once
         self.assertEqual(sorted(self.shown()), ["a2|", "a2|a2x", "a3|"])
         for text, rows in (("A2X", ["a2|a2x"]), ("sol", ["|solo"]), ("/w", ["a1|a1", "a2|", "a2|a2x", "a3|"])):
             self.app.filter_text.set(text)
@@ -1566,7 +1566,7 @@ class App(unittest.TestCase):
 
     def test_clear_button_after_the_filter_empties_it(self):
         everything = self.shown()
-        self.app.filter_text.set("WDT")
+        self.app.filter_text.set("WEB")
         self.assertNotEqual(self.shown(), everything)
         children = self.app.filter_entry.master.winfo_children()
         self.assertIs(children[children.index(self.app.filter_entry) + 1], self.app.clear_filter_button)
@@ -1575,7 +1575,7 @@ class App(unittest.TestCase):
         self.assertEqual(self.shown(), everything)
 
     def test_alt_x_empties_editable_inputs_only(self):
-        self.app.filter_text.set("WDT")
+        self.app.filter_text.set("WEB")
         self.key(self.app.filter_entry, "<Alt-x>")
         self.assertEqual(self.app.filter_text.get(), "")
         readonly = gui.ttk.Combobox(self.app, values=["a"], state="readonly")
@@ -1584,14 +1584,14 @@ class App(unittest.TestCase):
         self.assertEqual(readonly.get(), "a")
         log = self.app.tabs[gui.LOG_TAB]
         before = log.get("1.0", "end")
-        self.app.filter_text.set("WDT")
+        self.app.filter_text.set("WEB")
         self.key(log, "<Alt-X>")  # Caps Lock; the disabled tab keeps its text, the filter is cleared
         self.assertEqual(log.get("1.0", "end"), before)
         self.assertEqual(self.app.filter_text.get(), "")
 
     def test_alt_x_outside_text_inputs_clears_the_filter(self):
         everything = self.shown()
-        self.app.filter_text.set("WDT")
+        self.app.filter_text.set("WEB")
         self.key(self.app.tree, "<Alt-x>")
         self.assertEqual(self.app.filter_text.get(), "")
         self.assertEqual(self.shown(), everything)
@@ -1613,7 +1613,7 @@ class App(unittest.TestCase):
         self.assertEqual(seen, {"TEntry": "", "Text": ""})
 
     def test_kill_filtered_kills_the_running_instances_shown(self):
-        self.app.filter_text.set("WDT")  # a2|, a2|a2x, a3|: only a2x runs
+        self.app.filter_text.set("WEB")  # a2|, a2|a2x, a3|: only a2x runs
         self.app.group_menu.invoke(0)
         self.assertEqual(self.asked, [("Kill group", "Kill filtered: a2x?")])
         self.assertEqual(self.ran, [(["hcom", "kill", "a2x"], gui.HOME)])

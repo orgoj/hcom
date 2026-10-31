@@ -1447,12 +1447,12 @@ mod tests {
             .execute(
                 "INSERT INTO instances (name, tool, created_at, launch_context) \
                  VALUES ('coach', 'claude', 1, ?)",
-                params![r#"{"herdr_workspace":"ansible-wdt","herdr_tab":"coach"}"#],
+                params![r#"{"herdr_workspace":"ops-repo","herdr_tab":"coach"}"#],
             )
             .unwrap();
 
         let snapshot = db.get_instance_snapshot("coach").unwrap().unwrap();
-        assert_eq!(snapshot["herdr_workspace"], "ansible-wdt");
+        assert_eq!(snapshot["herdr_workspace"], "ops-repo");
         assert_eq!(snapshot["herdr_tab"], "coach");
         cleanup_test_db(db_path);
     }

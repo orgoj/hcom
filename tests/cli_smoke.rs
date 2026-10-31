@@ -2708,13 +2708,13 @@ fn project_bundle_fully_shadows_same_named_global_agent() {
 #[test]
 fn project_agent_resolves_identically_inside_and_outside_project() {
     let h = Hcom::new();
-    let project = h.root_path().join("wdt");
+    let project = h.root_path().join("ops");
     let project_catalog = project.join(".hcom/agents.json");
     std::fs::create_dir_all(project_catalog.parent().unwrap()).expect("create project catalog dir");
     std::fs::write(
         &project_catalog,
         r#"{"defaults":{"cli":"codex","system_prompt":"Project instructions."},
-            "agents":{"wdt_main":{"dir":".","model":"shared",
+            "agents":{"ops_main":{"dir":".","model":"shared",
                 "tools":{"codex":{"model":"profile-model"}}}}}"#,
     )
     .expect("write project catalog");
@@ -2727,7 +2727,7 @@ fn project_agent_resolves_identically_inside_and_outside_project() {
             },
             "imports": [{
                 "from": project_catalog,
-                "agents": ["wdt_main"]
+                "agents": ["ops_main"]
             }]
         })
         .to_string(),
@@ -2736,13 +2736,13 @@ fn project_agent_resolves_identically_inside_and_outside_project() {
 
     let outside = h
         .cmd()
-        .args(["agent", "show", "wdt_main"])
+        .args(["agent", "show", "ops_main"])
         .output()
         .expect("show imported project agent outside project");
     let inside = h
         .cmd()
         .current_dir(&project)
-        .args(["agent", "show", "wdt_main"])
+        .args(["agent", "show", "ops_main"])
         .output()
         .expect("show project agent inside project");
     let outside_stdout = String::from_utf8_lossy(&outside.stdout);
@@ -2823,7 +2823,7 @@ fn legacy_project_catalog_is_ignored_and_edit_creates_dot_hcom_catalog() {
 #[test]
 fn additive_catalog_env_keeps_global_agents_and_imports_selected_project_agents() {
     let h = Hcom::new();
-    let project = h.root_path().join("wdt");
+    let project = h.root_path().join("ops");
     std::fs::create_dir_all(project.join(".hcom")).expect("create project dir");
     std::fs::write(
         h.path().join("agents.json"),
@@ -2832,14 +2832,14 @@ fn additive_catalog_env_keeps_global_agents_and_imports_selected_project_agents(
     .expect("write global catalog");
     std::fs::write(
         project.join(".hcom/agents.json"),
-        r#"{"agents":{"wdt_main":{"dir":"."},"wdt_private":{"dir":"."}}}"#,
+        r#"{"agents":{"ops_main":{"dir":"."},"ops_private":{"dir":"."}}}"#,
     )
     .expect("write project catalog");
     let overlay = h.root_path().join("hermes-agents.json");
     std::fs::write(
         &overlay,
         format!(
-            r#"{{"imports":[{{"from":{},"agents":["wdt_main"]}}]}}"#,
+            r#"{{"imports":[{{"from":{},"agents":["ops_main"]}}]}}"#,
             serde_json::to_string(&project.join(".hcom/agents.json")).unwrap()
         ),
     )
@@ -2859,10 +2859,10 @@ fn additive_catalog_env_keeps_global_agents_and_imports_selected_project_agents(
         "stdout={stdout}"
     );
     assert!(
-        stdout.lines().any(|line| line == "wdt_main"),
+        stdout.lines().any(|line| line == "ops_main"),
         "stdout={stdout}"
     );
-    assert!(!stdout.contains("wdt_private"), "stdout={stdout}");
+    assert!(!stdout.contains("ops_private"), "stdout={stdout}");
 }
 
 #[test]
@@ -3002,23 +3002,23 @@ fn agent_list_local_includes_only_project_agents_and_their_imports() {
 #[test]
 fn imported_agent_config_overrides_global_defaults() {
     let h = Hcom::new();
-    let project = h.root_path().join("wdt");
+    let project = h.root_path().join("ops");
     std::fs::create_dir_all(project.join(".hcom")).expect("create project dir");
     std::fs::write(
         project.join(".hcom/agents.json"),
-        r#"{"defaults":{"cli":"claude"},"agents":{"wdt_main":{"dir":".","cli":"claude"}}}"#,
+        r#"{"defaults":{"cli":"claude"},"agents":{"ops_main":{"dir":".","cli":"claude"}}}"#,
     )
     .expect("write project catalog");
     std::fs::write(
         h.path().join("agents.json"),
         format!(
-            r#"{{"defaults":{{"cli":"codex"}},"imports":[{{"from":{},"agents":["wdt_main"]}}]}}"#,
+            r#"{{"defaults":{{"cli":"codex"}},"imports":[{{"from":{},"agents":["ops_main"]}}]}}"#,
             serde_json::to_string(&project.join(".hcom/agents.json")).unwrap()
         ),
     )
     .expect("write global catalog");
 
-    let (code, stdout, stderr) = h.run(["agent", "show", "wdt_main"]);
+    let (code, stdout, stderr) = h.run(["agent", "show", "ops_main"]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     assert!(
         stdout.lines().any(|line| line == "cli:       claude"),
@@ -3084,18 +3084,18 @@ fn agent_unknown_name_suggests_a_close_match() {
     let h = Hcom::new();
     std::fs::write(
         h.path().join("agents.json"),
-        r#"{"agents":{"wdt_main":{"dir":"/tmp","cli":"codex"}}}"#,
+        r#"{"agents":{"ops_main":{"dir":"/tmp","cli":"codex"}}}"#,
     )
     .expect("write catalog");
 
-    let (code, _stdout, stderr) = h.run(["agent", "wdt_mian"]);
+    let (code, _stdout, stderr) = h.run(["agent", "ops_mian"]);
     assert_ne!(code, 0, "stderr={stderr}");
     assert!(
-        stderr.contains("unknown agent 'wdt_mian'"),
+        stderr.contains("unknown agent 'ops_mian'"),
         "stderr={stderr}"
     );
     assert!(
-        stderr.contains("did you mean 'wdt_main'"),
+        stderr.contains("did you mean 'ops_main'"),
         "stderr={stderr}"
     );
 }
@@ -3341,13 +3341,13 @@ fn agent_dry_run_renders_the_hcom_command_without_launching() {
         h.path().join("agents.json"),
         r#"{"defaults":{"cli":"claude"},
             "agents":{"solo":{"dir":"/tmp","cli":"codex","terminal":"wezterm-tab",
-                              "env":{"AWS_PROFILE":"wdt"},"args":["--from-catalog"]}}}"#,
+                              "env":{"AWS_PROFILE":"ops"},"args":["--from-catalog"]}}}"#,
     )
     .expect("write catalog");
 
     let (code, stdout, stderr) = h.run(["agent", "solo", "--model", "gpt-5", "--dry-run"]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
-    assert!(stdout.contains("AWS_PROFILE=wdt"), "stdout={stdout}");
+    assert!(stdout.contains("AWS_PROFILE=ops"), "stdout={stdout}");
     assert!(stdout.contains("codex --as solo"), "stdout={stdout}");
     assert!(stdout.contains("--dir /tmp"), "stdout={stdout}");
     assert!(stdout.contains("--terminal wezterm-tab"), "stdout={stdout}");

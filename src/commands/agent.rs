@@ -3811,9 +3811,9 @@ mod tests {
 
     #[test]
     fn merge_keeps_base_when_override_omits_field() {
-        let mut base = def_from(r#"{"session":"wdt","resume":true}"#);
+        let mut base = def_from(r#"{"session":"ops","resume":true}"#);
         base.merge_from(&def_from(r#"{"cli":"codex"}"#));
-        assert_eq!(base.session.as_deref(), Some("wdt"));
+        assert_eq!(base.session.as_deref(), Some("ops"));
         assert_eq!(base.resume, Some(true));
     }
 
@@ -4223,14 +4223,14 @@ mod tests {
         std::fs::write(
             project.join(PROJECT_FILE),
             r#"{"defaults":{"cli":"codex"},"agents":{
-                "wdt_main":{"dir":"work","model":"base"},
+                "ops_main":{"dir":"work","model":"base"},
                 "private":{"dir":"private"}}}"#,
         )
         .unwrap();
         std::fs::write(
             overlay.join("hermes.json"),
-            r#"{"imports":[{"from":"../project/agents.json","agents":["wdt_main"]}],
-                "agents":{"wdt_main":{"model":"overlay"},"hermes_local":{"dir":"."}}}"#,
+            r#"{"imports":[{"from":"../project/agents.json","agents":["ops_main"]}],
+                "agents":{"ops_main":{"model":"overlay"},"hermes_local":{"dir":"."}}}"#,
         )
         .unwrap();
 
@@ -4246,11 +4246,11 @@ mod tests {
             project_files: Vec::new(),
             project_root: None,
         };
-        let wdt = catalogs.resolve("wdt_main").unwrap();
-        assert_eq!(wdt.cli.as_deref(), Some("codex"));
-        assert_eq!(wdt.model.as_deref(), Some("overlay"));
+        let ops = catalogs.resolve("ops_main").unwrap();
+        assert_eq!(ops.cli.as_deref(), Some("codex"));
+        assert_eq!(ops.model.as_deref(), Some("overlay"));
         assert_eq!(
-            wdt.dir.as_deref(),
+            ops.dir.as_deref(),
             Some(project.join("work").to_string_lossy().as_ref())
         );
         assert!(catalogs.resolve("private").is_none());
@@ -4353,7 +4353,7 @@ mod tests {
         std::fs::create_dir_all(&overlay).unwrap();
         std::fs::write(
             project_hcom.join(PROJECT_FILE),
-            r#"{"agents":{"wdt_main":{"dir":"."}}}"#,
+            r#"{"agents":{"ops_main":{"dir":"."}}}"#,
         )
         .unwrap();
         std::fs::write(
@@ -4378,7 +4378,7 @@ mod tests {
             project_root: None,
         };
         assert_eq!(
-            catalogs.resolve("wdt_main").unwrap().dir.as_deref(),
+            catalogs.resolve("ops_main").unwrap().dir.as_deref(),
             Some(project.to_string_lossy().as_ref())
         );
     }
@@ -4499,7 +4499,7 @@ mod tests {
 
     fn eff_of(json: &str, cli_args: &[&str]) -> Effective {
         let cli = parse_cli(&cli_args.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
-        effective("wdt_main", def_from(json), &cli)
+        effective("ops_main", def_from(json), &cli)
     }
 
     #[test]
@@ -4586,11 +4586,11 @@ mod tests {
 
     #[test]
     fn window_defaults_to_agent_name_and_empty_session_disables_placement() {
-        let eff = eff_of(r#"{"dir":"/w","session":"wdt","terminal":"herdr"}"#, &[]);
-        assert_eq!(eff.window, "wdt_main");
-        assert_eq!(eff.session.as_deref(), Some("wdt"));
+        let eff = eff_of(r#"{"dir":"/w","session":"ops","terminal":"herdr"}"#, &[]);
+        assert_eq!(eff.window, "ops_main");
+        assert_eq!(eff.session.as_deref(), Some("ops"));
 
-        let eff = eff_of(r#"{"dir":"/w","session":"wdt"}"#, &["--session", ""]);
+        let eff = eff_of(r#"{"dir":"/w","session":"ops"}"#, &["--session", ""]);
         assert!(eff.session.is_none());
     }
 
@@ -4613,7 +4613,7 @@ mod tests {
     fn session_with_non_herdr_preset_warns_and_falls_back() {
         for terminal in ["kitty-tab", "tmux"] {
             let eff = eff_of(
-                &format!(r#"{{"dir":"/w","session":"wdt","terminal":"{terminal}"}}"#),
+                &format!(r#"{{"dir":"/w","session":"ops","terminal":"{terminal}"}}"#),
                 &[],
             );
             let (s, warnings) = choose_strategy(&eff, None);
@@ -4652,7 +4652,7 @@ mod tests {
 
     #[test]
     fn herdr_default_space_is_the_agent_directory_not_the_caller_project() {
-        let caller = Some(Path::new("/work/ansible-wdt"));
+        let caller = Some(Path::new("/work/ops-repo"));
         let mut eff = eff_of(r#"{"dir":"/home/u/projects/hcom","terminal":"herdr"}"#, &[]);
         apply_herdr_placement(&mut eff, caller, false, None);
         assert_eq!(eff.session.as_deref(), Some("hcom"));
@@ -4661,10 +4661,7 @@ mod tests {
         apply_herdr_placement(&mut eff, caller, false, None);
         assert_eq!(eff.session.as_deref(), Some("wiki"));
 
-        let mut eff = eff_of(
-            r#"{"dir":"/work/ansible-wdt/roles","terminal":"herdr"}"#,
-            &[],
-        );
+        let mut eff = eff_of(r#"{"dir":"/work/ops-repo/roles","terminal":"herdr"}"#, &[]);
         apply_herdr_placement(&mut eff, caller, false, None);
         assert_eq!(eff.session.as_deref(), Some("roles"));
 
@@ -4682,8 +4679,8 @@ mod tests {
         // subdirectory), so the caller's project names the workspace.
         let mut eff = eff_of(r#"{"terminal":"herdr"}"#, &[]);
         assert!(!eff.dir_explicit);
-        apply_herdr_placement(&mut eff, Some(Path::new("/work/ansible-wdt")), false, None);
-        assert_eq!(eff.session.as_deref(), Some("ansible-wdt"));
+        apply_herdr_placement(&mut eff, Some(Path::new("/work/ops-repo")), false, None);
+        assert_eq!(eff.session.as_deref(), Some("ops-repo"));
     }
 
     #[test]
@@ -4704,13 +4701,13 @@ mod tests {
         );
         assert_eq!(
             eff.env.get("HCOM_HERDR_TAB").map(String::as_str),
-            Some("wdt_main")
+            Some("ops_main")
         );
     }
 
     #[test]
     fn session_without_herdr_terminal_warns() {
-        let eff = eff_of(r#"{"dir":"/w","session":"wdt"}"#, &[]);
+        let eff = eff_of(r#"{"dir":"/w","session":"ops"}"#, &[]);
         let (s, warnings) = choose_strategy(&eff, None);
         assert_eq!(s, Strategy::Direct(None));
         assert!(warnings[0].contains("terminal preset 'default'"));
@@ -4718,7 +4715,7 @@ mod tests {
 
     #[test]
     fn session_uses_configured_herdr_without_catalog_terminal() {
-        let eff = eff_of(r#"{"dir":"/w","session":"wdt"}"#, &[]);
+        let eff = eff_of(r#"{"dir":"/w","session":"ops"}"#, &[]);
         let (strategy, warnings) = choose_strategy(&eff, Some("herdr"));
         assert_eq!(strategy, Strategy::Direct(None));
         assert!(warnings.is_empty());
@@ -4727,7 +4724,7 @@ mod tests {
     #[test]
     fn hcom_argv_puts_hcom_flags_before_tool_args() {
         let eff = eff_of(
-            r#"{"dir":"/w","cli":"codex","tag":"wdt","prompt":"hi","args":["--foo"]}"#,
+            r#"{"dir":"/w","cli":"codex","tag":"ops","prompt":"hi","args":["--foo"]}"#,
             &["--model", "gpt-5"],
         );
         let argv = hcom_argv(&eff, Some("here"), false);
@@ -4736,13 +4733,13 @@ mod tests {
             vec![
                 "codex",
                 "--as",
-                "wdt_main",
+                "ops_main",
                 "--dir",
                 "/w",
                 "--terminal",
                 "here",
                 "--tag",
-                "wdt",
+                "ops",
                 "--hcom-prompt",
                 "hi",
                 "--go",
@@ -4843,7 +4840,7 @@ mod tests {
         let eff = eff_of(r#"{"dir":"/w","cli":"codex","reasoning":"xhigh"}"#, &[]);
         let argv = hcom_argv(&eff, Some("here"), true);
         assert_eq!(argv[0], "r");
-        assert_eq!(argv[1], "wdt_main");
+        assert_eq!(argv[1], "ops_main");
         assert!(argv.contains(&"--go".to_string()));
         assert!(!argv.contains(&"--as".to_string()));
         assert!(argv.ends_with(&[
@@ -4911,10 +4908,10 @@ mod tests {
 
     #[test]
     fn closest_suggests_near_miss_only() {
-        let names = ["wdt_main".to_string(), "gtm_cli".to_string()];
+        let names = ["ops_main".to_string(), "api_cli".to_string()];
         assert_eq!(
-            closest("wdt_mian", names.iter()).as_deref(),
-            Some("wdt_main")
+            closest("ops_mian", names.iter()).as_deref(),
+            Some("ops_main")
         );
         assert_eq!(closest("zzzzzzzzzz", names.iter()), None);
     }

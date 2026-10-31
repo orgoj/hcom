@@ -4279,7 +4279,7 @@ mod tests {
                 "background": 0,
                 "last_event_id": 0,
                 "directory": "/tmp",
-                "herdr_workspace": "ansible-wdt",
+                "herdr_workspace": "ops-repo",
                 "herdr_tab": "coach"
             }
         });
@@ -4297,7 +4297,7 @@ mod tests {
             assert_eq!(
                 env.get(crate::commands::agent::HERDR_WORKSPACE_ENV)
                     .map(String::as_str),
-                Some("ansible-wdt"),
+                Some("ops-repo"),
                 "fork={fork}"
             );
             assert_eq!(

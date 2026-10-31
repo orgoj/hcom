@@ -1930,18 +1930,18 @@ mod tests {
         let ctx = HcomContext::from_env(
             &launch_env(&[
                 ("HCOM_LAUNCHED", "1"),
-                ("HCOM_INSTANCE_NAME", "wdt_main"),
-                ("HCOM_TAG", "wdt"),
+                ("HCOM_INSTANCE_NAME", "ops_main"),
+                ("HCOM_TAG", "ops"),
             ]),
             std::path::PathBuf::from("/tmp"),
         );
 
         let name = reclaim_launch_identity(&db, &ctx, "sess-after-clear", "pid-live", "claude");
-        assert_eq!(name.as_deref(), Some("wdt_main"));
+        assert_eq!(name.as_deref(), Some("ops_main"));
 
-        let inst = db.get_instance_full("wdt_main").unwrap().unwrap();
+        let inst = db.get_instance_full("ops_main").unwrap().unwrap();
         assert_eq!(inst.session_id.as_deref(), Some("sess-after-clear"));
-        assert_eq!(inst.tag.as_deref(), Some("wdt"));
+        assert_eq!(inst.tag.as_deref(), Some("ops"));
     }
 
     #[test]
@@ -1952,7 +1952,7 @@ mod tests {
         // Name present but no HCOM_LAUNCHED: a vanilla session that merely
         // inherited the variable must not seize the agent's name.
         let inherited = HcomContext::from_env(
-            &launch_env(&[("HCOM_INSTANCE_NAME", "wdt_main")]),
+            &launch_env(&[("HCOM_INSTANCE_NAME", "ops_main")]),
             std::path::PathBuf::from("/tmp"),
         );
         assert_eq!(

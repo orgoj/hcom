@@ -1701,7 +1701,7 @@ mod tests {
         db.set_process_binding("pid-123", "", "temp").unwrap();
         db.store_launch_context(
             "temp",
-            r#"{"herdr_workspace":"ansible-wdt","herdr_tab":"miso"}"#,
+            r#"{"herdr_workspace":"ops-repo","herdr_tab":"miso"}"#,
         )
         .unwrap();
 
@@ -1711,10 +1711,10 @@ mod tests {
         let inst = db.get_instance_full("miso").unwrap().unwrap();
         let ctx: serde_json::Value =
             serde_json::from_str(inst.launch_context.as_deref().unwrap_or("{}")).unwrap();
-        assert_eq!(ctx["herdr_workspace"], "ansible-wdt");
+        assert_eq!(ctx["herdr_workspace"], "ops-repo");
         assert_eq!(ctx["herdr_tab"], "miso");
         let snapshot = db.get_instance_snapshot("miso").unwrap().unwrap();
-        assert_eq!(snapshot["herdr_workspace"], "ansible-wdt");
+        assert_eq!(snapshot["herdr_workspace"], "ops-repo");
         assert_eq!(snapshot["herdr_tab"], "miso");
 
         cleanup(path);
@@ -1801,28 +1801,28 @@ mod tests {
         // /clear deleted the row and both bindings; the process lives on.
         let result = reclaim_launched_identity(
             &db,
-            "wdt_main",
+            "ops_main",
             "sess-after-clear",
             "pid-live",
             "claude",
-            Some("wdt"),
+            Some("ops"),
             false,
         );
-        assert_eq!(result.as_deref(), Some("wdt_main"));
+        assert_eq!(result.as_deref(), Some("ops_main"));
 
-        let inst = db.get_instance_full("wdt_main").unwrap().unwrap();
+        let inst = db.get_instance_full("ops_main").unwrap().unwrap();
         assert_eq!(inst.session_id.as_deref(), Some("sess-after-clear"));
         assert_eq!(inst.tool, "claude");
-        assert_eq!(inst.tag.as_deref(), Some("wdt"));
+        assert_eq!(inst.tag.as_deref(), Some("ops"));
         assert_eq!(
             db.get_session_binding("sess-after-clear")
                 .unwrap()
                 .as_deref(),
-            Some("wdt_main")
+            Some("ops_main")
         );
         assert_eq!(
             db.get_process_binding("pid-live").unwrap().as_deref(),
-            Some("wdt_main")
+            Some("ops_main")
         );
 
         cleanup(path);
@@ -1836,16 +1836,16 @@ mod tests {
 
         // A second launch already runs under the name.
         let mut data = serde_json::Map::new();
-        data.insert("name".into(), serde_json::json!("wdt_main"));
+        data.insert("name".into(), serde_json::json!("ops_main"));
         data.insert("status".into(), serde_json::json!(ST_LISTENING));
         data.insert("status_context".into(), serde_json::json!("start"));
         data.insert("created_at".into(), serde_json::json!(now));
         data.insert("session_id".into(), serde_json::json!("sess-other"));
-        db.save_instance_named("wdt_main", &data).unwrap();
+        db.save_instance_named("ops_main", &data).unwrap();
 
         let result = reclaim_launched_identity(
             &db,
-            "wdt_main",
+            "ops_main",
             "sess-after-clear",
             "pid-live",
             "claude",
@@ -1854,7 +1854,7 @@ mod tests {
         );
         assert_eq!(result, None, "must not steal a live instance's name");
 
-        let inst = db.get_instance_full("wdt_main").unwrap().unwrap();
+        let inst = db.get_instance_full("ops_main").unwrap().unwrap();
         assert_eq!(inst.session_id.as_deref(), Some("sess-other"));
         assert_eq!(db.get_process_binding("pid-live").unwrap(), None);
 
@@ -1868,25 +1868,25 @@ mod tests {
         let now = now_epoch_i64();
 
         let mut data = serde_json::Map::new();
-        data.insert("name".into(), serde_json::json!("wdt_main"));
+        data.insert("name".into(), serde_json::json!("ops_main"));
         data.insert("status".into(), serde_json::json!(ST_INACTIVE));
         data.insert("status_context".into(), serde_json::json!("exit:clear"));
         data.insert("created_at".into(), serde_json::json!(now));
         data.insert("session_id".into(), serde_json::json!("sess-old"));
-        db.save_instance_named("wdt_main", &data).unwrap();
+        db.save_instance_named("ops_main", &data).unwrap();
 
         let result = reclaim_launched_identity(
             &db,
-            "wdt_main",
+            "ops_main",
             "sess-after-clear",
             "pid-live",
             "claude",
             None,
             false,
         );
-        assert_eq!(result.as_deref(), Some("wdt_main"));
+        assert_eq!(result.as_deref(), Some("ops_main"));
 
-        let inst = db.get_instance_full("wdt_main").unwrap().unwrap();
+        let inst = db.get_instance_full("ops_main").unwrap().unwrap();
         assert_eq!(inst.session_id.as_deref(), Some("sess-after-clear"));
 
         cleanup(path);
@@ -1902,11 +1902,11 @@ mod tests {
             None
         );
         assert_eq!(
-            reclaim_launched_identity(&db, "wdt_main", "", "pid", "claude", None, false),
+            reclaim_launched_identity(&db, "ops_main", "", "pid", "claude", None, false),
             None
         );
         assert_eq!(
-            reclaim_launched_identity(&db, "wdt_main", "sess", "", "claude", None, false),
+            reclaim_launched_identity(&db, "ops_main", "sess", "", "claude", None, false),
             None
         );
 
@@ -2123,7 +2123,7 @@ mod tests {
         assert_eq!(db.get_session_binding("sid-resume").unwrap(), None);
 
         let mut explicit = serde_json::Map::new();
-        explicit.insert("name".into(), serde_json::json!("wdt_main"));
+        explicit.insert("name".into(), serde_json::json!("ops_main"));
         explicit.insert("tool".into(), serde_json::json!("claude"));
         explicit.insert("created_at".into(), serde_json::json!(now));
         explicit.insert("status".into(), serde_json::json!("pending"));
@@ -2132,22 +2132,22 @@ mod tests {
             "launch_context".into(),
             serde_json::json!(r#"{"explicit_identity":true}"#),
         );
-        db.save_instance_named("wdt_main", &explicit).unwrap();
-        db.set_process_binding("pid-claude", "", "wdt_main")
+        db.save_instance_named("ops_main", &explicit).unwrap();
+        db.set_process_binding("pid-claude", "", "ops_main")
             .unwrap();
 
         let result = bind_session_to_process(&db, "sid-resume", Some("pid-claude"));
-        assert_eq!(result.as_deref(), Some("wdt_main"));
+        assert_eq!(result.as_deref(), Some("ops_main"));
         assert_eq!(
             db.get_session_binding("sid-resume").unwrap().as_deref(),
-            Some("wdt_main")
+            Some("ops_main")
         );
         assert_eq!(
             db.get_process_binding("pid-claude").unwrap().as_deref(),
-            Some("wdt_main")
+            Some("ops_main")
         );
         assert_eq!(
-            db.get_instance_full("wdt_main")
+            db.get_instance_full("ops_main")
                 .unwrap()
                 .unwrap()
                 .session_id
