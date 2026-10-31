@@ -106,14 +106,16 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   duplicate skill manifest in the prompt. Existing .claude/skills is left alone.
   A project agent ignores a
   same-named non-project entry but still inherits global defaults.
-  External bundles are granted through each CLI's additional-workspace mechanism;
-  agy and antigravity use --add-dir.
+  External bundles are granted through each CLI's additional-workspace mechanism,
+  except agy and antigravity: they get no --add-dir, because AGY runs run_command
+  in the lexicographically first workspace dir, which would be the bundle; the
+  bundle stays reachable as files outside the workspace.
   Every launched agent receives HCOM_INSTANCE_NAME (its actual name) and
   HCOM_AGENT_NAME (the catalog name it started from; under --as or roaming it
   differs from the instance name, outside the catalog both are equal). Resume
   keeps both, a fork keeps HCOM_AGENT_NAME, and children set their own.
   Catalog-launched agy/antigravity also receive DIPPY_POLICY_CWD: the canonical
-  catalog dir, independent of --dir overrides, tool Cwd and --add-dir bundles.
+  catalog dir, independent of --dir overrides and tool Cwd.
   Tracked hcom r restores that scope from the stopped instance snapshot.
   Relative import paths resolve against the importing file. Relative \"dir\" resolves
   against $HOME globally, the parent of project .hcom (also when imported), or its
@@ -2129,9 +2131,14 @@ fn apply_bundle_access(eff: &mut Effective) {
     }
 
     match eff.cli.as_str() {
-        "codex" | "agy" | "antigravity" => {
+        "codex" => {
             eff.bundle_args.extend(["--add-dir".into(), dir]);
         }
+        // AGY (1.4.12) runs run_command in the lexicographically first workspace
+        // dir, and ~/.hcom/agents/<x> sorts before most project dirs, so an added
+        // bundle would become the command cwd. The bundle stays reachable as
+        // files outside the workspace.
+        "agy" | "antigravity" => {}
         "gemini" => {
             eff.bundle_args
                 .extend(["--include-directories".into(), dir]);
@@ -4118,8 +4125,8 @@ mod tests {
         for (cli, expected) in [
             ("claude", vec!["--add-dir", "/agent/reviewer"]),
             ("codex", vec!["--add-dir", "/agent/reviewer"]),
-            ("agy", vec!["--add-dir", "/agent/reviewer"]),
-            ("antigravity", vec!["--add-dir", "/agent/reviewer"]),
+            ("agy", vec![]),
+            ("antigravity", vec![]),
             ("gemini", vec!["--include-directories", "/agent/reviewer"]),
             ("omp", vec!["--add-dir=/agent/reviewer"]),
             ("copilot", vec!["--add-dir=/agent/reviewer"]),

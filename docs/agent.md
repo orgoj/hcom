@@ -168,7 +168,11 @@ launch. Relative references in the manifest resolve from the bundle or skill dir
 
 If a bundle is outside the working directory, hcom grants only that directory through the CLI's
 additional-workspace mechanism. Launch fails clearly when the CLI cannot make it writable at
-startup. Antigravity (`agy`) receives the bundle through its repeatable `--add-dir` option.
+startup. Antigravity (`agy`, `antigravity`) is the exception: it receives no `--add-dir`, because
+AGY 1.4.12 runs `run_command` in the lexicographically first workspace directory, and a bundle
+such as `~/.hcom/agents/<name>` sorts before most project directories, so commands would run in
+the bundle. The bundle stays reachable as files outside the workspace; without
+`--dangerously-skip-permissions`, AGY asks before reading or writing it.
 
 Every launched agent receives `HCOM_INSTANCE_NAME`, its actual instance name, and
 `HCOM_AGENT_NAME`, the catalog name it was started from. They differ under `--as` and for roaming
@@ -178,7 +182,7 @@ the parent's `HCOM_AGENT_NAME` under its new instance name, and nested child lau
 
 For catalog-launched Antigravity, hcom sets `DIPPY_POLICY_CWD` to the canonical catalog `dir`
 for that agent and passes it to the CLI process and its hooks. This launch scope is independent of
-a command-line `--dir` override, tool-call `Cwd`, and any bundle supplied with `--add-dir`.
+a command-line `--dir` override and tool-call `Cwd`.
 The value is recomputed on named resume and a CLI switch to Antigravity. A direct tracked
 `hcom r <name>` restores the recorded launch scope; older snapshots without one do not receive
 the variable. Child launches do not inherit the parent's policy directory.
@@ -546,7 +550,7 @@ passes `--add-dir <bundle>`:
 | CLI | Native project skill location | What hcom currently does for bundle skills |
 |---|---|---|
 | Codex | `.agents/skills/<skill>/SKILL.md` in the working directory or an ancestor up to the repository root | Adds the bundle as a writable directory when external and lists its skills in the agent instructions |
-| Antigravity CLI | `<workspace-root>/.agents/skills/<skill>/SKILL.md` | Adds the external bundle to the workspace and lists its skills in the agent instructions |
+| Antigravity CLI | `<workspace-root>/.agents/skills/<skill>/SKILL.md` | Lists the bundle's skills in the agent instructions; an external bundle is not added to the workspace (see Agent bundles) |
 
 `--add-dir` is an access/workspace option, not a skill-directory option. A future switch to native
 loading needs a CLI-recognized skill location for each agent and an isolated launch check before

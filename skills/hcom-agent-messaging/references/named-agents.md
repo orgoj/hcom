@@ -73,7 +73,9 @@ Claude discovers those skills natively, so the prompt omits the manifest. hcom r
 every clean launch and named resume. References in the manifest resolve relative to their bundle
 or skill directory. For an external bundle,
 hcom grants only that directory when the CLI supports startup-time additional workspaces;
-otherwise launch fails clearly. Antigravity (`agy`) uses its repeatable `--add-dir` option.
+otherwise launch fails clearly. Antigravity (`agy`) gets no `--add-dir`: AGY runs `run_command`
+in the lexicographically first workspace dir, which would be the bundle. The bundle stays
+reachable as files outside the workspace (prompted unless `--dangerously-skip-permissions`).
 
 A bundle may keep file-based memory next to `SOUL.md`:
 

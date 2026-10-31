@@ -2473,7 +2473,7 @@ fn agent_help_lists_catalog_layers() {
     assert!(stdout.contains("system_prompt_file"), "stdout={stdout}");
     assert!(stdout.contains("cli_overrides"), "stdout={stdout}");
     assert!(
-        stdout.contains("agy and antigravity use --add-dir"),
+        stdout.contains("except agy and antigravity: they get no --add-dir"),
         "stdout={stdout}"
     );
     assert!(stdout.contains("DIPPY_POLICY_CWD"), "stdout={stdout}");
@@ -4057,7 +4057,7 @@ fn agent_catalog_system_prompt_file_reports_read_error() {
 }
 
 #[test]
-fn agent_agy_external_bundle_dry_run_adds_bundle_to_workspace() {
+fn agent_agy_external_bundle_dry_run_keeps_bundle_out_of_workspace() {
     let h = Hcom::new();
     let workspace = h.root_path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("create workspace");
@@ -4084,8 +4084,10 @@ fn agent_agy_external_bundle_dry_run_adds_bundle_to_workspace() {
         let bundle = h.path().join("agents").join(name);
         let (code, stdout, stderr) = h.run(["agent", name, "--dry-run"]);
         assert_eq!(code, 0, "name={name} stdout={stdout} stderr={stderr}");
+        // AGY would run commands in the first-sorting workspace dir: the bundle.
+        assert!(!stdout.contains("--add-dir"), "name={name} stdout={stdout}");
         assert!(
-            stdout.contains(&format!("--add-dir {}", bundle.display())),
+            stdout.contains(&bundle.join("SOUL.md").display().to_string()),
             "name={name} stdout={stdout}"
         );
     }
@@ -4118,7 +4120,7 @@ fn agent_agy_policy_cwd_uses_canonical_launch_directory() {
         stdout.contains(&format!("DIPPY_POLICY_CWD={}", workspace.display())),
         "stdout={stdout}"
     );
-    assert!(stdout.contains(&format!("--add-dir {}", bundle.display())));
+    assert!(!stdout.contains(&format!("--add-dir {}", bundle.display())));
     assert!(!stdout.contains("DIPPY_POLICY_CWD=/wrong"));
     let other = h.root_path().join("other-workspace");
     std::fs::create_dir_all(&other).unwrap();
