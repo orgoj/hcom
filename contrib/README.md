@@ -8,6 +8,27 @@ Evaluation scripts and metric-only results for classifying an idle agent's last 
 (does the user need to act?), and `idle_check.py`, a CLI that lists which listening agents need
 a user decision. See `idle-classifier/README.md`.
 
+## review-session
+
+`review-session/review_session.py` gives an independent, cheap review of an agent's session,
+also while the agent still runs. Install it as an hcom user script with
+`ln -s <repo>/contrib/review-session/review_session.py ~/.hcom/scripts/review-session.py`,
+then `hcom run review-session [NAME] [--pane ID] [--coach NAME] [--model MODEL]`.
+Without NAME it reviews the one Herdr-launched agent whose `launch_context.pane_id` is `--pane`
+or `$HERDR_PANE_ID` (a Herdr key binding can run it in the focused pane); several matches fail
+with their names, and NAME wins over both. It runs
+`claude -p --model haiku` (default) with a fixed review prompt carrying the agent's name, CLI,
+session id, transcript path and directory; the model reads the session itself with
+`hcom transcript` and `hcom events` (which commands it may run is up to the permission hooks,
+e.g. Dippy). The report goes to `<hcom dir>/tmp/session-reviews/<name>-<time>.md`, and one
+message from `session-review` (intent inform) goes to the coach (default `agent_coach`): a
+fixed instruction on how to treat the findings, then the report. Child processes get no
+`HCOM_*` variable except `HCOM_DIR`, and none of the caller CLI's session markers
+(`CLAUDECODE`, `CLAUDE_ENV_FILE`, `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`,
+`CODEX_SESSION_ID`), so they never act as the caller or the reviewed agent. The review times
+out after 30 minutes; the report file is owner-only (it quotes the transcript).
+Tests: `python3 -I contrib/review-session/test_review_session.py`.
+
 ## hcom-gui
 
 Tk window listing every catalog agent (`hcom agent list --all --json`) and every live
