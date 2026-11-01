@@ -3,7 +3,7 @@
 ## Commands
 
 - Unit tests: `cargo test --bin hcom` (never `cargo test --lib`). Cargo accepts one positional filter; use a shared filter or separate commands.
-- Integration: `cargo test --test cli_smoke <filter>`.
+- Integration: `cargo test --test cli_smoke <filter>`. Codex-launching cases can fail under default parallelism with `Failed to prepare hcom's per-run codex integration ... timed out waiting on channel`; rerun the filter with `-- --test-threads=4` before investigating.
 - GUI (`contrib/hcom-gui`): `contrib/test-hcom-gui`; add cases there instead of ad-hoc runs.
 - Lint: `cargo fmt --check` and `cargo clippy --bin hcom --all-targets` (zero warnings).
 - Tasks: Backlog.md in `backlog/`; `backlog task list --plain`.
