@@ -3752,3 +3752,230 @@ fn test_tooltip_target_gates_and_content() {
     app.config.tooltip.clear();
     assert_eq!(app.tooltip_target(false, false), None);
 }
+
+fn snap(name: &str, parent: Option<&str>) -> InstanceSnapshot {
+    InstanceSnapshot {
+        name: name.into(),
+        status: Some("active".into()),
+        status_context: None,
+        status_age_seconds: None,
+        unread_count: None,
+        parent_name: parent.map(|p| p.into()),
+        directory: None,
+        tool: None,
+    }
+}
+
+#[test]
+fn test_state_save_sanitizes_non_finite_and_keeps_other_keys() {
+    use hcom_graph::config::{GraphState, SavedNodePos, load_state, save_state};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = GraphState {
+        layout_mode: "manual".into(),
+        canvas_zoom: Some(2.0),
+        canvas_pan_x: Some(f32::NAN),
+        canvas_pan_y: Some(5.0),
+        side_panel_width: Some(f32::INFINITY),
+        ..Default::default()
+    };
+    state.node_positions.insert(
+        "bad".into(),
+        SavedNodePos {
+            x: f32::NAN,
+            y: 1.0,
+            saved_at: 1,
+        },
+    );
+    state.node_positions.insert(
+        "good".into(),
+        SavedNodePos {
+            x: 10.0,
+            y: -20.0,
+            saved_at: 2,
+        },
+    );
+    save_state(dir.path(), &state).unwrap();
+
+    let loaded = load_state(dir.path());
+    assert_eq!(loaded.layout_mode, "manual");
+    assert_eq!(loaded.canvas_zoom, Some(2.0));
+    assert_eq!((loaded.canvas_pan_x, loaded.canvas_pan_y), (None, None));
+    assert_eq!(loaded.side_panel_width, None);
+    assert_eq!(loaded.node_positions.len(), 1);
+    assert_eq!(
+        loaded.node_positions["good"],
+        SavedNodePos {
+            x: 10.0,
+            y: -20.0,
+            saved_at: 2
+        }
+    );
+
+    // Only graph-state.json exists: no gui-state.json, no leftover temp file.
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["graph-state.json"]);
+}
+
+#[test]
+fn test_state_load_drops_bad_position_entry_and_clamps_values() {
+    use hcom_graph::config::load_state;
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("graph-state.json"),
+        r#"{
+            "view_mode": "graph_only",
+            "node_positions": {
+                "ok": {"x": 1.0, "y": 2.0, "saved_at": 5},
+                "nullx": {"x": null, "y": 2.0},
+                "wrong": "text"
+            },
+            "canvas_zoom": 100.0,
+            "canvas_pan_x": 3.0,
+            "canvas_pan_y": 4.0,
+            "side_panel_width": 10.0
+        }"#,
+    )
+    .unwrap();
+    let s = load_state(dir.path());
+    assert_eq!(s.view_mode, "graph_only");
+    assert_eq!(s.node_positions.keys().collect::<Vec<_>>(), ["ok"]);
+    assert_eq!(s.canvas_zoom, Some(hcom_graph::canvas::ZOOM_MAX));
+    assert_eq!((s.canvas_pan_x, s.canvas_pan_y), (Some(3.0), Some(4.0)));
+    assert_eq!(
+        s.side_panel_width,
+        Some(hcom_graph::config::SIDE_PANEL_MIN_WIDTH)
+    );
+}
+
+#[test]
+fn test_state_corrupt_file_uses_defaults() {
+    use hcom_graph::config::{GraphState, load_state};
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("graph-state.json"), "{ not json").unwrap();
+    let s = load_state(dir.path());
+    let d = GraphState::default();
+    assert_eq!(s.view_mode, d.view_mode);
+    assert!(s.node_positions.is_empty());
+    assert_eq!(s.canvas_zoom, None);
+    assert_eq!(s.side_panel_width, None);
+}
+
+#[test]
+fn test_state_sanitize_caps_node_positions_to_newest() {
+    use hcom_graph::config::{GraphState, MAX_NODE_POSITIONS, SavedNodePos};
+
+    let mut s = GraphState::default();
+    for i in 0..(MAX_NODE_POSITIONS + 10) {
+        s.node_positions.insert(
+            format!("n{i}"),
+            SavedNodePos {
+                x: 0.0,
+                y: 0.0,
+                saved_at: i as i64,
+            },
+        );
+    }
+    s.canvas_zoom = Some(f32::NAN);
+    s.sanitize();
+    assert_eq!(s.node_positions.len(), MAX_NODE_POSITIONS);
+    assert!(!s.node_positions.contains_key("n0"));
+    assert!(!s.node_positions.contains_key("n9"));
+    assert!(s.node_positions.contains_key("n10"));
+    assert_eq!(s.canvas_zoom, None);
+}
+
+#[test]
+fn test_layout_uses_saved_position_except_in_hierarchy() {
+    use hcom_graph::layout::LayoutMode;
+
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[snap("a", None)]);
+    let idx = graph.get_node_index("a").unwrap();
+    let saved = Pos2::new(321.0, -123.0);
+
+    for mode in [LayoutMode::Cluster, LayoutMode::Manual] {
+        let mut layout = GraphLayout::new();
+        layout.set_mode(mode);
+        layout.saved_positions.insert("a".into(), saved);
+        layout.sync_nodes(&graph);
+        assert_eq!(layout.nodes[&idx].pos, saved, "{mode:?}");
+    }
+
+    let mut layout = GraphLayout::new();
+    layout.set_mode(LayoutMode::Hierarchy);
+    layout.saved_positions.insert("a".into(), saved);
+    layout.sync_nodes(&graph);
+    assert_ne!(layout.nodes[&idx].pos, saved);
+}
+
+#[test]
+fn test_app_persists_drag_and_view_with_debounce() {
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState, load_state};
+    use std::time::Instant;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+    app.graph.apply_instance_snapshot(&[snap("worker_1", None)]);
+    app.layout.sync_nodes(&app.graph);
+    let idx = app.graph.get_node_index("worker_1").unwrap();
+    app.layout.set_node_pos(idx, Pos2::new(50.0, 60.0), false);
+
+    app.record_dragged_position(idx);
+    let s = load_state(dir.path());
+    let p = s.node_positions["worker_1"];
+    assert_eq!((p.x, p.y), (50.0, 60.0));
+    assert!(p.saved_at > 0);
+    assert_eq!(
+        app.layout.saved_positions["worker_1"],
+        Pos2::new(50.0, 60.0)
+    );
+
+    // Debounce: nothing before 1 s or with a pressed pointer.
+    app.state.canvas_zoom = Some(1.5);
+    app.mark_view_dirty();
+    let t0 = app.view_dirty_since.unwrap();
+    assert!(!app.flush_view_state(t0 + Duration::from_millis(500), false));
+    assert!(!app.flush_view_state(t0 + Duration::from_secs(2), true));
+    assert_eq!(load_state(dir.path()).canvas_zoom, None);
+    assert!(app.flush_view_state(t0 + Duration::from_secs(2), false));
+    assert!(app.view_dirty_since.is_none());
+    assert_eq!(load_state(dir.path()).canvas_zoom, Some(1.5));
+    assert!(!app.flush_view_state(Instant::now() + Duration::from_secs(5), false));
+
+    // Restore into a fresh app.
+    let mut fresh = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState {
+            canvas_pan_x: Some(7.0),
+            canvas_pan_y: Some(-8.0),
+            ..load_state(dir.path())
+        },
+        dir.path().to_path_buf(),
+    );
+    fresh.apply_persisted_view();
+    assert_eq!(fresh.canvas.zoom, 1.5);
+    assert_eq!(fresh.canvas.pan, Vec2::new(7.0, -8.0));
+    assert_eq!(
+        fresh.layout.saved_positions["worker_1"],
+        Pos2::new(50.0, 60.0)
+    );
+}
+
+#[test]
+fn test_approx_eq_ignores_float_noise() {
+    use hcom_graph::app::approx_eq;
+    assert!(!approx_eq(None, 1.0, 0.5));
+    assert!(approx_eq(Some(340.0), 340.3, 0.5));
+    assert!(!approx_eq(Some(340.0), 341.0, 0.5));
+}

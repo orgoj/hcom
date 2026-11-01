@@ -4,6 +4,10 @@ use egui::{Color32, FontId, Pos2, Rect, Stroke, Vec2};
 use petgraph::stable_graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 
+/// Zoom range of the canvas (also used to sanitize persisted zoom).
+pub const ZOOM_MIN: f32 = 0.15;
+pub const ZOOM_MAX: f32 = 4.0;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum CanvasAction {
     NodeClicked(NodeIndex),
@@ -250,7 +254,7 @@ impl CanvasView {
             && let Some(hover_pos) = response.hover_pos()
         {
             let world_under_mouse = self.screen_to_world(hover_pos, rect);
-            let new_zoom = (self.zoom * zoom_factor).clamp(0.15, 4.0);
+            let new_zoom = (self.zoom * zoom_factor).clamp(ZOOM_MIN, ZOOM_MAX);
             self.pan = hover_pos - rect.center() - world_under_mouse.to_vec2() * new_zoom;
             self.zoom = new_zoom;
         }

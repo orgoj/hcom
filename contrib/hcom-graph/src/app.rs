@@ -1,8 +1,8 @@
 use crate::action::{ActionRequest, ActionResult, ActionWorkerHandle, SystemActionRunner};
 use crate::canvas::{CanvasAction, CanvasView};
 use crate::config::{
-    GraphConfig, GraphState, PlaceholderContext, load_config, load_state, replace_placeholders_str,
-    replace_placeholders_vec, save_state, screen_bar_buttons,
+    GraphConfig, GraphState, PlaceholderContext, SIDE_PANEL_MIN_WIDTH, load_config, load_state,
+    replace_placeholders_str, replace_placeholders_vec, save_state, screen_bar_buttons,
 };
 use crate::layout::{GraphLayout, LayoutMode};
 use crate::model::{AgentGraph, AgentStatus, EdgeKind, MessageWindow};
@@ -51,6 +51,8 @@ pub struct HcomGraphApp {
     /// Node and pointer position of the hover tooltip (kept while it fades out).
     pub tooltip_node: Option<NodeIndex>,
     pub tooltip_pos: egui::Pos2,
+    /// Time of the last unsaved zoom/pan/panel width change.
+    pub view_dirty_since: Option<Instant>,
 
     // Config & state
     pub hcom_dir: PathBuf,
@@ -199,6 +201,7 @@ impl HcomGraphApp {
             context_menu: None,
             tooltip_node: None,
             tooltip_pos: egui::Pos2::ZERO,
+            view_dirty_since: None,
             hcom_dir,
             config,
             msg_window: state.message_window(),
@@ -240,6 +243,7 @@ impl HcomGraphApp {
             send_text: String::new(),
             inject_input_has_focus: false,
         };
+        app.apply_persisted_view();
 
         // Dispatch initial table data reload and stats reload
         app.dispatch_action(ActionRequest::ReloadTableData);
@@ -267,6 +271,7 @@ impl HcomGraphApp {
             context_menu: None,
             tooltip_node: None,
             tooltip_pos: egui::Pos2::ZERO,
+            view_dirty_since: None,
             inject_input: String::new(),
             loaded_transcript: None,
             hcom_dir,
@@ -1289,10 +1294,75 @@ impl HcomGraphApp {
         Some((node.name.clone(), lines))
     }
 
+    /// Restores persisted zoom, pan and dragged node positions (state is
+    /// already sanitized by `load_state`).
+    pub fn apply_persisted_view(&mut self) {
+        if let Some(z) = self.state.canvas_zoom {
+            self.canvas.zoom = z;
+        }
+        if let (Some(x), Some(y)) = (self.state.canvas_pan_x, self.state.canvas_pan_y) {
+            self.canvas.pan = egui::vec2(x, y);
+        }
+        self.layout.saved_positions = self
+            .state
+            .node_positions
+            .iter()
+            .map(|(name, p)| (name.clone(), egui::pos2(p.x, p.y)))
+            .collect();
+    }
+
+    /// Stores the position of a node the user just dropped and saves it.
+    pub fn record_dragged_position(&mut self, idx: NodeIndex) {
+        let (Some(node), Some(phys)) = (
+            self.graph.graph.node_weight(idx),
+            self.layout.nodes.get(&idx),
+        ) else {
+            return;
+        };
+        let (name, pos) = (node.name.clone(), phys.pos);
+        if !(pos.x.is_finite() && pos.y.is_finite()) {
+            return;
+        }
+        self.layout.saved_positions.insert(name.clone(), pos);
+        self.state.node_positions.insert(
+            name,
+            crate::config::SavedNodePos {
+                x: pos.x,
+                y: pos.y,
+                saved_at: chrono::Utc::now().timestamp(),
+            },
+        );
+        self.save_state();
+    }
+
+    pub fn mark_view_dirty(&mut self) {
+        self.view_dirty_since = Some(Instant::now());
+    }
+
+    /// Saves pending view changes once they have been stable for 1 s and no
+    /// pointer button is held. Returns true when it saved.
+    pub fn flush_view_state(&mut self, now: Instant, pointer_down: bool) -> bool {
+        match self.view_dirty_since {
+            Some(t) if !pointer_down && now.duration_since(t) >= Duration::from_secs(1) => {
+                self.save_state();
+                self.view_dirty_since = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn show_canvas(&mut self, ui: &mut egui::Ui, visible: &std::collections::HashSet<NodeIndex>) {
+        let dragged_before = self.canvas.dragged_node;
         let (response, action) = self
             .canvas
             .show(ui, &self.graph, &mut self.layout, Some(visible));
+        if let Some(idx) = dragged_before
+            && self.canvas.dragged_node.is_none()
+            && self.canvas.is_dragging
+        {
+            self.record_dragged_position(idx);
+        }
         self.handle_canvas_action(action);
         self.render_node_tooltip(ui.ctx(), response.rect);
     }
@@ -2389,10 +2459,10 @@ impl eframe::App for HcomGraphApp {
         // 6. Right Side Panel for Agent Details & Report
         if self.state.show_side_panel {
             let mut close_panel = false;
-            egui::Panel::right("detail_side_panel")
+            let side_resp = egui::Panel::right("detail_side_panel")
                 .resizable(true)
-                .default_size(340.0)
-                .min_size(240.0)
+                .default_size(self.state.side_panel_width.unwrap_or(340.0))
+                .min_size(SIDE_PANEL_MIN_WIDTH)
                 .show(ui, |ui| {
                     ui.set_min_width(240.0);
                     ui.add_space(4.0);
@@ -2452,6 +2522,11 @@ impl eframe::App for HcomGraphApp {
                         }
                     }
                 });
+            let side_w = side_resp.response.rect.width();
+            if !approx_eq(self.state.side_panel_width, side_w, 0.5) {
+                self.state.side_panel_width = Some(side_w);
+                self.mark_view_dirty();
+            }
 
             if close_panel {
                 self.state.show_side_panel = false;
@@ -2641,8 +2716,28 @@ impl eframe::App for HcomGraphApp {
             }
         }
 
+        // Zoom, pan and panel width are saved 1 s after the last change.
+        let (zoom, pan) = (self.canvas.zoom, self.canvas.pan);
+        if !approx_eq(self.state.canvas_zoom, zoom, 1e-3)
+            || !approx_eq(self.state.canvas_pan_x, pan.x, 0.5)
+            || !approx_eq(self.state.canvas_pan_y, pan.y, 0.5)
+        {
+            self.state.canvas_zoom = Some(zoom);
+            self.state.canvas_pan_x = Some(pan.x);
+            self.state.canvas_pan_y = Some(pan.y);
+            self.mark_view_dirty();
+        }
+        let pointer_down = ctx.input(|i| i.pointer.any_down());
+        self.flush_view_state(Instant::now(), pointer_down);
+
         // S3: Periodic repaint so timer and refresh tick even when idle with no input
         ctx.request_repaint_after(Duration::from_millis(500));
+    }
+
+    fn on_exit(&mut self) {
+        if self.view_dirty_since.is_some() {
+            self.save_state();
+        }
     }
 }
 
@@ -2682,4 +2777,10 @@ impl HcomGraphApp {
             }
         }
     }
+}
+
+/// True when a persisted value exists and lies within `tol` of `current`
+/// (sub-pixel float noise must not mark the view dirty every frame).
+pub fn approx_eq(saved: Option<f32>, current: f32, tol: f32) -> bool {
+    saved.is_some_and(|s| (s - current).abs() <= tol)
 }

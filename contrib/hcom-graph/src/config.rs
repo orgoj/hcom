@@ -221,9 +221,85 @@ pub struct GraphState {
     /// Layout mode: "hierarchy", "cluster" (default) or "manual".
     #[serde(default = "default_layout_mode")]
     pub layout_mode: String,
+    /// World positions of dragged nodes by instance name; invalid entries
+    /// are dropped on load so one bad entry cannot reject the file.
+    #[serde(default, deserialize_with = "deserialize_node_positions")]
+    pub node_positions: HashMap<String, SavedNodePos>,
+    #[serde(default)]
+    pub canvas_zoom: Option<f32>,
+    #[serde(default)]
+    pub canvas_pan_x: Option<f32>,
+    #[serde(default)]
+    pub canvas_pan_y: Option<f32>,
+    #[serde(default)]
+    pub side_panel_width: Option<f32>,
+}
+
+/// A saved node position and when it was last stored (unix seconds).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SavedNodePos {
+    pub x: f32,
+    pub y: f32,
+    #[serde(default)]
+    pub saved_at: i64,
+}
+
+/// Most saved node positions kept; the oldest are dropped first.
+pub const MAX_NODE_POSITIONS: usize = 500;
+/// Minimum width of the detail side panel.
+pub const SIDE_PANEL_MIN_WIDTH: f32 = 240.0;
+
+fn deserialize_node_positions<'de, D>(d: D) -> Result<HashMap<String, SavedNodePos>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<HashMap<String, serde_json::Value>>::deserialize(d)?.unwrap_or_default();
+    Ok(raw
+        .into_iter()
+        .filter_map(|(k, v)| {
+            serde_json::from_value::<SavedNodePos>(v)
+                .ok()
+                .map(|p| (k, p))
+        })
+        .collect())
 }
 
 impl GraphState {
+    /// Drops or clamps values that cannot be used (non-finite numbers,
+    /// zoom outside the canvas range, too narrow side panel) and keeps only
+    /// the `MAX_NODE_POSITIONS` newest node positions.
+    pub fn sanitize(&mut self) {
+        use crate::canvas::{ZOOM_MAX, ZOOM_MIN};
+        self.node_positions
+            .retain(|_, p| p.x.is_finite() && p.y.is_finite());
+        if self.node_positions.len() > MAX_NODE_POSITIONS {
+            let mut by_age: Vec<(i64, String)> = self
+                .node_positions
+                .iter()
+                .map(|(k, p)| (p.saved_at, k.clone()))
+                .collect();
+            by_age.sort();
+            let excess = by_age.len() - MAX_NODE_POSITIONS;
+            for (_, k) in by_age.into_iter().take(excess) {
+                self.node_positions.remove(&k);
+            }
+        }
+        self.canvas_zoom = self
+            .canvas_zoom
+            .filter(|z| z.is_finite())
+            .map(|z| z.clamp(ZOOM_MIN, ZOOM_MAX));
+        if !(self.canvas_pan_x.is_some_and(f32::is_finite)
+            && self.canvas_pan_y.is_some_and(f32::is_finite))
+        {
+            self.canvas_pan_x = None;
+            self.canvas_pan_y = None;
+        }
+        self.side_panel_width = self
+            .side_panel_width
+            .filter(|w| w.is_finite())
+            .map(|w| w.max(SIDE_PANEL_MIN_WIDTH));
+    }
+
     /// Persisted window settings as a live window (end follows now);
     /// invalid values (span <= 0, last_n == 0) mean no limit.
     pub fn message_window(&self) -> crate::model::MessageWindow {
@@ -277,6 +353,11 @@ impl Default for GraphState {
             window_span_secs: None,
             window_last_n: None,
             layout_mode: default_layout_mode(),
+            node_positions: HashMap::new(),
+            canvas_zoom: None,
+            canvas_pan_x: None,
+            canvas_pan_y: None,
+            side_panel_width: None,
         }
     }
 }
@@ -308,6 +389,12 @@ pub fn load_config(hcom_dir: &Path) -> GraphConfig {
 }
 
 pub fn load_state(hcom_dir: &Path) -> GraphState {
+    let mut state = read_state(hcom_dir);
+    state.sanitize();
+    state
+}
+
+fn read_state(hcom_dir: &Path) -> GraphState {
     let graph_state_json = hcom_dir.join("graph-state.json");
     if graph_state_json.is_file() {
         match fs::read_to_string(&graph_state_json) {
@@ -333,13 +420,26 @@ pub fn load_state(hcom_dir: &Path) -> GraphState {
     GraphState::default()
 }
 
-/// Saves state strictly to graph-state.json without ever mutating gui-state.json
+/// Saves state strictly to graph-state.json without ever mutating gui-state.json.
+/// The state is sanitized first (a NaN would be written as null and reject the
+/// file on the next load); the temp file is unique per process and save, so
+/// concurrent windows never rename each other's partial file (last writer wins).
 pub fn save_state(hcom_dir: &Path, state: &GraphState) -> Result<()> {
+    static SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut state = state.clone();
+    state.sanitize();
     let target = hcom_dir.join("graph-state.json");
-    let tmp = hcom_dir.join("graph-state.json.tmp");
-    let json = serde_json::to_string_pretty(state)?;
-    fs::write(&tmp, json)?;
-    fs::rename(tmp, target)?;
+    let seq = SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = hcom_dir.join(format!(
+        "graph-state.json.{}.{}.tmp",
+        std::process::id(),
+        seq
+    ));
+    let json = serde_json::to_string_pretty(&state)?;
+    if let Err(e) = fs::write(&tmp, json).and_then(|_| fs::rename(&tmp, &target)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     Ok(())
 }
 

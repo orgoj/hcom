@@ -101,6 +101,8 @@ pub struct GraphLayout {
     pub tree_targets: HashMap<NodeIndex, egui::Pos2>,
     springs_key: Option<(usize, u64, usize, u64)>,
     springs: Vec<Spring>,
+    /// Start positions of nodes by name (persisted drags); not used in Hierarchy.
+    pub saved_positions: HashMap<String, egui::Pos2>,
 }
 
 impl Default for GraphLayout {
@@ -147,6 +149,7 @@ impl GraphLayout {
             tree_targets: HashMap::new(),
             springs_key: None,
             springs: Vec::new(),
+            saved_positions: HashMap::new(),
         }
     }
 
@@ -245,6 +248,11 @@ impl GraphLayout {
             && let Some(t) = self.tree_targets.get(&idx)
         {
             return *t;
+        }
+        if self.mode != LayoutMode::Hierarchy
+            && let Some(p) = self.saved_positions.get(&graph.graph[idx].name)
+        {
+            return *p;
         }
         let k = idx.index() as f32;
         let parent = graph.graph[idx]
