@@ -4,6 +4,7 @@ title: '2D grafové plátno: renderování uzlů, stavů a komunikačních toků
 status: To Do
 assignee: []
 created_date: '2026-11-01 11:21'
+updated_date: '2026-11-01 11:23'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -14,7 +15,7 @@ ordinal: 80000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Vizuální komponenta v egui/eframe s 2D force-directed nebo pružinovým rozložením. Zobrazuje agenty jako uzly obarvené podle stavu, animované/orientované šipky zpráv a stromové vazby spuštění.
+Vizuální komponenta v egui/eframe s využitím egui_graphs a petgraph pro 2D graf. Zobrazuje agenty jako interaktivní uzly obarvené podle stavu, animované/orientované šipky zpráv a stromové vazby spuštění s podporou pro zachycení kliknutí a pravého kliknutí.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
