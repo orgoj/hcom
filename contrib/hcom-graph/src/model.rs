@@ -234,7 +234,7 @@ pub struct MessageEvent {
     pub data: MessageData,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct AgentGraph {
     pub graph: StableDiGraph<AgentNode, EdgeKind>,
     pub node_map: HashMap<String, NodeIndex>,

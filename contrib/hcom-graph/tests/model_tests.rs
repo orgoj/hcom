@@ -1,13 +1,18 @@
 use anyhow::Result;
 use chrono::Utc;
+use egui::{Color32, Pos2, Rect, Vec2};
+use hcom_graph::canvas::CanvasView;
+use hcom_graph::layout::GraphLayout;
 use hcom_graph::model::{
     AgentGraph, AgentNode, AgentStatus, InstanceSnapshot, MessageData, MessageEvent,
     is_valid_identity, sanitize_display_string,
 };
 use hcom_graph::source::{
-    CommandExecutor, HcomSyncWorker, StreamHandle, build_messages_snapshot_cmd, parse_instances,
-    parse_messages_snapshot, read_line_capped,
+    CommandExecutor, HcomSyncWorker, StreamHandle, StreamKillHandle, StreamReader,
+    build_messages_snapshot_cmd, parse_instances, parse_messages_snapshot, read_line_capped,
+    split_system_stream,
 };
+use hcom_graph::sync::BackgroundSync;
 use std::collections::VecDeque;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -232,6 +237,25 @@ fn test_non_blocking_backoff_timing() {
         }
         fn spawn_stream(&self, _argv: &[String]) -> Result<Box<dyn StreamHandle>> {
             Ok(Box::new(FailingStream))
+        }
+
+        fn spawn_stream_split(
+            &self,
+            _argv: &[String],
+        ) -> Result<(Box<dyn StreamReader>, Arc<dyn StreamKillHandle>)> {
+            struct FailingReader;
+            impl StreamReader for FailingReader {
+                fn next_line(&mut self, _cap: usize) -> Result<Option<String>> {
+                    Err(anyhow::anyhow!("stream fail"))
+                }
+            }
+            struct FailingKill;
+            impl StreamKillHandle for FailingKill {
+                fn kill(&self) -> Result<()> {
+                    Ok(())
+                }
+            }
+            Ok((Box::new(FailingReader), Arc::new(FailingKill)))
         }
     }
 
@@ -619,6 +643,36 @@ impl CommandExecutor for MockExecutor {
         *self.last_spawned_killed_flag.lock().unwrap() = Some(killed.clone());
         Ok(Box::new(MockStreamHandle { lines, killed }))
     }
+
+    fn spawn_stream_split(
+        &self,
+        argv: &[String],
+    ) -> Result<(Box<dyn StreamReader>, Arc<dyn StreamKillHandle>)> {
+        let handle = self.spawn_stream(argv)?;
+        struct SplitMockReader(Box<dyn StreamHandle>);
+        impl StreamReader for SplitMockReader {
+            fn next_line(&mut self, _cap: usize) -> Result<Option<String>> {
+                self.0.next_line()
+            }
+        }
+        struct SplitMockKill(Arc<AtomicBool>);
+        impl StreamKillHandle for SplitMockKill {
+            fn kill(&self) -> Result<()> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let killed = self
+            .last_spawned_killed_flag
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap();
+        Ok((
+            Box::new(SplitMockReader(handle)),
+            Arc::new(SplitMockKill(killed)),
+        ))
+    }
 }
 
 #[test]
@@ -767,4 +821,468 @@ fn test_parse_messages_snapshot_drops_oversized_lines() {
     let parsed = parse_messages_snapshot(&payload).expect("parse ok");
     assert_eq!(parsed.len(), 1, "Oversized line must be dropped");
     assert_eq!(parsed[0].id, 1);
+}
+
+// =========================================================================
+// TASK-77.2 Tests: Canvas, Layout, Interaction, and BackgroundSync
+// =========================================================================
+
+#[test]
+fn test_node_status_colors() {
+    assert_eq!(
+        CanvasView::status_color(&AgentStatus::Active),
+        Color32::from_rgb(46, 204, 113)
+    );
+    assert_eq!(
+        CanvasView::status_color(&AgentStatus::Listening),
+        Color32::from_rgb(52, 152, 219)
+    );
+    assert_eq!(
+        CanvasView::status_color(&AgentStatus::Blocked),
+        Color32::from_rgb(231, 76, 60)
+    );
+    assert_eq!(
+        CanvasView::status_color(&AgentStatus::Stopped),
+        Color32::from_rgb(127, 140, 141)
+    );
+}
+
+#[test]
+fn test_canvas_coordinate_transforms_pan_and_zoom() {
+    let mut canvas = CanvasView::new();
+    let rect = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1000.0, 800.0));
+
+    // Default zoom = 1.0, pan = (0, 0)
+    let p_world = Pos2::new(50.0, -100.0);
+    let p_screen = canvas.world_to_screen(p_world, rect);
+    assert_eq!(p_screen, Pos2::new(550.0, 300.0)); // center is (500, 400)
+
+    let roundtrip = canvas.screen_to_world(p_screen, rect);
+    assert!((roundtrip.x - p_world.x).abs() < 1e-4);
+    assert!((roundtrip.y - p_world.y).abs() < 1e-4);
+
+    // Zoomed and panned
+    canvas.zoom = 2.0;
+    canvas.pan = Vec2::new(100.0, 50.0);
+    let p_screen_zoomed = canvas.world_to_screen(p_world, rect);
+    // center (500, 400) + pan (100, 50) + world (50, -100) * 2 = (700, 250)
+    assert_eq!(p_screen_zoomed, Pos2::new(700.0, 250.0));
+
+    let roundtrip_zoomed = canvas.screen_to_world(p_screen_zoomed, rect);
+    assert!((roundtrip_zoomed.x - p_world.x).abs() < 1e-4);
+    assert!((roundtrip_zoomed.y - p_world.y).abs() < 1e-4);
+}
+
+#[test]
+fn test_layout_hit_test_and_drag_pinning() {
+    let mut graph = AgentGraph::new();
+    let snap = vec![
+        InstanceSnapshot {
+            name: "agent_a".into(),
+            status: Some("active".into()),
+            status_context: None,
+            status_age_seconds: None,
+            unread_count: None,
+            parent_name: None,
+            directory: None,
+            tool: None,
+        },
+        InstanceSnapshot {
+            name: "agent_b".into(),
+            status: Some("listening".into()),
+            status_context: None,
+            status_age_seconds: None,
+            unread_count: None,
+            parent_name: Some("agent_a".into()),
+            directory: None,
+            tool: None,
+        },
+    ];
+    graph.apply_instance_snapshot(&snap);
+
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+
+    let idx_a = graph.get_node_index("agent_a").expect("node a");
+    let phys_a = layout.nodes.get(&idx_a).expect("phys a");
+    let pos_a = phys_a.pos;
+
+    // Hit test directly at node pos
+    assert_eq!(layout.hit_test(pos_a, 26.0), Some(idx_a));
+
+    // Hit test far outside node radius
+    assert_eq!(
+        layout.hit_test(Pos2::new(pos_a.x + 100.0, pos_a.y + 100.0), 26.0),
+        None
+    );
+
+    // Test dragging and pinning
+    let new_pos = Pos2::new(300.0, 400.0);
+    layout.set_node_pos(idx_a, new_pos, true);
+
+    let phys_pinned = layout.nodes.get(&idx_a).unwrap();
+    assert_eq!(phys_pinned.pos, new_pos);
+    assert!(phys_pinned.pinned);
+    assert_eq!(phys_pinned.vel, Vec2::ZERO);
+
+    // Layout step must NOT move pinned node
+    let _ = layout.step(&graph, 0.016);
+    let phys_after_step = layout.nodes.get(&idx_a).unwrap();
+    assert_eq!(phys_after_step.pos, new_pos);
+    assert_eq!(phys_after_step.vel, Vec2::ZERO);
+
+    // Release drag / unpin
+    layout.set_node_pos(idx_a, new_pos, false);
+    let phys_unpinned = layout.nodes.get(&idx_a).unwrap();
+    assert!(!phys_unpinned.pinned);
+}
+
+#[test]
+fn test_layout_physics_step_dt_clamping_and_sleep() {
+    let mut graph = AgentGraph::new();
+    let snap = vec![
+        InstanceSnapshot {
+            name: "node_1".into(),
+            status: Some("active".into()),
+            status_context: None,
+            status_age_seconds: None,
+            unread_count: None,
+            parent_name: None,
+            directory: None,
+            tool: None,
+        },
+        InstanceSnapshot {
+            name: "node_2".into(),
+            status: Some("active".into()),
+            status_context: None,
+            status_age_seconds: None,
+            unread_count: None,
+            parent_name: None,
+            directory: None,
+            tool: None,
+        },
+    ];
+    graph.apply_instance_snapshot(&snap);
+
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+
+    // Run steps and verify layout converges to sleep
+    for _ in 0..300 {
+        layout.step(&graph, 0.016);
+        if layout.is_sleeping {
+            break;
+        }
+    }
+
+    assert!(
+        layout.is_sleeping,
+        "Layout must enter sleep mode once stable"
+    );
+    assert_eq!(
+        layout.step(&graph, 0.016),
+        0.0,
+        "Sleeping layout must do 0 work"
+    );
+
+    // Wake up
+    layout.wake_up();
+    assert!(!layout.is_sleeping);
+}
+
+struct MockOverloadExecutor {
+    events_jsonl: String,
+}
+
+impl CommandExecutor for MockOverloadExecutor {
+    fn run_command(&self, _argv: &[String]) -> Result<String> {
+        Ok("[]".into())
+    }
+
+    fn spawn_stream(&self, _argv: &[String]) -> Result<Box<dyn StreamHandle>> {
+        struct MockStream(std::io::Lines<std::io::Cursor<String>>);
+        impl StreamHandle for MockStream {
+            fn next_line(&mut self) -> Result<Option<String>> {
+                match self.0.next() {
+                    Some(Ok(l)) => Ok(Some(l)),
+                    Some(Err(e)) => Err(e.into()),
+                    None => Ok(None),
+                }
+            }
+            fn kill(&mut self) {}
+        }
+        let cursor = std::io::Cursor::new(self.events_jsonl.clone());
+        Ok(Box::new(MockStream(std::io::BufRead::lines(cursor))))
+    }
+
+    fn spawn_stream_split(
+        &self,
+        _argv: &[String],
+    ) -> Result<(Box<dyn StreamReader>, Arc<dyn StreamKillHandle>)> {
+        struct MockReader(std::io::Lines<std::io::Cursor<String>>);
+        impl StreamReader for MockReader {
+            fn next_line(&mut self, _cap: usize) -> Result<Option<String>> {
+                match self.0.next() {
+                    Some(Ok(l)) => Ok(Some(l)),
+                    Some(Err(e)) => Err(e.into()),
+                    None => Ok(None),
+                }
+            }
+        }
+        struct MockKill;
+        impl StreamKillHandle for MockKill {
+            fn kill(&self) -> Result<()> {
+                Ok(())
+            }
+        }
+        let cursor = std::io::Cursor::new(self.events_jsonl.clone());
+        Ok((
+            Box::new(MockReader(std::io::BufRead::lines(cursor))),
+            Arc::new(MockKill),
+        ))
+    }
+}
+
+#[test]
+fn test_overload_10k_events_throttled_coalescing() {
+    // Generate 10,000 message events
+    let mut lines = String::new();
+    for i in 1..=10_000 {
+        lines.push_str(&format!(
+            r#"{{"id":{},"instance":"bench","ts":"2026-11-01T10:00:00Z","type":"message","data":{{"from":"agent_a","delivered_to":["agent_b"],"text":"msg_{}"}}}}"#,
+            i, i
+        ));
+        lines.push('\n');
+    }
+
+    let executor = MockOverloadExecutor {
+        events_jsonl: lines,
+    };
+    let worker = HcomSyncWorker::new(executor, 0);
+
+    // Batch limit 200, cadence 16ms
+    let sync = BackgroundSync::new(worker, 200, Duration::from_millis(16)).expect("sync start");
+
+    // Wait until stream finishes processing
+    let start = std::time::Instant::now();
+    let mut final_graph = None;
+    while start.elapsed() < Duration::from_secs(5) {
+        if let Some(g) = sync.try_get_latest() {
+            final_graph = Some(g);
+        }
+        if let Some(ref g) = final_graph
+            && g.last_event_id >= 10_000
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let g = final_graph.expect("must produce a final graph");
+    assert_eq!(
+        g.last_event_id, 10_000,
+        "All 10,000 events must be ingested"
+    );
+
+    let pub_count = sync.published_count.load(Ordering::Relaxed);
+    assert!(
+        pub_count <= 55,
+        "Throttled publications must be <= 55 for 10k events with batch 200, got {}",
+        pub_count
+    );
+}
+
+#[test]
+fn test_drop_quiet_follower_kills_and_joins_cleanly() {
+    // Custom follower executor spawning long sleep
+    struct QuietStreamExecutor;
+    impl CommandExecutor for QuietStreamExecutor {
+        fn run_command(&self, _argv: &[String]) -> Result<String> {
+            Ok("[]".into())
+        }
+
+        fn spawn_stream(&self, _argv: &[String]) -> Result<Box<dyn StreamHandle>> {
+            unimplemented!()
+        }
+
+        fn spawn_stream_split(
+            &self,
+            _argv: &[String],
+        ) -> Result<(Box<dyn StreamReader>, Arc<dyn StreamKillHandle>)> {
+            #[cfg(unix)]
+            let cmd_argv: Vec<String> = vec!["sleep".into(), "60".into()];
+            #[cfg(windows)]
+            let cmd_argv: Vec<String> = vec![
+                "powershell".into(),
+                "-NoProfile".into(),
+                "-Command".into(),
+                "Start-Sleep -Seconds 60".into(),
+            ];
+
+            let mut child = std::process::Command::new(&cmd_argv[0])
+                .args(&cmd_argv[1..])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("spawn quiet child");
+
+            let stdout = child.stdout.take().unwrap();
+            Ok(split_system_stream(child, stdout))
+        }
+    }
+
+    let worker = HcomSyncWorker::new(QuietStreamExecutor, 0);
+    let sync = BackgroundSync::new(worker, 200, Duration::from_millis(16)).expect("start sync");
+
+    // Allow worker to spawn child and block in read_line
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Drop must kill child and join thread without deadlock
+    let drop_start = std::time::Instant::now();
+    drop(sync);
+    let drop_duration = drop_start.elapsed();
+
+    assert!(
+        drop_duration < Duration::from_millis(200),
+        "Drop of quiet follower must terminate and join in <200ms, took {:?}",
+        drop_duration
+    );
+}
+
+#[test]
+fn test_layout_frame_budget_deadline_enforced_and_resumes() {
+    let mut graph = AgentGraph::new();
+    let mut snap = Vec::new();
+    // 300 nodes = 44,850 pairs
+    for i in 0..300 {
+        snap.push(InstanceSnapshot {
+            name: format!("node_{}", i),
+            status: Some("active".into()),
+            status_context: None,
+            status_age_seconds: None,
+            unread_count: None,
+            parent_name: if i > 0 {
+                Some(format!("node_{}", i - 1))
+            } else {
+                None
+            },
+            directory: None,
+            tool: None,
+        });
+    }
+    graph.apply_instance_snapshot(&snap);
+
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+
+    let initial_pos_0 = layout.nodes[&graph.get_node_index("node_0").unwrap()].pos;
+
+    // Set a strict deadline: 200 microseconds
+    layout.max_step_duration = Duration::from_micros(200);
+
+    let start = std::time::Instant::now();
+    let motion1 = layout.step(&graph, 0.016);
+    let elapsed = start.elapsed();
+
+    // Verify it terminated well within frame limits (allowing small margin for test thread contention)
+    assert!(
+        elapsed < Duration::from_millis(5),
+        "Layout step must respect max_step_duration deadline, took {:?}",
+        elapsed
+    );
+    assert!(
+        !layout.is_sleeping,
+        "Layout must NOT sleep when budget was exceeded"
+    );
+    assert!(
+        motion1 > 0.0,
+        "Motion must be non-zero when budget was exceeded"
+    );
+
+    // Cursor must have advanced
+    let (c_i1, c_j1) = (layout.cursor_i, layout.cursor_j);
+    assert!(
+        c_i1 > 0 || c_j1 > 1,
+        "Pair cursor must advance across frames"
+    );
+
+    // Next step must resume and make further progress
+    let _ = layout.step(&graph, 0.016);
+    let (c_i2, c_j2) = (layout.cursor_i, layout.cursor_j);
+    assert_ne!(
+        (c_i1, c_j1),
+        (c_i2, c_j2),
+        "Pair cursor must progress across frames"
+    );
+
+    let final_pos_0 = layout.nodes[&graph.get_node_index("node_0").unwrap()].pos;
+    assert_ne!(
+        initial_pos_0, final_pos_0,
+        "Positions must advance even under tight time-slicing"
+    );
+}
+
+#[test]
+fn test_layout_large_graph_frame_budget_enforced_during_forces_init() {
+    let mut graph = AgentGraph::new();
+    let mut snap = Vec::new();
+    // 1500 nodes = 1,124,250 pairs
+    for i in 0..1500 {
+        snap.push(InstanceSnapshot {
+            name: format!("large_node_{}", i),
+            status: Some("active".into()),
+            status_context: None,
+            status_age_seconds: None,
+            unread_count: None,
+            parent_name: None,
+            directory: None,
+            tool: None,
+        });
+    }
+    graph.apply_instance_snapshot(&snap);
+
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+
+    // Sorted indices are precomputed in sync_nodes
+    assert_eq!(layout.sorted_indices.len(), 1500);
+
+    let initial_pos_0 = layout.nodes[&graph.get_node_index("large_node_0").unwrap()].pos;
+
+    // Tight deadline: 100 microseconds so repulsion and integration get sliced across frames
+    layout.max_step_duration = Duration::from_micros(100);
+
+    let start = std::time::Instant::now();
+    let _ = layout.step(&graph, 0.016);
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_millis(5),
+        "Layout step with 1500 nodes must respect max_step_duration clamp, took {:?}",
+        elapsed
+    );
+
+    let (c_i1, c_j1) = (layout.cursor_i, layout.cursor_j);
+    let int_cur_1 = layout.integrate_cursor;
+    assert!(c_i1 > 0 || c_j1 > 1, "Pair cursor must advance in frame 1");
+
+    // Frame 2: verify cursors make further progress without resetting to 0
+    let _ = layout.step(&graph, 0.016);
+    let (c_i2, c_j2) = (layout.cursor_i, layout.cursor_j);
+    let int_cur_2 = layout.integrate_cursor;
+    assert_ne!(
+        (c_i1, c_j1),
+        (c_i2, c_j2),
+        "Pair cursor must advance further in frame 2 without resetting"
+    );
+    assert_ne!(
+        int_cur_1, int_cur_2,
+        "Integration cursor must advance across frames"
+    );
+
+    let final_pos_0 = layout.nodes[&graph.get_node_index("large_node_0").unwrap()].pos;
+    assert_ne!(
+        initial_pos_0, final_pos_0,
+        "Positions must advance across frames even under heavy time-slicing"
+    );
 }

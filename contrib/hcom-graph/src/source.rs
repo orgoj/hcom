@@ -3,7 +3,7 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MiB cap
@@ -163,6 +163,57 @@ pub fn read_line_capped(reader: &mut impl BufRead, cap: usize) -> Result<Option<
 pub trait CommandExecutor: Send + Sync {
     fn run_command(&self, argv: &[String]) -> Result<String>;
     fn spawn_stream(&self, argv: &[String]) -> Result<Box<dyn StreamHandle>>;
+    fn spawn_stream_split(
+        &self,
+        argv: &[String],
+    ) -> Result<(Box<dyn StreamReader>, Arc<dyn StreamKillHandle>)>;
+}
+
+pub trait StreamKillHandle: Send + Sync {
+    fn kill(&self) -> Result<()>;
+}
+
+pub trait StreamReader: Send {
+    fn next_line(&mut self, cap: usize) -> Result<Option<String>>;
+}
+
+pub struct SystemStreamKillHandle {
+    child: Mutex<Option<Child>>,
+}
+
+impl StreamKillHandle for SystemStreamKillHandle {
+    fn kill(&self) -> Result<()> {
+        let mut guard = self.child.lock().unwrap();
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Ok(())
+    }
+}
+
+pub struct SystemStreamReader {
+    reader: BufReader<ChildStdout>,
+}
+
+impl StreamReader for SystemStreamReader {
+    fn next_line(&mut self, cap: usize) -> Result<Option<String>> {
+        read_line_capped(&mut self.reader, cap)
+    }
+}
+
+pub fn split_system_stream(
+    child: Child,
+    stdout: ChildStdout,
+) -> (Box<dyn StreamReader>, Arc<dyn StreamKillHandle>) {
+    (
+        Box::new(SystemStreamReader {
+            reader: BufReader::new(stdout),
+        }),
+        Arc::new(SystemStreamKillHandle {
+            child: Mutex::new(Some(child)),
+        }),
+    )
 }
 
 pub trait StreamHandle: Send {
@@ -198,6 +249,28 @@ impl CommandExecutor for SystemCommandExecutor {
             reader: BufReader::new(stdout),
             cap: DEFAULT_MAX_LINE_BYTES,
         }))
+    }
+
+    fn spawn_stream_split(
+        &self,
+        argv: &[String],
+    ) -> Result<(Box<dyn StreamReader>, Arc<dyn StreamKillHandle>)> {
+        if argv.is_empty() {
+            return Err(anyhow!("empty argv"));
+        }
+        let mut child = Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to spawn stream process {}", argv[0]))?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("failed to capture stdout for stream"))?;
+
+        Ok(split_system_stream(child, stdout))
     }
 }
 

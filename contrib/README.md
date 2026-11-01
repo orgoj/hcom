@@ -205,3 +205,30 @@ with `hcom term inject <instance> <keys>` to the selected running instance (cont
 characters as JSON escapes). Without `screen_bar` all built-ins are shown; `[]` empties
 the bar. An unknown name, any other item or a repeated label is reported in the log and
 skipped; a `screen_bar` that is not a list keeps the default bar.
+
+## hcom-graph
+
+2D cyclic graph GUI dashboard in Rust (`egui`/`eframe`) visualizing running `hcom` agents:
+- Nodes represent agents, colored by status (`active` green, `listening` blue, `blocked` red, `stopped` gray).
+- Edges represent relationships:
+  - Directed silver lines with arrow for spawn relationships (parent -> child).
+  - Colored arrows with message count badge for message flows between agents. Bi-directional message flows use curved Bezier paths so arrows do not overlap.
+- Interactive canvas:
+  - Zoom with mouse wheel (anchored to cursor position).
+  - Pan by dragging the canvas background or using middle/secondary mouse buttons.
+  - Drag & drop agents to manually position them (pinned while held, smoothly relax on release).
+  - Top status bar with agent counts by state, message stats, zoom reset and zoom percentage.
+
+### Running
+
+To run `hcom-graph`:
+
+```bash
+cargo run --manifest-path contrib/hcom-graph/Cargo.toml
+```
+
+To run tests:
+
+```bash
+cargo test --manifest-path contrib/hcom-graph/Cargo.toml
+```
