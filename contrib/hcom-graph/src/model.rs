@@ -1,7 +1,9 @@
 use chrono::{DateTime, Utc};
 use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+
+pub const MAX_EDGE_HISTORY: usize = 50;
 
 /// Scans UTF-8 bytes and strips ECMA-48 CSI and OSC escape sequences
 /// (both 7-bit and UTF-8 2-byte C1 encodings). Discards unterminated
@@ -186,6 +188,17 @@ pub struct SpawnEdge {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredMessage {
+    pub id: u64,
+    pub ts: DateTime<Utc>,
+    pub from: String,
+    pub to: String,
+    pub intent: Option<String>,
+    pub preview: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MessageEdge {
     pub from: String,
     pub to: String,
@@ -193,6 +206,8 @@ pub struct MessageEdge {
     pub last_timestamp: DateTime<Utc>,
     pub last_intent: Option<String>,
     pub last_preview: String,
+    #[serde(default)]
+    pub history: VecDeque<StoredMessage>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -401,10 +416,20 @@ impl AgentGraph {
         let sender_idx = self.ensure_node_placeholder(sender);
         let preview = sanitize_preview(&event.data.text);
         let intent = event.data.intent.as_deref().map(sanitize_display_string);
+        let sanitized_text = sanitize_display_string(&event.data.text);
 
         for recipient in recipients {
             let recipient_idx = self.ensure_node_placeholder(&recipient);
             let edge_key = (sender.clone(), recipient.clone());
+            let stored_msg = StoredMessage {
+                id: event.id,
+                ts: event.ts,
+                from: sender.clone(),
+                to: recipient.clone(),
+                intent: intent.clone(),
+                preview: preview.clone(),
+                text: sanitized_text.clone(),
+            };
 
             if let Some(&edge_idx) = self.message_edges.get(&edge_key) {
                 if let Some(EdgeKind::Message(msg_edge)) = self.graph.edge_weight_mut(edge_idx) {
@@ -412,8 +437,14 @@ impl AgentGraph {
                     msg_edge.last_timestamp = event.ts;
                     msg_edge.last_intent = intent.clone();
                     msg_edge.last_preview = preview.clone();
+                    if msg_edge.history.len() >= MAX_EDGE_HISTORY {
+                        msg_edge.history.pop_front();
+                    }
+                    msg_edge.history.push_back(stored_msg);
                 }
             } else {
+                let mut history = VecDeque::with_capacity(MAX_EDGE_HISTORY);
+                history.push_back(stored_msg);
                 let msg_edge = MessageEdge {
                     from: sender.clone(),
                     to: recipient,
@@ -421,6 +452,7 @@ impl AgentGraph {
                     last_timestamp: event.ts,
                     last_intent: intent.clone(),
                     last_preview: preview.clone(),
+                    history,
                 };
                 let edge_idx =
                     self.graph
@@ -431,6 +463,23 @@ impl AgentGraph {
 
         self.last_event_id = event.id;
         true
+    }
+
+    /// Returns the combined conversation history between two agents (a -> b and b -> a),
+    /// sorted in ascending chronological order, strictly capped at the last 50 messages.
+    pub fn get_conversation_history(&self, a: &str, b: &str) -> Vec<StoredMessage> {
+        let mut messages = Vec::new();
+        if let Some(edge) = self.get_message_edge(a, b) {
+            messages.extend(edge.history.iter().cloned());
+        }
+        if let Some(edge) = self.get_message_edge(b, a) {
+            messages.extend(edge.history.iter().cloned());
+        }
+        messages.sort_by(|m1, m2| m1.ts.cmp(&m2.ts).then_with(|| m1.id.cmp(&m2.id)));
+        if messages.len() > 50 {
+            messages.drain(0..messages.len() - 50);
+        }
+        messages
     }
 
     pub fn reset_events(&mut self) {

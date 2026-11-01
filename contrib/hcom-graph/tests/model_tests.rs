@@ -1,7 +1,8 @@
 use anyhow::Result;
 use chrono::Utc;
 use egui::{Color32, Pos2, Rect, Vec2};
-use hcom_graph::canvas::CanvasView;
+use hcom_graph::action::{ActionRequest, ActionResult, ActionRunner, ActionWorkerHandle};
+use hcom_graph::canvas::{CanvasView, distance_to_quadratic_bezier, distance_to_segment};
 use hcom_graph::layout::GraphLayout;
 use hcom_graph::model::{
     AgentGraph, AgentNode, AgentStatus, InstanceSnapshot, MessageData, MessageEvent,
@@ -599,6 +600,128 @@ fn test_current_db_id_monotonicity() {
     }
     assert_eq!(graph.last_event_id, 110);
     assert_eq!(graph.get_message_edge("x", "y").unwrap().count, 4);
+    assert_eq!(graph.get_message_edge("x", "y").unwrap().history.len(), 4);
+}
+
+#[test]
+fn test_message_edge_bounded_history_and_sanitization() {
+    let mut graph = AgentGraph::new();
+    // Send 60 messages to exceed the 50 limit
+    for id in 1..=60 {
+        let event = MessageEvent {
+            id,
+            ts: Utc::now(),
+            instance: "alice".into(),
+            data: MessageData {
+                from: "alice".into(),
+                delivered_to: vec!["bob".into()],
+                mentions: vec![],
+                intent: Some("chat\x1b[31m".into()),
+                text: format!("msg_{}\x1b[2J\u{200B}", id),
+            },
+        };
+        assert!(graph.apply_message_event(&event));
+    }
+
+    let edge = graph.get_message_edge("alice", "bob").unwrap();
+    assert_eq!(edge.count, 60);
+    assert_eq!(
+        edge.history.len(),
+        50,
+        "History must be bounded to MAX_EDGE_HISTORY (50)"
+    );
+
+    // Oldest messages (1..=10) should have been popped
+    assert_eq!(edge.history.front().unwrap().id, 11);
+    assert_eq!(edge.history.back().unwrap().id, 60);
+
+    // Sanitization must have cleaned the text and intent
+    let last = edge.history.back().unwrap();
+    assert_eq!(last.text, "msg_60");
+    assert_eq!(last.intent.as_deref(), Some("chat"));
+}
+
+#[test]
+fn test_conversation_history_bidirectional_sorting_capped_at_50() {
+    let mut graph = AgentGraph::new();
+    let base_time = Utc::now();
+
+    // Alice -> Bob: 30 messages (odd timestamps)
+    for i in 0..30 {
+        let ts = base_time + chrono::Duration::seconds(i * 2);
+        let event = MessageEvent {
+            id: (i as u64) + 1,
+            ts,
+            instance: "alice".into(),
+            data: MessageData {
+                from: "alice".into(),
+                delivered_to: vec!["bob".into()],
+                mentions: vec![],
+                intent: None,
+                text: format!("alice_{}", i),
+            },
+        };
+        assert!(graph.apply_message_event(&event));
+    }
+
+    // Bob -> Alice: 30 messages (even timestamps, interleaved)
+    for i in 0..30 {
+        let ts = base_time + chrono::Duration::seconds(i * 2 + 1);
+        let event = MessageEvent {
+            id: (i as u64) + 101,
+            ts,
+            instance: "bob".into(),
+            data: MessageData {
+                from: "bob".into(),
+                delivered_to: vec!["alice".into()],
+                mentions: vec![],
+                intent: None,
+                text: format!("bob_{}", i),
+            },
+        };
+        assert!(graph.apply_message_event(&event));
+    }
+
+    // Total = 60 messages between Alice and Bob. get_conversation_history must cap at 50!
+    let history = graph.get_conversation_history("alice", "bob");
+    assert_eq!(
+        history.len(),
+        50,
+        "Combined history must be strictly capped at 50"
+    );
+
+    // Must be sorted strictly ascending by timestamp
+    for w in history.windows(2) {
+        assert!(w[0].ts <= w[1].ts);
+    }
+
+    // Symmetric query (bob, alice) must return identical history
+    let history_rev = graph.get_conversation_history("bob", "alice");
+    assert_eq!(history, history_rev);
+}
+
+#[test]
+fn test_reset_clears_message_history() {
+    let mut graph = AgentGraph::new();
+    let event = MessageEvent {
+        id: 1,
+        ts: Utc::now(),
+        instance: "alice".into(),
+        data: MessageData {
+            from: "alice".into(),
+            delivered_to: vec!["bob".into()],
+            mentions: vec![],
+            intent: None,
+            text: "hello".into(),
+        },
+    };
+    assert!(graph.apply_message_event(&event));
+    assert_eq!(graph.get_conversation_history("alice", "bob").len(), 1);
+
+    // Reset events
+    graph.reset_events();
+    assert!(graph.get_message_edge("alice", "bob").is_none());
+    assert_eq!(graph.get_conversation_history("alice", "bob").len(), 0);
 }
 
 struct MockStreamHandle {
@@ -1285,4 +1408,493 @@ fn test_layout_large_graph_frame_budget_enforced_during_forces_init() {
         initial_pos_0, final_pos_0,
         "Positions must advance across frames even under heavy time-slicing"
     );
+}
+
+struct MockActionRunner {
+    recorded: Arc<Mutex<Vec<ActionRequest>>>,
+    fail_attach: bool,
+    transcript_result: String,
+}
+
+impl ActionRunner for MockActionRunner {
+    fn execute(&self, req: ActionRequest) -> Option<ActionResult> {
+        self.recorded.lock().unwrap().push(req.clone());
+        match req {
+            ActionRequest::Attach { agent } => Some(ActionResult::AttachFinished {
+                agent: agent.clone(),
+                result: if self.fail_attach {
+                    Err("Agent not running in Herdr pane".into())
+                } else {
+                    Ok(())
+                },
+            }),
+            ActionRequest::Inject { agent, .. } => Some(ActionResult::InjectFinished {
+                agent,
+                result: Ok(()),
+            }),
+            ActionRequest::Transcript { agent, .. } => Some(ActionResult::TranscriptLoaded {
+                agent,
+                content: Ok(self.transcript_result.clone()),
+            }),
+            ActionRequest::Kill { agent } => Some(ActionResult::KillFinished {
+                agent,
+                result: Ok(()),
+            }),
+            ActionRequest::Shutdown => None,
+        }
+    }
+}
+
+#[test]
+fn test_action_worker_async_dispatch_and_bounded_transcript() {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let runner = MockActionRunner {
+        recorded: recorded.clone(),
+        fail_attach: false,
+        transcript_result: "line 1\nline 2".into(),
+    };
+
+    let worker = ActionWorkerHandle::new(runner);
+
+    // 1. Dispatch Attach
+    worker
+        .try_send(ActionRequest::Attach {
+            agent: "test_agent".into(),
+        })
+        .unwrap();
+
+    // Spin briefly until worker finishes
+    let mut attach_res = None;
+    for _ in 0..50 {
+        if let Some(res) = worker.try_recv() {
+            attach_res = Some(res);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        attach_res,
+        Some(ActionResult::AttachFinished {
+            agent: "test_agent".into(),
+            result: Ok(()),
+        })
+    );
+
+    // 2. Dispatch Inject
+    worker
+        .try_send(ActionRequest::Inject {
+            agent: "test_agent".into(),
+            text: "hello world".into(),
+        })
+        .unwrap();
+
+    let mut inject_res = None;
+    for _ in 0..50 {
+        if let Some(res) = worker.try_recv() {
+            inject_res = Some(res);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        inject_res,
+        Some(ActionResult::InjectFinished {
+            agent: "test_agent".into(),
+            result: Ok(()),
+        })
+    );
+
+    // 3. Dispatch Transcript
+    worker
+        .try_send(ActionRequest::Transcript {
+            agent: "test_agent".into(),
+            last_lines: 10,
+        })
+        .unwrap();
+
+    let mut transcript_res = None;
+    for _ in 0..50 {
+        if let Some(res) = worker.try_recv() {
+            transcript_res = Some(res);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        transcript_res,
+        Some(ActionResult::TranscriptLoaded {
+            agent: "test_agent".into(),
+            content: Ok("line 1\nline 2".into()),
+        })
+    );
+
+    // 4. Dispatch Kill
+    worker
+        .try_send(ActionRequest::Kill {
+            agent: "test_agent".into(),
+        })
+        .unwrap();
+
+    let mut kill_res = None;
+    for _ in 0..50 {
+        if let Some(res) = worker.try_recv() {
+            kill_res = Some(res);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        kill_res,
+        Some(ActionResult::KillFinished {
+            agent: "test_agent".into(),
+            result: Ok(()),
+        })
+    );
+
+    // Verify all requests were recorded
+    let rec = recorded.lock().unwrap();
+    assert_eq!(rec.len(), 4);
+    assert_eq!(
+        rec[0],
+        ActionRequest::Attach {
+            agent: "test_agent".into()
+        }
+    );
+    assert_eq!(
+        rec[1],
+        ActionRequest::Inject {
+            agent: "test_agent".into(),
+            text: "hello world".into()
+        }
+    );
+    assert_eq!(
+        rec[2],
+        ActionRequest::Transcript {
+            agent: "test_agent".into(),
+            last_lines: 10
+        }
+    );
+    assert_eq!(
+        rec[3],
+        ActionRequest::Kill {
+            agent: "test_agent".into()
+        }
+    );
+}
+
+#[test]
+fn test_canvas_edge_and_node_hit_testing() {
+    // 1. Line segment distance
+    let a = Pos2::new(0.0, 0.0);
+    let b = Pos2::new(100.0, 0.0);
+    assert!((distance_to_segment(Pos2::new(50.0, 5.0), a, b) - 5.0).abs() < 1e-4);
+    assert!((distance_to_segment(Pos2::new(-10.0, 0.0), a, b) - 10.0).abs() < 1e-4);
+    assert!((distance_to_segment(Pos2::new(110.0, 0.0), a, b) - 10.0).abs() < 1e-4);
+
+    // 2. Quadratic Bezier curve distance
+    let p0 = Pos2::new(0.0, 0.0);
+    let p1 = Pos2::new(50.0, 50.0);
+    let p2 = Pos2::new(100.0, 0.0);
+    // At t=0.5, midpoint of curve is (50.0, 25.0)
+    let dist_mid = distance_to_quadratic_bezier(Pos2::new(50.0, 25.0), p0, p1, p2);
+    assert!(dist_mid < 1.0, "Distance at curve point should be near 0");
+
+    let dist_far = distance_to_quadratic_bezier(Pos2::new(50.0, 45.0), p0, p1, p2);
+    assert!(
+        (dist_far - 20.0).abs() < 2.0,
+        "Distance should be approx 20.0"
+    );
+
+    // 3. Test Edge Hit Testing in Graph
+    let mut graph = AgentGraph::new();
+    let snap = vec![
+        InstanceSnapshot {
+            name: "node_a".into(),
+            status: Some("active".into()),
+            status_context: None,
+            status_age_seconds: None,
+            unread_count: None,
+            parent_name: None,
+            directory: None,
+            tool: None,
+        },
+        InstanceSnapshot {
+            name: "node_b".into(),
+            status: Some("active".into()),
+            status_context: None,
+            status_age_seconds: None,
+            unread_count: None,
+            parent_name: None,
+            directory: None,
+            tool: None,
+        },
+    ];
+    graph.apply_instance_snapshot(&snap);
+    let ev = MessageEvent {
+        id: 1,
+        ts: Utc::now(),
+        instance: "node_a".into(),
+        data: MessageData {
+            from: "node_a".into(),
+            delivered_to: vec!["node_b".into()],
+            mentions: vec![],
+            intent: None,
+            text: "test".into(),
+        },
+    };
+    graph.apply_message_event(&ev);
+
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+    let idx_a = graph.get_node_index("node_a").unwrap();
+    let idx_b = graph.get_node_index("node_b").unwrap();
+
+    // Place node_a at (0, 0) and node_b at (200, 0)
+    layout.set_node_pos(idx_a, Pos2::new(-100.0, 0.0), true);
+    layout.set_node_pos(idx_b, Pos2::new(100.0, 0.0), true);
+
+    let canvas = CanvasView::new();
+    let rect = Rect::from_center_size(Pos2::new(300.0, 300.0), Vec2::new(600.0, 600.0));
+
+    // Screen pos of edge midpoint is rect.center() = (300.0, 300.0)
+    let hit_edge = canvas.hit_test_edge(Pos2::new(300.0, 300.0), &graph, &layout, rect, 8.0);
+    assert!(hit_edge.is_some(), "Edge should be hit at its midpoint");
+
+    let miss_edge = canvas.hit_test_edge(Pos2::new(300.0, 350.0), &graph, &layout, rect, 8.0);
+    assert!(miss_edge.is_none(), "Points far away should miss");
+}
+
+#[test]
+fn test_attach_failure_reports_error_without_crash() {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let runner = MockActionRunner {
+        recorded,
+        fail_attach: true, // Will fail!
+        transcript_result: String::new(),
+    };
+
+    let worker = ActionWorkerHandle::new(runner);
+    worker
+        .try_send(ActionRequest::Attach {
+            agent: "headless_agent".into(),
+        })
+        .unwrap();
+
+    let mut res = None;
+    for _ in 0..50 {
+        if let Some(r) = worker.try_recv() {
+            res = Some(r);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    match res {
+        Some(ActionResult::AttachFinished { agent, result }) => {
+            assert_eq!(agent, "headless_agent");
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("not running in Herdr pane"));
+        }
+        other => panic!("Expected AttachFinished with Err, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_kill_requires_confirmation_flow_and_stale_target_check() {
+    let mut graph = AgentGraph::new();
+    let snap = vec![
+        InstanceSnapshot {
+            name: "live_agent".into(),
+            status: Some("active".into()),
+            status_context: None,
+            status_age_seconds: None,
+            unread_count: None,
+            parent_name: None,
+            directory: None,
+            tool: None,
+        },
+        InstanceSnapshot {
+            name: "stopped_agent".into(),
+            status: Some("stopped".into()),
+            status_context: None,
+            status_age_seconds: None,
+            unread_count: None,
+            parent_name: None,
+            directory: None,
+            tool: None,
+        },
+    ];
+    graph.apply_instance_snapshot(&snap);
+
+    // 1. Verify stale check for stopped agent
+    let target = "stopped_agent";
+    let agent_node = graph.get_agent(target).unwrap();
+    assert_eq!(agent_node.status, AgentStatus::Stopped);
+
+    // 2. Verify stale check for non-existent agent
+    assert!(graph.get_agent("unknown_agent").is_none());
+
+    // 3. Verify live agent can proceed
+    let live = graph.get_agent("live_agent").unwrap();
+    assert_eq!(live.status, AgentStatus::Active);
+}
+
+#[test]
+fn test_action_runner_stdout_capped_kills_child_and_avoids_deadlock() {
+    use hcom_graph::action::SystemActionRunner;
+    let runner = SystemActionRunner::new();
+    #[cfg(unix)]
+    let res = runner.run_command_bounded("head", &["-c", "100000", "/dev/zero"], 1024, 1024);
+    #[cfg(windows)]
+    let res = runner.run_command_bounded("cmd", &["/c", "echo", "dummy"], 1024, 1024);
+
+    #[cfg(unix)]
+    {
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("output exceeded maximum allowed size of 1024 bytes"),
+            "Expected exceeded limit error, got: {}",
+            err
+        );
+    }
+}
+
+#[test]
+fn test_action_runner_concurrent_stderr_drain_no_deadlock() {
+    use hcom_graph::action::SystemActionRunner;
+    let runner = SystemActionRunner::new();
+    #[cfg(unix)]
+    let res = runner.run_command_bounded(
+        "sh",
+        &["-c", "head -c 131072 /dev/zero >&2 && echo ok"],
+        1024,
+        1024,
+    );
+    #[cfg(windows)]
+    let res: Result<String, String> = Ok("ok\n".to_string());
+
+    #[cfg(unix)]
+    {
+        assert!(res.is_ok(), "Expected Ok, got: {:?}", res);
+        assert_eq!(res.unwrap().trim(), "ok");
+    }
+}
+
+#[test]
+fn test_action_worker_handle_drop_cancels_hanging_process() {
+    use hcom_graph::action::SystemActionRunner;
+
+    struct HangingActionRunner {
+        inner: SystemActionRunner,
+    }
+
+    impl ActionRunner for HangingActionRunner {
+        fn execute(&self, _req: ActionRequest) -> Option<ActionResult> {
+            #[cfg(unix)]
+            let _ = self.inner.run_command_bounded("sleep", &["10"], 1024, 1024);
+            #[cfg(windows)]
+            let _ = self
+                .inner
+                .run_command_bounded("timeout", &["10"], 1024, 1024);
+            None
+        }
+
+        fn cancel(&self) {
+            self.inner.cancel();
+        }
+    }
+
+    let runner = HangingActionRunner {
+        inner: SystemActionRunner::new(),
+    };
+
+    let start = std::time::Instant::now();
+    let worker = ActionWorkerHandle::new(runner);
+    worker
+        .try_send(ActionRequest::Attach {
+            agent: "test".into(),
+        })
+        .unwrap();
+
+    // Give worker thread a moment to spawn the child process
+    std::thread::sleep(Duration::from_millis(30));
+
+    // Drop worker, which must cancel the hanging process and join quickly
+    drop(worker);
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "Worker drop took too long: {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn test_transcript_clamping_to_100() {
+    use hcom_graph::action::{
+        build_attach_argv, build_inject_argv, build_kill_argv, build_transcript_argv,
+        clamp_transcript_lines,
+    };
+
+    assert_eq!(clamp_transcript_lines(0), 1);
+    assert_eq!(clamp_transcript_lines(50), 50);
+    assert_eq!(clamp_transcript_lines(100), 100);
+    assert_eq!(clamp_transcript_lines(500), 100);
+
+    let argv_large = build_transcript_argv("agent_alpha", 500);
+    assert_eq!(
+        argv_large,
+        vec!["transcript", "agent_alpha", "--last", "100"]
+    );
+
+    let argv_zero = build_transcript_argv("agent_beta", 0);
+    assert_eq!(argv_zero, vec!["transcript", "agent_beta", "--last", "1"]);
+
+    let attach_argv = build_attach_argv("agent_gamma");
+    assert_eq!(attach_argv, vec!["agent", "attach", "agent_gamma"]);
+
+    let inject_argv = build_inject_argv("agent_delta", "status");
+    assert_eq!(
+        inject_argv,
+        vec!["term", "inject", "agent_delta", "status", "--enter"]
+    );
+
+    let kill_argv = build_kill_argv("agent_epsilon");
+    assert_eq!(kill_argv, vec!["kill", "agent_epsilon"]);
+}
+
+#[test]
+fn test_action_runner_cancel_while_in_wait_loop() {
+    use hcom_graph::action::SystemActionRunner;
+
+    let runner = Arc::new(SystemActionRunner::new());
+    let runner_thread = Arc::clone(&runner);
+
+    let start = std::time::Instant::now();
+    let thread = std::thread::spawn(move || {
+        #[cfg(unix)]
+        let res = runner_thread.run_command_bounded("sleep", &["10"], 1024, 1024);
+        #[cfg(windows)]
+        let res = runner_thread.run_command_bounded("timeout", &["10"], 1024, 1024);
+        res
+    });
+
+    // Allow the process to start and enter the cancellable wait loop
+    std::thread::sleep(Duration::from_millis(30));
+
+    // Cancel while in the wait loop
+    runner.cancel();
+
+    let res = thread.join().expect("thread panicked");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "Cancellation in wait loop took too long: {:?}",
+        elapsed
+    );
+    assert!(res.is_err());
+    assert_eq!(res.unwrap_err(), "Command was cancelled");
 }

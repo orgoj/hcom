@@ -1,11 +1,11 @@
 ---
 id: TASK-77.3
 title: 'Interaktivita a integrace: attach terminálu, kontextové akce a detail zpráv'
-status: In Progress
+status: Done
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-01 11:21'
-updated_date: '2026-11-01 14:06'
+updated_date: '2026-11-01 14:26'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -38,3 +38,9 @@ Uživatelská interakce s grafem: kliknutí na uzel aktivuje agenta v terminálu
 5. Postranní panel a kontextová menu: egui::Panel::right pro detail agenta (metadata, status context/age, inject pole, transcript výpis, kill) a detail hrany (chronologická historie); popup menu na pravý klik pro uzel i hranu.
 6. Testy: 7 unit testů pokrývajících bounded historii, obousměrný limit 50, DB reset, async dispatch workeru, selhání attach, stale-target kill potvrzení a hit-testing hran.
 <!-- SECTION:PLAN:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implementována kompletní interaktivita a integrace: terminálový attach, historie zpráv mezi dvojicí agentů s obousměrným limitem a sanitizací, postranní panel detailů s inline injectem a transcriptem, asynchronní ActionWorker s pipe-safe souběžným drainem a spolehlivou cancelací při Dropu/ukončení, potvrzovací dialog pro kill s ověřením stale targetu a kontextová menu pro uzly i hrany. Pokryto 36 testy v contrib/hcom-graph.
+<!-- SECTION:FINAL_SUMMARY:END -->

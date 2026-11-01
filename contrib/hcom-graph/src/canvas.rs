@@ -1,20 +1,65 @@
 use crate::layout::GraphLayout;
 use crate::model::{AgentGraph, AgentStatus, EdgeKind};
 use egui::{Color32, FontId, Pos2, Rect, Stroke, Vec2};
-use petgraph::stable_graph::NodeIndex;
+use petgraph::stable_graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CanvasAction {
+    NodeClicked(NodeIndex),
+    EdgeClicked(EdgeIndex),
+    NodeSecondaryClicked(NodeIndex, Pos2),
+    EdgeSecondaryClicked(EdgeIndex, Pos2),
+    SelectionCleared,
+}
 
 pub struct CanvasView {
     pub pan: Vec2,
     pub zoom: f32,
     pub dragged_node: Option<NodeIndex>,
     pub hovered_node: Option<NodeIndex>,
+    pub hovered_edge: Option<EdgeIndex>,
+    pub selected_node: Option<NodeIndex>,
+    pub selected_edge: Option<EdgeIndex>,
+    pub mouse_down_pos: Option<Pos2>,
+    pub is_dragging: bool,
 }
 
 impl Default for CanvasView {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub fn distance_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let len_sq = ab.length_sq();
+    if len_sq < 1e-4 {
+        return p.distance(a);
+    }
+    let t = ((p - a).dot(ab) / len_sq).clamp(0.0, 1.0);
+    let proj = a + ab * t;
+    p.distance(proj)
+}
+
+pub fn distance_to_quadratic_bezier(p: Pos2, p0: Pos2, p1: Pos2, p2: Pos2) -> f32 {
+    let mut min_dist = f32::MAX;
+    let steps = 16;
+    let mut prev = p0;
+    for i in 1..=steps {
+        let t = i as f32 / steps as f32;
+        let it = 1.0 - t;
+        let curr = Pos2::new(
+            it * it * p0.x + 2.0 * it * t * p1.x + t * t * p2.x,
+            it * it * p0.y + 2.0 * it * t * p1.y + t * t * p2.y,
+        );
+        let dist = distance_to_segment(p, prev, curr);
+        if dist < min_dist {
+            min_dist = dist;
+        }
+        prev = curr;
+    }
+    min_dist
 }
 
 impl CanvasView {
@@ -24,6 +69,11 @@ impl CanvasView {
             zoom: 1.0,
             dragged_node: None,
             hovered_node: None,
+            hovered_edge: None,
+            selected_node: None,
+            selected_edge: None,
+            mouse_down_pos: None,
+            is_dragging: false,
         }
     }
 
@@ -50,15 +100,68 @@ impl CanvasView {
         self.zoom = 1.0;
     }
 
+    pub fn hit_test_edge(
+        &self,
+        screen_pos: Pos2,
+        graph: &AgentGraph,
+        layout: &GraphLayout,
+        rect: Rect,
+        hit_threshold: f32,
+    ) -> Option<EdgeIndex> {
+        let node_radius = 26.0 * self.zoom;
+        for edge_ref in graph.graph.edge_references() {
+            let source_idx = edge_ref.source();
+            let target_idx = edge_ref.target();
+
+            let Some(source_phys) = layout.nodes.get(&source_idx) else {
+                continue;
+            };
+            let Some(target_phys) = layout.nodes.get(&target_idx) else {
+                continue;
+            };
+
+            let p1 = self.world_to_screen(source_phys.pos, rect);
+            let p2 = self.world_to_screen(target_phys.pos, rect);
+
+            let d = p2 - p1;
+            let len = d.length();
+            if len <= node_radius {
+                continue;
+            }
+
+            let dir = d / len;
+            let normal = Vec2::new(-dir.y, dir.x);
+            let is_reciprocal = graph.graph.contains_edge(target_idx, source_idx);
+            let curve_offset = if is_reciprocal { 18.0 * self.zoom } else { 0.0 };
+
+            let start_pt = p1 + dir * node_radius;
+            let end_pt = p2 - dir * node_radius;
+
+            let dist = if curve_offset.abs() > 0.1 {
+                let mid = p1 + (p2 - p1) * 0.5;
+                let ctrl_pt = mid + normal * curve_offset;
+                distance_to_quadratic_bezier(screen_pos, start_pt, ctrl_pt, end_pt)
+            } else {
+                distance_to_segment(screen_pos, start_pt, end_pt)
+            };
+
+            if dist <= hit_threshold {
+                return Some(edge_ref.id());
+            }
+        }
+        None
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         graph: &AgentGraph,
         layout: &mut GraphLayout,
-    ) -> egui::Response {
+    ) -> (egui::Response, Option<CanvasAction>) {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         let painter = ui.painter_at(rect);
+        let mut triggered_action = None;
 
         // 1. Zoom interaction (anchored at mouse cursor)
         let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
@@ -77,24 +180,41 @@ impl CanvasView {
             self.zoom = new_zoom;
         }
 
-        // 2. Hit testing and Drag & Drop
-        let node_radius = 26.0 * self.zoom;
+        // 2. Hit testing & Click vs. Drag handling
         let hit_radius_world = 26.0;
 
         if let Some(mouse_pos) = response.interact_pointer_pos() {
             let world_mouse = self.screen_to_world(mouse_pos, rect);
             self.hovered_node = layout.hit_test(world_mouse, hit_radius_world);
+            if self.hovered_node.is_none() {
+                self.hovered_edge = self.hit_test_edge(mouse_pos, graph, layout, rect, 10.0);
+            } else {
+                self.hovered_edge = None;
+            }
 
-            if response.drag_started_by(egui::PointerButton::Primary)
-                && let Some(hit) = self.hovered_node
+            // Track mouse down pos to distinguish small click from drag
+            if response.drag_started_by(egui::PointerButton::Primary) {
+                self.mouse_down_pos = Some(mouse_pos);
+                self.is_dragging = false;
+
+                if let Some(hit) = self.hovered_node {
+                    self.dragged_node = Some(hit);
+                    layout.set_node_pos(hit, world_mouse, true);
+                }
+            }
+
+            if response.dragged_by(egui::PointerButton::Primary)
+                && let Some(down) = self.mouse_down_pos
+                && (mouse_pos - down).length() > 3.0
             {
-                self.dragged_node = Some(hit);
-                layout.set_node_pos(hit, world_mouse, true);
+                self.is_dragging = true;
             }
         } else {
             self.hovered_node = None;
+            self.hovered_edge = None;
         }
 
+        // Handle active node dragging
         if let Some(dragged) = self.dragged_node {
             if response.dragged_by(egui::PointerButton::Primary)
                 && let Some(mouse_pos) = response.interact_pointer_pos()
@@ -112,6 +232,38 @@ impl CanvasView {
         } else if response.dragged() {
             // Pan when dragging empty canvas or using middle/secondary buttons
             self.pan += response.drag_delta();
+        }
+
+        // Handle Clicks (when not dragging)
+        if response.clicked() && !self.is_dragging {
+            if let Some(node_idx) = self.hovered_node {
+                self.selected_node = Some(node_idx);
+                self.selected_edge = None;
+                triggered_action = Some(CanvasAction::NodeClicked(node_idx));
+            } else if let Some(edge_idx) = self.hovered_edge {
+                self.selected_edge = Some(edge_idx);
+                self.selected_node = None;
+                triggered_action = Some(CanvasAction::EdgeClicked(edge_idx));
+            } else {
+                self.selected_node = None;
+                self.selected_edge = None;
+                triggered_action = Some(CanvasAction::SelectionCleared);
+            }
+        }
+
+        // Secondary Click (Right click) for context menus
+        if response.secondary_clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            if let Some(node_idx) = self.hovered_node {
+                self.selected_node = Some(node_idx);
+                self.selected_edge = None;
+                triggered_action = Some(CanvasAction::NodeSecondaryClicked(node_idx, pos));
+            } else if let Some(edge_idx) = self.hovered_edge {
+                self.selected_edge = Some(edge_idx);
+                self.selected_node = None;
+                triggered_action = Some(CanvasAction::EdgeSecondaryClicked(edge_idx, pos));
+            }
         }
 
         // 3. Render Background Grid
@@ -143,7 +295,9 @@ impl CanvasView {
         }
 
         // 4. Render Edges
+        let node_radius = 26.0 * self.zoom;
         for edge_ref in graph.graph.edge_references() {
+            let edge_id = edge_ref.id();
             let source_idx = edge_ref.source();
             let target_idx = edge_ref.target();
 
@@ -166,26 +320,49 @@ impl CanvasView {
             let dir = d / len;
             let normal = Vec2::new(-dir.y, dir.x);
 
-            // Check if reciprocal edge exists between these two nodes
             let is_reciprocal = graph.graph.contains_edge(target_idx, source_idx);
             let curve_offset = if is_reciprocal { 18.0 * self.zoom } else { 0.0 };
 
             let start_pt = p1 + dir * node_radius;
             let end_pt = p2 - dir * node_radius;
 
+            let is_selected = self.selected_edge == Some(edge_id);
+            let is_hovered = self.hovered_edge == Some(edge_id);
+
             match edge_ref.weight() {
                 EdgeKind::Spawn(_) => {
+                    let color = if is_selected {
+                        Color32::from_rgb(241, 196, 15)
+                    } else if is_hovered {
+                        Color32::from_rgb(170, 185, 210)
+                    } else {
+                        Color32::from_rgb(110, 120, 140)
+                    };
                     let stroke = Stroke::new(
-                        1.5 * self.zoom.clamp(0.5, 2.0),
-                        Color32::from_rgb(110, 120, 140),
+                        (if is_selected { 2.5 } else { 1.5 }) * self.zoom.clamp(0.5, 2.0),
+                        color,
                     );
                     painter.line_segment([start_pt, end_pt], stroke);
-                    draw_arrow_head(&painter, end_pt, dir, 8.0 * self.zoom, stroke.color);
+                    draw_arrow_head(&painter, end_pt, dir, 8.0 * self.zoom, color);
                 }
                 EdgeKind::Message(msg) => {
-                    let thickness =
+                    let base_thickness =
                         (1.8 + (msg.count as f32).log2().min(5.0)) * self.zoom.clamp(0.6, 2.2);
-                    let color = Color32::from_rgb(165, 105, 189);
+                    let thickness = if is_selected {
+                        base_thickness + 2.0 * self.zoom
+                    } else if is_hovered {
+                        base_thickness + 1.0 * self.zoom
+                    } else {
+                        base_thickness
+                    };
+
+                    let color = if is_selected {
+                        Color32::from_rgb(241, 196, 15)
+                    } else if is_hovered {
+                        Color32::from_rgb(210, 150, 235)
+                    } else {
+                        Color32::from_rgb(165, 105, 189)
+                    };
                     let stroke = Stroke::new(thickness, color);
 
                     if curve_offset.abs() > 0.1 {
@@ -218,18 +395,28 @@ impl CanvasView {
 
             let is_hovered = self.hovered_node == Some(*idx);
             let is_dragged = self.dragged_node == Some(*idx);
+            let is_selected = self.selected_node == Some(*idx);
 
             let status_color = Self::status_color(&node_data.status);
             let node_fill = Color32::from_rgb(28, 30, 38);
 
-            let border_width = if is_dragged || is_hovered {
+            let border_width = if is_dragged || is_hovered || is_selected {
                 3.5 * self.zoom
             } else {
                 2.2 * self.zoom
             };
 
+            // Selection ring
+            if is_selected {
+                painter.circle_stroke(
+                    center,
+                    node_radius + 5.0 * self.zoom,
+                    Stroke::new(2.5 * self.zoom, Color32::from_rgb(241, 196, 15)),
+                );
+            }
+
             // Outer glow if hovered
-            if is_hovered {
+            if is_hovered && !is_selected {
                 painter.circle_filled(
                     center,
                     node_radius + 4.0 * self.zoom,
@@ -257,7 +444,7 @@ impl CanvasView {
             );
         }
 
-        response
+        (response, triggered_action)
     }
 }
 
