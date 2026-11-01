@@ -6607,6 +6607,174 @@ fn roaming_send_rejects_an_instance_name_recorded_for_another_root() {
 }
 
 #[test]
+fn roaming_dirs_allow_listed_projects_and_reject_every_other_project() {
+    let h = Hcom::new();
+    let allowed = h.root_path().join("allowed-app");
+    let repos = h.root_path().join("repos");
+    let inside = repos.join("tool");
+    let other = h.root_path().join("other-app");
+    for dir in [&allowed, &inside, &other] {
+        std::fs::create_dir_all(dir.join(".git")).expect("create git marker");
+    }
+    std::fs::create_dir_all(allowed.join("src")).expect("create nested dir");
+    std::fs::write(
+        h.path().join("agents.json"),
+        format!(
+            r#"{{"agents":{{"reviewer":{{"roaming":true,"cli":"codex",
+                "terminal_command":"sh -c true {{script}}",
+                "roaming_dirs":["{}","{}"]}}}}}}"#,
+            allowed.display(),
+            repos.display()
+        ),
+    )
+    .expect("write catalog");
+    let allowed_c = std::fs::canonicalize(&allowed).expect("canonical allowed");
+    let repos_c = std::fs::canonicalize(&repos).expect("canonical repos");
+    let assert_rejected = |stderr: &str| {
+        assert!(
+            stderr.contains("roaming agent 'reviewer' may not run in project")
+                && stderr.contains(&format!("  {}", allowed_c.display()))
+                && stderr.contains(&format!("  {}", repos_c.display()))
+                && stderr.contains("--project-dir <dir>"),
+            "stderr={stderr}"
+        );
+    };
+    let send = |dir: &std::path::Path, project_dir: Option<&std::path::Path>, text: &str| {
+        let mut cmd = h.cmd();
+        cmd.current_dir(dir).args(["send", "--from", "bigboss"]);
+        if let Some(project_dir) = project_dir {
+            cmd.arg("--project-dir").arg(project_dir);
+        }
+        let output = cmd
+            .args(["@reviewer", "--", text])
+            .output()
+            .expect("send to roaming agent");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let messages = || {
+        let (code, events, stderr) = h.run(["events", "--type", "message", "--full"]);
+        assert_eq!(code, 0, "stderr={stderr}");
+        events
+    };
+
+    // Rejected: another project by CWD, and --project-dir outside the list.
+    let (ok, stdout, stderr) = send(&other, None, "lost-cwd");
+    assert!(!ok, "stdout={stdout} stderr={stderr}");
+    assert_rejected(&stderr);
+    let (ok, stdout, stderr) = send(&allowed, Some(&other), "lost-project-dir");
+    assert!(!ok, "stdout={stdout} stderr={stderr}");
+    assert_rejected(&stderr);
+    let events = messages();
+    assert!(
+        !events.contains("lost-cwd") && !events.contains("lost-project-dir"),
+        "events={events}"
+    );
+    let other_instance = roaming_instance("reviewer_other_app", &other);
+    let (_, instances, _) = h.run(["list", "--json", "--stopped"]);
+    assert!(
+        !instances.contains(&other_instance),
+        "instances={instances}"
+    );
+
+    // Rejected: catalog launch and attach from another project.
+    for args in [
+        vec!["agent", "reviewer", "--dry-run"],
+        vec!["agent", "attach", "reviewer"],
+    ] {
+        let output = h
+            .cmd()
+            .current_dir(&other)
+            .args(&args)
+            .output()
+            .expect("launch roaming agent");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "args={args:?} stderr={stderr}");
+        assert_rejected(&stderr);
+    }
+
+    // show and list report the allowed directories from anywhere.
+    let output = h
+        .cmd()
+        .current_dir(&other)
+        .args(["agent", "show", "reviewer"])
+        .output()
+        .expect("show roaming agent");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "stdout={stdout}");
+    assert!(
+        stdout.contains("(not allowed: see roaming_dirs)"),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("roaming_dirs: {}", allowed_c.display()))
+            && stdout.contains(&format!("roaming_dirs: {}", repos_c.display())),
+        "stdout={stdout}"
+    );
+    let (code, list, stderr) = h.run(["agent", "list", "--json"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let list: serde_json::Value = serde_json::from_str(&list).expect("agent list JSON");
+    assert_eq!(
+        list[0]["roaming_dirs"],
+        serde_json::json!([allowed_c.to_string_lossy(), repos_c.to_string_lossy()])
+    );
+    let (code, table, stderr) = h.run(["agent", "list", "--for-humans"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(table.contains("<project: "), "table={table}");
+    let (code, brief, stderr) = h.run(["agent", "list", "--for-agents"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(brief.contains("(roaming_dirs: "), "brief={brief}");
+
+    // Allowed: a nested CWD of a listed dir, a project inside a listed dir,
+    // and --project-dir to a listed dir from another project.
+    let output = h
+        .cmd()
+        .current_dir(allowed.join("src"))
+        .args(["agent", "reviewer", "--dry-run"])
+        .output()
+        .expect("dry-run from allowed project");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr={stderr}");
+    for (dir, project_dir, text, root, prefix) in [
+        (&inside, None, "via-cwd", &inside, "reviewer_tool"),
+        (
+            &other,
+            Some(allowed.as_path()),
+            "via-project-dir",
+            &allowed,
+            "reviewer_allowed_app",
+        ),
+    ] {
+        let (ok, stdout, stderr) = send(dir, project_dir, text);
+        assert!(ok, "text={text} stdout={stdout} stderr={stderr}");
+        assert!(
+            stdout.contains(&roaming_instance(prefix, root)),
+            "stdout={stdout}"
+        );
+        assert!(messages().contains(text));
+    }
+
+    // Allowed: a send to an already running instance of a listed project.
+    let running = roaming_instance("reviewer_allowed_app", &allowed);
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "INSERT OR REPLACE INTO instances (name, status, directory, created_at) \
+         VALUES (?1, 'listening', ?2, 1000.0)",
+        [running.as_str(), allowed_c.to_string_lossy().as_ref()],
+    )
+    .expect("insert running allowed instance");
+    let (ok, stdout, stderr) = send(&allowed, None, "to-running");
+    assert!(ok, "stdout={stdout} stderr={stderr}");
+    let (code, events, stderr) = h.run(["events", "--type", "message", "--last", "1", "--full"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let event: serde_json::Value = serde_json::from_str(events.trim()).expect("message event JSON");
+    assert_eq!(event["data"]["delivered_to"], serde_json::json!([running]));
+}
+
+#[test]
 fn roaming_slug_collision_blocks_only_sends_that_address_that_agent() {
     let h = Hcom::new();
     let first = h.root_path().join("one/app");

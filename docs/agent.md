@@ -331,6 +331,7 @@ Supported agent fields:
 | `description` | One line on what the agent is for, shown to other agents |
 | `dir` | CLI working directory |
 | `roaming` | Materialize one project-local instance per sender project |
+| `roaming_dirs` | Array of project directories a roaming agent may run in (default: all) |
 | `cli` | CLI selected by default |
 | `terminal` | hcom terminal preset, or `here` |
 | `terminal_command` | Raw terminal command containing `{script}` |
@@ -448,6 +449,18 @@ table the roaming entry shows its running instances in STATUS (`● 2 roaming: a
 If an existing instance with the materialized name already belongs to another project root, the
 send fails instead of reaching the wrong project; only a send that addresses that roaming agent by
 name, full name, or tag fails.
+
+`"roaming_dirs": ["~/work/app", "~/work/tools"]` limits a roaming agent to project roots equal to
+or inside one of the listed directories. Entries expand `~` and `$VAR` and resolve relative to the
+catalog file, like `dir`. For any other project root, a send that addresses the agent (by CWD or
+with `--project-dir`), `hcom agent <name>`, `hcom agent attach <name>`, and the restart of a
+stopped instance (for example a thread member) fail with an error that names the agent, lists the
+allowed directories, and suggests `--project-dir <dir>`; nothing is started and no message is
+queued. A running instance addressed by its full name stays reachable. `hcom agent show` works
+from anywhere, prints each `roaming_dirs:` entry, and marks a disallowed current project on its
+`dir:` line; `hcom agent list` shows DIR `<project: ...>`, `--for-agents` appends
+`(roaming_dirs: ...)` to the description, and `--json` adds `roaming_dirs`. Absent or empty, every
+project is allowed; on a non-roaming agent the field is an error.
 Sends route to running agents first, and the catalog is read only for unmatched names, tags (which
 include stopped catalog agents), stopped thread members, or `--spawn-as`. An unreadable catalog
 prints a warning and the send routes to running agents only. Broadcasts never start a roaming

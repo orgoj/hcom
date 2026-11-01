@@ -322,7 +322,7 @@ const SEND_HELP: &[HelpEntry] = &[
     ),
     (
         "  --project-dir <DIR>",
-        "Resolve roaming targets in DIR's Git/project root instead of the sender's",
+        "Resolve roaming targets in DIR's Git/project root instead of the sender's (must be allowed by roaming_dirs)",
     ),
     ("", ""),
     ("Envelope:", ""),
@@ -1334,6 +1334,7 @@ Commands:\n\
 \x20              roaming ones run as <name>_<project>_<hash>, <hash> = 3 digits,\n\
 \x20              and send/launch print a Note with that name;\n\
 \x20              send --project-dir <DIR> picks another project for them;\n\
+\x20              roaming_dirs limits the projects they may run in;\n\
 \x20              <stem>.local.json beside a catalog overrides it;\n\
 \x20              Herdr workspace defaults to the agent's dir name,\n\
 \x20              or the caller's project name when it has no dir;\n\
@@ -1883,6 +1884,15 @@ mod tests {
             get_help_text().contains("send --project-dir <DIR> picks another project for them;")
         );
         assert!(get_command_help("send").contains("--project-dir <DIR>"));
+    }
+
+    #[test]
+    fn help_documents_roaming_dirs() {
+        assert!(get_help_text().contains("roaming_dirs limits the projects they may run in;"));
+        let agent = get_command_help("agent");
+        assert!(agent.contains("roaming, roaming_dirs, disabled, tools."));
+        assert!(agent.contains("list the allowed dirs and suggest --project-dir <dir>"));
+        assert!(get_command_help("send").contains("(must be allowed by roaming_dirs)"));
     }
 
     #[test]

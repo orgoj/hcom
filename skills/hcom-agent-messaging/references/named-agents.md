@@ -285,6 +285,12 @@ full name, or tag fail. Running agents route first; the catalog is read
 only for unmatched names, tags, stopped thread members, or `--spawn-as`, and an unreadable catalog
 only warns.
 
+`"roaming_dirs": [...]` limits the role to project roots equal to or inside a listed directory
+(`~`, `$VAR`, catalog-relative paths expand). Elsewhere, sends (by CWD or `--project-dir`),
+`hcom agent`, `attach` and stopped-instance restarts fail, list the allowed directories and
+suggest `--project-dir <dir>`; nothing starts or queues. Look the list up with
+`hcom agent list --for-agents` (`(roaming_dirs: ...)`) or `hcom agent show <name>`.
+
 Catalog `env` reaches the materialized process during nested autostart. A read-only roaming role
 can therefore select a separately managed Dippy policy with one variable:
 
@@ -483,7 +489,7 @@ Agent and `defaults` fields:
 
 - `description`: one line on what the agent is for; the only field other agents see in
   `hcom agent list --for-agents`
-- `cli`, `dir`, boolean `roaming`, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`, `reasoning`
+- `cli`, `dir`, boolean `roaming`, `roaming_dirs` array, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`, `reasoning`
 - `prompt`, `system_prompt`, boolean `resume`, and boolean `continue`
 - `env` object, `inherit_env` and `args` arrays
 - `idle_kill` (seconds; `0` or `false` disables) and boolean `disabled`

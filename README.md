@@ -400,6 +400,7 @@ Launch flags override the catalog for one run: `--cli` (alias `--tool`), `--dir`
 | `resume`, `continue` | Default start mode; `--resume`, `--continue` and `--clean` override it |
 | `idle_kill` | Seconds of idle listening before hcom kills the instance (`0` or `false` off) |
 | `roaming` | Per-project instances, see below |
+| `roaming_dirs` | Project directories a roaming agent may run in, see below |
 | `disabled` | `true` hides the entry, see below |
 | `tools` | Per-CLI profile: `model`, `reasoning`, `prompt`, `system_prompt`, `args` for the effective CLI |
 
@@ -441,6 +442,8 @@ For temporary changes without touching a tracked file, put a sidecar `<stem>.loc
 A send to the catalog name, and `hcom agent reviewer`, print a stdout line such as `Note: @reviewer is a roaming agent; in this project it is reviewer_hcom_807 (use that name).` so the sender knows which instance it reached. Instances of the role in other projects are separate agents and never receive it. Sends to the exact instance name print no note.
 
 `hcom list` marks each running roaming instance with its catalog agent (`reviewer_hcom_807 ↻reviewer`). In the `hcom agent list` table the roaming entry keeps `<project>` as DIR and shows its running instances in STATUS (`● 2 roaming: reviewer_hcom_807, reviewer_app_412`); `hcom agent list --json` lists them in `instances`.
+
+`"roaming_dirs": ["~/work/app", "~/work/tools"]` restricts a roaming agent to project roots equal to or inside one of the listed directories (`~`, `$VAR` and paths relative to the catalog file are expanded). From any other project, `hcom send @reviewer` (also with `--project-dir` outside the list), `hcom agent reviewer`, `hcom agent attach reviewer` and the restart of a stopped instance fail with an error that lists the allowed directories and suggests `--project-dir <dir>`; nothing starts and no message is queued. `hcom agent show` and `hcom agent list` (DIR `<project: ...>`, `--for-agents` `(roaming_dirs: ...)`, `--json` `roaming_dirs`) show the list. Without the field every project is allowed; on a non-roaming agent it is an error.
 
 #### Disabled agents
 

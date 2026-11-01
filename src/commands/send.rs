@@ -30,7 +30,8 @@ Target matching:
   (<hash> = 3-digit number from the root path's SHA-256) in the sender's Git/project root
   and starts there when missing; the output adds a Note line with that instance name.
   --project-dir <DIR> uses DIR's Git/project root instead of the sender's (roaming
-  targets only; the catalog still comes from the sender's CWD).
+  targets only; the catalog still comes from the sender's CWD). A roaming agent with
+  roaming_dirs fails the send outside those projects and lists them.
   Running agents route first; the catalog is read only for unmatched names,
   tags (which include stopped catalog agents), stopped thread members, or
   --spawn-as; an unreadable catalog only warns. Broadcasts never start agents.
@@ -1349,6 +1350,7 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
                     tag: target_route.tag.clone(),
                     launch_name: target_route.launch_name.clone(),
                     launch_dir: target_route.launch_dir.clone(),
+                    roaming_dirs: target_route.roaming_dirs.clone(),
                 };
                 catalog_instances.push(clone_route);
                 effective_targets = vec![spawn_name.clone()];
@@ -2068,6 +2070,7 @@ mod tests {
             tag: Some("review".into()),
             launch_name: "reviewer".into(),
             launch_dir: None,
+            roaming_dirs: Vec::new(),
         }];
 
         let targeted = resolve_delivery(
@@ -2117,6 +2120,7 @@ mod tests {
             tag: None,
             launch_name: "reviewer".into(),
             launch_dir: Some(std::path::PathBuf::from("/projects/weather")),
+            roaming_dirs: Vec::new(),
         }];
 
         let delivery =
@@ -2151,6 +2155,7 @@ mod tests {
             tag: None,
             launch_name: "reviewer".into(),
             launch_dir: Some(std::path::PathBuf::from("/projects/weather")),
+            roaming_dirs: Vec::new(),
         }];
 
         let delivery =
@@ -2186,6 +2191,7 @@ mod tests {
             tag: None,
             launch_name: "reviewer".into(),
             launch_dir: Some(std::path::PathBuf::from("/projects/weather")),
+            roaming_dirs: Vec::new(),
         }];
 
         let outcome =
@@ -2250,6 +2256,7 @@ mod tests {
             tag: None,
             launch_name: "reviewer".into(),
             launch_dir: Some(std::path::PathBuf::from("/projects/elsewhere")),
+            roaming_dirs: Vec::new(),
         }];
 
         let delivery =
@@ -2259,6 +2266,57 @@ mod tests {
         assert_eq!(
             delivery.catalog_starts[0].launch_dir.as_deref(),
             Some(project.as_path())
+        );
+
+        cleanup_test_db(path);
+    }
+
+    #[test]
+    #[serial]
+    fn stopped_roaming_instance_outside_roaming_dirs_is_not_restarted() {
+        let (db, path, _env) = setup_test_db();
+        let tmp = tempfile::tempdir().unwrap();
+        let project = std::fs::canonicalize(tmp.path()).unwrap().join("project");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        let instance = format!(
+            "reviewer_{}",
+            crate::commands::agent::roaming_project_slug(&project).unwrap()
+        );
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, status, directory, created_at) \
+                 VALUES (?1, 'stopped', ?2, 1000.0)",
+                [instance.as_str(), project.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        db.add_thread_memberships("review", None, std::slice::from_ref(&instance));
+        let sender = SenderIdentity {
+            kind: SenderKind::External,
+            name: "bigboss".into(),
+            instance_data: None,
+            session_id: None,
+        };
+        let envelope = MessageEnvelope {
+            thread: Some("review".into()),
+            ..Default::default()
+        };
+        let catalog = vec![crate::commands::agent::CatalogRoute {
+            alias: "reviewer".into(),
+            instance: "reviewer_allowed".into(),
+            tag: None,
+            launch_name: "reviewer".into(),
+            launch_dir: Some(std::path::PathBuf::from("/projects/allowed")),
+            roaming_dirs: vec![std::path::PathBuf::from("/projects/allowed")],
+        }];
+
+        let Err(err) = resolve_delivery(&db, &sender, "continue", Some(&envelope), None, &catalog)
+        else {
+            panic!("a stopped instance outside roaming_dirs must not be restarted");
+        };
+        assert!(
+            err.contains("roaming agent 'reviewer' may not run in project")
+                && err.contains("/projects/allowed"),
+            "err={err}"
         );
 
         cleanup_test_db(path);
@@ -2291,6 +2349,7 @@ mod tests {
             tag: None,
             launch_name: "reviewer".into(),
             launch_dir: None,
+            roaming_dirs: Vec::new(),
         }];
 
         let delivery =

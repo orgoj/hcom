@@ -60,7 +60,7 @@ pub fn help_text() -> String {
 Agent fields (in an \"agents\" entry or in \"defaults\"):
   description, cli, dir, model, reasoning, prompt, system_prompt, terminal,
   terminal_command, session, window, tag, groups, env, inherit_env, args,
-  resume, continue, idle_kill, roaming, disabled, tools.
+  resume, continue, idle_kill, roaming, roaming_dirs, disabled, tools.
   Top level: version, defaults, agents, imports, system_prompt_file, and
   cli_overrides (global catalog only).
 
@@ -139,6 +139,10 @@ Roaming agents:
   Send and hcom agent <name> print a Note line on stdout naming that instance.
   The agent list table shows its running instances in STATUS
   (\"● 2 roaming: a, b\"; --json: \"instances\"); hcom list marks each with ↻<name>.
+  \"roaming_dirs\": [\"~/work/app\", ...] allows only project roots equal to or inside
+  a listed dir (~, $VAR, catalog-relative). Elsewhere send, launch, attach and restart
+  fail, list the allowed dirs and suggest --project-dir <dir>; nothing starts or queues.
+  show, list (DIR <project: ...>, --for-agents, --json \"roaming_dirs\") display them.
   Catalog env values are passed to the materialized process; for an isolated Dippy
   policy use \"env\": {{\"DIPPY_CONFIG_ONLY\": \"/path/to/policy.dippy\"}}.
 
@@ -275,6 +279,9 @@ struct AgentDef {
     description: Option<String>,
     dir: Option<String>,
     roaming: Option<bool>,
+    /// Project roots a roaming agent may materialize in (each root equal to
+    /// or inside one entry); absent or empty allows every project.
+    roaming_dirs: Option<Vec<String>>,
     /// true hides the entry from the catalog as if it were not defined.
     disabled: Option<bool>,
     #[serde(default)]
@@ -356,6 +363,7 @@ impl AgentDef {
             description,
             dir,
             roaming,
+            roaming_dirs,
             disabled,
             cli,
             terminal,
@@ -690,11 +698,17 @@ fn parse_catalog(path: &Path, base: &Path, label: &str) -> Result<Catalog> {
     if let Some(dir) = catalog.defaults.dir.take() {
         catalog.defaults.dir = Some(expand_path(&dir, base));
     }
+    for dir in catalog.defaults.roaming_dirs.iter_mut().flatten() {
+        *dir = expand_path(dir, base);
+    }
     reject_legacy_skills_dir(&catalog.defaults, "defaults", path)?;
     validate_idle_kill(&catalog.defaults, "defaults", path)?;
     for (name, def) in catalog.agents.iter_mut() {
         if let Some(dir) = def.dir.take() {
             def.dir = Some(expand_path(&dir, base));
+        }
+        for dir in def.roaming_dirs.iter_mut().flatten() {
+            *dir = expand_path(dir, base);
         }
         reject_legacy_skills_dir(def, "agent", path)?;
         validate_idle_kill(def, &format!("agent '{name}'"), path)?;
@@ -1107,6 +1121,8 @@ pub(crate) struct CatalogRoute {
     pub tag: Option<String>,
     pub launch_name: String,
     pub launch_dir: Option<PathBuf>,
+    /// Allowed project roots of a roaming agent (canonical); empty allows all.
+    pub roaming_dirs: Vec<PathBuf>,
 }
 
 pub(crate) fn retarget_roaming_route(
@@ -1129,6 +1145,7 @@ pub(crate) fn retarget_roaming_route(
     if expected != instance {
         return Ok(None);
     }
+    check_roaming_root(&route.alias, &root, &route.roaming_dirs)?;
     let mut retargeted = route.clone();
     retargeted.instance = instance.to_string();
     retargeted.launch_dir = Some(root);
@@ -1222,8 +1239,41 @@ pub(crate) fn roaming_project_slug(root: &Path) -> Result<String> {
     Ok(slug)
 }
 
+/// Canonical `roaming_dirs` of a definition; empty allows every project.
+fn roaming_dirs(def: &AgentDef) -> Vec<PathBuf> {
+    def.roaming_dirs
+        .iter()
+        .flatten()
+        .filter(|dir| !dir.trim().is_empty())
+        .map(|dir| canonical_directory(Path::new(dir)))
+        .collect()
+}
+
+fn roaming_root_allowed(root: &Path, allowed: &[PathBuf]) -> bool {
+    allowed.is_empty() || allowed.iter().any(|dir| root.starts_with(dir))
+}
+
+/// Fail unless `root` is equal to or inside one of the allowed directories.
+fn check_roaming_root(name: &str, root: &Path, allowed: &[PathBuf]) -> Result<()> {
+    if roaming_root_allowed(root, allowed) {
+        return Ok(());
+    }
+    let list = allowed
+        .iter()
+        .map(|dir| format!("  {}", dir.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    bail!(
+        "roaming agent '{name}' may not run in project '{}'; allowed project directories:\n{list}\nRun it from one of them, or send with --project-dir <dir>.",
+        root.display()
+    )
+}
+
 fn validate_roaming_definition(name: &str, def: &AgentDef) -> Result<()> {
     if def.roaming != Some(true) {
+        if def.roaming_dirs.is_some() {
+            bail!("agent '{name}' sets roaming_dirs, which requires \"roaming\": true");
+        }
         return Ok(());
     }
     let conflicts = [
@@ -1252,7 +1302,24 @@ fn validate_roaming_definition(name: &str, def: &AgentDef) -> Result<()> {
     Ok(())
 }
 
+/// Instance and project root of a roaming agent for `start`, enforcing
+/// `roaming_dirs`.
 fn materialize_roaming_definition(
+    db: &HcomDb,
+    name: &str,
+    def: &AgentDef,
+    start: &Path,
+) -> Result<Option<(String, PathBuf)>> {
+    let resolved = resolve_roaming_instance(db, name, def, start)?;
+    if let Some((_, root)) = &resolved {
+        check_roaming_root(name, root, &roaming_dirs(def))?;
+    }
+    Ok(resolved)
+}
+
+/// Like `materialize_roaming_definition`, without the `roaming_dirs` check
+/// (for `hcom agent show`, which only reports).
+fn resolve_roaming_instance(
     db: &HcomDb,
     name: &str,
     def: &AgentDef,
@@ -1308,6 +1375,7 @@ fn roaming_route(
         tag: eff.tag,
         launch_name: name.to_string(),
         launch_dir: Some(root),
+        roaming_dirs: roaming_dirs(def),
     }))
 }
 
@@ -1381,6 +1449,7 @@ pub(crate) fn catalog_message_targets(
                 tag: eff.tag,
                 launch_name: name.clone(),
                 launch_dir: None,
+                roaming_dirs: Vec::new(),
             });
         }
     }
@@ -3063,9 +3132,17 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
             } else {
                 ""
             };
-            let description = effective(name, def, &Cli::default())
+            let allowed_dirs = roaming_dirs(&def);
+            let mut description = effective(name, def, &Cli::default())
                 .description
                 .unwrap_or_else(|| "-".to_string());
+            if !allowed_dirs.is_empty() {
+                let dirs = allowed_dirs
+                    .iter()
+                    .map(|dir| shorten_home(&dir.to_string_lossy()))
+                    .collect::<Vec<_>>();
+                description.push_str(&format!(" (roaming_dirs: {})", dirs.join(", ")));
+            }
             let values = status_columns
                 .latest_cells(name)
                 .into_iter()
@@ -3095,6 +3172,7 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
         for (name, source) in &names {
             let def = catalogs.resolve_any(name).unwrap_or_default();
             let disabled = def.disabled == Some(true);
+            let allowed_dirs = roaming_dirs(&def);
             let eff = effective(name, def, &Cli::default());
             let mut entry = serde_json::json!({
                 "name": name,
@@ -3117,6 +3195,7 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
             });
             if eff.roaming {
                 entry["instances"] = serde_json::json!(roaming_instances(name, &live));
+                entry["roaming_dirs"] = serde_json::json!(allowed_dirs);
             }
             if with_status {
                 entry["status_columns"] = status_columns.json(name);
@@ -3136,6 +3215,7 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
             } else {
                 ""
             };
+            let allowed_dirs = roaming_dirs(&def);
             let eff = effective(name, def, &Cli::default());
             let where_ = match (&eff.session, &eff.terminal) {
                 (Some(s), _) => format!("{s}:{}", eff.window),
@@ -3159,7 +3239,13 @@ fn cmd_list(rest: &[String]) -> Result<i32> {
                 eff.cli,
                 eff.model.unwrap_or_else(|| "-".to_string()),
                 where_,
-                if eff.roaming {
+                if eff.roaming && !allowed_dirs.is_empty() {
+                    let dirs = allowed_dirs
+                        .iter()
+                        .map(|dir| shorten_home(&dir.to_string_lossy()))
+                        .collect::<Vec<_>>();
+                    format!("<project: {}>", dirs.join(", "))
+                } else if eff.roaming {
                     "<project>".to_string()
                 } else {
                     shorten_home(&eff.dir)
@@ -3326,11 +3412,13 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
         .ok_or_else(|| unknown_agent_error(&name, &catalogs))?;
     let window_explicit = def.window.is_some() || cli.def.window.is_some();
     let mut roaming_root = None;
+    let allowed_dirs = roaming_dirs(&def);
     let default_instance = if def.roaming == Some(true) {
         let cwd = std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("cannot read CWD for roaming agent: {e}"))?;
         let db = HcomDb::open()?;
-        let (instance, root) = materialize_roaming_definition(&db, &name, &def, &cwd)?
+        // show only reports: a project outside roaming_dirs is marked, not refused.
+        let (instance, root) = resolve_roaming_instance(&db, &name, &def, &cwd)?
             .expect("roaming definition must materialize");
         def.dir = Some(root.to_string_lossy().into_owned());
         roaming_root = Some(root);
@@ -3365,7 +3453,15 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
         println!("description: {description}");
     }
     println!("cli:       {}", eff.cli);
-    println!("dir:       {}", eff.dir);
+    match &roaming_root {
+        Some(root) if !roaming_root_allowed(root, &allowed_dirs) => {
+            println!("dir:       {} (not allowed: see roaming_dirs)", eff.dir)
+        }
+        _ => println!("dir:       {}", eff.dir),
+    }
+    for dir in &allowed_dirs {
+        println!("roaming_dirs: {}", dir.display());
+    }
     if eff.idle_kill > 0 {
         println!("idle_kill: {}s", eff.idle_kill);
     }
@@ -3679,6 +3775,35 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("dir, session"), "{error}");
+    }
+
+    #[test]
+    fn roaming_root_allowed_matches_listed_dirs_and_their_subdirectories() {
+        let allowed = [PathBuf::from("/w/pyznap"), PathBuf::from("/w/repos")];
+        assert!(roaming_root_allowed(Path::new("/w/pyznap"), &allowed));
+        assert!(roaming_root_allowed(
+            Path::new("/w/repos/zfs-report"),
+            &allowed
+        ));
+        assert!(!roaming_root_allowed(Path::new("/w/pyznap2"), &allowed));
+        assert!(!roaming_root_allowed(Path::new("/w"), &allowed));
+        assert!(roaming_root_allowed(Path::new("/anywhere"), &[]));
+    }
+
+    #[test]
+    fn roaming_dirs_require_a_roaming_agent() {
+        for raw in [
+            r#"{"roaming_dirs":["/w/pyznap"]}"#,
+            r#"{"roaming_dirs":[]}"#,
+        ] {
+            let error = validate_roaming_definition("reviewer", &def_from(raw))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("requires \"roaming\": true"),
+                "{raw}: {error}"
+            );
+        }
     }
 
     fn live_agent(name: &str, status: &str) -> LiveAgent {
