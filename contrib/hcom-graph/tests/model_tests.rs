@@ -2870,3 +2870,117 @@ fn test_graph_state_split_ratio_and_side_panel_defaults_and_roundtrip() {
     assert!(!restored.show_side_panel);
     assert_eq!(restored.main_split_ratio, Some(0.42));
 }
+
+#[test]
+fn test_parse_context_percent_reads_trailing_percent_token() {
+    use hcom_graph::model::parse_context_percent;
+    assert_eq!(parse_context_percent("123k 45%"), Some(45.0));
+    assert_eq!(parse_context_percent("80%"), Some(80.0));
+    assert_eq!(parse_context_percent("130%"), Some(100.0));
+    assert_eq!(parse_context_percent(""), None);
+    assert_eq!(parse_context_percent("123k"), None);
+    assert_eq!(parse_context_percent("abc%"), None);
+    assert_eq!(parse_context_percent("NaN%"), None);
+}
+
+#[test]
+fn test_node_styles_from_rows_carry_roaming_and_context() {
+    use hcom_graph::table_data::{TableRow, node_styles_from_rows};
+    let rows = vec![
+        TableRow {
+            instance: "roamer".into(),
+            is_roaming: true,
+            context_fill: "500k 50%".into(),
+            ..Default::default()
+        },
+        TableRow {
+            instance: "plain".into(),
+            ..Default::default()
+        },
+        TableRow {
+            agent: "catalog_only".into(),
+            is_roaming: true,
+            ..Default::default()
+        },
+    ];
+    let styles = node_styles_from_rows(&rows);
+    assert_eq!(styles.len(), 2);
+    assert!(styles["roamer"].is_roaming);
+    assert_eq!(styles["roamer"].context_percent, Some(50.0));
+    assert!(!styles["plain"].is_roaming);
+    assert_eq!(styles["plain"].context_percent, None);
+
+    let mut graph = AgentGraph::new();
+    graph.node_styles = styles;
+    assert!(graph.node_style("roamer").is_roaming);
+    assert_eq!(
+        graph.node_style("unknown"),
+        hcom_graph::model::NodeStyle::default()
+    );
+}
+
+#[test]
+fn test_context_fill_color_thresholds() {
+    let green = CanvasView::context_fill_color(0.0);
+    assert_eq!(CanvasView::context_fill_color(69.9), green);
+    let amber = CanvasView::context_fill_color(70.0);
+    assert_ne!(amber, green);
+    assert_eq!(CanvasView::context_fill_color(85.0), amber);
+    let red = CanvasView::context_fill_color(85.1);
+    assert_ne!(red, amber);
+    assert_ne!(red, green);
+    assert_eq!(CanvasView::context_fill_color(100.0), red);
+}
+
+#[test]
+fn test_cli_colors_match_spec_and_are_distinct() {
+    assert_eq!(
+        CanvasView::cli_color(Some("claude")),
+        Color32::from_rgb(0xD9, 0x77, 0x06)
+    );
+    assert_eq!(
+        CanvasView::cli_color(Some("codex")),
+        Color32::from_rgb(0x10, 0xA3, 0x7F)
+    );
+    let google = Color32::from_rgb(0x42, 0x85, 0xF4);
+    assert_eq!(CanvasView::cli_color(Some("agy")), google);
+    assert_eq!(CanvasView::cli_color(Some("antigravity")), google);
+    assert_eq!(CanvasView::cli_color(Some("gemini")), google);
+
+    let tools = ["claude", "codex", "agy", "hermes", "kimi", "grok"];
+    let colors: std::collections::HashSet<_> = tools
+        .iter()
+        .map(|t| CanvasView::cli_color(Some(t)))
+        .chain([CanvasView::cli_color(None)])
+        .collect();
+    assert_eq!(colors.len(), tools.len() + 1);
+}
+
+#[test]
+fn test_context_fill_polygon_rises_from_bottom() {
+    use hcom_graph::canvas::context_fill_polygon;
+    let c = Pos2::new(100.0, 100.0);
+    let r = 20.0;
+    assert!(context_fill_polygon(c, r, 0.0).is_empty());
+
+    for pct in [10.0_f32, 50.0, 90.0] {
+        let pts = context_fill_polygon(c, r, pct);
+        assert!(pts.len() >= 3);
+        // Liquid level: bottom (y = c.y + r) minus pct of the diameter.
+        let level = c.y + r - 2.0 * r * pct / 100.0;
+        let min_y = pts.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+        let max_y = pts.iter().map(|p| p.y).fold(f32::MIN, f32::max);
+        assert!(
+            (min_y - level).abs() < 0.01,
+            "pct {pct}: top {min_y} vs {level}"
+        );
+        assert!((max_y - (c.y + r)).abs() < 0.1, "pct {pct}: bottom {max_y}");
+        for p in &pts {
+            assert!((p.distance(c) - r).abs() < 0.01);
+        }
+    }
+
+    let full = context_fill_polygon(c, r, 100.0);
+    let min_y = full.iter().map(|p| p.y).fold(f32::MAX, f32::min);
+    assert!((min_y - (c.y - r)).abs() < 0.1);
+}

@@ -1086,7 +1086,10 @@ impl eframe::App for HcomGraphApp {
         if let Some(ref sync) = self.sync
             && let Some(updated) = sync.try_get_latest()
         {
+            // Node styles come from table reloads, not from the sync snapshot.
+            let styles = std::mem::take(&mut self.graph.node_styles);
             self.graph = updated;
+            self.graph.node_styles = styles;
             self.layout.sync_nodes(&self.graph);
             self.layout.wake_up();
             ctx.request_repaint();
@@ -1239,6 +1242,7 @@ impl eframe::App for HcomGraphApp {
                     } => {
                         self.table_reload_in_flight = false;
                         crate::table_data::apply_event_stats(&mut rows, &self.cached_event_stats);
+                        self.graph.node_styles = crate::table_data::node_styles_from_rows(&rows);
                         self.table_rows = rows;
                         self.catalog_groups = catalog_groups;
                         self.tool_groups = tool_groups;

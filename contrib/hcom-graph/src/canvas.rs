@@ -95,6 +95,40 @@ impl CanvasView {
         }
     }
 
+    /// Accent ring color of a node by its CLI tool.
+    pub fn cli_color(tool: Option<&str>) -> Color32 {
+        match tool.map(|t| t.to_ascii_lowercase()).as_deref() {
+            Some("claude") => Color32::from_rgb(0xD9, 0x77, 0x06),
+            Some("codex") => Color32::from_rgb(0x10, 0xA3, 0x7F),
+            Some("agy" | "antigravity" | "gemini") => Color32::from_rgb(0x42, 0x85, 0xF4),
+            Some("hermes") => Color32::from_rgb(0xE8, 0x4A, 0x8A),
+            Some("kimi") => Color32::from_rgb(0x8B, 0x5C, 0xF6),
+            Some("grok") => Color32::from_rgb(0xE5, 0xE7, 0xEB),
+            Some("opencode" | "kilo") => Color32::from_rgb(0x06, 0xB6, 0xD4),
+            Some("pi" | "omp") => Color32::from_rgb(0xEA, 0xB3, 0x08),
+            Some("cursor" | "copilot" | "qoder") => Color32::from_rgb(0x84, 0xCC, 0x16),
+            _ => Color32::from_rgb(0x64, 0x74, 0x8B),
+        }
+    }
+
+    /// Context fill color: green below 70 %, amber 70–85 %, red above 85 %.
+    pub fn context_fill_color(percent: f32) -> Color32 {
+        if percent > 85.0 {
+            Color32::from_rgb(231, 76, 60)
+        } else if percent >= 70.0 {
+            Color32::from_rgb(243, 156, 18)
+        } else {
+            Color32::from_rgb(46, 204, 113)
+        }
+    }
+
+    /// Distance from a node center where edges start and end: outside the
+    /// CLI (+3.5), roaming (+7.5) and selection (+11) rings, so arrow heads
+    /// are never covered by node decorations drawn after the edges.
+    fn edge_gap(&self) -> f32 {
+        (26.0 + 13.0) * self.zoom
+    }
+
     pub fn reset_view(&mut self) {
         self.pan = Vec2::ZERO;
         self.zoom = 1.0;
@@ -120,7 +154,6 @@ impl CanvasView {
         hit_threshold: f32,
         visible_nodes: Option<&std::collections::HashSet<NodeIndex>>,
     ) -> Option<EdgeIndex> {
-        let node_radius = 26.0 * self.zoom;
         for edge_ref in graph.graph.edge_references() {
             let source_idx = edge_ref.source();
             let target_idx = edge_ref.target();
@@ -143,7 +176,7 @@ impl CanvasView {
 
             let d = p2 - p1;
             let len = d.length();
-            if len <= node_radius {
+            if len <= 2.0 * self.edge_gap() {
                 continue;
             }
 
@@ -152,8 +185,9 @@ impl CanvasView {
             let is_reciprocal = graph.graph.contains_edge(target_idx, source_idx);
             let curve_offset = if is_reciprocal { 18.0 * self.zoom } else { 0.0 };
 
-            let start_pt = p1 + dir * node_radius;
-            let end_pt = p2 - dir * node_radius;
+            let edge_gap = self.edge_gap();
+            let start_pt = p1 + dir * edge_gap;
+            let end_pt = p2 - dir * edge_gap;
 
             let dist = if curve_offset.abs() > 0.1 {
                 let mid = p1 + (p2 - p1) * 0.5;
@@ -366,7 +400,7 @@ impl CanvasView {
 
             let d = p2 - p1;
             let len = d.length();
-            if len <= node_radius {
+            if len <= 2.0 * self.edge_gap() {
                 continue;
             }
 
@@ -376,8 +410,9 @@ impl CanvasView {
             let is_reciprocal = graph.graph.contains_edge(target_idx, source_idx);
             let curve_offset = if is_reciprocal { 18.0 * self.zoom } else { 0.0 };
 
-            let start_pt = p1 + dir * node_radius;
-            let end_pt = p2 - dir * node_radius;
+            let edge_gap = self.edge_gap();
+            let start_pt = p1 + dir * edge_gap;
+            let end_pt = p2 - dir * edge_gap;
 
             let is_selected = self.selected_edge == Some(edge_id);
             let is_hovered = self.hovered_edge == Some(edge_id);
@@ -395,8 +430,16 @@ impl CanvasView {
                         (if is_selected { 2.5 } else { 1.5 }) * self.zoom.clamp(0.5, 2.0),
                         color,
                     );
-                    painter.line_segment([start_pt, end_pt], stroke);
-                    draw_arrow_head(&painter, end_pt, dir, 8.0 * self.zoom, color);
+                    // Dashed and muted to stay distinct from solid message edges;
+                    // the arrow points from parent (source) to child (target).
+                    let arrow = 8.0 * self.zoom;
+                    painter.extend(egui::Shape::dashed_line(
+                        &[start_pt, end_pt - dir * arrow],
+                        stroke,
+                        6.0 * self.zoom,
+                        4.0 * self.zoom,
+                    ));
+                    draw_arrow_head(&painter, end_pt, dir, arrow, color);
                 }
                 EdgeKind::Message(msg) => {
                     let base_thickness =
@@ -464,11 +507,13 @@ impl CanvasView {
                 2.2 * self.zoom
             };
 
-            // Selection ring
+            let style = graph.node_style(&node_data.name);
+
+            // Selection ring (outside the CLI and roaming rings)
             if is_selected {
                 painter.circle_stroke(
                     center,
-                    node_radius + 5.0 * self.zoom,
+                    node_radius + 11.0 * self.zoom,
                     Stroke::new(2.5 * self.zoom, Color32::from_rgb(241, 196, 15)),
                 );
             }
@@ -489,7 +534,39 @@ impl CanvasView {
 
             // Node body & border
             painter.circle_filled(center, node_radius, node_fill);
+
+            // Context window fill rising from the bottom
+            if let Some(pct) = style.context_percent {
+                let fill_points = context_fill_polygon(center, node_radius, pct);
+                if fill_points.len() >= 3 {
+                    let c = Self::context_fill_color(pct);
+                    painter.add(egui::Shape::convex_polygon(
+                        fill_points,
+                        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 110),
+                        Stroke::NONE,
+                    ));
+                }
+            }
+
             painter.circle_stroke(center, node_radius, Stroke::new(border_width, status_color));
+
+            // CLI accent ring
+            painter.circle_stroke(
+                center,
+                node_radius + 3.5 * self.zoom,
+                Stroke::new(2.5 * self.zoom, Self::cli_color(node_data.tool.as_deref())),
+            );
+
+            // Roaming agents: dashed outer outline
+            if style.is_roaming {
+                let ring = circle_points(center, node_radius + 7.5 * self.zoom, 48);
+                painter.extend(egui::Shape::dashed_line(
+                    &ring,
+                    Stroke::new(1.5 * self.zoom, Color32::from_rgb(200, 205, 220)),
+                    5.0 * self.zoom,
+                    3.5 * self.zoom,
+                ));
+            }
 
             // Agent name text
             let font_size = (12.0 * self.zoom).clamp(8.0, 18.0);
@@ -504,6 +581,36 @@ impl CanvasView {
 
         (response, triggered_action)
     }
+}
+
+/// Closed polyline around a circle (first point repeated at the end).
+fn circle_points(center: Pos2, radius: f32, steps: usize) -> Vec<Pos2> {
+    (0..=steps)
+        .map(|i| {
+            let a = std::f32::consts::TAU * i as f32 / steps as f32;
+            center + Vec2::new(a.cos(), a.sin()) * radius
+        })
+        .collect()
+}
+
+/// Convex polygon of the circle segment filled from the bottom up to
+/// `percent` (0–100) of the diameter. Empty for 0 % or less.
+pub fn context_fill_polygon(center: Pos2, radius: f32, percent: f32) -> Vec<Pos2> {
+    let p = (percent / 100.0).clamp(0.0, 1.0);
+    if p <= 0.0 {
+        return Vec::new();
+    }
+    // Screen y grows downwards: the segment holds the arc angles with
+    // sin(a) >= 1 - 2p, i.e. a in [start, PI - start].
+    let start = (1.0 - 2.0 * p).asin();
+    let end = std::f32::consts::PI - start;
+    let steps = 32;
+    (0..=steps)
+        .map(|i| {
+            let a = start + (end - start) * i as f32 / steps as f32;
+            center + Vec2::new(a.cos(), a.sin()) * radius
+        })
+        .collect()
 }
 
 fn draw_arrow_head(painter: &egui::Painter, tip: Pos2, dir: Vec2, size: f32, color: Color32) {

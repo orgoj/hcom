@@ -315,6 +315,23 @@ pub fn build_table_rows(
     Ok(rows)
 }
 
+/// Graph node styles from live table rows, keyed by instance name.
+/// Catalog-only rows (no instance) have no graph node and are skipped.
+pub fn node_styles_from_rows(rows: &[TableRow]) -> HashMap<String, crate::model::NodeStyle> {
+    rows.iter()
+        .filter(|r| !r.instance.is_empty())
+        .map(|r| {
+            (
+                r.instance.clone(),
+                crate::model::NodeStyle {
+                    is_roaming: r.is_roaming,
+                    context_percent: crate::model::parse_context_percent(&r.context_fill),
+                },
+            )
+        })
+        .collect()
+}
+
 pub const REPORT_FIELDS: &[&str] = &[
     "status:status",
     "status:done",

@@ -249,6 +249,24 @@ pub struct MessageEvent {
     pub data: MessageData,
 }
 
+/// Visual enrichment of a node that `hcom list` snapshots do not carry
+/// (catalog roaming flag, context window fill). Keyed by instance name in
+/// `AgentGraph::node_styles` and replaced on every table data reload.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct NodeStyle {
+    pub is_roaming: bool,
+    /// Context window fill in percent (0–100), `None` when unknown.
+    pub context_percent: Option<f32>,
+}
+
+/// Percent from a context cell such as `"123k 45%"`: the last whitespace
+/// separated token ending with `%`. Returns `None` when absent or invalid.
+pub fn parse_context_percent(fill: &str) -> Option<f32> {
+    let token = fill.split_whitespace().last()?;
+    let pct: f32 = token.strip_suffix('%')?.parse().ok()?;
+    pct.is_finite().then(|| pct.clamp(0.0, 100.0))
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct AgentGraph {
     pub graph: StableDiGraph<AgentNode, EdgeKind>,
@@ -256,6 +274,7 @@ pub struct AgentGraph {
     pub spawn_edges: HashMap<(String, String), EdgeIndex>,
     pub message_edges: HashMap<(String, String), EdgeIndex>,
     pub last_event_id: u64,
+    pub node_styles: HashMap<String, NodeStyle>,
 }
 
 impl AgentGraph {
@@ -275,6 +294,10 @@ impl AgentGraph {
         self.node_map
             .get(name)
             .and_then(|&idx| self.graph.node_weight(idx))
+    }
+
+    pub fn node_style(&self, name: &str) -> NodeStyle {
+        self.node_styles.get(name).copied().unwrap_or_default()
     }
 
     pub fn get_node_index(&self, name: &str) -> Option<NodeIndex> {
