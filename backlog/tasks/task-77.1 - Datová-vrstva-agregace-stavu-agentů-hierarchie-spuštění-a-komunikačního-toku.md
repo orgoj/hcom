@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-01 11:21'
-updated_date: '2026-11-01 11:30'
+updated_date: '2026-11-01 11:31'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -31,9 +31,9 @@ Implementace načítání a aktualizace dat z hcom (čtení stavu z hcom list/ev
 <!-- SECTION:PLAN:BEGIN -->
 1. Založit crate contrib/hcom-graph s vlastním Cargo.toml (petgraph, serde, serde_json, chrono).
 2. Implementovat datové struktury v model.rs: AgentNode, SpawnEdge a MessageEdge (s počtem unikátních zpráv v aktuální epoše, timestampem a náhledem).
-3. Implementovat AgentGraph s watermarkem last_event_id: události s id <= last_event_id se zahazují (idempotence bez neomezeného HashSetu).
+3. Implementovat AgentGraph s watermarkem last_event_id: události s id <= last_event_id se zahazují (idempotence).
 4. Implementovat reset_events(): kompletní odstranění všech MessageEdge z grafu a vynulování last_event_id na 0 po db_reset.
-5. Ingest kontrakt v source.rs: snapshot historie zpráv (hcom events) se před aplikací do grafu VŽDY seřadí vzestupně (newest-first reverse), streamování (events --follow --after-id <last_id>).
-6. Deterministická db_reset sekvence: při detekci db_reset okamžitě zabít běžící child stream events --follow, zavolat reset_events(), provést a aplikovat seřazený initial snapshot a teprve poté spustit nový follow (zamezení race condition a přeskočení historie).
-7. Unit testy v tests/model_tests.rs: sestavení grafu, akumulace zpráv, watermark dedup, řazení initial loadu a test db_reset synchronní resync sekvence.
+5. Ingest kontrakt v source.rs: snapshot historie zpráv POUZE z aktuální aktivní DB (hcom events --type message --full --last N BEZ --all, aby nekolidovala ID z archivů), seřazený vzestupně (newest-first reverse), streamování (events --follow --after-id <last_id>).
+6. Deterministická db_reset sekvence: při detekci db_reset okamžitě zabít child stream events --follow, zavolat reset_events(), provést a aplikovat seřazený initial snapshot z nové DB a teprve poté spustit nový follow.
+7. Unit testy v tests/model_tests.rs: sestavení grafu, akumulace zpráv, watermark dedup, řazení initial loadu, test monotonie ID v aktuální DB a test db_reset synchronní resync sekvence.
 <!-- SECTION:PLAN:END -->
