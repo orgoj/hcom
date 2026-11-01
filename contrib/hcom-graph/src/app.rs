@@ -5,7 +5,7 @@ use crate::config::{
     replace_placeholders_vec, save_state, screen_bar_buttons,
 };
 use crate::layout::GraphLayout;
-use crate::model::{AgentGraph, AgentStatus, EdgeKind};
+use crate::model::{AgentGraph, AgentStatus, EdgeKind, MessageWindow};
 use crate::sync::BackgroundSync;
 use crate::table_data::{DEFAULT_COLUMNS, REPORT_FIELDS, TableRow, filter_row, sort_rows};
 use egui::{Color32, RichText};
@@ -51,6 +51,10 @@ pub struct HcomGraphApp {
     pub hcom_dir: PathBuf,
     pub config: GraphConfig,
     pub state: GraphState,
+    /// Active message time window (span and limit persisted in `state`).
+    pub msg_window: MessageWindow,
+    /// Key of the windowed edge counts held in `canvas.edge_counts`.
+    window_cache_key: Option<WindowCacheKey>,
     pub selection_generation: u64,
     pub search_query: String,
 
@@ -98,6 +102,47 @@ pub struct HcomGraphApp {
     pub send_text: String,
 
     pub inject_input_has_focus: bool,
+}
+
+/// (window, last_event_id, edge_count, live second or 0 for a fixed end).
+type WindowCacheKey = (MessageWindow, u64, usize, i64);
+
+/// Time window presets of the top bar: label and span in seconds (None = All).
+pub const WINDOW_PRESETS: &[(&str, Option<i64>)] = &[
+    ("5m", Some(300)),
+    ("15m", Some(900)),
+    ("1h", Some(3600)),
+    ("6h", Some(21600)),
+    ("24h", Some(86400)),
+    ("All", None),
+];
+
+/// Header text of the active window in UTC, e.g.
+/// `Range: 2026-11-01 14:05:00 – 15:05:00 UTC (live) · 37 msgs`.
+pub fn format_window_range(
+    window: &MessageWindow,
+    now: chrono::DateTime<chrono::Utc>,
+    msg_count: usize,
+) -> String {
+    let (start, end) = window.bounds(now);
+    let start_text = match start {
+        Some(s) => s.format("%Y-%m-%d %H:%M:%S").to_string(),
+        None => "start of history".to_string(),
+    };
+    let mode = if window.end.is_none() { " (live)" } else { "" };
+    let limit = match window.last_n {
+        Some(n) => format!(", newest {n}"),
+        None => String::new(),
+    };
+    let end_fmt = if start.is_some_and(|s| s.date_naive() == end.date_naive()) {
+        "%H:%M:%S"
+    } else {
+        "%Y-%m-%d %H:%M:%S"
+    };
+    format!(
+        "Range: {start_text} – {} UTC{mode} · {msg_count} msgs{limit}",
+        end.format(end_fmt)
+    )
 }
 
 pub fn accept_generation_result(current_generation: u64, result_generation: u64) -> bool {
@@ -148,6 +193,8 @@ impl HcomGraphApp {
             context_menu: None,
             hcom_dir,
             config,
+            msg_window: state.message_window(),
+            window_cache_key: None,
             state,
             selection_generation: 0,
             search_query: String::new(),
@@ -210,6 +257,8 @@ impl HcomGraphApp {
             loaded_transcript: None,
             hcom_dir,
             config,
+            msg_window: state.message_window(),
+            window_cache_key: None,
             state,
             selection_generation: 0,
             search_query: String::new(),
@@ -253,6 +302,48 @@ impl HcomGraphApp {
         if let Err(e) = save_state(&self.hcom_dir, &self.state) {
             eprintln!("Warning: failed to save graph state: {}", e);
         }
+    }
+
+    /// Sets span and limit of the message window, keeps the scrubber end,
+    /// and mirrors them into `state` (the caller persists with `save_state`).
+    pub fn set_message_window(&mut self, span_secs: Option<i64>, last_n: Option<usize>) {
+        self.msg_window.span_secs = span_secs.filter(|s| *s > 0);
+        self.msg_window.last_n = last_n.filter(|n| *n > 0);
+        self.state.window_span_secs = self.msg_window.span_secs;
+        self.state.window_last_n = self.msg_window.last_n;
+    }
+
+    /// Clamps the scrubber end to [oldest retained message, now] (live when
+    /// there are no messages) and recomputes `canvas.edge_counts` only when
+    /// the window, the event watermark, the edge set or the live second changed.
+    pub fn refresh_window_counts(&mut self, now: chrono::DateTime<chrono::Utc>) {
+        if let Some(end) = self.msg_window.end {
+            self.msg_window.end = self
+                .graph
+                .oldest_message_ts()
+                .map(|oldest| end.clamp(oldest, now.max(oldest)));
+        }
+        if self.msg_window.is_unfiltered() {
+            self.canvas.edge_counts = None;
+            self.window_cache_key = None;
+            return;
+        }
+        let live_second = if self.msg_window.end.is_none() {
+            now.timestamp()
+        } else {
+            0
+        };
+        let key = (
+            self.msg_window,
+            self.graph.last_event_id,
+            self.graph.edge_count(),
+            live_second,
+        );
+        if self.window_cache_key == Some(key) && self.canvas.edge_counts.is_some() {
+            return;
+        }
+        self.canvas.edge_counts = Some(self.graph.windowed_edge_counts(&self.msg_window, now));
+        self.window_cache_key = Some(key);
     }
 
     pub fn selected_agent_name(&self) -> Option<String> {
@@ -540,6 +631,108 @@ impl HcomGraphApp {
             });
     }
 
+    fn render_window_bar(&mut self, ui: &mut egui::Ui) {
+        let now = chrono::Utc::now();
+        ui.label("Window:");
+        let mut span = self.msg_window.span_secs;
+        let mut last_n = self.msg_window.last_n;
+        let mut changed = false;
+        // Presets persist at once; drag values only when the drag or edit ends.
+        let mut persist = false;
+        for (label, preset) in WINDOW_PRESETS {
+            if ui.selectable_label(span == *preset, *label).clicked() {
+                span = *preset;
+                changed = true;
+                persist = true;
+            }
+        }
+
+        let mut minutes = span.map(|s| s / 60).unwrap_or(0);
+        let resp = ui
+            .add(
+                egui::DragValue::new(&mut minutes)
+                    .range(0..=525_600)
+                    .suffix(" min"),
+            )
+            .on_hover_text("Custom window span in minutes (0 = All)");
+        if resp.changed() {
+            span = (minutes > 0).then_some(minutes * 60);
+            changed = true;
+        }
+        persist |= resp.drag_stopped() || resp.lost_focus();
+
+        let mut limit = last_n.unwrap_or(0);
+        ui.label("Last:");
+        let resp = ui
+            .add(
+                egui::DragValue::new(&mut limit)
+                    .range(0..=10_000)
+                    .suffix(" msgs"),
+            )
+            .on_hover_text("Keep only the newest N messages in the window (0 = off)");
+        if resp.changed() {
+            last_n = (limit > 0).then_some(limit);
+            changed = true;
+        }
+        persist |= resp.drag_stopped() || resp.lost_focus();
+        if changed {
+            self.set_message_window(span, last_n);
+        }
+        if persist {
+            self.save_state();
+        }
+
+        ui.separator();
+
+        // Timeline scrubber: moves the window end through retained history.
+        let oldest = self.graph.oldest_message_ts();
+        let mut live = self.msg_window.end.is_none();
+        ui.add_enabled_ui(oldest.is_some(), |ui| {
+            if ui
+                .checkbox(&mut live, "Live")
+                .on_hover_text("Window end follows the current time")
+                .changed()
+            {
+                self.msg_window.end = if live { None } else { Some(now) };
+            }
+            let min_ts = oldest.map(|o| o.timestamp()).unwrap_or(now.timestamp());
+            let max_ts = now.timestamp().max(min_ts);
+            let mut end_ts = self.msg_window.end.unwrap_or(now).timestamp();
+            if ui
+                .add(
+                    egui::Slider::new(&mut end_ts, min_ts..=max_ts)
+                        .show_value(false)
+                        .text("end"),
+                )
+                .on_hover_text("Scrub the window end through message history")
+                .changed()
+            {
+                self.msg_window.end = chrono::DateTime::from_timestamp(end_ts, 0);
+            }
+        });
+
+        self.refresh_window_counts(now);
+        if self.msg_window.end.is_none() && !self.msg_window.is_unfiltered() {
+            // Live window: messages age out without any input event.
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+        }
+        let msg_count: usize = match &self.canvas.edge_counts {
+            Some(m) => m.values().map(|c| c.count).sum(),
+            None => self.graph.iter_message_edges().map(|m| m.count).sum(),
+        };
+        let lower_bound = self
+            .canvas
+            .edge_counts
+            .as_ref()
+            .is_some_and(|m| m.values().any(|c| c.lower_bound));
+        ui.separator();
+        let mut text = format_window_range(&self.msg_window, now, msg_count);
+        if lower_bound {
+            text.push_str(" (retained history, N+ = more may exist)");
+        }
+        ui.label(RichText::new(text).strong());
+    }
+
     fn render_side_panel_summary(&mut self, ui: &mut egui::Ui) {
         // Priority 1: Selected message edge
         if let Some(edge_idx) = self.canvas.selected_edge
@@ -555,6 +748,16 @@ impl HcomGraphApp {
                     });
                     ui.separator();
 
+                    if !self.msg_window.is_unfiltered() {
+                        let wc = self
+                            .canvas
+                            .edge_counts
+                            .as_ref()
+                            .and_then(|m| m.get(&edge_idx).copied())
+                            .unwrap_or_default();
+                        let plus = if wc.lower_bound { "+" } else { "" };
+                        ui.label(format!("Messages in window (directed): {}{plus}", wc.count));
+                    }
                     ui.label(format!("Total Messages (directed): {}", msg.count));
                     ui.label(format!(
                         "Last Active: {}",
@@ -566,8 +769,18 @@ impl HcomGraphApp {
                     ui.label(format!("Last Preview: {}", msg.last_preview));
                     ui.separator();
 
-                    ui.label(RichText::new("Conversation History (last 50):").strong());
-                    let history = self.graph.get_conversation_history(&from, &to);
+                    let history_title = if self.msg_window.is_unfiltered() {
+                        "Conversation History (last 50):"
+                    } else {
+                        "Conversation History in window (last 50):"
+                    };
+                    ui.label(RichText::new(history_title).strong());
+                    let history = self.graph.windowed_conversation_history(
+                        &from,
+                        &to,
+                        &self.msg_window,
+                        chrono::Utc::now(),
+                    );
                     if history.is_empty() {
                         ui.label("No recent stored messages.");
                     } else {
@@ -1090,6 +1303,8 @@ impl eframe::App for HcomGraphApp {
             let styles = std::mem::take(&mut self.graph.node_styles);
             self.graph = updated;
             self.graph.node_styles = styles;
+            // Edge indices may be reused in another order after a swap.
+            self.window_cache_key = None;
             self.layout.sync_nodes(&self.graph);
             self.layout.wake_up();
             ctx.request_repaint();
@@ -1465,6 +1680,11 @@ impl eframe::App for HcomGraphApp {
                     "Zobrazeno: {} / Celkem: {}",
                     shown_count, total_count
                 ));
+            });
+
+            // Row 2b: Message time window (presets, custom span/limit, scrubber, range)
+            ui.horizontal_wrapped(|ui| {
+                self.render_window_bar(ui);
             });
 
             // Row 3: Action Toolbar (Start, Send, Open With, Commands, Attach, Restart, Kill, Kill Group)

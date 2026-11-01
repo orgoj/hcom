@@ -2984,3 +2984,278 @@ fn test_context_fill_polygon_rises_from_bottom() {
     let min_y = full.iter().map(|p| p.y).fold(f32::MAX, f32::min);
     assert!((min_y - (c.y - r)).abs() < 0.1);
 }
+
+fn window_msg(id: u64, ts: chrono::DateTime<Utc>, from: &str, to: &str) -> MessageEvent {
+    MessageEvent {
+        id,
+        ts,
+        instance: from.into(),
+        data: MessageData {
+            from: from.into(),
+            delivered_to: vec![to.into()],
+            mentions: vec![],
+            intent: None,
+            text: format!("m{id}"),
+        },
+    }
+}
+
+#[test]
+fn test_message_window_bounds_presets_live_and_fixed_end() {
+    use chrono::{Duration, TimeZone};
+    use hcom_graph::model::MessageWindow;
+    let now = Utc.with_ymd_and_hms(2026, 11, 1, 15, 0, 0).unwrap();
+
+    let all = MessageWindow::default();
+    assert!(all.is_unfiltered());
+    assert_eq!(all.bounds(now), (None, now));
+    assert!(all.contains(now - Duration::days(400), now));
+    // Live window: no upper bound (clock skew); a fixed end has one.
+    assert!(all.contains(now + Duration::seconds(5), now));
+
+    let live_1h = MessageWindow {
+        span_secs: Some(3600),
+        ..Default::default()
+    };
+    assert!(!live_1h.is_unfiltered());
+    assert_eq!(live_1h.bounds(now), (Some(now - Duration::hours(1)), now));
+    assert!(live_1h.contains(now - Duration::minutes(60), now));
+    assert!(!live_1h.contains(now - Duration::minutes(61), now));
+
+    let end = now - Duration::hours(2);
+    let fixed = MessageWindow {
+        span_secs: Some(300),
+        end: Some(end),
+        last_n: None,
+    };
+    assert_eq!(fixed.bounds(now), (Some(end - Duration::minutes(5)), end));
+    assert!(!fixed.contains(now, now));
+    assert!(fixed.contains(end - Duration::minutes(1), now));
+
+    // Non-positive span means no lower bound.
+    let zero = MessageWindow {
+        span_secs: Some(0),
+        ..Default::default()
+    };
+    assert_eq!(zero.bounds(now).0, None);
+}
+
+#[test]
+fn test_windowed_edge_counts_window_last_n_and_unfiltered_totals() {
+    use chrono::Duration;
+    use hcom_graph::model::{MessageWindow, WindowedCount};
+    let now = Utc::now();
+    let mut graph = AgentGraph::new();
+    graph.apply_message_event(&window_msg(1, now - Duration::hours(3), "a", "b"));
+    graph.apply_message_event(&window_msg(2, now - Duration::minutes(10), "a", "b"));
+    graph.apply_message_event(&window_msg(3, now - Duration::minutes(2), "b", "a"));
+    graph.apply_message_event(&window_msg(4, now - Duration::minutes(2), "a", "c"));
+    let ab = graph.message_edges[&("a".to_string(), "b".to_string())];
+    let ba = graph.message_edges[&("b".to_string(), "a".to_string())];
+    let ac = graph.message_edges[&("a".to_string(), "c".to_string())];
+
+    let all = graph.windowed_edge_counts(&MessageWindow::default(), now);
+    assert_eq!(all[&ab].count, 2);
+    assert_eq!(all[&ba].count, 1);
+
+    let w5 = MessageWindow {
+        span_secs: Some(300),
+        ..Default::default()
+    };
+    let c5 = graph.windowed_edge_counts(&w5, now);
+    assert!(
+        !c5.contains_key(&ab),
+        "a->b has no message in the last 5 min"
+    );
+    assert_eq!(c5[&ba].count, 1);
+    assert_eq!(c5[&ac].count, 1);
+
+    // Bounds first, then newest N across edges, ties broken by id (4 > 3).
+    let w_last = MessageWindow {
+        span_secs: Some(3600),
+        end: None,
+        last_n: Some(1),
+    };
+    let cl = graph.windowed_edge_counts(&w_last, now);
+    assert_eq!(cl.len(), 1);
+    assert_eq!(
+        cl[&ac],
+        WindowedCount {
+            count: 1,
+            lower_bound: false
+        }
+    );
+
+    // Detail history uses the same selection.
+    let hist = graph.windowed_conversation_history("a", "b", &w5, now);
+    assert_eq!(hist.iter().map(|m| m.id).collect::<Vec<_>>(), vec![3]);
+    let hist_all = graph.windowed_conversation_history("a", "b", &MessageWindow::default(), now);
+    assert_eq!(
+        hist_all.iter().map(|m| m.id).collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert!(
+        graph
+            .windowed_conversation_history("a", "b", &w_last, now)
+            .is_empty()
+    );
+
+    assert_eq!(graph.oldest_message_ts(), Some(now - Duration::hours(3)));
+}
+
+#[test]
+fn test_windowed_count_is_lower_bound_when_edge_history_is_full() {
+    use chrono::Duration;
+    use hcom_graph::model::{MAX_EDGE_HISTORY, MessageWindow};
+    let now = Utc::now();
+    let mut graph = AgentGraph::new();
+    let total = MAX_EDGE_HISTORY as u64 + 10;
+    for i in 1..=total {
+        graph.apply_message_event(&window_msg(
+            i,
+            now - Duration::seconds((total - i) as i64),
+            "a",
+            "b",
+        ));
+    }
+    let ab = graph.message_edges[&("a".to_string(), "b".to_string())];
+    let w = MessageWindow {
+        span_secs: Some(3600),
+        ..Default::default()
+    };
+    let c = graph.windowed_edge_counts(&w, now);
+    assert_eq!(c[&ab].count, MAX_EDGE_HISTORY);
+    assert!(c[&ab].lower_bound);
+    assert_eq!(
+        hcom_graph::canvas::edge_badge_label(c[&ab]).as_deref(),
+        Some("50+ msgs")
+    );
+
+    // Oldest retained message outside the window: the count is exact.
+    let narrow = MessageWindow {
+        span_secs: Some(5),
+        ..Default::default()
+    };
+    let cn = graph.windowed_edge_counts(&narrow, now);
+    assert!(!cn[&ab].lower_bound);
+    assert_eq!(
+        hcom_graph::canvas::edge_badge_label(cn[&ab]).as_deref(),
+        Some("6 msgs")
+    );
+    assert_eq!(
+        hcom_graph::canvas::edge_badge_label(Default::default()),
+        None
+    );
+}
+
+#[test]
+fn test_zero_count_edge_in_window_stays_selectable() {
+    use chrono::Duration;
+    use hcom_graph::model::MessageWindow;
+    let now = Utc::now();
+    let mut graph = AgentGraph::new();
+    graph.apply_message_event(&window_msg(1, now - Duration::hours(5), "node_a", "node_b"));
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+    let idx_a = graph.get_node_index("node_a").unwrap();
+    let idx_b = graph.get_node_index("node_b").unwrap();
+    layout.set_node_pos(idx_a, Pos2::new(-100.0, 0.0), true);
+    layout.set_node_pos(idx_b, Pos2::new(100.0, 0.0), true);
+
+    let mut canvas = CanvasView::new();
+    let w = MessageWindow {
+        span_secs: Some(300),
+        ..Default::default()
+    };
+    canvas.edge_counts = Some(graph.windowed_edge_counts(&w, now));
+    assert!(canvas.edge_counts.as_ref().unwrap().is_empty());
+    let rect = Rect::from_center_size(Pos2::new(300.0, 300.0), Vec2::new(600.0, 600.0));
+    let hit = canvas.hit_test_edge(Pos2::new(300.0, 300.0), &graph, &layout, rect, 10.0);
+    assert!(hit.is_some(), "dimmed edge must stay clickable");
+}
+
+#[test]
+fn test_format_window_range_uses_utc() {
+    use chrono::{Duration, TimeZone};
+    use hcom_graph::app::format_window_range;
+    use hcom_graph::model::MessageWindow;
+    let now = Utc.with_ymd_and_hms(2026, 11, 1, 15, 5, 0).unwrap();
+    let w = MessageWindow {
+        span_secs: Some(3600),
+        ..Default::default()
+    };
+    assert_eq!(
+        format_window_range(&w, now, 37),
+        "Range: 2026-11-01 14:05:00 – 15:05:00 UTC (live) · 37 msgs"
+    );
+    let fixed = MessageWindow {
+        span_secs: None,
+        end: Some(now - Duration::hours(1)),
+        last_n: Some(10),
+    };
+    assert_eq!(
+        format_window_range(&fixed, now, 10),
+        "Range: start of history – 2026-11-01 14:05:00 UTC · 10 msgs, newest 10"
+    );
+}
+
+#[test]
+fn test_graph_state_window_defaults_and_invalid_values() {
+    use hcom_graph::config::GraphState;
+    let old: GraphState = serde_json::from_str("{}").expect("old state");
+    assert_eq!(old.window_span_secs, None);
+    assert_eq!(old.window_last_n, None);
+    assert!(old.message_window().is_unfiltered());
+
+    let bad: GraphState =
+        serde_json::from_str(r#"{"window_span_secs": -5, "window_last_n": 0}"#).expect("parse");
+    assert!(bad.message_window().is_unfiltered());
+
+    let good = GraphState {
+        window_span_secs: Some(900),
+        window_last_n: Some(20),
+        ..Default::default()
+    };
+    let restored: GraphState =
+        serde_json::from_str(&serde_json::to_string(&good).unwrap()).unwrap();
+    let w = restored.message_window();
+    assert_eq!(w.span_secs, Some(900));
+    assert_eq!(w.last_n, Some(20));
+    assert_eq!(w.end, None);
+}
+
+#[test]
+fn test_app_window_refresh_caches_clamps_and_persists() {
+    use chrono::Duration;
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState, load_state};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+    let now = Utc::now();
+    app.graph
+        .apply_message_event(&window_msg(1, now - Duration::minutes(30), "a", "b"));
+
+    app.refresh_window_counts(now);
+    assert!(app.canvas.edge_counts.is_none(), "All keeps totals");
+
+    app.set_message_window(Some(300), None);
+    app.save_state();
+    app.refresh_window_counts(now);
+    assert!(app.canvas.edge_counts.as_ref().unwrap().is_empty());
+    assert_eq!(load_state(dir.path()).window_span_secs, Some(300));
+
+    // Scrubber end before the oldest message is clamped to it.
+    app.msg_window.end = Some(now - Duration::hours(2));
+    app.refresh_window_counts(now);
+    assert_eq!(app.msg_window.end, Some(now - Duration::minutes(30)));
+    assert_eq!(app.canvas.edge_counts.as_ref().unwrap().len(), 1);
+
+    app.set_message_window(None, None);
+    app.msg_window.end = None;
+    app.refresh_window_counts(now);
+    assert!(app.canvas.edge_counts.is_none());
+}

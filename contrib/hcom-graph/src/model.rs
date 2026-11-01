@@ -249,6 +249,51 @@ pub struct MessageEvent {
     pub data: MessageData,
 }
 
+/// Time window over retained message history. Bounds apply first, then
+/// `last_n` keeps the newest N messages across all edges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct MessageWindow {
+    /// Span in seconds before `end`; `None` = no lower bound (All).
+    pub span_secs: Option<i64>,
+    /// Window end; `None` = live, follows now.
+    pub end: Option<DateTime<Utc>>,
+    /// Keep only the newest N messages; `None` = no limit.
+    pub last_n: Option<usize>,
+}
+
+impl MessageWindow {
+    /// All messages, live, no limit: counts are the totals since load.
+    pub fn is_unfiltered(&self) -> bool {
+        self.span_secs.is_none() && self.end.is_none() && self.last_n.is_none()
+    }
+
+    /// Inclusive bounds `(start, end)`; `start` is `None` without a span.
+    pub fn bounds(&self, now: DateTime<Utc>) -> (Option<DateTime<Utc>>, DateTime<Utc>) {
+        let end = self.end.unwrap_or(now);
+        let start = self
+            .span_secs
+            .filter(|s| *s > 0)
+            .map(|s| end - chrono::Duration::seconds(s));
+        (start, end)
+    }
+
+    pub fn contains(&self, ts: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+        let (start, end) = self.bounds(now);
+        // A live window has no upper bound, so messages stamped slightly
+        // ahead (clock skew, relayed remotes) still count.
+        (self.end.is_none() || ts <= end) && start.is_none_or(|s| ts >= s)
+    }
+}
+
+/// Message count of one edge inside a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowedCount {
+    pub count: usize,
+    /// The edge history is full (MAX_EDGE_HISTORY) and its oldest retained
+    /// message is inside the window, so older in-window messages may be lost.
+    pub lower_bound: bool,
+}
+
 /// Visual enrichment of a node that `hcom list` snapshots do not carry
 /// (catalog roaming flag, context window fill). Keyed by instance name in
 /// `AgentGraph::node_styles` and replaced on every table data reload.
@@ -503,6 +548,112 @@ impl AgentGraph {
             messages.drain(0..messages.len() - 50);
         }
         messages
+    }
+
+    /// Retained messages inside `window`, newest first (by ts, then id).
+    /// Bounds apply first, then `last_n` keeps the newest N across all edges.
+    pub fn messages_in_window(
+        &self,
+        window: &MessageWindow,
+        now: DateTime<Utc>,
+    ) -> Vec<(EdgeIndex, &StoredMessage)> {
+        let mut msgs: Vec<(EdgeIndex, &StoredMessage)> = self
+            .message_edges
+            .values()
+            .filter_map(|&idx| match self.graph.edge_weight(idx) {
+                Some(EdgeKind::Message(m)) => Some((idx, m)),
+                _ => None,
+            })
+            .flat_map(|(idx, m)| {
+                m.history
+                    .iter()
+                    .filter(|s| window.contains(s.ts, now))
+                    .map(move |s| (idx, s))
+            })
+            .collect();
+        msgs.sort_by(|(_, a), (_, b)| b.ts.cmp(&a.ts).then_with(|| b.id.cmp(&a.id)));
+        if let Some(n) = window.last_n {
+            msgs.truncate(n);
+        }
+        msgs
+    }
+
+    /// Per message edge count inside `window`. Edges without in-window
+    /// messages are absent (count 0). An unfiltered window returns the totals.
+    pub fn windowed_edge_counts(
+        &self,
+        window: &MessageWindow,
+        now: DateTime<Utc>,
+    ) -> HashMap<EdgeIndex, WindowedCount> {
+        let mut counts: HashMap<EdgeIndex, WindowedCount> = HashMap::new();
+        if window.is_unfiltered() {
+            for &idx in self.message_edges.values() {
+                if let Some(EdgeKind::Message(m)) = self.graph.edge_weight(idx) {
+                    counts.insert(
+                        idx,
+                        WindowedCount {
+                            count: m.count,
+                            lower_bound: false,
+                        },
+                    );
+                }
+            }
+            return counts;
+        }
+        let msgs = self.messages_in_window(window, now);
+        let limited = window.last_n.is_some_and(|n| msgs.len() >= n);
+        for (idx, _) in &msgs {
+            counts.entry(*idx).or_default().count += 1;
+        }
+        if !limited {
+            for (idx, wc) in counts.iter_mut() {
+                if let Some(EdgeKind::Message(m)) = self.graph.edge_weight(*idx) {
+                    wc.lower_bound = m.history.len() >= MAX_EDGE_HISTORY
+                        && m.count > m.history.len()
+                        && m.history
+                            .front()
+                            .is_some_and(|f| window.contains(f.ts, now));
+                }
+            }
+        }
+        counts
+    }
+
+    /// Conversation between `a` and `b` inside `window` (same selection as
+    /// `messages_in_window`), ascending, capped at the last 50 messages.
+    pub fn windowed_conversation_history(
+        &self,
+        a: &str,
+        b: &str,
+        window: &MessageWindow,
+        now: DateTime<Utc>,
+    ) -> Vec<StoredMessage> {
+        let edges: Vec<EdgeIndex> = [(a, b), (b, a)]
+            .iter()
+            .filter_map(|(f, t)| {
+                self.message_edges
+                    .get(&(f.to_string(), t.to_string()))
+                    .copied()
+            })
+            .collect();
+        let mut messages: Vec<StoredMessage> = self
+            .messages_in_window(window, now)
+            .into_iter()
+            .filter(|(idx, _)| edges.contains(idx))
+            .map(|(_, m)| m.clone())
+            .collect();
+        messages.reverse();
+        if messages.len() > 50 {
+            messages.drain(0..messages.len() - 50);
+        }
+        messages
+    }
+
+    /// Timestamp of the oldest retained message, for the timeline scrubber.
+    pub fn oldest_message_ts(&self) -> Option<DateTime<Utc>> {
+        self.iter_message_edges()
+            .filter_map(|m| m.history.front().map(|s| s.ts))
+            .min()
     }
 
     pub fn reset_events(&mut self) {

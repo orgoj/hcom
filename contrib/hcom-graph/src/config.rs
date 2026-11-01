@@ -199,6 +199,24 @@ pub struct GraphState {
     pub columns_known: Vec<String>,
     #[serde(default)]
     pub column_widths: HashMap<String, f32>,
+    /// Message time window span in seconds; `None`, 0 or negative = All.
+    #[serde(default)]
+    pub window_span_secs: Option<i64>,
+    /// Keep only the newest N messages in the window; `None` or 0 = off.
+    #[serde(default)]
+    pub window_last_n: Option<usize>,
+}
+
+impl GraphState {
+    /// Persisted window settings as a live window (end follows now);
+    /// invalid values (span <= 0, last_n == 0) mean no limit.
+    pub fn message_window(&self) -> crate::model::MessageWindow {
+        crate::model::MessageWindow {
+            span_secs: self.window_span_secs.filter(|s| *s > 0),
+            end: None,
+            last_n: self.window_last_n.filter(|n| *n > 0),
+        }
+    }
 }
 
 fn default_view_mode() -> String {
@@ -236,6 +254,8 @@ impl Default for GraphState {
             columns: default_columns(),
             columns_known: Vec::new(),
             column_widths: HashMap::new(),
+            window_span_secs: None,
+            window_last_n: None,
         }
     }
 }

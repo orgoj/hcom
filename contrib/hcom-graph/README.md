@@ -5,6 +5,8 @@ Native Rust GUI for visualizing and managing `hcom` agents, instances, and messa
 `hcom-graph` integrates interactive 2D node-link graph visualization with full agent fleet management:
 - **Table view**: Real-time listing of active instances and catalog agents with configurable columns and search/filtering.
 - **Inspect panels**: Screen (interactive PTY viewer with shortcuts), Transcript, Events, Log, and structured Report.
+- **Graph styling**: dashed spawn edges (parent → child), solid message edges, a CLI-colored ring per node, context window fill from the bottom (green < 70 %, amber 70–85 %, red > 85 %), and a dashed outline for roaming agents.
+- **Message time window**: presets (5m, 15m, 1h, 6h, 24h, All), a custom span in minutes, a "Last N msgs" limit, and a timeline scrubber with a Live toggle. Edge badges, edge thickness and the conversation detail follow the window; edges without messages in it are dimmed but stay clickable. The header shows the range in UTC. Windowed counts cover the retained history (last 500 message events at start, 50 per edge); `N+` marks an edge whose count is a lower bound.
 - **Actions**: Start catalog agents, Send messages, Attach/focus terminal panes, Restart, Kill individual agents or groups, and launch external tools (`open_with`).
 
 ---
@@ -20,7 +22,7 @@ Native Rust GUI for visualizing and managing `hcom` agents, instances, and messa
 If neither exists or if syntax is corrupt, built-in defaults are used.
 
 ### State Persistence
-User layout preferences (view mode, active filters, sort order, and active bottom tab) are saved to:
+User layout preferences (view mode, active filters, sort order, active bottom tab, and the message window span and limit) are saved to:
 ```
 ~/.hcom/graph-state.json
 ```

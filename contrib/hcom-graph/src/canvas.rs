@@ -1,5 +1,5 @@
 use crate::layout::GraphLayout;
-use crate::model::{AgentGraph, AgentStatus, EdgeKind};
+use crate::model::{AgentGraph, AgentStatus, EdgeKind, WindowedCount};
 use egui::{Color32, FontId, Pos2, Rect, Stroke, Vec2};
 use petgraph::stable_graph::{EdgeIndex, NodeIndex};
 use petgraph::visit::{EdgeRef, IntoEdgeReferences};
@@ -23,6 +23,8 @@ pub struct CanvasView {
     pub selected_edge: Option<EdgeIndex>,
     pub mouse_down_pos: Option<Pos2>,
     pub is_dragging: bool,
+    /// Windowed message counts per edge; `None` = totals (no time window).
+    pub edge_counts: Option<std::collections::HashMap<EdgeIndex, WindowedCount>>,
 }
 
 impl Default for CanvasView {
@@ -74,6 +76,7 @@ impl CanvasView {
             selected_edge: None,
             mouse_down_pos: None,
             is_dragging: false,
+            edge_counts: None,
         }
     }
 
@@ -442,8 +445,21 @@ impl CanvasView {
                     draw_arrow_head(&painter, end_pt, dir, arrow, color);
                 }
                 EdgeKind::Message(msg) => {
-                    let base_thickness =
-                        (1.8 + (msg.count as f32).log2().min(5.0)) * self.zoom.clamp(0.6, 2.2);
+                    let wc = match &self.edge_counts {
+                        Some(map) => map.get(&edge_id).copied().unwrap_or_default(),
+                        None => WindowedCount {
+                            count: msg.count,
+                            lower_bound: false,
+                        },
+                    };
+                    // Edges without messages in the window are dimmed, not hidden,
+                    // and stay clickable (hit test is unchanged).
+                    let inactive = wc.count == 0;
+                    let base_thickness = if inactive {
+                        1.0 * self.zoom.clamp(0.6, 2.2)
+                    } else {
+                        (1.8 + (wc.count as f32).log2().min(5.0)) * self.zoom.clamp(0.6, 2.2)
+                    };
                     let thickness = if is_selected {
                         base_thickness + 2.0 * self.zoom
                     } else if is_hovered {
@@ -456,9 +472,12 @@ impl CanvasView {
                         Color32::from_rgb(241, 196, 15)
                     } else if is_hovered {
                         Color32::from_rgb(210, 150, 235)
+                    } else if inactive {
+                        Color32::from_rgba_unmultiplied(165, 105, 189, 50)
                     } else {
                         Color32::from_rgb(165, 105, 189)
                     };
+                    let badge = edge_badge_label(wc);
                     let stroke = Stroke::new(thickness, color);
 
                     if curve_offset.abs() > 0.1 {
@@ -469,14 +488,18 @@ impl CanvasView {
                         draw_arrow_head(&painter, end_pt, mid_dir, 10.0 * self.zoom, color);
 
                         // Pill badge with message count
-                        draw_badge(&painter, ctrl_pt, &format!("{} msgs", msg.count), self.zoom);
+                        if let Some(ref text) = badge {
+                            draw_badge(&painter, ctrl_pt, text, self.zoom);
+                        }
                     } else {
                         painter.line_segment([start_pt, end_pt], stroke);
                         draw_arrow_head(&painter, end_pt, dir, 10.0 * self.zoom, color);
 
                         // Pill badge with message count
                         let mid_pt = start_pt + (end_pt - start_pt) * 0.5;
-                        draw_badge(&painter, mid_pt, &format!("{} msgs", msg.count), self.zoom);
+                        if let Some(ref text) = badge {
+                            draw_badge(&painter, mid_pt, text, self.zoom);
+                        }
                     }
                 }
             }
@@ -580,6 +603,16 @@ impl CanvasView {
         }
 
         (response, triggered_action)
+    }
+}
+
+/// Badge text of a message edge: `None` when the window holds no message,
+/// `N+ msgs` when the count is a lower bound of the retained history.
+pub fn edge_badge_label(wc: WindowedCount) -> Option<String> {
+    match (wc.count, wc.lower_bound) {
+        (0, _) => None,
+        (n, true) => Some(format!("{n}+ msgs")),
+        (n, false) => Some(format!("{n} msgs")),
     }
 }
 
