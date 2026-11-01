@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@hcom_dev__idea'
 created_date: '2026-11-01 14:53'
-updated_date: '2026-11-01 18:51'
+updated_date: '2026-11-01 19:19'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -34,6 +34,8 @@ Při najetí myší (hover) na uzel agenta zobrazit plovoucí informační kartu
 Rozhodnutí uživatele: PID se nedoplňuje (hcom list --json ho nemá); tooltip má stejné možnosti jako postranní panel (Report), vlastní config a podmnožinu polí.
 
 Review agent_review: plán OK (6 poznámek zapracováno), diff APPROVED; nit max_col_width(280) zapracován. Odchylky: Id::unique (Id::new deprecated v egui 0.37), is_dragging se negatuje (po uvolnění zůstává true), drag pokrývá pointer_down + dragged_node.
+
+Oprava po nasazení (nalezeno při UX screenshotech release buildu): hit test canvasu bral jen interact_pointer_pos (None při prostém hoveru), takže hover glow ani tooltip se bez stisku nezobrazily; nyní interact_pointer_pos().or_else(hover_pos). Regresní test test_canvas_plain_hover_sets_hovered_node (bez opravy selže).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

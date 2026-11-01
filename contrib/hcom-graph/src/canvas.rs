@@ -262,7 +262,12 @@ impl CanvasView {
         // 2. Hit testing & Click vs. Drag handling
         let hit_radius_world = 26.0;
 
-        if let Some(mouse_pos) = response.interact_pointer_pos() {
+        // Interaction position while pressed or dragged, hover position otherwise
+        // (interact_pointer_pos alone is None on a plain hover).
+        if let Some(mouse_pos) = response
+            .interact_pointer_pos()
+            .or_else(|| response.hover_pos())
+        {
             let world_mouse = self.screen_to_world(mouse_pos, rect);
             self.hovered_node = layout
                 .hit_test(world_mouse, hit_radius_world)

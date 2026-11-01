@@ -3979,3 +3979,38 @@ fn test_approx_eq_ignores_float_noise() {
     assert!(approx_eq(Some(340.0), 340.3, 0.5));
     assert!(!approx_eq(Some(340.0), 341.0, 0.5));
 }
+
+#[test]
+fn test_canvas_plain_hover_sets_hovered_node() {
+    // Regression: hit testing used only interact_pointer_pos, which is None
+    // on a plain hover, so the hover glow and the tooltip never appeared.
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[snap("a", None)]);
+    let idx = graph.get_node_index("a").unwrap();
+    let mut layout = GraphLayout::new();
+    layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    layout.sync_nodes(&graph);
+    layout.set_node_pos(idx, Pos2::ZERO, false);
+    let mut canvas = CanvasView::new();
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let mut center = Pos2::ZERO;
+    for frame in 0..3 {
+        let mut input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        if frame > 0 {
+            input.events.push(egui::Event::PointerMoved(center));
+        }
+        ctx.run_ui(input, |ui| {
+            let (resp, _) = canvas.show(ui, &graph, &mut layout, None);
+            center = resp.rect.center();
+        })
+        .textures_delta
+        .clear();
+    }
+    assert_eq!(canvas.hovered_node, Some(idx));
+    assert!(!ctx.input(|i| i.pointer.any_down()));
+}
