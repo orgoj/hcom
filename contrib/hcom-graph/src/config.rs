@@ -182,9 +182,16 @@ impl Default for GraphConfig {
 pub struct GraphState {
     #[serde(default)]
     pub geometry: Option<String>,
-    /// Height of the bottom agent table panel in pixels.
-    #[serde(default)]
+    /// Legacy table height in pixels (older files, gui-state.json); read only,
+    /// turned into `table_height_frac` once the window size is known.
+    #[serde(default, skip_serializing)]
     pub sash_pos: Option<f32>,
+    /// Table height as a fraction of the window height.
+    #[serde(default)]
+    pub table_height_frac: Option<f32>,
+    /// Detail panel width as a fraction of the window width.
+    #[serde(default)]
+    pub detail_width_frac: Option<f32>,
     #[serde(default = "default_true")]
     pub show_table: bool,
     #[serde(default)]
@@ -235,7 +242,8 @@ pub struct GraphState {
     pub canvas_pan_x: Option<f32>,
     #[serde(default)]
     pub canvas_pan_y: Option<f32>,
-    #[serde(default)]
+    /// Legacy detail panel width in pixels; read only, like `sash_pos`.
+    #[serde(default, skip_serializing)]
     pub side_panel_width: Option<f32>,
 }
 
@@ -252,6 +260,9 @@ pub struct SavedNodePos {
 pub const MAX_NODE_POSITIONS: usize = 500;
 /// Minimum width of the detail side panel.
 pub const SIDE_PANEL_MIN_WIDTH: f32 = 240.0;
+/// Range a saved split fraction is clamped to.
+pub const SPLIT_FRAC_MIN: f32 = 0.05;
+pub const SPLIT_FRAC_MAX: f32 = 0.95;
 
 fn deserialize_node_positions<'de, D>(d: D) -> Result<HashMap<String, SavedNodePos>, D::Error>
 where
@@ -270,7 +281,7 @@ where
 
 impl GraphState {
     /// Drops or clamps values that cannot be used (non-finite numbers,
-    /// zoom outside the canvas range, too narrow side panel, unknown detail
+    /// zoom outside the canvas range, split fractions outside (0, 1), unknown detail
     /// tab, preferring the legacy `bottom_tab`) and keeps only
     /// the `MAX_NODE_POSITIONS` newest node positions.
     pub fn sanitize(&mut self) {
@@ -299,10 +310,15 @@ impl GraphState {
             self.canvas_pan_x = None;
             self.canvas_pan_y = None;
         }
-        self.side_panel_width = self
-            .side_panel_width
-            .filter(|w| w.is_finite())
-            .map(|w| w.max(SIDE_PANEL_MIN_WIDTH));
+        let usable_px = |v: Option<f32>| v.filter(|v| v.is_finite() && *v > 0.0);
+        self.sash_pos = usable_px(self.sash_pos);
+        self.side_panel_width = usable_px(self.side_panel_width);
+        let usable_frac = |v: Option<f32>| {
+            v.filter(|f| f.is_finite() && *f > 0.0 && *f < 1.0)
+                .map(|f| f.clamp(SPLIT_FRAC_MIN, SPLIT_FRAC_MAX))
+        };
+        self.table_height_frac = usable_frac(self.table_height_frac);
+        self.detail_width_frac = usable_frac(self.detail_width_frac);
         let legacy = self.bottom_tab.take();
         if !DETAIL_TABS.contains(&self.detail_tab.as_str()) {
             self.detail_tab = legacy
@@ -344,6 +360,8 @@ impl Default for GraphState {
         Self {
             geometry: None,
             sash_pos: None,
+            table_height_frac: None,
+            detail_width_frac: None,
             show_table: true,
             running_only: false,
             blocked_only: false,

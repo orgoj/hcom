@@ -1,8 +1,9 @@
 use crate::action::{ActionRequest, ActionResult, ActionWorkerHandle, SystemActionRunner};
 use crate::canvas::{CanvasAction, CanvasView};
 use crate::config::{
-    DETAIL_TABS, GraphConfig, GraphState, PlaceholderContext, SIDE_PANEL_MIN_WIDTH, load_config,
-    load_state, replace_placeholders_str, replace_placeholders_vec, save_state, screen_bar_buttons,
+    DETAIL_TABS, GraphConfig, GraphState, PlaceholderContext, SIDE_PANEL_MIN_WIDTH, SPLIT_FRAC_MAX,
+    SPLIT_FRAC_MIN, load_config, load_state, replace_placeholders_str, replace_placeholders_vec,
+    save_state, screen_bar_buttons,
 };
 use crate::layout::{GraphLayout, LayoutMode};
 use crate::model::{AgentGraph, AgentStatus, EdgeKind, MessageWindow};
@@ -17,7 +18,81 @@ use std::time::{Duration, Instant};
 
 /// Minimum canvas height kept when the agent table panel is resized or restored.
 pub const CANVAS_MIN_HEIGHT: f32 = 150.0;
+/// Minimum canvas width kept next to the detail panel.
+pub const CANVAS_MIN_WIDTH: f32 = 200.0;
 pub const TABLE_PANEL_MIN_HEIGHT: f32 = 80.0;
+/// Window fraction of the table height and the detail panel width by default.
+pub const DEFAULT_SPLIT_FRAC: f32 = 0.3;
+const SPLIT_HANDLE_WIDTH: f32 = 6.0;
+
+/// Panel size in px for a window fraction, at least `min` and leaving `keep`
+/// px of `avail` for the canvas; `min` wins in a tiny or minimized window.
+pub fn split_px(frac: f32, window: f32, min: f32, avail: f32, keep: f32) -> f32 {
+    let max = (avail - keep).max(min);
+    (frac * window).max(min).min(max)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SplitChange {
+    /// The handle was dragged to this pointer coordinate along the split axis.
+    Moved(f32),
+    /// The handle was double-clicked.
+    Reset,
+}
+
+/// A drag strip on the movable edge of `panel` (the top edge for `BottomUp`,
+/// the left edge for `RightToLeft`), in a foreground area so it wins over
+/// the panels and the canvas.
+fn split_handle(
+    ui: &egui::Ui,
+    id: &str,
+    panel: egui::Rect,
+    side: egui::Direction,
+) -> Option<SplitChange> {
+    let half = SPLIT_HANDLE_WIDTH / 2.0;
+    let (rect, cursor) = if side == egui::Direction::BottomUp {
+        (
+            egui::Rect::from_x_y_ranges(
+                panel.x_range(),
+                (panel.top() - half)..=(panel.top() + half),
+            ),
+            egui::CursorIcon::ResizeVertical,
+        )
+    } else {
+        (
+            egui::Rect::from_x_y_ranges(
+                (panel.left() - half)..=(panel.left() + half),
+                panel.y_range(),
+            ),
+            egui::CursorIcon::ResizeHorizontal,
+        )
+    };
+    egui::Area::new(ui.scope_id().with(id))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ui.ctx(), |ui| {
+            let (rect, resp) = ui.allocate_exact_size(rect.size(), egui::Sense::click_and_drag());
+            if resp.hovered() || resp.dragged() {
+                ui.ctx().set_cursor_icon(cursor);
+                ui.painter()
+                    .rect_filled(rect, 0.0, Color32::from_rgb(100, 150, 200));
+            }
+            if resp.double_clicked() {
+                Some(SplitChange::Reset)
+            } else if resp.dragged() {
+                resp.interact_pointer_pos().map(|p| {
+                    SplitChange::Moved(if side == egui::Direction::BottomUp {
+                        p.y
+                    } else {
+                        p.x
+                    })
+                })
+            } else {
+                None
+            }
+        })
+        .inner
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContextMenuTarget {
@@ -448,6 +523,30 @@ impl HcomGraphApp {
             _ => return,
         };
         self.select_detail_tab(tab);
+    }
+
+    /// Turns pixel sizes from an older state file into window fractions once
+    /// the window has a size (a minimized or unmapped window reports 0).
+    /// A gui-state.json `sash_pos` is hcom-gui's sash position, so the result
+    /// is only an approximation of that layout.
+    /// The converted state is marked dirty, so it is saved even without other changes.
+    pub fn adopt_legacy_split_sizes(&mut self, window: egui::Vec2) {
+        if window.y >= 1.0
+            && let Some(px) = self.state.sash_pos.take()
+            && self.state.table_height_frac.is_none()
+        {
+            self.state.table_height_frac =
+                Some((px / window.y).clamp(SPLIT_FRAC_MIN, SPLIT_FRAC_MAX));
+            self.mark_view_dirty();
+        }
+        if window.x >= 1.0
+            && let Some(px) = self.state.side_panel_width.take()
+            && self.state.detail_width_frac.is_none()
+        {
+            self.state.detail_width_frac =
+                Some((px / window.x).clamp(SPLIT_FRAC_MIN, SPLIT_FRAC_MAX));
+            self.mark_view_dirty();
+        }
     }
 
     pub fn toggle_table(&mut self) {
@@ -1460,6 +1559,8 @@ impl HcomGraphApp {
 impl eframe::App for HcomGraphApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let window = ui.max_rect();
+        self.adopt_legacy_split_sizes(window.size());
 
         // Periodic table data reload
         if !self.table_reload_in_flight
@@ -2449,46 +2550,48 @@ impl eframe::App for HcomGraphApp {
 
         // 6. Bottom agent table across the full window width. Declared before
         // the right panel, so the detail panel and the canvas sit above it.
+        // Both panels have an exact size from their window fraction (content
+        // never resizes them); only the split handles below change a fraction.
+        let mut table_rect = None;
+        let table_avail = ui.available_height();
         if self.state.show_table {
-            // Keep a usable canvas when a saved height came from a taller window.
-            let max_h = (ui.available_height() - CANVAS_MIN_HEIGHT).max(TABLE_PANEL_MIN_HEIGHT);
-            let table_h = self
-                .state
-                .sash_pos
-                .unwrap_or(240.0)
-                .clamp(TABLE_PANEL_MIN_HEIGHT, max_h);
+            let table_h = split_px(
+                self.state.table_height_frac.unwrap_or(DEFAULT_SPLIT_FRAC),
+                window.height(),
+                TABLE_PANEL_MIN_HEIGHT,
+                table_avail,
+                CANVAS_MIN_HEIGHT,
+            );
             let table_resp = egui::Panel::bottom("agent_table_panel")
-                .resizable(true)
-                .default_size(table_h)
-                .min_size(TABLE_PANEL_MIN_HEIGHT)
-                .max_size(max_h)
+                .exact_size(table_h)
                 .show(ui, |ui| {
                     self.render_table(ui, &filtered_rows);
                 });
-            if ui.input(|i| i.pointer.any_down()) {
-                let cur_h = table_resp.response.rect.height();
-                if (cur_h - table_h).abs() > 2.0 {
-                    self.state.sash_pos = Some(cur_h);
-                    self.mark_view_dirty();
-                }
-            }
+            table_rect = Some(table_resp.response.rect);
         }
 
         // 7. Right detail panel: all tabs of the selected agent
+        let mut detail_rect = None;
+        let detail_avail = ui.available_width();
         if self.state.show_side_panel {
             let mut close_panel = false;
+            let detail_w = split_px(
+                self.state.detail_width_frac.unwrap_or(DEFAULT_SPLIT_FRAC),
+                window.width(),
+                SIDE_PANEL_MIN_WIDTH,
+                detail_avail,
+                CANVAS_MIN_WIDTH,
+            );
             let side_resp = egui::Panel::right("detail_side_panel")
-                .resizable(true)
-                .default_size(self.state.side_panel_width.unwrap_or(340.0))
-                .min_size(SIDE_PANEL_MIN_WIDTH)
+                .exact_size(detail_w)
                 .show(ui, |ui| {
-                    ui.set_min_width(240.0);
                     ui.add_space(4.0);
 
                     // Error banner
                     let mut dismiss_err = false;
+                    // Wrapped: a long unwrapped line would push the fixed-width panel off screen.
                     if let Some(ref err) = self.action_error {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             ui.colored_label(Color32::from_rgb(231, 76, 60), format!("⚠ {}", err));
                             if ui.small_button("✖").clicked() {
                                 dismiss_err = true;
@@ -2502,11 +2605,7 @@ impl eframe::App for HcomGraphApp {
 
                     close_panel = self.render_detail_tabs(ui);
                 });
-            let side_w = side_resp.response.rect.width();
-            if !approx_eq(self.state.side_panel_width, side_w, 0.5) {
-                self.state.side_panel_width = Some(side_w);
-                self.mark_view_dirty();
-            }
+            detail_rect = Some(side_resp.response.rect);
 
             if close_panel {
                 self.toggle_detail_panel();
@@ -2517,6 +2616,46 @@ impl eframe::App for HcomGraphApp {
         egui::CentralPanel::default().show(ui, |ui| {
             self.show_canvas(ui, &visible_node_indices);
         });
+
+        // Split handles on the drawn panel edges, above every panel (the canvas
+        // would otherwise take the drag and pan). Double-click resets.
+        if window.height() >= 1.0
+            && let Some(rect) = table_rect
+            && let Some(change) = split_handle(ui, "table_split", rect, egui::Direction::BottomUp)
+        {
+            self.state.table_height_frac = match change {
+                SplitChange::Moved(y) => Some(
+                    split_px(
+                        (window.bottom() - y) / window.height(),
+                        window.height(),
+                        TABLE_PANEL_MIN_HEIGHT,
+                        table_avail,
+                        CANVAS_MIN_HEIGHT,
+                    ) / window.height(),
+                ),
+                SplitChange::Reset => None,
+            };
+            self.mark_view_dirty();
+        }
+        if window.width() >= 1.0
+            && let Some(rect) = detail_rect
+            && let Some(change) =
+                split_handle(ui, "detail_split", rect, egui::Direction::RightToLeft)
+        {
+            self.state.detail_width_frac = match change {
+                SplitChange::Moved(x) => Some(
+                    split_px(
+                        (window.right() - x) / window.width(),
+                        window.width(),
+                        SIDE_PANEL_MIN_WIDTH,
+                        detail_avail,
+                        CANVAS_MIN_WIDTH,
+                    ) / window.width(),
+                ),
+                SplitChange::Reset => None,
+            };
+            self.mark_view_dirty();
+        }
 
         // 9. Context Menu Popup
         if let Some(ref menu) = self.context_menu.clone() {

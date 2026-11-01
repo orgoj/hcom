@@ -3868,7 +3868,9 @@ fn test_state_load_drops_bad_position_entry_and_clamps_values() {
             "canvas_zoom": 100.0,
             "canvas_pan_x": 3.0,
             "canvas_pan_y": 4.0,
-            "side_panel_width": 10.0
+            "side_panel_width": 10.0,
+            "table_height_frac": 0.99,
+            "detail_width_frac": 0.5
         }"#,
     )
     .unwrap();
@@ -3882,8 +3884,14 @@ fn test_state_load_drops_bad_position_entry_and_clamps_values() {
     assert_eq!((s.canvas_pan_x, s.canvas_pan_y), (Some(3.0), Some(4.0)));
     assert_eq!(
         s.side_panel_width,
-        Some(hcom_graph::config::SIDE_PANEL_MIN_WIDTH)
+        Some(10.0),
+        "legacy px is kept for conversion"
     );
+    assert_eq!(
+        s.table_height_frac,
+        Some(hcom_graph::config::SPLIT_FRAC_MAX)
+    );
+    assert_eq!(s.detail_width_frac, Some(0.5));
 }
 
 #[test]
@@ -4049,21 +4057,24 @@ fn test_canvas_plain_hover_sets_hovered_node() {
     assert!(!ctx.input(|i| i.pointer.any_down()));
 }
 
-/// Runs `frames` frames of the whole app on a 1000x700 window and returns the
-/// outer rects of the table and detail panels as egui stored them.
-fn run_app_frames(
+/// Runs one frame of the whole app per entry of `frames` (the input events of
+/// that frame) on a window of `size` and returns the outer rects of the table
+/// and detail panels as egui stored them.
+fn run_app_events(
     ctx: &egui::Context,
     app: &mut hcom_graph::app::HcomGraphApp,
-    frames: usize,
+    size: Vec2,
+    frames: Vec<Vec<egui::Event>>,
 ) -> (Option<Rect>, Option<Rect>) {
     use eframe::App;
     use egui::containers::panel::PanelState;
-    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let screen = Rect::from_min_size(Pos2::ZERO, size);
     let mut frame = eframe::Frame::_new_kittest();
     let mut root = egui::Id::NULL;
-    for _ in 0..frames {
+    for events in frames {
         let input = egui::RawInput {
             screen_rect: Some(screen),
+            events,
             ..Default::default()
         };
         ctx.run_ui(input, |ui| {
@@ -4077,6 +4088,15 @@ fn run_app_frames(
         PanelState::load(ctx, root.with_salt(egui::IdSalt::new(salt))).map(|p| p.outer_rect)
     };
     (rect("agent_table_panel"), rect("detail_side_panel"))
+}
+
+/// `run_app_events` with `frames` frames without input on a 1000x700 window.
+fn run_app_frames(
+    ctx: &egui::Context,
+    app: &mut hcom_graph::app::HcomGraphApp,
+    frames: usize,
+) -> (Option<Rect>, Option<Rect>) {
+    run_app_events(ctx, app, Vec2::new(1000.0, 700.0), vec![vec![]; frames])
 }
 
 #[test]
@@ -4153,4 +4173,315 @@ fn test_layout_oversized_saved_table_height_keeps_canvas_visible() {
         table.height() > 300.0,
         "a large saved height is clamped, not dropped: {table:?}"
     );
+}
+
+fn drag_frames(from: Pos2, to: Pos2) -> Vec<Vec<egui::Event>> {
+    let button = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    vec![
+        vec![egui::Event::PointerMoved(from)],
+        vec![button(from, true)],
+        vec![egui::Event::PointerMoved(Pos2::new(
+            (from.x + to.x) / 2.0,
+            (from.y + to.y) / 2.0,
+        ))],
+        vec![egui::Event::PointerMoved(to)],
+        vec![button(to, false)],
+        vec![],
+    ]
+}
+
+fn split_test_app(
+    state: hcom_graph::config::GraphState,
+) -> (tempfile::TempDir, hcom_graph::app::HcomGraphApp) {
+    let dir = tempfile::tempdir().unwrap();
+    let app = hcom_graph::app::HcomGraphApp::new_for_test(
+        hcom_graph::config::GraphConfig::default(),
+        state,
+        dir.path().to_path_buf(),
+    );
+    (dir, app)
+}
+
+#[test]
+fn test_split_drag_saves_window_fractions_and_does_not_pan() {
+    use hcom_graph::config::GraphState;
+    use std::time::Instant;
+
+    let (dir, mut app) = split_test_app(GraphState::default());
+    let ctx = egui::Context::default();
+    let size = Vec2::new(1000.0, 700.0);
+    let (table, detail) = run_app_events(&ctx, &mut app, size, vec![vec![]; 3]);
+    let (table, detail) = (table.unwrap(), detail.unwrap());
+    let pan = app.canvas.pan;
+
+    // Table edge: dragged up by 100 px.
+    let from = Pos2::new(100.0, table.top());
+    run_app_events(
+        &ctx,
+        &mut app,
+        size,
+        drag_frames(from, from - Vec2::new(0.0, 100.0)),
+    );
+    let frac = app
+        .state
+        .table_height_frac
+        .expect("table fraction set by the drag");
+    assert!(
+        (frac * 700.0 - (table.height() + 100.0)).abs() <= 2.0,
+        "{frac}"
+    );
+    assert_eq!(
+        app.canvas.pan, pan,
+        "a drag on the split handle must not pan"
+    );
+
+    // Detail edge: dragged left by 100 px.
+    let from = Pos2::new(detail.left(), detail.center().y);
+    run_app_events(
+        &ctx,
+        &mut app,
+        size,
+        drag_frames(from, from - Vec2::new(100.0, 0.0)),
+    );
+    let frac = app
+        .state
+        .detail_width_frac
+        .expect("detail fraction set by the drag");
+    assert!(
+        (frac * 1000.0 - (detail.width() + 100.0)).abs() <= 2.0,
+        "{frac}"
+    );
+    assert_eq!(app.canvas.pan, pan);
+
+    // Saved as fractions only.
+    app.flush_view_state(Instant::now() + Duration::from_secs(2), false);
+    let saved = std::fs::read_to_string(dir.path().join("graph-state.json")).unwrap();
+    assert!(saved.contains("table_height_frac") && saved.contains("detail_width_frac"));
+    assert!(!saved.contains("sash_pos") && !saved.contains("side_panel_width"));
+
+    // Double-click resets the table split to the default.
+    let at = Pos2::new(100.0, app_table_top(&ctx, &mut app, size));
+    let click = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    run_app_events(
+        &ctx,
+        &mut app,
+        size,
+        vec![
+            vec![egui::Event::PointerMoved(at)],
+            vec![click(true)],
+            vec![click(false)],
+            vec![click(true)],
+            vec![click(false)],
+            vec![],
+        ],
+    );
+    assert_eq!(app.state.table_height_frac, None);
+
+    // A hidden table has no handle: the same drag changes nothing.
+    app.state.table_height_frac = Some(0.3);
+    app.state.show_table = false;
+    let at = Pos2::new(100.0, 490.0);
+    run_app_events(
+        &ctx,
+        &mut app,
+        size,
+        drag_frames(at, at - Vec2::new(0.0, 100.0)),
+    );
+    assert_eq!(app.state.table_height_frac, Some(0.3));
+}
+
+fn app_table_top(ctx: &egui::Context, app: &mut hcom_graph::app::HcomGraphApp, size: Vec2) -> f32 {
+    run_app_events(ctx, app, size, vec![vec![]; 2])
+        .0
+        .unwrap()
+        .top()
+}
+
+#[test]
+fn test_split_sizes_ignore_content_changes() {
+    use hcom_graph::config::GraphState;
+
+    let (_dir, mut app) = split_test_app(GraphState::default());
+    let ctx = egui::Context::default();
+    let (table, detail) = run_app_frames(&ctx, &mut app, 3);
+    for tab in hcom_graph::config::DETAIL_TABS {
+        app.state.detail_tab = tab.to_string();
+        app.action_error = Some("a long error message ".repeat(20));
+        let (t, d) = run_app_frames(&ctx, &mut app, 2);
+        assert_eq!((t, d), (table, detail), "tab {tab} resized a panel");
+    }
+}
+
+#[test]
+fn test_split_proportions_survive_another_window_size() {
+    use hcom_graph::config::GraphState;
+
+    let state = GraphState {
+        table_height_frac: Some(0.4),
+        detail_width_frac: Some(0.35),
+        ..Default::default()
+    };
+    for size in [Vec2::new(1000.0, 700.0), Vec2::new(1600.0, 1000.0)] {
+        let (_dir, mut app) = split_test_app(state.clone());
+        let ctx = egui::Context::default();
+        let (t, d) = run_app_events(&ctx, &mut app, size, vec![vec![]; 3]);
+        let (t, d) = (t.unwrap(), d.unwrap());
+        assert!((t.height() / size.y - 0.4).abs() < 0.01, "{size:?} {t:?}");
+        assert!((d.width() / size.x - 0.35).abs() < 0.01, "{size:?} {d:?}");
+        assert_eq!(
+            app.state.table_height_frac,
+            Some(0.4),
+            "rendering keeps the fraction"
+        );
+    }
+
+    // A small window: the clamps win (canvas keeps its minimum), the stored
+    // fraction stays for the next larger window.
+    let (_dir, mut app) = split_test_app(GraphState {
+        table_height_frac: Some(0.9),
+        ..state
+    });
+    let ctx = egui::Context::default();
+    let (t, _) = run_app_events(&ctx, &mut app, Vec2::new(500.0, 400.0), vec![vec![]; 3]);
+    assert!(t.unwrap().height() < 0.9 * 400.0);
+    assert_eq!(app.state.table_height_frac, Some(0.9));
+}
+
+#[test]
+fn test_split_tiny_and_zero_windows_do_not_panic() {
+    use hcom_graph::app::split_px;
+    use hcom_graph::config::GraphState;
+
+    assert_eq!(split_px(0.3, 0.0, 80.0, 0.0, 150.0), 80.0);
+    assert_eq!(split_px(0.3, 150.0, 80.0, 100.0, 150.0), 80.0);
+    assert_eq!(split_px(0.5, 1000.0, 80.0, 900.0, 150.0), 500.0);
+    assert_eq!(split_px(0.9, 1000.0, 80.0, 900.0, 150.0), 750.0);
+
+    for size in [Vec2::new(200.0, 150.0), Vec2::ZERO] {
+        let (_dir, mut app) = split_test_app(GraphState {
+            sash_pos: Some(300.0),
+            side_panel_width: Some(400.0),
+            ..Default::default()
+        });
+        let ctx = egui::Context::default();
+        run_app_events(&ctx, &mut app, size, vec![vec![]; 3]);
+        if size == Vec2::ZERO {
+            assert_eq!(
+                app.state.sash_pos,
+                Some(300.0),
+                "no conversion without a window size"
+            );
+            assert_eq!(app.state.table_height_frac, None);
+        }
+    }
+}
+
+#[test]
+fn test_split_legacy_pixels_become_fractions() {
+    use hcom_graph::config::GraphState;
+
+    let (_dir, mut app) = split_test_app(GraphState {
+        sash_pos: Some(280.0),
+        side_panel_width: Some(5000.0),
+        detail_width_frac: None,
+        ..Default::default()
+    });
+    app.adopt_legacy_split_sizes(Vec2::new(1000.0, 700.0));
+    assert_eq!(app.state.table_height_frac, Some(0.4));
+    assert_eq!(
+        app.state.detail_width_frac,
+        Some(hcom_graph::config::SPLIT_FRAC_MAX)
+    );
+    assert_eq!(
+        (app.state.sash_pos, app.state.side_panel_width),
+        (None, None)
+    );
+
+    // An existing fraction wins over a legacy value.
+    let (_dir, mut app) = split_test_app(GraphState {
+        sash_pos: Some(280.0),
+        table_height_frac: Some(0.2),
+        ..Default::default()
+    });
+    app.adopt_legacy_split_sizes(Vec2::new(1000.0, 700.0));
+    assert_eq!(app.state.table_height_frac, Some(0.2));
+}
+
+#[test]
+fn test_split_fraction_sanitize() {
+    use hcom_graph::config::{GraphState, SPLIT_FRAC_MAX, SPLIT_FRAC_MIN};
+    for (v, want) in [
+        (f32::NAN, None),
+        (f32::INFINITY, None),
+        (-1.0, None),
+        (0.0, None),
+        (5.0, None),
+        (0.97, Some(SPLIT_FRAC_MAX)),
+        (0.01, Some(SPLIT_FRAC_MIN)),
+        (0.4, Some(0.4)),
+    ] {
+        let mut s = GraphState {
+            table_height_frac: Some(v),
+            detail_width_frac: Some(v),
+            ..Default::default()
+        };
+        s.sanitize();
+        assert_eq!(
+            (s.table_height_frac, s.detail_width_frac),
+            (want, want),
+            "{v}"
+        );
+    }
+}
+
+#[test]
+fn test_split_legacy_conversion_is_saved_without_other_changes() {
+    use eframe::App;
+    use hcom_graph::config::{GraphState, load_state};
+
+    // Regression: the conversion did not mark the state dirty, so a legacy
+    // file with an unchanged view was never rewritten and the next start on
+    // another screen converted the pixels against that screen instead.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("graph-state.json"),
+        r#"{"sash_pos": 280.0, "side_panel_width": 300.0,
+            "canvas_zoom": 1.0, "canvas_pan_x": 0.0, "canvas_pan_y": 0.0}"#,
+    )
+    .unwrap();
+    let mut app = hcom_graph::app::HcomGraphApp::new_for_test(
+        hcom_graph::config::GraphConfig::default(),
+        load_state(dir.path()),
+        dir.path().to_path_buf(),
+    );
+    app.apply_persisted_view();
+    let ctx = egui::Context::default();
+    run_app_events(&ctx, &mut app, Vec2::new(1000.0, 700.0), vec![vec![]; 2]);
+    app.on_exit();
+
+    let saved: GraphState = load_state(dir.path());
+    assert_eq!(saved.table_height_frac, Some(0.4));
+    assert_eq!(saved.detail_width_frac, Some(0.3));
+    assert_eq!((saved.sash_pos, saved.side_panel_width), (None, None));
+
+    let mut app = hcom_graph::app::HcomGraphApp::new_for_test(
+        hcom_graph::config::GraphConfig::default(),
+        saved,
+        dir.path().to_path_buf(),
+    );
+    let ctx = egui::Context::default();
+    let size = Vec2::new(1600.0, 1000.0);
+    let (t, d) = run_app_events(&ctx, &mut app, size, vec![vec![]; 3]);
+    assert!((t.unwrap().height() / size.y - 0.4).abs() < 0.01);
+    assert!((d.unwrap().width() / size.x - 0.3).abs() < 0.01);
 }
