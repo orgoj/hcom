@@ -136,9 +136,17 @@ impl CanvasView {
         (26.0 + 13.0) * self.zoom
     }
 
-    pub fn reset_view(&mut self) {
-        self.pan = Vec2::ZERO;
-        self.zoom = 1.0;
+    /// Sets zoom and pan so every item fits `rect` (see `fit_view`).
+    /// Returns false (view unchanged) when there is nothing to fit.
+    pub fn fit_to(&mut self, items: &[(Pos2, f32)], rect: Rect, max_zoom: f32) -> bool {
+        match fit_view(items, rect, max_zoom) {
+            Some((zoom, pan)) => {
+                self.zoom = zoom;
+                self.pan = pan;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn hit_test_edge(
@@ -515,6 +523,7 @@ impl CanvasView {
         }
 
         // 5. Render Nodes
+        let mut off_view = Vec::new();
         for (idx, phys) in &layout.nodes {
             if let Some(v) = visible_nodes
                 && !v.contains(idx)
@@ -601,7 +610,7 @@ impl CanvasView {
             }
 
             // Agent name text
-            let font_size = (12.0 * self.zoom).clamp(8.0, 18.0);
+            let font_size = label_font_size(self.zoom);
             painter.text(
                 center,
                 egui::Align2::CENTER_CENTER,
@@ -609,10 +618,102 @@ impl CanvasView {
                 FontId::proportional(font_size),
                 Color32::WHITE,
             );
+
+            if let Some(marker) = edge_marker(rect, center) {
+                off_view.push((marker, status_color));
+            }
+        }
+
+        // 6. Markers on the canvas edge for visible nodes outside the view
+        for ((tip, dir), color) in off_view {
+            let normal = Vec2::new(-dir.y, dir.x);
+            let base = tip - dir * 10.0;
+            painter.add(egui::Shape::convex_polygon(
+                vec![tip, base + normal * 6.0, base - normal * 6.0],
+                color,
+                Stroke::new(1.0, Color32::from_rgb(18, 19, 24)),
+            ));
         }
 
         (response, triggered_action)
     }
+}
+
+/// Node radius plus the outermost decoration (selection ring), in world units.
+const NODE_EXTENT: f32 = 26.0 + 11.0;
+
+/// Font size of a node label at `zoom` (as drawn by `CanvasView::show`).
+fn label_font_size(zoom: f32) -> f32 {
+    (12.0 * zoom).clamp(8.0, 18.0)
+}
+
+/// Zoom and pan that fit all `items` (world position, label width at a
+/// 12 px font) with their decorations and labels inside `rect` minus a 5 %
+/// margin per side: the largest zoom in `ZOOM_MIN..=max_zoom` that fits
+/// (`ZOOM_MIN` when none does), the content centered. `None` without items.
+pub fn fit_view(items: &[(Pos2, f32)], rect: Rect, max_zoom: f32) -> Option<(f32, Vec2)> {
+    if items.is_empty() {
+        return None;
+    }
+    let avail = rect.size() * 0.9;
+    // Screen bounding box of the content relative to rect.center() + pan.
+    let bbox = |z: f32| {
+        let font = label_font_size(z);
+        let mut b = Rect::NOTHING;
+        for &(pos, label_w12) in items {
+            let half = Vec2::new(
+                (NODE_EXTENT * z).max(label_w12 * font / 12.0 / 2.0),
+                (NODE_EXTENT * z).max(font * 0.6),
+            );
+            let c = pos.to_vec2() * z;
+            b = b.union(Rect::from_center_size(c.to_pos2(), half * 2.0));
+        }
+        b
+    };
+    let fits = |z: f32| {
+        let s = bbox(z).size();
+        s.x <= avail.x && s.y <= avail.y
+    };
+    let max_zoom = max_zoom.max(ZOOM_MIN);
+    let zoom = if fits(max_zoom) {
+        max_zoom
+    } else if !fits(ZOOM_MIN) {
+        ZOOM_MIN
+    } else {
+        let (mut lo, mut hi) = (ZOOM_MIN, max_zoom);
+        for _ in 0..30 {
+            let mid = (lo + hi) / 2.0;
+            if fits(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    };
+    Some((zoom, -bbox(zoom).center().to_vec2()))
+}
+
+/// Off-view marker of a node at `screen_pos`: `None` while the node center is
+/// inside `rect`, otherwise the point where the ray from the rect center to
+/// the node meets `rect` shrunk by 8 px, and the unit direction to the node.
+pub fn edge_marker(rect: Rect, screen_pos: Pos2) -> Option<(Pos2, Vec2)> {
+    if rect.contains(screen_pos) {
+        return None;
+    }
+    let inner = rect.shrink(8.0);
+    let c = inner.center();
+    let d = screen_pos - c;
+    let half = inner.size() / 2.0;
+    let t = [(d.x, half.x), (d.y, half.y)]
+        .iter()
+        .filter(|(dv, _)| dv.abs() > 1e-6)
+        .map(|(dv, h)| h / dv.abs())
+        .fold(f32::INFINITY, f32::min);
+    if !t.is_finite() {
+        return None;
+    }
+    Some((c + d * t.min(1.0), d.normalized()))
 }
 
 /// Badge text of a message edge: `None` when the window holds no message,

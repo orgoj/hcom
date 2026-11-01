@@ -126,6 +126,14 @@ pub struct HcomGraphApp {
     pub tooltip_pos: egui::Pos2,
     /// Time of the last unsaved zoom/pan/panel width change.
     pub view_dirty_since: Option<Instant>,
+    /// Fit the view to the visible nodes every frame until the user changes it.
+    pub auto_fit: bool,
+    /// A saved view was restored: turn on `auto_fit` if it shows no node.
+    pub check_saved_view: bool,
+    /// The Fit button was pressed: fit once on the next canvas frame.
+    pub fit_requested: bool,
+    /// Canvas area of the last frame.
+    pub canvas_rect: egui::Rect,
 
     // Config & state
     pub hcom_dir: PathBuf,
@@ -272,6 +280,10 @@ impl HcomGraphApp {
             tooltip_node: None,
             tooltip_pos: egui::Pos2::ZERO,
             view_dirty_since: None,
+            auto_fit: false,
+            check_saved_view: false,
+            fit_requested: false,
+            canvas_rect: egui::Rect::NOTHING,
             hcom_dir,
             config,
             msg_window: state.message_window(),
@@ -341,6 +353,10 @@ impl HcomGraphApp {
             tooltip_node: None,
             tooltip_pos: egui::Pos2::ZERO,
             view_dirty_since: None,
+            auto_fit: false,
+            check_saved_view: false,
+            fit_requested: false,
+            canvas_rect: egui::Rect::NOTHING,
             inject_input: String::new(),
             loaded_transcript: None,
             hcom_dir,
@@ -1430,6 +1446,9 @@ impl HcomGraphApp {
     pub fn apply_persisted_view(&mut self) {
         if let Some(z) = self.state.canvas_zoom {
             self.canvas.zoom = z;
+            self.check_saved_view = true;
+        } else {
+            self.auto_fit = true;
         }
         if let (Some(x), Some(y)) = (self.state.canvas_pan_x, self.state.canvas_pan_y) {
             self.canvas.pan = egui::vec2(x, y);
@@ -1483,11 +1502,73 @@ impl HcomGraphApp {
         }
     }
 
+    /// Applies the Fit button and auto-fit to `rect`, the canvas area of
+    /// this frame. Auto-fit stays off in Manual mode and while a pointer
+    /// button is held; the button fits in any mode.
+    fn fit_canvas(
+        &mut self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        visible: &std::collections::HashSet<NodeIndex>,
+    ) {
+        let items: Vec<(egui::Pos2, f32)> = self
+            .layout
+            .nodes
+            .iter()
+            .filter(|(idx, _)| visible.contains(idx))
+            .filter_map(|(idx, phys)| {
+                let name = &self.graph.graph.node_weight(*idx)?.name;
+                let label_w = ui
+                    .painter()
+                    .layout_no_wrap(
+                        name.clone(),
+                        egui::FontId::proportional(12.0),
+                        Color32::WHITE,
+                    )
+                    .size()
+                    .x;
+                Some((phys.pos, label_w))
+            })
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        if self.check_saved_view {
+            self.check_saved_view = false;
+            let in_view = items
+                .iter()
+                .any(|(p, _)| rect.contains(self.canvas.world_to_screen(*p, rect)));
+            if !in_view {
+                self.auto_fit = true;
+            }
+        }
+        if self.fit_requested {
+            self.fit_requested = false;
+            // An explicit Fit is a user view choice: auto-fit must not undo it.
+            self.auto_fit = false;
+            self.canvas.fit_to(&items, rect, crate::canvas::ZOOM_MAX);
+        } else if self.auto_fit
+            && self.layout.mode != LayoutMode::Manual
+            && !ui.input(|i| i.pointer.any_down())
+        {
+            self.canvas.fit_to(&items, rect, 1.0);
+        }
+    }
+
     fn show_canvas(&mut self, ui: &mut egui::Ui, visible: &std::collections::HashSet<NodeIndex>) {
+        let rect = ui.available_rect_before_wrap();
+        self.canvas_rect = rect;
+        self.fit_canvas(ui, rect, visible);
         let dragged_before = self.canvas.dragged_node;
+        let view_before = (self.canvas.zoom, self.canvas.pan);
         let (response, action) = self
             .canvas
             .show(ui, &self.graph, &mut self.layout, Some(visible));
+        // The first user zoom, pan or node drag ends auto-fit.
+        if view_before != (self.canvas.zoom, self.canvas.pan) || self.canvas.dragged_node.is_some()
+        {
+            self.auto_fit = false;
+        }
         if let Some(idx) = dragged_before
             && self.canvas.dragged_node.is_none()
             && self.canvas.is_dragging
@@ -1889,8 +1970,12 @@ impl eframe::App for HcomGraphApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Reset View").clicked() {
-                        self.canvas.reset_view();
+                    if ui
+                        .button("Fit")
+                        .on_hover_text("Zoom and pan so all shown agents fit the graph")
+                        .clicked()
+                    {
+                        self.fit_requested = true;
                     }
                     ui.label(format!("Zoom: {:.0}%", self.canvas.zoom * 100.0));
                 });

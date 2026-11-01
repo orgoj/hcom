@@ -4485,3 +4485,233 @@ fn test_split_legacy_conversion_is_saved_without_other_changes() {
     assert!((t.unwrap().height() / size.y - 0.4).abs() < 0.01);
     assert!((d.unwrap().width() / size.x - 0.3).abs() < 0.01);
 }
+
+#[test]
+fn test_fit_view_fits_far_nodes_and_long_labels_with_margin() {
+    use hcom_graph::canvas::{CanvasView, ZOOM_MAX, fit_view};
+
+    let rect = Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(800.0, 500.0));
+    assert_eq!(fit_view(&[], rect, 1.0), None);
+
+    let items = [
+        (Pos2::new(1200.0, 800.0), 40.0),
+        (Pos2::new(-1200.0, -800.0), 40.0),
+        (Pos2::new(-1200.0, 800.0), 600.0),
+    ];
+    let mut view = CanvasView::new();
+    assert!(view.fit_to(&items, rect, 1.0));
+    let inner = rect.shrink2(rect.size() * 0.05 - Vec2::splat(0.5));
+    for (pos, w12) in items {
+        let c = view.world_to_screen(pos, rect);
+        let font = (12.0 * view.zoom).clamp(8.0, 18.0);
+        let half_x = (37.0 * view.zoom).max(w12 * font / 24.0);
+        assert!(
+            inner.contains(c - Vec2::new(half_x, 37.0 * view.zoom)),
+            "{c:?}"
+        );
+        assert!(
+            inner.contains(c + Vec2::new(half_x, 37.0 * view.zoom)),
+            "{c:?}"
+        );
+    }
+
+    // One node: auto-fit stops at 100 %, the explicit cap may zoom further.
+    let one = [(Pos2::new(300.0, -200.0), 40.0)];
+    assert_eq!(fit_view(&one, rect, 1.0).unwrap().0, 1.0);
+    let (z, pan) = fit_view(&one, rect, ZOOM_MAX).unwrap();
+    assert!(z > 1.0);
+    view.zoom = z;
+    view.pan = pan;
+    let c = view.world_to_screen(one[0].0, rect);
+    assert!((c - rect.center()).length() < 0.5, "centered: {c:?}");
+}
+
+#[test]
+fn test_edge_marker_points_from_the_border_to_off_view_nodes() {
+    use hcom_graph::canvas::edge_marker;
+
+    let rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(400.0, 200.0));
+    assert_eq!(edge_marker(rect, Pos2::new(10.0, 10.0)), None);
+    let cases = [
+        (
+            Pos2::new(-500.0, 100.0),
+            Pos2::new(8.0, 100.0),
+            Vec2::new(-1.0, 0.0),
+        ),
+        (
+            Pos2::new(900.0, 100.0),
+            Pos2::new(392.0, 100.0),
+            Vec2::new(1.0, 0.0),
+        ),
+        (
+            Pos2::new(200.0, -300.0),
+            Pos2::new(200.0, 8.0),
+            Vec2::new(0.0, -1.0),
+        ),
+        (
+            Pos2::new(200.0, 700.0),
+            Pos2::new(200.0, 192.0),
+            Vec2::new(0.0, 1.0),
+        ),
+    ];
+    for (node, tip, dir) in cases {
+        let (p, d) = edge_marker(rect, node).unwrap();
+        assert!((p - tip).length() < 0.01, "{node:?}: {p:?}");
+        assert!((d - dir).length() < 0.01, "{node:?}: {d:?}");
+    }
+    // Diagonal: on the shrunk border, inside the canvas.
+    let (p, _) = edge_marker(rect, Pos2::new(5000.0, 5000.0)).unwrap();
+    assert!(rect.shrink(7.9).contains(p) && !rect.shrink(8.1).contains(p));
+}
+
+/// App with three active agents pinned far from the origin.
+fn fit_test_app(
+    state: hcom_graph::config::GraphState,
+) -> (tempfile::TempDir, hcom_graph::app::HcomGraphApp) {
+    let (dir, mut app) = split_test_app(state);
+    app.apply_persisted_view();
+    app.graph.apply_instance_snapshot(&[
+        snap("far_a", None),
+        snap("far_b", None),
+        snap("far_c", None),
+    ]);
+    app.layout.sync_nodes(&app.graph);
+    for (name, pos) in [
+        ("far_a", Pos2::new(1200.0, 800.0)),
+        ("far_b", Pos2::new(-1200.0, -800.0)),
+        ("far_c", Pos2::new(1500.0, -500.0)),
+    ] {
+        let idx = app.graph.get_node_index(name).unwrap();
+        app.layout.set_node_pos(idx, pos, true);
+    }
+    (dir, app)
+}
+
+fn all_nodes_in_canvas(app: &hcom_graph::app::HcomGraphApp) -> bool {
+    let rect = app.canvas_rect;
+    app.layout
+        .nodes
+        .values()
+        .all(|p| rect.contains(app.canvas.world_to_screen(p.pos, rect)))
+}
+
+#[test]
+fn test_auto_fit_without_saved_view_shows_all_nodes_until_user_zooms() {
+    use hcom_graph::config::GraphState;
+
+    let (_dir, mut app) = fit_test_app(GraphState::default());
+    let ctx = egui::Context::default();
+    run_app_frames(&ctx, &mut app, 3);
+    assert!(app.canvas_rect.is_positive());
+    assert!(all_nodes_in_canvas(&app), "AC1: auto-fit at start");
+    assert!(app.canvas.zoom <= 1.0);
+
+    // A user scroll zoom ends auto-fit: a later fit would undo it.
+    let fitted = app.canvas.zoom;
+    let center = app.canvas_rect.center();
+    run_app_events(
+        &ctx,
+        &mut app,
+        Vec2::new(1000.0, 700.0),
+        vec![
+            vec![egui::Event::PointerMoved(center)],
+            vec![egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, 200.0),
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+            }],
+            vec![],
+            vec![],
+        ],
+    );
+    assert!(!app.auto_fit, "user zoom stops auto-fit");
+    run_app_frames(&ctx, &mut app, 30);
+    assert!(
+        app.canvas.zoom > fitted * 1.05,
+        "no refit after the user zoom"
+    );
+}
+
+#[test]
+fn test_auto_fit_corrects_a_saved_view_without_visible_nodes() {
+    use hcom_graph::config::GraphState;
+
+    let saved = |x: f32, y: f32| GraphState {
+        canvas_zoom: Some(1.0),
+        canvas_pan_x: Some(x),
+        canvas_pan_y: Some(y),
+        ..GraphState::default()
+    };
+    // Saved view far away from every node: fitted (AC3).
+    let (_dir, mut app) = fit_test_app(saved(50_000.0, 0.0));
+    let ctx = egui::Context::default();
+    run_app_frames(&ctx, &mut app, 3);
+    assert!(all_nodes_in_canvas(&app), "AC3: empty saved view fitted");
+
+    // Saved view that shows a node: kept.
+    let (_dir2, mut app) = fit_test_app(saved(-1200.0, -800.0));
+    let ctx = egui::Context::default();
+    run_app_frames(&ctx, &mut app, 3);
+    assert_eq!(
+        (app.canvas.zoom, app.canvas.pan),
+        (1.0, Vec2::new(-1200.0, -800.0))
+    );
+    assert!(!app.auto_fit);
+}
+
+#[test]
+fn test_auto_fit_skips_manual_mode_and_pressed_pointer_but_fit_button_works() {
+    use hcom_graph::config::GraphState;
+
+    // Manual mode: no auto-fit (AC5); the Fit request fits (AC2).
+    let (_dir, mut app) = fit_test_app(GraphState {
+        layout_mode: "manual".into(),
+        ..GraphState::default()
+    });
+    let ctx = egui::Context::default();
+    run_app_frames(&ctx, &mut app, 3);
+    assert_eq!((app.canvas.zoom, app.canvas.pan), (1.0, Vec2::ZERO));
+    app.fit_requested = true;
+    run_app_frames(&ctx, &mut app, 1);
+    assert!(!app.fit_requested);
+    assert!(all_nodes_in_canvas(&app), "AC2: Fit in Manual mode");
+
+    // Pointer held down (outside the canvas): no auto-fit (AC5).
+    let (_dir2, mut app) = fit_test_app(GraphState::default());
+    let ctx = egui::Context::default();
+    let at = Pos2::new(5.0, 5.0);
+    let press = egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    };
+    run_app_events(
+        &ctx,
+        &mut app,
+        Vec2::new(1000.0, 700.0),
+        vec![vec![egui::Event::PointerMoved(at), press], vec![], vec![]],
+    );
+    assert_eq!((app.canvas.zoom, app.canvas.pan), (1.0, Vec2::ZERO));
+    assert!(app.auto_fit, "auto-fit waits for the release");
+}
+
+#[test]
+fn test_fit_button_ends_auto_fit_and_keeps_its_zoom() {
+    use hcom_graph::config::GraphState;
+
+    let (_dir, mut app) = split_test_app(GraphState::default());
+    app.apply_persisted_view();
+    app.graph.apply_instance_snapshot(&[snap("solo", None)]);
+    app.layout.sync_nodes(&app.graph);
+    let ctx = egui::Context::default();
+    run_app_frames(&ctx, &mut app, 3);
+    assert_eq!(app.canvas.zoom, 1.0, "auto-fit stops at 100 %");
+
+    app.fit_requested = true;
+    run_app_frames(&ctx, &mut app, 3);
+    assert!(!app.auto_fit);
+    assert!(app.canvas.zoom > 1.0, "Fit zoom kept: {}", app.canvas.zoom);
+}
