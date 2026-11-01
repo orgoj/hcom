@@ -189,6 +189,10 @@ pub struct GraphState {
     pub sort_reverse: bool,
     #[serde(default = "default_bottom_tab")]
     pub bottom_tab: String,
+    #[serde(default = "default_true")]
+    pub show_side_panel: bool,
+    #[serde(default)]
+    pub main_split_ratio: Option<f32>,
     #[serde(default = "default_columns")]
     pub columns: Vec<String>,
     #[serde(default)]
@@ -227,6 +231,8 @@ impl Default for GraphState {
             sort_col: default_sort_col(),
             sort_reverse: false,
             bottom_tab: default_bottom_tab(),
+            show_side_panel: true,
+            main_split_ratio: None,
             columns: default_columns(),
             columns_known: Vec::new(),
             column_widths: HashMap::new(),

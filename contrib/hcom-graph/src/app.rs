@@ -518,6 +518,7 @@ impl HcomGraphApp {
 
         egui::ScrollArea::vertical()
             .id_salt("report_scroll_view")
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 egui::Grid::new("report_view_grid")
                     .num_columns(2)
@@ -539,12 +540,284 @@ impl HcomGraphApp {
             });
     }
 
+    fn render_side_panel_summary(&mut self, ui: &mut egui::Ui) {
+        // Priority 1: Selected message edge
+        if let Some(edge_idx) = self.canvas.selected_edge
+            && let Some(edge_weight) = self.graph.graph.edge_weight(edge_idx)
+        {
+            match edge_weight {
+                EdgeKind::Message(msg) => {
+                    let from = msg.from.clone();
+                    let to = msg.to.clone();
+
+                    ui.horizontal(|ui| {
+                        ui.heading(RichText::new(format!("{} ⇄ {}", from, to)).strong());
+                    });
+                    ui.separator();
+
+                    ui.label(format!("Total Messages (directed): {}", msg.count));
+                    ui.label(format!(
+                        "Last Active: {}",
+                        msg.last_timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                    ));
+                    if let Some(ref intent) = msg.last_intent {
+                        ui.label(format!("Last Intent: {}", intent));
+                    }
+                    ui.label(format!("Last Preview: {}", msg.last_preview));
+                    ui.separator();
+
+                    ui.label(RichText::new("Conversation History (last 50):").strong());
+                    let history = self.graph.get_conversation_history(&from, &to);
+                    if history.is_empty() {
+                        ui.label("No recent stored messages.");
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .max_height(400.0)
+                            .show(ui, |ui| {
+                                for m in &history {
+                                    ui.group(|ui| {
+                                        ui.horizontal(|ui| {
+                                            let from_color = if m.from == from {
+                                                Color32::from_rgb(52, 152, 219)
+                                            } else {
+                                                Color32::from_rgb(46, 204, 113)
+                                            };
+                                            ui.colored_label(
+                                                from_color,
+                                                RichText::new(&m.from).strong(),
+                                            );
+                                            ui.label("→");
+                                            ui.label(&m.to);
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    ui.weak(m.ts.format("%H:%M:%S").to_string());
+                                                },
+                                            );
+                                        });
+                                        if let Some(ref intent) = m.intent {
+                                            ui.weak(format!("intent: {}", intent));
+                                        }
+                                        ui.monospace(&m.text);
+                                    });
+                                    ui.add_space(2.0);
+                                }
+                            });
+                    }
+                }
+                EdgeKind::Spawn(spawn) => {
+                    ui.heading(RichText::new("Spawn Relation").strong());
+                    ui.separator();
+                    ui.label(format!("Parent: {}", spawn.parent));
+                    ui.label(format!("Child: {}", spawn.child));
+                }
+            }
+            return;
+        }
+
+        // Priority 2: Selected node or selected table row
+        let selected_node = self
+            .canvas
+            .selected_node
+            .and_then(|idx| self.graph.graph.node_weight(idx).cloned());
+        let selected_row = self.selected_row();
+
+        if selected_node.is_none() && selected_row.is_none() {
+            ui.heading("Agent Details");
+            ui.separator();
+            ui.weak("No agent or message edge selected.");
+            ui.add_space(6.0);
+            ui.label("Click a node or edge in the graph, or a row in the table, to view detailed status, command history, and quick actions.");
+            return;
+        }
+
+        let agent_name = if let Some(ref n) = selected_node {
+            n.name.clone()
+        } else if let Some(ref r) = selected_row {
+            if !r.instance.is_empty() {
+                r.instance.clone()
+            } else {
+                r.agent.clone()
+            }
+        } else {
+            return;
+        };
+
+        let status_desc = if let Some(ref n) = selected_node {
+            format!("{:?}", n.status)
+        } else if let Some(ref r) = selected_row {
+            r.status.clone()
+        } else {
+            "-".to_string()
+        };
+
+        let status_col = if let Some(ref n) = selected_node {
+            CanvasView::status_color(&n.status)
+        } else if let Some(ref r) = selected_row {
+            if r.status == "active" {
+                Color32::from_rgb(46, 204, 113)
+            } else if r.status == "listening" {
+                Color32::from_rgb(52, 152, 219)
+            } else if r.status == "blocked" {
+                Color32::from_rgb(231, 76, 60)
+            } else {
+                Color32::from_rgb(127, 140, 141)
+            }
+        } else {
+            Color32::GRAY
+        };
+
+        ui.horizontal(|ui| {
+            ui.heading(RichText::new(&agent_name).strong());
+            ui.colored_label(status_col, status_desc);
+        });
+        ui.separator();
+
+        egui::Grid::new("agent_meta_grid")
+            .num_columns(2)
+            .spacing([10.0, 6.0])
+            .show(ui, |ui| {
+                ui.label(RichText::new("Status Detail:").weak());
+                let detail = if let Some(ref n) = selected_node {
+                    n.status_context.as_deref().unwrap_or("none").to_string()
+                } else if let Some(ref r) = selected_row {
+                    if !r.detail.is_empty() {
+                        r.detail.clone()
+                    } else {
+                        "none".to_string()
+                    }
+                } else {
+                    "none".to_string()
+                };
+                ui.label(detail);
+                ui.end_row();
+
+                ui.label(RichText::new("Status Age:").weak());
+                let age = if let Some(ref n) = selected_node {
+                    format!("{}s", n.status_age_seconds)
+                } else if let Some(ref r) = selected_row {
+                    r.since_text.clone()
+                } else {
+                    "-".to_string()
+                };
+                ui.label(age);
+                ui.end_row();
+
+                ui.label(RichText::new("Unread Count:").weak());
+                let unread = if let Some(ref n) = selected_node {
+                    format!("{}", n.unread_count)
+                } else if let Some(ref r) = selected_row {
+                    format!("{}", r.unread_count)
+                } else {
+                    "-".to_string()
+                };
+                ui.label(unread);
+                ui.end_row();
+
+                ui.label(RichText::new("CLI Tool:").weak());
+                let tool = if let Some(ref n) = selected_node {
+                    n.tool.as_deref().unwrap_or("-").to_string()
+                } else if let Some(ref r) = selected_row {
+                    if !r.cli.is_empty() {
+                        r.cli.clone()
+                    } else {
+                        "-".to_string()
+                    }
+                } else {
+                    "-".to_string()
+                };
+                ui.label(tool);
+                ui.end_row();
+
+                ui.label(RichText::new("Directory:").weak());
+                let dir = if let Some(ref n) = selected_node {
+                    n.directory.as_deref().unwrap_or("-").to_string()
+                } else if let Some(ref r) = selected_row {
+                    if !r.directory.is_empty() {
+                        r.directory.clone()
+                    } else {
+                        "-".to_string()
+                    }
+                } else {
+                    "-".to_string()
+                };
+                ui.label(dir);
+                ui.end_row();
+
+                ui.label(RichText::new("Parent:").weak());
+                let parent = if let Some(ref n) = selected_node {
+                    n.parent_name.as_deref().unwrap_or("none").to_string()
+                } else {
+                    "none".to_string()
+                };
+                ui.label(parent);
+                ui.end_row();
+            });
+
+        ui.add_space(8.0);
+        ui.separator();
+
+        // Quick Actions
+        ui.label(RichText::new("Quick Actions:").strong());
+        ui.horizontal(|ui| {
+            let custom_cmd = self.resolve_attach_cmd(self.selected_row().as_ref(), &agent_name);
+            if ui.button("Attach (Focus)").clicked() {
+                self.dispatch_action(ActionRequest::Attach {
+                    agent: agent_name.clone(),
+                    custom_cmd,
+                });
+            }
+            if ui.button("Transcript").clicked() {
+                self.dispatch_action(ActionRequest::Transcript {
+                    agent: agent_name.clone(),
+                    generation: self.selection_generation,
+                    last_lines: 30,
+                });
+            }
+            if ui
+                .button(RichText::new("Kill").color(Color32::from_rgb(231, 76, 60)))
+                .clicked()
+            {
+                self.confirm_kill_target = Some(agent_name.clone());
+            }
+        });
+
+        // Inject field
+        ui.add_space(6.0);
+        ui.label(RichText::new("Inject Prompt/Command:").strong());
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.inject_input);
+            if ui.button("Inject").clicked() && !self.inject_input.trim().is_empty() {
+                self.dispatch_action(ActionRequest::Inject {
+                    agent: agent_name.clone(),
+                    text: self.inject_input.clone(),
+                    enter: true,
+                });
+            }
+        });
+
+        // Loaded Transcript View
+        if let Some((ref tr_agent, _, ref text)) = self.transcript_content
+            && tr_agent == &agent_name
+        {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.label(RichText::new("Recent Transcript:").strong());
+            egui::ScrollArea::vertical()
+                .max_height(250.0)
+                .show(ui, |ui| {
+                    ui.monospace(text);
+                });
+        }
+    }
+
     fn render_screen_tab(&mut self, ui: &mut egui::Ui) {
         let agent = self.selected_agent_name();
         ui.vertical(|ui| {
             // Screen output area
             egui::ScrollArea::both()
                 .id_salt("screen_terminal_scroll")
+                .auto_shrink([false, false])
                 .max_height(ui.available_height() - 40.0)
                 .show(ui, |ui| {
                     if let Some(ref selected) = agent {
@@ -660,6 +933,7 @@ impl HcomGraphApp {
                 let agent = self.selected_agent_name();
                 egui::ScrollArea::both()
                     .id_salt("transcript_scroll_tab")
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if let Some(ref selected) = agent {
                             if let Some((ref tr_agent, _, ref text)) = self.transcript_content {
@@ -680,6 +954,7 @@ impl HcomGraphApp {
                 let agent = self.selected_agent_name();
                 egui::ScrollArea::both()
                     .id_salt("events_scroll_tab")
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if let Some(ref selected) = agent {
                             if let Some((ref ev_agent, _, ref text)) = self.events_content {
@@ -704,6 +979,7 @@ impl HcomGraphApp {
                 });
                 egui::ScrollArea::both()
                     .id_salt("command_logs_scroll")
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if self.command_logs.is_empty() {
                             ui.weak("No command log entries.");
@@ -1126,6 +1402,14 @@ impl eframe::App for HcomGraphApp {
                     .clicked()
                 {
                     self.state.view_mode = "split_vertical".to_string();
+                    self.save_state();
+                }
+
+                if ui
+                    .selectable_label(self.state.show_side_panel, "Detail")
+                    .clicked()
+                {
+                    self.state.show_side_panel = !self.state.show_side_panel;
                     self.save_state();
                 }
 
@@ -1738,261 +2022,76 @@ impl eframe::App for HcomGraphApp {
         }
 
         // 6. Right Side Panel for Agent Details & Report
-        let has_selection =
-            self.canvas.selected_node.is_some() || self.canvas.selected_edge.is_some();
-        if has_selection {
-            egui::Panel::right("detail_side_panel").show(ui, |ui| {
-                ui.set_min_width(340.0);
-                ui.add_space(4.0);
+        if self.state.show_side_panel {
+            let mut close_panel = false;
+            egui::Panel::right("detail_side_panel")
+                .resizable(true)
+                .default_size(340.0)
+                .min_size(240.0)
+                .show(ui, |ui| {
+                    ui.set_min_width(240.0);
+                    ui.add_space(4.0);
 
-                // Error banner
-                let mut dismiss_err = false;
-                if let Some(ref err) = self.action_error {
+                    // Error banner
+                    let mut dismiss_err = false;
+                    if let Some(ref err) = self.action_error {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(Color32::from_rgb(231, 76, 60), format!("⚠ {}", err));
+                            if ui.small_button("✖").clicked() {
+                                dismiss_err = true;
+                            }
+                        });
+                        ui.separator();
+                    }
+                    if dismiss_err {
+                        self.action_error = None;
+                    }
+
+                    // Tab selector: Summary vs Report
                     ui.horizontal(|ui| {
-                        ui.colored_label(Color32::from_rgb(231, 76, 60), format!("⚠ {}", err));
-                        if ui.small_button("✖").clicked() {
-                            dismiss_err = true;
-                        }
+                        ui.selectable_value(
+                            &mut self.side_panel_tab,
+                            SidePanelTab::Summary,
+                            "Summary",
+                        );
+                        ui.selectable_value(
+                            &mut self.side_panel_tab,
+                            SidePanelTab::Report,
+                            "Report",
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("✖").on_hover_text("Close Detail Panel").clicked() {
+                                close_panel = true;
+                            }
+                        });
                     });
                     ui.separator();
-                }
-                if dismiss_err {
-                    self.action_error = None;
-                }
 
-                // Tab selector: Summary vs Report
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.side_panel_tab, SidePanelTab::Summary, "Summary");
-                    ui.selectable_value(&mut self.side_panel_tab, SidePanelTab::Report, "Report");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("✖").clicked() {
-                            self.canvas.selected_node = None;
-                            self.canvas.selected_edge = None;
+                    match self.side_panel_tab {
+                        SidePanelTab::Summary => {
+                            self.render_side_panel_summary(ui);
                         }
-                    });
+                        SidePanelTab::Report => {
+                            if let Some(row) = self.selected_row() {
+                                self.render_report_view(ui, &row);
+                            } else if let Some(idx) = self.canvas.selected_node {
+                                if let Some(node) = self.graph.graph.node_weight(idx) {
+                                    let row = TableRow::from_agent_node(node);
+                                    self.render_report_view(ui, &row);
+                                } else {
+                                    ui.weak("No agent selected");
+                                }
+                            } else {
+                                ui.weak("No agent selected");
+                            }
+                        }
+                    }
                 });
-                ui.separator();
 
-                match self.side_panel_tab {
-                    SidePanelTab::Summary => {
-                        // Render Selected Node Details
-                        if let Some(node_idx) = self.canvas.selected_node {
-                            if let Some(node) = self.graph.graph.node_weight(node_idx) {
-                                let agent_name = node.name.clone();
-                                let status_col = CanvasView::status_color(&node.status);
-
-                                ui.horizontal(|ui| {
-                                    ui.heading(RichText::new(&node.name).strong());
-                                    ui.colored_label(status_col, format!("{:?}", node.status));
-                                });
-                                ui.separator();
-
-                                egui::Grid::new("agent_meta_grid")
-                                    .num_columns(2)
-                                    .spacing([10.0, 6.0])
-                                    .show(ui, |ui| {
-                                        ui.label(RichText::new("Status Detail:").weak());
-                                        ui.label(
-                                            node.status_context
-                                                .as_deref()
-                                                .unwrap_or("none")
-                                                .to_string(),
-                                        );
-                                        ui.end_row();
-
-                                        ui.label(RichText::new("Status Age:").weak());
-                                        ui.label(format!("{}s", node.status_age_seconds));
-                                        ui.end_row();
-
-                                        ui.label(RichText::new("Unread Count:").weak());
-                                        ui.label(format!("{}", node.unread_count));
-                                        ui.end_row();
-
-                                        ui.label(RichText::new("CLI Tool:").weak());
-                                        ui.label(node.tool.as_deref().unwrap_or("-").to_string());
-                                        ui.end_row();
-
-                                        ui.label(RichText::new("Directory:").weak());
-                                        ui.label(
-                                            node.directory.as_deref().unwrap_or("-").to_string(),
-                                        );
-                                        ui.end_row();
-
-                                        ui.label(RichText::new("Parent:").weak());
-                                        ui.label(
-                                            node.parent_name
-                                                .as_deref()
-                                                .unwrap_or("none")
-                                                .to_string(),
-                                        );
-                                        ui.end_row();
-                                    });
-
-                                ui.add_space(8.0);
-                                ui.separator();
-
-                                // Quick Actions
-                                ui.label(RichText::new("Quick Actions:").strong());
-                                ui.horizontal(|ui| {
-                                    let custom_cmd = self.resolve_attach_cmd(
-                                        self.selected_row().as_ref(),
-                                        &agent_name,
-                                    );
-                                    if ui.button("Attach (Focus)").clicked() {
-                                        self.dispatch_action(ActionRequest::Attach {
-                                            agent: agent_name.clone(),
-                                            custom_cmd,
-                                        });
-                                    }
-                                    if ui.button("Transcript").clicked() {
-                                        self.dispatch_action(ActionRequest::Transcript {
-                                            agent: agent_name.clone(),
-                                            generation: self.selection_generation,
-                                            last_lines: 30,
-                                        });
-                                    }
-                                    if ui
-                                        .button(
-                                            RichText::new("Kill")
-                                                .color(Color32::from_rgb(231, 76, 60)),
-                                        )
-                                        .clicked()
-                                    {
-                                        self.confirm_kill_target = Some(agent_name.clone());
-                                    }
-                                });
-
-                                // Inject field
-                                ui.add_space(6.0);
-                                ui.label(RichText::new("Inject Prompt/Command:").strong());
-                                ui.horizontal(|ui| {
-                                    ui.text_edit_singleline(&mut self.inject_input);
-                                    if ui.button("Inject").clicked()
-                                        && !self.inject_input.trim().is_empty()
-                                    {
-                                        self.dispatch_action(ActionRequest::Inject {
-                                            agent: agent_name.clone(),
-                                            text: self.inject_input.clone(),
-                                            enter: true,
-                                        });
-                                    }
-                                });
-
-                                // Loaded Transcript View
-                                if let Some((ref tr_agent, _, ref text)) = self.transcript_content
-                                    && tr_agent == &agent_name
-                                {
-                                    ui.add_space(8.0);
-                                    ui.separator();
-                                    ui.label(RichText::new("Recent Transcript:").strong());
-                                    egui::ScrollArea::vertical()
-                                        .max_height(250.0)
-                                        .show(ui, |ui| {
-                                            ui.monospace(text);
-                                        });
-                                }
-                            }
-                        } else if let Some(edge_idx) = self.canvas.selected_edge {
-                            // Render Selected Edge Message History
-                            if let Some(edge_weight) = self.graph.graph.edge_weight(edge_idx) {
-                                match edge_weight {
-                                    EdgeKind::Message(msg) => {
-                                        let from = msg.from.clone();
-                                        let to = msg.to.clone();
-
-                                        ui.horizontal(|ui| {
-                                            ui.heading(
-                                                RichText::new(format!("{} ⇄ {}", from, to))
-                                                    .strong(),
-                                            );
-                                        });
-                                        ui.separator();
-
-                                        ui.label(format!(
-                                            "Total Messages (directed): {}",
-                                            msg.count
-                                        ));
-                                        ui.label(format!(
-                                            "Last Active: {}",
-                                            msg.last_timestamp.format("%Y-%m-%d %H:%M:%S UTC")
-                                        ));
-                                        if let Some(ref intent) = msg.last_intent {
-                                            ui.label(format!("Last Intent: {}", intent));
-                                        }
-                                        ui.label(format!("Last Preview: {}", msg.last_preview));
-                                        ui.separator();
-
-                                        ui.label(
-                                            RichText::new("Conversation History (last 50):")
-                                                .strong(),
-                                        );
-                                        let history =
-                                            self.graph.get_conversation_history(&from, &to);
-                                        if history.is_empty() {
-                                            ui.label("No recent stored messages.");
-                                        } else {
-                                            egui::ScrollArea::vertical().max_height(400.0).show(
-                                                ui,
-                                                |ui| {
-                                                    for m in &history {
-                                                        ui.group(|ui| {
-                                                            ui.horizontal(|ui| {
-                                                                let from_color = if m.from == from {
-                                                                    Color32::from_rgb(52, 152, 219)
-                                                                } else {
-                                                                    Color32::from_rgb(46, 204, 113)
-                                                                };
-                                                                ui.colored_label(
-                                                                    from_color,
-                                                                    RichText::new(&m.from).strong(),
-                                                                );
-                                                                ui.label("→");
-                                                                ui.label(&m.to);
-                                                                ui.with_layout(
-                                                                    egui::Layout::right_to_left(
-                                                                        egui::Align::Center,
-                                                                    ),
-                                                                    |ui| {
-                                                                        ui.weak(
-                                                                            m.ts.format("%H:%M:%S")
-                                                                                .to_string(),
-                                                                        );
-                                                                    },
-                                                                );
-                                                            });
-                                                            if let Some(ref intent) = m.intent {
-                                                                ui.weak(format!(
-                                                                    "intent: {}",
-                                                                    intent
-                                                                ));
-                                                            }
-                                                            ui.monospace(&m.text);
-                                                        });
-                                                        ui.add_space(2.0);
-                                                    }
-                                                },
-                                            );
-                                        }
-                                    }
-                                    EdgeKind::Spawn(spawn) => {
-                                        ui.heading(RichText::new("Spawn Relation").strong());
-                                        ui.separator();
-                                        ui.label(format!("Parent: {}", spawn.parent));
-                                        ui.label(format!("Child: {}", spawn.child));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    SidePanelTab::Report => {
-                        if let Some(row) = self.selected_row() {
-                            self.render_report_view(ui, &row);
-                        } else {
-                            ui.weak("No agent selected");
-                        }
-                    }
-                }
-            });
+            if close_panel {
+                self.state.show_side_panel = false;
+                self.save_state();
+            }
         }
 
         // 7. Bottom Inspection Panel (always at bottom, holding Screen/Transcript/Events/Log/Report of selected agent)
@@ -2004,10 +2103,12 @@ impl eframe::App for HcomGraphApp {
             .show(ui, |ui| {
                 self.render_bottom_tabs(ui);
             });
-        let cur_h = bottom_resp.response.rect.height();
-        if (cur_h - bottom_h).abs() > 2.0 && cur_h >= 80.0 {
-            self.state.sash_pos = Some(cur_h);
-            self.save_state();
+        if ui.input(|i| i.pointer.any_down()) {
+            let cur_h = bottom_resp.response.rect.height();
+            if (cur_h - bottom_h).abs() > 2.0 && cur_h >= 80.0 {
+                self.state.sash_pos = Some(cur_h);
+                self.save_state();
+            }
         }
 
         // 8. Main Central Panel: View modes (Graph, Table, Split H, Split V)
@@ -2026,10 +2127,13 @@ impl eframe::App for HcomGraphApp {
             }
             "split_horizontal" => {
                 let total_w = ui.available_width();
-                let left_w = (total_w * 0.5).max(150.0);
+                let total_h = ui.available_height();
+                let ratio = self.state.main_split_ratio.unwrap_or(0.5).clamp(0.15, 0.85);
+                let mut left_w = (total_w * ratio).clamp(100.0, (total_w - 100.0).max(100.0));
+
                 ui.horizontal(|ui| {
                     ui.allocate_ui_with_layout(
-                        egui::vec2(left_w, ui.available_height()),
+                        egui::vec2(left_w, total_h),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             let (_response, action) = self.canvas.show(
@@ -2041,17 +2145,42 @@ impl eframe::App for HcomGraphApp {
                             self.handle_canvas_action(action);
                         },
                     );
-                    ui.separator();
+
+                    let (sep_rect, sep_resp) =
+                        ui.allocate_exact_size(egui::vec2(6.0, total_h), egui::Sense::drag());
+                    if sep_resp.hovered() || sep_resp.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    if sep_resp.dragged() {
+                        let delta = sep_resp.drag_delta().x;
+                        left_w = (left_w + delta).clamp(100.0, (total_w - 100.0).max(100.0));
+                        if total_w > 0.0 {
+                            self.state.main_split_ratio = Some(left_w / total_w);
+                            self.save_state();
+                        }
+                    }
+                    let sep_color = if sep_resp.dragged() {
+                        Color32::from_rgb(52, 152, 219)
+                    } else if sep_resp.hovered() {
+                        Color32::from_rgb(100, 150, 200)
+                    } else {
+                        ui.visuals().widgets.noninteractive.bg_stroke.color
+                    };
+                    ui.painter().rect_filled(sep_rect, 0.0, sep_color);
+
                     self.render_table(ui, &filtered_rows);
                 });
             }
             _ => {
                 // "split" or "split_vertical"
+                let total_w = ui.available_width();
                 let total_h = ui.available_height();
-                let top_h = (total_h * 0.5).max(100.0);
+                let ratio = self.state.main_split_ratio.unwrap_or(0.5).clamp(0.15, 0.85);
+                let mut top_h = (total_h * ratio).clamp(80.0, (total_h - 80.0).max(80.0));
+
                 ui.vertical(|ui| {
                     ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), top_h),
+                        egui::vec2(total_w, top_h),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
                             let (_response, action) = self.canvas.show(
@@ -2063,7 +2192,29 @@ impl eframe::App for HcomGraphApp {
                             self.handle_canvas_action(action);
                         },
                     );
-                    ui.separator();
+
+                    let (sep_rect, sep_resp) =
+                        ui.allocate_exact_size(egui::vec2(total_w, 6.0), egui::Sense::drag());
+                    if sep_resp.hovered() || sep_resp.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    }
+                    if sep_resp.dragged() {
+                        let delta = sep_resp.drag_delta().y;
+                        top_h = (top_h + delta).clamp(80.0, (total_h - 80.0).max(80.0));
+                        if total_h > 0.0 {
+                            self.state.main_split_ratio = Some(top_h / total_h);
+                            self.save_state();
+                        }
+                    }
+                    let sep_color = if sep_resp.dragged() {
+                        Color32::from_rgb(52, 152, 219)
+                    } else if sep_resp.hovered() {
+                        Color32::from_rgb(100, 150, 200)
+                    } else {
+                        ui.visuals().widgets.noninteractive.bg_stroke.color
+                    };
+                    ui.painter().rect_filled(sep_rect, 0.0, sep_color);
+
                     self.render_table(ui, &filtered_rows);
                 });
             }

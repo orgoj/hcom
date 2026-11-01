@@ -2834,3 +2834,39 @@ fn test_canvas_filtering_excludes_hidden_nodes_and_edges() {
         "Edge must be hidden when target node is filtered out"
     );
 }
+
+#[test]
+fn test_graph_state_split_ratio_and_side_panel_defaults_and_roundtrip() {
+    use hcom_graph::config::GraphState;
+
+    // Check defaults
+    let default_state = GraphState::default();
+    assert!(
+        default_state.show_side_panel,
+        "Side panel should default to open"
+    );
+    assert!(
+        default_state.main_split_ratio.is_none(),
+        "Main split ratio defaults to None"
+    );
+
+    // Check json deserialization without the new fields uses defaults
+    let json_legacy = r#"{"view_mode":"split_horizontal"}"#;
+    let parsed: GraphState = serde_json::from_str(json_legacy).expect("parse legacy state");
+    assert!(
+        parsed.show_side_panel,
+        "Legacy state should default show_side_panel to true"
+    );
+    assert!(parsed.main_split_ratio.is_none());
+
+    // Check roundtrip with explicit values
+    let custom_state = GraphState {
+        show_side_panel: false,
+        main_split_ratio: Some(0.42),
+        ..Default::default()
+    };
+    let serialized = serde_json::to_string(&custom_state).expect("serialize");
+    let restored: GraphState = serde_json::from_str(&serialized).expect("deserialize");
+    assert!(!restored.show_side_panel);
+    assert_eq!(restored.main_split_ratio, Some(0.42));
+}
