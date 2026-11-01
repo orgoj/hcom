@@ -4,14 +4,15 @@ title: 'Inteligentní automatický layout grafu: hierarchie, shlukování a pokr
 status: To Do
 assignee: []
 created_date: '2026-11-01 14:53'
-updated_date: '2026-11-01 15:00'
+updated_date: '2026-11-01 15:12'
 labels: []
 dependencies: []
 references:
   - /home/michael/wiki/2-Knowledge/Research/2d-layout-agentni-graf-hcom-graph.md
 parent_task_id: TASK-77
+priority: medium
 type: feature
-ordinal: 86000
+ordinal: 87000
 ---
 
 ## Description

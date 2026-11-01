@@ -4,11 +4,13 @@ title: Konfigurovatelný hover popup a Rich Tooltip agenta
 status: To Do
 assignee: []
 created_date: '2026-11-01 14:53'
+updated_date: '2026-11-01 15:12'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
+priority: medium
 type: feature
-ordinal: 87000
+ordinal: 85000
 ---
 
 ## Description

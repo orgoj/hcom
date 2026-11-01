@@ -4,11 +4,13 @@ title: Animované impulzy zpráv a vizuální indikátory aktivity
 status: To Do
 assignee: []
 created_date: '2026-11-01 14:54'
+updated_date: '2026-11-01 15:12'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
+priority: low
 type: feature
-ordinal: 89000
+ordinal: 88000
 ---
 
 ## Description

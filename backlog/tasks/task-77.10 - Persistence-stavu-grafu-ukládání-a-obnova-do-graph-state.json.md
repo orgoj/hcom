@@ -4,11 +4,13 @@ title: 'Persistence stavu grafu: ukládání a obnova do graph-state.json'
 status: To Do
 assignee: []
 created_date: '2026-11-01 14:54'
+updated_date: '2026-11-01 15:12'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
+priority: medium
 type: feature
-ordinal: 88000
+ordinal: 86000
 ---
 
 ## Description
