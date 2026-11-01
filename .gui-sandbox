@@ -1,0 +1,5 @@
+ro ~/projects/hcom
+rw ~/.hcom
+pid host
+path ~/projects/hcom/target/release
+res 1280x900
