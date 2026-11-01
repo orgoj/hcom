@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-01 11:21'
-updated_date: '2026-11-01 11:27'
+updated_date: '2026-11-01 11:28'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -29,9 +29,9 @@ Implementace načítání a aktualizace dat z hcom (čtení stavu z hcom list/ev
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Založit crate contrib/hcom-graph s vlastním Cargo.toml (petgraph, serde, serde_json).
-2. Implementovat datové struktury v model.rs: AgentNode (stav, unread, parent), SpawnEdge (hierarchie) a MessageEdge (směr, počet zpráv, čas, intent).
-3. Implementovat AgentGraph nad petgraph::graph::DiGraph pro rychlé vyhledávání a aktualizaci uzlů/hran.
-4. Implementovat parser/ingestion z hcom výstupu (instance a message events).
-5. Pokrýt unit testy: správné sestavení grafu, cyklická komunikace, akumulace zpráv a parent-child vazby.
+1. Založit crate contrib/hcom-graph s vlastním Cargo.toml (petgraph, serde, serde_json, chrono).
+2. Implementovat datové struktury v model.rs: AgentNode (stav, unread, parent), SpawnEdge (hierarchie) a MessageEdge (směr, počet unikátních zpráv, timestamp, intent).
+3. Implementovat AgentGraph s explicitním kurzorem (last_event_id), deduplikační sadou (processed_event_ids: HashSet<u64>) a idempotentním ingestem apply_message_event().
+4. Definovat kontrakt zdroje dat v source.rs: initial load instancí (hcom list --json) a zpráv (hcom events --type message --full --all --last N), streaming s follow/reconnect (hcom events --follow --full --type message --after-id <last_id>) a obsluhu db_reset.
+5. Unit testy v tests/model_tests.rs: sestavení grafu, akumulace cyklických zpráv, idempotentní aplikace překrývajících se dávek (ochrana proti zdvojení count a regresi timestampu) a db_reset.
 <!-- SECTION:PLAN:END -->
