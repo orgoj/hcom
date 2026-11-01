@@ -1,8 +1,13 @@
 use crate::model::{AgentGraph, InstanceSnapshot, MessageEvent};
 use anyhow::{Context, Result, anyhow};
 use serde_json::Value;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+pub const DEFAULT_MAX_LINE_BYTES: usize = 1024 * 1024; // 1 MiB cap
+pub const DEFAULT_MAX_CMD_OUTPUT_BYTES: usize = 16 * 1024 * 1024; // 16 MiB cap for command output
 
 #[derive(Debug, PartialEq)]
 pub enum StreamItem {
@@ -57,11 +62,14 @@ pub fn parse_messages_snapshot(json_lines: &str) -> Result<Vec<MessageEvent>> {
         if trimmed.is_empty() {
             continue;
         }
+        if trimmed.len() > DEFAULT_MAX_LINE_BYTES {
+            // Drop lines exceeding line limit
+            continue;
+        }
         if let Ok(event) = serde_json::from_str::<MessageEvent>(trimmed) {
             events.push(event);
         }
     }
-    // Ascending sort by ID ensures sequential watermark advancement
     events.sort_by_key(|e| e.id);
     Ok(events)
 }
@@ -86,8 +94,72 @@ pub fn parse_stream_line(line: &str) -> StreamItem {
     StreamItem::Ignored
 }
 
-/// Abstraction for command execution to allow testing process flows
-/// (snapshots, streaming follow, reconnects and db_reset) without real hcom binary.
+/// Reads a single line from reader up to `cap` bytes.
+/// If `cap` is reached without finding a newline `\n`, it consumes and discards
+/// (drains) the rest of the oversized line until `\n` or EOF, returning an error.
+pub fn read_line_capped(reader: &mut impl BufRead, cap: usize) -> Result<Option<String>> {
+    let mut buf = Vec::new();
+    let mut total_read = 0;
+
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            if buf.is_empty() {
+                return Ok(None);
+            }
+            if total_read >= cap {
+                return Err(anyhow!(
+                    "Line reached or exceeded limit of {} bytes without newline",
+                    cap
+                ));
+            }
+            break;
+        }
+
+        if let Some(newline_pos) = available.iter().position(|&b| b == b'\n') {
+            let to_take = newline_pos + 1;
+            if total_read + to_take > cap {
+                reader.consume(to_take);
+                return Err(anyhow!(
+                    "Line exceeded maximum allowed size of {} bytes",
+                    cap
+                ));
+            }
+            buf.extend_from_slice(&available[..to_take]);
+            reader.consume(to_take);
+            break;
+        } else {
+            let len = available.len();
+            if total_read + len >= cap {
+                reader.consume(len);
+                // Drain rest of line until newline or EOF
+                loop {
+                    let next_buf = reader.fill_buf()?;
+                    if next_buf.is_empty() {
+                        break;
+                    }
+                    if let Some(pos) = next_buf.iter().position(|&b| b == b'\n') {
+                        reader.consume(pos + 1);
+                        break;
+                    }
+                    let nlen = next_buf.len();
+                    reader.consume(nlen);
+                }
+                return Err(anyhow!(
+                    "Line exceeded maximum allowed size of {} bytes; drained rest of line",
+                    cap
+                ));
+            }
+            buf.extend_from_slice(available);
+            total_read += len;
+            reader.consume(len);
+        }
+    }
+
+    let s = String::from_utf8(buf).context("line was not valid utf-8")?;
+    Ok(Some(s))
+}
+
 pub trait CommandExecutor: Send + Sync {
     fn run_command(&self, argv: &[String]) -> Result<String>;
     fn spawn_stream(&self, argv: &[String]) -> Result<Box<dyn StreamHandle>>;
@@ -102,25 +174,7 @@ pub struct SystemCommandExecutor;
 
 impl CommandExecutor for SystemCommandExecutor {
     fn run_command(&self, argv: &[String]) -> Result<String> {
-        if argv.is_empty() {
-            return Err(anyhow!("empty argv"));
-        }
-        let output = Command::new(&argv[0])
-            .args(&argv[1..])
-            .output()
-            .with_context(|| format!("failed to execute {}", argv[0]))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!(
-                "command {} failed (status {:?}): {}",
-                argv.join(" "),
-                output.status.code(),
-                stderr
-            ));
-        }
-
-        String::from_utf8(output.stdout).context("command output was not valid utf-8")
+        self.run_command_capped(argv, DEFAULT_MAX_CMD_OUTPUT_BYTES)
     }
 
     fn spawn_stream(&self, argv: &[String]) -> Result<Box<dyn StreamHandle>> {
@@ -142,20 +196,83 @@ impl CommandExecutor for SystemCommandExecutor {
         Ok(Box::new(SystemStreamHandle {
             child,
             reader: BufReader::new(stdout),
+            cap: DEFAULT_MAX_LINE_BYTES,
         }))
+    }
+}
+
+impl SystemCommandExecutor {
+    pub fn run_command_capped(&self, argv: &[String], max_bytes: usize) -> Result<String> {
+        if argv.is_empty() {
+            return Err(anyhow!("empty argv"));
+        }
+        let mut child = Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("failed to execute {}", argv[0]))?;
+
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("missing stdout"))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow!("missing stderr"))?;
+
+        // Concurrently drain stderr in a thread to prevent OS pipe buffer deadlock
+        let stderr_handle = std::thread::spawn(move || {
+            let mut err_buf = Vec::new();
+            let mut take = Read::take(&mut stderr, 64 * 1024);
+            let _ = take.read_to_end(&mut err_buf);
+            // Drain any remaining stderr to sink so child never blocks and never receives SIGPIPE
+            let mut sink = std::io::sink();
+            let _ = std::io::copy(&mut stderr, &mut sink);
+            err_buf
+        });
+
+        let mut out_buf = Vec::new();
+        let read_bytes =
+            Read::take(&mut stdout, (max_bytes + 1) as u64).read_to_end(&mut out_buf)?;
+        if read_bytes > max_bytes {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stderr_handle.join();
+            return Err(anyhow!(
+                "command {} output exceeded maximum allowed size of {} bytes",
+                argv[0],
+                max_bytes
+            ));
+        }
+
+        let status = child.wait()?;
+        let err_buf = stderr_handle.join().unwrap_or_default();
+
+        if !status.success() {
+            let stderr_str = String::from_utf8_lossy(&err_buf);
+            return Err(anyhow!(
+                "command {} failed (status {:?}): {}",
+                argv.join(" "),
+                status.code(),
+                stderr_str
+            ));
+        }
+
+        String::from_utf8(out_buf).context("command output was not valid utf-8")
     }
 }
 
 pub struct SystemStreamHandle {
     child: Child,
     reader: BufReader<ChildStdout>,
+    cap: usize,
 }
 
 impl StreamHandle for SystemStreamHandle {
     fn next_line(&mut self) -> Result<Option<String>> {
-        let mut line = String::new();
-        let bytes = self.reader.read_line(&mut line)?;
-        if bytes == 0 { Ok(None) } else { Ok(Some(line)) }
+        read_line_capped(&mut self.reader, self.cap)
     }
 
     fn kill(&mut self) {
@@ -174,6 +291,10 @@ impl Drop for SystemStreamHandle {
 pub struct HcomSyncWorker<E: CommandExecutor> {
     pub executor: E,
     pub history_last_n: usize,
+    pub initial_backoff: Duration,
+    pub max_backoff: Duration,
+    pub current_backoff: Mutex<Duration>,
+    pub reconnect_deadline: Mutex<Option<Instant>>,
 }
 
 impl HcomSyncWorker<SystemCommandExecutor> {
@@ -181,6 +302,10 @@ impl HcomSyncWorker<SystemCommandExecutor> {
         Self {
             executor: SystemCommandExecutor,
             history_last_n,
+            initial_backoff: Duration::from_millis(500),
+            max_backoff: Duration::from_secs(30),
+            current_backoff: Mutex::new(Duration::from_millis(500)),
+            reconnect_deadline: Mutex::new(None),
         }
     }
 }
@@ -190,10 +315,13 @@ impl<E: CommandExecutor> HcomSyncWorker<E> {
         Self {
             executor,
             history_last_n,
+            initial_backoff: Duration::from_millis(500),
+            max_backoff: Duration::from_secs(30),
+            current_backoff: Mutex::new(Duration::from_millis(500)),
+            reconnect_deadline: Mutex::new(None),
         }
     }
 
-    /// Fetches and applies instances from `hcom list --json`.
     pub fn refresh_instances(&self, graph: &mut AgentGraph) -> Result<()> {
         let argv = build_instances_cmd();
         let json_out = self.executor.run_command(&argv)?;
@@ -202,7 +330,6 @@ impl<E: CommandExecutor> HcomSyncWorker<E> {
         Ok(())
     }
 
-    /// Fetches and applies message history snapshot from active DB.
     pub fn refresh_messages_snapshot(&self, graph: &mut AgentGraph) -> Result<()> {
         let argv = build_messages_snapshot_cmd(self.history_last_n);
         let lines_out = self.executor.run_command(&argv)?;
@@ -213,77 +340,104 @@ impl<E: CommandExecutor> HcomSyncWorker<E> {
         Ok(())
     }
 
-    /// Performs complete initial sync: instances and message snapshot.
     pub fn initial_sync(&self, graph: &mut AgentGraph) -> Result<()> {
         self.refresh_instances(graph)?;
         self.refresh_messages_snapshot(graph)?;
         Ok(())
     }
 
-    /// Spawns follower child process starting from `graph.last_event_id`.
     pub fn spawn_follower(&self, graph: &AgentGraph) -> Result<Box<dyn StreamHandle>> {
         let argv = build_messages_follow_cmd(graph.last_event_id);
         self.executor.spawn_stream(&argv)
     }
 
-    /// Synchronous and deterministic recovery upon `db_reset`:
-    /// 1. Kill existing follower process.
-    /// 2. Clear graph events and reset watermark.
-    /// 3. Fetch fresh instances and sorted messages snapshot from new DB.
-    /// 4. Spawn fresh follower stream with updated watermark.
     pub fn handle_db_reset(
         &self,
         graph: &mut AgentGraph,
         follower: &mut Option<Box<dyn StreamHandle>>,
     ) -> Result<()> {
-        // Step 1: Kill current follower immediately
         if let Some(mut handle) = follower.take() {
             handle.kill();
         }
 
-        // Step 2: Reset events in graph
         graph.reset_events();
-
-        // Step 3: Reload fresh snapshot
         self.initial_sync(graph)?;
 
-        // Step 4: Restart follow stream with new watermark
         let new_follower = self.spawn_follower(graph)?;
         *follower = Some(new_follower);
+
+        // Reset backoff on full reset resync
+        *self.current_backoff.lock().unwrap() = self.initial_backoff;
+        *self.reconnect_deadline.lock().unwrap() = None;
 
         Ok(())
     }
 
-    /// Processes a single stream line or handles reconnect / db_reset.
+    fn schedule_backoff(&self) {
+        let mut b = self.current_backoff.lock().unwrap();
+        *self.reconnect_deadline.lock().unwrap() = Some(Instant::now() + *b);
+        *b = (*b * 2).min(self.max_backoff);
+    }
+
+    /// Processes a single stream line or handles non-blocking reconnect / db_reset.
     pub fn step_stream(
         &self,
         graph: &mut AgentGraph,
         follower: &mut Option<Box<dyn StreamHandle>>,
     ) -> Result<bool> {
+        // If in backoff delay, check whether deadline passed
+        if let Some(deadline) = *self.reconnect_deadline.lock().unwrap() {
+            if Instant::now() < deadline {
+                return Ok(false);
+            }
+            *self.reconnect_deadline.lock().unwrap() = None;
+        }
+
         let Some(handle) = follower else {
-            // No active follower, spawn one
-            let new_handle = self.spawn_follower(graph)?;
-            *follower = Some(new_handle);
-            return Ok(false);
+            match self.spawn_follower(graph) {
+                Ok(new_handle) => {
+                    *follower = Some(new_handle);
+                    return Ok(false);
+                }
+                Err(_) => {
+                    self.schedule_backoff();
+                    return Ok(false);
+                }
+            }
         };
 
-        match handle.next_line()? {
-            Some(line) => match parse_stream_line(&line) {
-                StreamItem::Message(msg) => Ok(graph.apply_message_event(&msg)),
+        match handle.next_line() {
+            Ok(Some(line)) => match parse_stream_line(&line) {
+                StreamItem::Message(msg) => {
+                    let updated = graph.apply_message_event(&msg);
+                    if updated {
+                        *self.current_backoff.lock().unwrap() = self.initial_backoff;
+                        *self.reconnect_deadline.lock().unwrap() = None;
+                    }
+                    Ok(updated)
+                }
                 StreamItem::DbReset => {
                     self.handle_db_reset(graph, follower)?;
                     Ok(true)
                 }
                 StreamItem::Ignored => Ok(false),
             },
-            None => {
-                // Stream reached EOF or process died; reconnect
+            Ok(None) => {
+                // Stream reached EOF; kill old handle and schedule non-blocking backoff
                 let mut old = follower.take();
                 if let Some(ref mut h) = old {
                     h.kill();
                 }
-                let new_handle = self.spawn_follower(graph)?;
-                *follower = Some(new_handle);
+                self.schedule_backoff();
+                Ok(false)
+            }
+            Err(_) => {
+                // I/O error reading line; schedule backoff
+                let mut old = follower.take();
+                if let Some(ref mut h) = old {
+                    h.kill();
+                }
+                self.schedule_backoff();
                 Ok(false)
             }
         }

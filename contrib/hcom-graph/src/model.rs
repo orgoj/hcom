@@ -3,6 +3,150 @@ use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Scans UTF-8 bytes and strips ECMA-48 CSI and OSC escape sequences
+/// (both 7-bit and UTF-8 2-byte C1 encodings). Discards unterminated
+/// sequences fail-closed.
+pub fn strip_ansi_osc(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+
+    while i < bytes.len() {
+        // Check for 7-bit CSI: ESC [ (\x1b[)
+        if bytes[i] == 0x1B && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            i += 2;
+            let mut found_final = false;
+            while i < bytes.len() {
+                let b = bytes[i];
+                i += 1;
+                if (0x40..=0x7E).contains(&b) {
+                    found_final = true;
+                    break;
+                } else if (0x30..=0x3F).contains(&b) || (0x20..=0x2F).contains(&b) {
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            if !found_final {
+                // Fail-closed on unterminated sequence: discard to end
+                break;
+            }
+            continue;
+        }
+
+        // Check for UTF-8 C1 CSI: \u{009B} = [0xC2, 0x9B]
+        if bytes[i] == 0xC2 && i + 1 < bytes.len() && bytes[i + 1] == 0x9B {
+            i += 2;
+            let mut found_final = false;
+            while i < bytes.len() {
+                let b = bytes[i];
+                i += 1;
+                if (0x40..=0x7E).contains(&b) {
+                    found_final = true;
+                    break;
+                } else if (0x30..=0x3F).contains(&b) || (0x20..=0x2F).contains(&b) {
+                    continue;
+                } else {
+                    break;
+                }
+            }
+            if !found_final {
+                break;
+            }
+            continue;
+        }
+
+        // Check for 7-bit OSC: ESC ] (\x1b])
+        if bytes[i] == 0x1B && i + 1 < bytes.len() && bytes[i + 1] == b']' {
+            i += 2;
+            let mut found_term = false;
+            while i < bytes.len() {
+                if bytes[i] == 0x07 {
+                    i += 1;
+                    found_term = true;
+                    break;
+                } else if (bytes[i] == 0x1B && i + 1 < bytes.len() && bytes[i + 1] == b'\\')
+                    || (bytes[i] == 0xC2 && i + 1 < bytes.len() && bytes[i + 1] == 0x9C)
+                {
+                    i += 2;
+                    found_term = true;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            if !found_term {
+                // Fail-closed on unterminated OSC: discard to end
+                break;
+            }
+            continue;
+        }
+
+        // Check for UTF-8 C1 OSC: \u{009D} = [0xC2, 0x9D]
+        if bytes[i] == 0xC2 && i + 1 < bytes.len() && bytes[i + 1] == 0x9D {
+            i += 2;
+            let mut found_term = false;
+            while i < bytes.len() {
+                if bytes[i] == 0x07 {
+                    i += 1;
+                    found_term = true;
+                    break;
+                } else if (bytes[i] == 0x1B && i + 1 < bytes.len() && bytes[i + 1] == b'\\')
+                    || (bytes[i] == 0xC2 && i + 1 < bytes.len() && bytes[i + 1] == 0x9C)
+                {
+                    i += 2;
+                    found_term = true;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            if !found_term {
+                break;
+            }
+            continue;
+        }
+
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Sanitizes display strings: removes ANSI/OSC escapes, ALL C0/C1 control chars
+/// (including \n, \r, \t), bidi overrides, and zero-width characters.
+pub fn sanitize_display_string(input: &str) -> String {
+    let stripped = strip_ansi_osc(input);
+    stripped
+        .chars()
+        .filter(|&c| {
+            if c.is_control() {
+                return false;
+            }
+            // Zero-width characters: U+200B (ZWSP), U+200C (ZWNJ), U+200D (ZWJ), U+FEFF (BOM)
+            if matches!(c, '\u{200B}'..='\u{200D}' | '\u{FEFF}') {
+                return false;
+            }
+            // Bidi override characters: U+202A..=U+202E, U+2066..=U+2069
+            if matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') {
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
+/// Collision rule: identity string must be non-empty, must have no leading/trailing
+/// whitespace, and must not be altered by sanitization.
+pub fn is_valid_identity(name: &str) -> bool {
+    if name.is_empty() || name != name.trim() {
+        return false;
+    }
+    sanitize_display_string(name) == name
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
@@ -122,7 +266,21 @@ impl AgentGraph {
         self.node_map.get(name).copied()
     }
 
-    pub fn upsert_agent(&mut self, node: AgentNode) -> NodeIndex {
+    pub fn upsert_agent(&mut self, mut node: AgentNode) -> Option<NodeIndex> {
+        if !is_valid_identity(&node.name) {
+            return None;
+        }
+
+        node.status_context = node.status_context.as_deref().map(sanitize_display_string);
+        node.directory = node.directory.as_deref().map(sanitize_display_string);
+        node.tool = node.tool.as_deref().map(sanitize_display_string);
+
+        if let Some(ref p) = node.parent_name
+            && !is_valid_identity(p)
+        {
+            node.parent_name = None;
+        }
+
         let name = node.name.clone();
         let new_parent = node.parent_name.clone();
 
@@ -141,7 +299,6 @@ impl AgentGraph {
             (idx, None)
         };
 
-        // If parent changed or was removed, remove old SpawnEdge
         if old_parent != new_parent
             && let Some(old_p) = old_parent
         {
@@ -151,7 +308,6 @@ impl AgentGraph {
             }
         }
 
-        // Add new SpawnEdge if parent is specified
         if let Some(parent) = new_parent
             && !parent.is_empty()
             && parent != name
@@ -171,7 +327,7 @@ impl AgentGraph {
             }
         }
 
-        node_idx
+        Some(node_idx)
     }
 
     fn ensure_node_placeholder(&mut self, name: &str) -> NodeIndex {
@@ -196,6 +352,9 @@ impl AgentGraph {
 
     pub fn apply_instance_snapshot(&mut self, snapshots: &[InstanceSnapshot]) {
         for s in snapshots {
+            if !is_valid_identity(&s.name) {
+                continue;
+            }
             let node = AgentNode {
                 name: s.name.clone(),
                 status: AgentStatus::from_raw(s.status.as_deref()),
@@ -217,7 +376,9 @@ impl AgentGraph {
         }
 
         let sender = &event.data.from;
-        if sender.is_empty() {
+        if !is_valid_identity(sender) {
+            // Safely skip invalid sender, but advance watermark so we don't re-loop on reconnect
+            self.last_event_id = event.id;
             return false;
         }
 
@@ -226,18 +387,20 @@ impl AgentGraph {
             recipients = event.data.mentions.clone();
         }
 
-        // Retain only valid, distinct non-self recipients.
+        // Retain only valid, distinct non-self recipients
         recipients.sort();
         recipients.dedup();
-        recipients.retain(|r| !r.is_empty() && r != sender);
+        recipients.retain(|r| is_valid_identity(r) && r != sender);
 
         if recipients.is_empty() {
             // Still advance watermark even if no valid recipients.
             self.last_event_id = event.id;
-            return true;
+            return false;
         }
 
         let sender_idx = self.ensure_node_placeholder(sender);
+        let preview = sanitize_preview(&event.data.text);
+        let intent = event.data.intent.as_deref().map(sanitize_display_string);
 
         for recipient in recipients {
             let recipient_idx = self.ensure_node_placeholder(&recipient);
@@ -247,8 +410,8 @@ impl AgentGraph {
                 if let Some(EdgeKind::Message(msg_edge)) = self.graph.edge_weight_mut(edge_idx) {
                     msg_edge.count += 1;
                     msg_edge.last_timestamp = event.ts;
-                    msg_edge.last_intent = event.data.intent.clone();
-                    msg_edge.last_preview = sanitize_preview(&event.data.text);
+                    msg_edge.last_intent = intent.clone();
+                    msg_edge.last_preview = preview.clone();
                 }
             } else {
                 let msg_edge = MessageEdge {
@@ -256,8 +419,8 @@ impl AgentGraph {
                     to: recipient,
                     count: 1,
                     last_timestamp: event.ts,
-                    last_intent: event.data.intent.clone(),
-                    last_preview: sanitize_preview(&event.data.text),
+                    last_intent: intent.clone(),
+                    last_preview: preview.clone(),
                 };
                 let edge_idx =
                     self.graph
@@ -271,13 +434,11 @@ impl AgentGraph {
     }
 
     pub fn reset_events(&mut self) {
-        // StableDiGraph retains stable edge indices for surviving edges!
         self.graph
             .retain_edges(|frozen, edge_idx| !matches!(frozen[edge_idx], EdgeKind::Message(_)));
         self.message_edges.clear();
         self.last_event_id = 0;
 
-        // Reset unread counts on nodes
         for node in self.graph.node_weights_mut() {
             node.unread_count = 0;
         }
@@ -323,7 +484,8 @@ impl AgentGraph {
 }
 
 fn sanitize_preview(text: &str) -> String {
-    let single_line = text.lines().next().unwrap_or("").trim();
+    let sanitized = sanitize_display_string(text);
+    let single_line = sanitized.trim();
     if single_line.chars().count() > 120 {
         let truncated: String = single_line.chars().take(117).collect();
         format!("{truncated}...")
