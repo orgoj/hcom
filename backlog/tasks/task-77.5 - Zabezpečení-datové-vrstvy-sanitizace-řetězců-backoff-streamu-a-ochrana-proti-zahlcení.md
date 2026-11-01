@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-01 11:57'
-updated_date: '2026-11-01 11:59'
+updated_date: '2026-11-01 12:00'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -32,7 +32,7 @@ Zapracování bezpečnostních nálezů z review agentem bin: 1. Důkladná sani
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. model.rs: implementace plného ANSI/OSC stripingu (včetně payloadů) a odstranění C0/C1, bidi overrides a zero-width znaků pro všechna textová pole. Kolizní pravidlo pro identity: pokud sanitizace změní identitu (raw != sanitized), entita je neplatná a přeskočí se.
-2. source.rs: čtení řádek s limitem 1 MiB a drainem zbytku řádky do dalšího \n (zamezení rozpadu na podřádky). Ne-blokující exponenciální backoff pro GUI pomocí deadline (Instant) pro EOF i I/O chyby.
-3. tests/model_tests.rs: unit testy pro ANSI/OSC payload striping, kolizní pravidlo identit, čtení řádky s drainem nadlimitního vstupu a neblokující backoff.
+1. model.rs: ECMA-48 stavový automat/scanner pro 7-bit i C1 CSI a OSC sekvence (včetně subparametrů :, parametrů ?, intermediate bytes, final bytes @..~ a ST/BEL ukončení). Následné čištění C0/C1, bidi overrides a zero-width znaků. Kolizní pravidlo: pokud raw != sanitized pro jméno agenta, entita je neplatná a přeskočí se.
+2. source.rs: čtení řádky s limitem 1 MiB a drainem zbytku řádky do dalšího \n. Ne-blokující exponenciální backoff s počátkem na 500 ms (další retry se zdvojnásobují až do 30 s) a sledováním deadline (Instant).
+3. tests/model_tests.rs: unit testy pro ECMA-48 escape sekvence (subparametry, ~, C1 OSC/CSI, BEL/ST), kolizní pravidlo, capped read s drainem a časování neblokujícího backoffu.
 <!-- SECTION:PLAN:END -->
