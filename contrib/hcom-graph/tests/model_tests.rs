@@ -3259,3 +3259,357 @@ fn test_app_window_refresh_caches_clamps_and_persists() {
     app.refresh_window_counts(now);
     assert!(app.canvas.edge_counts.is_none());
 }
+
+fn layout_snap(name: &str, parent: Option<&str>) -> InstanceSnapshot {
+    InstanceSnapshot {
+        name: name.into(),
+        status: Some("active".into()),
+        status_context: None,
+        status_age_seconds: None,
+        unread_count: None,
+        parent_name: parent.map(Into::into),
+        directory: None,
+        tool: None,
+    }
+}
+
+fn node_pos(layout: &GraphLayout, graph: &AgentGraph, name: &str) -> Pos2 {
+    layout.nodes[&graph.get_node_index(name).unwrap()].pos
+}
+
+fn min_pair_distance(layout: &GraphLayout) -> f32 {
+    let ps: Vec<Pos2> = layout.nodes.values().map(|p| p.pos).collect();
+    let mut min = f32::MAX;
+    for i in 0..ps.len() {
+        for j in i + 1..ps.len() {
+            min = min.min(ps[i].distance(ps[j]));
+        }
+    }
+    min
+}
+
+#[test]
+fn test_spawn_depths_roots_chain_cycle_and_placeholder() {
+    use hcom_graph::layout::spawn_depths;
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[
+        layout_snap("root", None),
+        layout_snap("child", Some("root")),
+        layout_snap("grand", Some("child")),
+        layout_snap("sibling", Some("root")),
+        // Parent only known as a placeholder: it is a root.
+        layout_snap("orphan", Some("ghost")),
+        // Spawn cycle without a root.
+        layout_snap("cyc_a", Some("cyc_b")),
+        layout_snap("cyc_b", Some("cyc_a")),
+    ]);
+    let d = spawn_depths(&graph);
+    let depth = |n: &str| d[&graph.get_node_index(n).unwrap()];
+    assert_eq!(depth("root"), 0);
+    assert_eq!(depth("child"), 1);
+    assert_eq!(depth("sibling"), 1);
+    assert_eq!(depth("grand"), 2);
+    assert_eq!(depth("ghost"), 0);
+    assert_eq!(depth("orphan"), 1);
+    let mut cyc = [depth("cyc_a"), depth("cyc_b")];
+    cyc.sort();
+    assert_eq!(cyc, [0, 1]);
+    assert_eq!(d.len(), graph.node_count());
+}
+
+#[test]
+fn test_tree_targets_layers_siblings_and_centered_parent() {
+    use hcom_graph::layout::tree_targets;
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[
+        layout_snap("root", None),
+        layout_snap("a", Some("root")),
+        layout_snap("b", Some("root")),
+        layout_snap("c", Some("root")),
+        layout_snap("a1", Some("a")),
+    ]);
+    let slot = 100.0;
+    let t = tree_targets(&graph, 130.0, slot);
+    let p = |n: &str| t[&graph.get_node_index(n).unwrap()];
+    assert!((p("a").y - p("root").y - 130.0).abs() < 1e-3);
+    assert!((p("a1").y - p("a").y - 130.0).abs() < 1e-3);
+    // Siblings at least one slot apart, in name order.
+    assert!(p("b").x - p("a").x >= slot - 1e-3);
+    assert!(p("c").x - p("b").x >= slot - 1e-3);
+    // Parent centered over its first and last child.
+    assert!((p("root").x - (p("a").x + p("c").x) / 2.0).abs() < 1e-3);
+}
+
+#[test]
+fn test_hierarchy_mode_converges_to_layers_and_reparent_moves_subtree() {
+    use hcom_graph::layout::LayoutMode;
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[
+        layout_snap("root", None),
+        layout_snap("kid", Some("root")),
+        layout_snap("other", None),
+    ]);
+    let mut layout = GraphLayout::new();
+    layout.set_mode(LayoutMode::Hierarchy);
+    layout.sync_nodes(&graph);
+    for _ in 0..2000 {
+        layout.step(&graph, 0.016);
+    }
+    let dy = node_pos(&layout, &graph, "kid").y - node_pos(&layout, &graph, "root").y;
+    assert!(
+        (dy - layout.h_layer).abs() < 25.0,
+        "kid one layer below root, dy {dy}"
+    );
+
+    // Re-parent kid under other: its target follows the new parent.
+    graph.apply_instance_snapshot(&[layout_snap("kid", Some("other"))]);
+    layout.wake_up();
+    for _ in 0..2000 {
+        layout.step(&graph, 0.016);
+    }
+    let kid = node_pos(&layout, &graph, "kid");
+    let other = node_pos(&layout, &graph, "other");
+    assert!((kid.y - other.y - layout.h_layer).abs() < 25.0);
+    assert!(
+        (kid.x - other.x).abs() < 40.0,
+        "kid centered under its new parent"
+    );
+}
+
+#[test]
+fn test_cluster_mode_pulls_heavy_communicators_closer() {
+    let mut graph = AgentGraph::new();
+    let now = Utc::now();
+    let mut id = 0;
+    for _ in 0..100 {
+        id += 1;
+        graph.apply_message_event(&window_msg(id, now, "a", "b"));
+    }
+    id += 1;
+    graph.apply_message_event(&window_msg(id, now, "c", "d"));
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+    for _ in 0..3000 {
+        layout.step(&graph, 0.016);
+    }
+    let ab = node_pos(&layout, &graph, "a").distance(node_pos(&layout, &graph, "b"));
+    let cd = node_pos(&layout, &graph, "c").distance(node_pos(&layout, &graph, "d"));
+    assert!(
+        ab < cd,
+        "heavy pair {ab} must be closer than light pair {cd}"
+    );
+    // Sublinear springs: stiffness grows with ln(1 + count), rest length shrinks.
+    let (k1, l1) = layout.spring_params(1);
+    let (k100, l100) = layout.spring_params(100);
+    assert!(k100 > k1 && k100 < k1 * 100.0);
+    assert!(l100 < l1 && l100 >= layout.l_min);
+}
+
+#[test]
+fn test_collision_separates_coincident_nodes_and_respects_pins() {
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[
+        layout_snap("p", None),
+        layout_snap("q", None),
+        layout_snap("r", None),
+    ]);
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+    let (p, q, r) = (
+        graph.get_node_index("p").unwrap(),
+        graph.get_node_index("q").unwrap(),
+        graph.get_node_index("r").unwrap(),
+    );
+    // All on the same point, p pinned (dragged).
+    layout.set_node_pos(p, Pos2::ZERO, true);
+    layout.set_node_pos(q, Pos2::ZERO, false);
+    layout.set_node_pos(r, Pos2::ZERO, false);
+    for _ in 0..200 {
+        layout.step(&graph, 0.016);
+    }
+    assert_eq!(
+        layout.nodes[&p].pos,
+        Pos2::ZERO,
+        "pinned node does not move"
+    );
+    let min = min_pair_distance(&layout);
+    assert!(min.is_finite());
+    assert!(
+        min >= 2.0 * layout.collision_radius - 0.5,
+        "nodes must not overlap, min {min}"
+    );
+
+    // Two pinned coincident nodes cannot be separated: the layout still sleeps.
+    layout.set_node_pos(q, Pos2::ZERO, true);
+    layout.set_node_pos(r, Pos2::new(500.0, 500.0), true);
+    let mut slept = false;
+    for _ in 0..50 {
+        layout.step(&graph, 0.016);
+        if layout.is_sleeping {
+            slept = true;
+            break;
+        }
+    }
+    assert!(slept, "unseparable pinned pairs must not block sleep");
+}
+
+#[test]
+fn test_collision_pass_resumes_under_tight_budget() {
+    let mut graph = AgentGraph::new();
+    let snap: Vec<InstanceSnapshot> = (0..400)
+        .map(|i| layout_snap(&format!("n{i:03}"), None))
+        .collect();
+    graph.apply_instance_snapshot(&snap);
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+    // Spread nodes far apart, except the last two in pair order on one point.
+    let mut idxs: Vec<_> = layout.nodes.keys().copied().collect();
+    idxs.sort();
+    for (k, idx) in idxs.iter().enumerate() {
+        layout.set_node_pos(*idx, Pos2::new(k as f32 * 1000.0, 0.0), false);
+    }
+    let last = idxs[idxs.len() - 1];
+    let prev = idxs[idxs.len() - 2];
+    layout.set_node_pos(last, Pos2::new(5_000_000.0, 0.0), false);
+    layout.set_node_pos(prev, Pos2::new(5_000_000.0, 0.0), false);
+    layout.max_step_duration = Duration::from_micros(300);
+    for _ in 0..3000 {
+        layout.step(&graph, 0.016);
+        let d = layout.nodes[&last].pos.distance(layout.nodes[&prev].pos);
+        if d >= 2.0 * layout.collision_radius - 0.5 {
+            return;
+        }
+    }
+    panic!("overlap at the end of the pair order was never resolved");
+}
+
+#[test]
+fn test_manual_mode_does_not_move_nodes_but_places_new_ones() {
+    use hcom_graph::layout::LayoutMode;
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[layout_snap("m1", None), layout_snap("m2", None)]);
+    let mut layout = GraphLayout::new();
+    layout.set_mode(LayoutMode::Manual);
+    layout.sync_nodes(&graph);
+    let before: Vec<Pos2> = ["m1", "m2"]
+        .iter()
+        .map(|n| node_pos(&layout, &graph, n))
+        .collect();
+    assert_eq!(layout.step(&graph, 0.016), 0.0);
+    let after: Vec<Pos2> = ["m1", "m2"]
+        .iter()
+        .map(|n| node_pos(&layout, &graph, n))
+        .collect();
+    assert_eq!(before, after);
+
+    graph.apply_instance_snapshot(&[layout_snap("m3", Some("m1"))]);
+    layout.sync_nodes(&graph);
+    let d = node_pos(&layout, &graph, "m3").distance(node_pos(&layout, &graph, "m1"));
+    assert!(d < 200.0, "new node placed next to its parent, d {d}");
+
+    // A finished drag does not leave the node pinned for later modes.
+    let m1 = graph.get_node_index("m1").unwrap();
+    layout.set_node_pos(m1, Pos2::new(10.0, 10.0), true);
+    layout.set_node_pos(m1, Pos2::new(10.0, 10.0), false);
+    assert!(!layout.nodes[&m1].pinned);
+    layout.set_mode(LayoutMode::Cluster);
+    assert!(!layout.is_sleeping);
+    assert_eq!(
+        (layout.cursor_i, layout.cursor_j, layout.edge_cursor),
+        (0, 1, 0)
+    );
+}
+
+#[test]
+fn test_initial_placement_near_placeholder_parent_and_deterministic_spiral() {
+    let build = || {
+        let mut graph = AgentGraph::new();
+        // Child arrives first; its parent exists only as a placeholder.
+        graph.apply_instance_snapshot(&[layout_snap("kid", Some("dad"))]);
+        graph.apply_instance_snapshot(&[
+            layout_snap("s1", None),
+            layout_snap("s2", None),
+            layout_snap("s3", None),
+        ]);
+        let mut layout = GraphLayout::new();
+        layout.sync_nodes(&graph);
+        (graph, layout)
+    };
+    let (graph, layout) = build();
+    let d = node_pos(&layout, &graph, "kid").distance(node_pos(&layout, &graph, "dad"));
+    assert!(d < 200.0, "child next to its placeholder parent, d {d}");
+
+    // Spiral: deterministic and not all on one circle.
+    let (graph2, layout2) = build();
+    let radii: Vec<f32> = ["s1", "s2", "s3"]
+        .iter()
+        .map(|n| {
+            let p = node_pos(&layout, &graph, n);
+            assert_eq!(p, node_pos(&layout2, &graph2, n));
+            p.to_vec2().length()
+        })
+        .collect();
+    assert!(radii[0] < radii[1] && radii[1] < radii[2]);
+}
+
+#[test]
+fn test_graph_state_layout_mode_default_and_roundtrip() {
+    use hcom_graph::config::GraphState;
+    use hcom_graph::layout::LayoutMode;
+    let old: GraphState = serde_json::from_str("{}").unwrap();
+    assert_eq!(old.layout_mode, "cluster");
+    assert_eq!(
+        LayoutMode::from_str_or_default(&old.layout_mode),
+        LayoutMode::Cluster
+    );
+    assert_eq!(
+        LayoutMode::from_str_or_default("bogus"),
+        LayoutMode::Cluster
+    );
+    for m in [
+        LayoutMode::Hierarchy,
+        LayoutMode::Cluster,
+        LayoutMode::Manual,
+    ] {
+        let s = GraphState {
+            layout_mode: m.as_str().into(),
+            ..Default::default()
+        };
+        let r: GraphState = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(LayoutMode::from_str_or_default(&r.layout_mode), m);
+    }
+}
+
+#[test]
+fn test_cluster_springs_follow_reparent_without_new_event() {
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[
+        layout_snap("p1", None),
+        layout_snap("p2", None),
+        layout_snap("kid", Some("p1")),
+    ]);
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+    let p1 = graph.get_node_index("p1").unwrap();
+    let p2 = graph.get_node_index("p2").unwrap();
+    let kid = graph.get_node_index("kid").unwrap();
+    // Parents far apart and pinned; kid starts next to p1.
+    layout.set_node_pos(p1, Pos2::new(-600.0, 0.0), true);
+    layout.set_node_pos(p2, Pos2::new(600.0, 0.0), true);
+    layout.set_node_pos(kid, Pos2::new(-500.0, 0.0), false);
+    for _ in 0..200 {
+        layout.step(&graph, 0.016);
+    }
+    // Re-parent: the edge count stays the same, no message event.
+    graph.apply_instance_snapshot(&[layout_snap("kid", Some("p2"))]);
+    layout.wake_up();
+    for _ in 0..3000 {
+        layout.step(&graph, 0.016);
+    }
+    let k = layout.nodes[&kid].pos;
+    assert!(
+        k.x > 0.0,
+        "kid must follow the spring to its new parent, x {}",
+        k.x
+    );
+}

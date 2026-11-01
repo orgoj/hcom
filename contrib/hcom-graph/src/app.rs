@@ -4,7 +4,7 @@ use crate::config::{
     GraphConfig, GraphState, PlaceholderContext, load_config, load_state, replace_placeholders_str,
     replace_placeholders_vec, save_state, screen_bar_buttons,
 };
-use crate::layout::GraphLayout;
+use crate::layout::{GraphLayout, LayoutMode};
 use crate::model::{AgentGraph, AgentStatus, EdgeKind, MessageWindow};
 use crate::sync::BackgroundSync;
 use crate::table_data::{DEFAULT_COLUMNS, REPORT_FIELDS, TableRow, filter_row, sort_rows};
@@ -172,6 +172,7 @@ impl HcomGraphApp {
         }
 
         let mut layout = GraphLayout::new();
+        layout.set_mode(LayoutMode::from_str_or_default(&state.layout_mode));
         layout.sync_nodes(&graph);
 
         let action_worker = Some(ActionWorkerHandle::new(SystemActionRunner::new()));
@@ -242,7 +243,11 @@ impl HcomGraphApp {
     pub fn new_for_test(config: GraphConfig, state: GraphState, hcom_dir: PathBuf) -> Self {
         Self {
             graph: AgentGraph::new(),
-            layout: GraphLayout::new(),
+            layout: {
+                let mut l = GraphLayout::new();
+                l.set_mode(LayoutMode::from_str_or_default(&state.layout_mode));
+                l
+            },
             canvas: CanvasView::new(),
             sync: None,
             action_worker: None,
@@ -1305,6 +1310,7 @@ impl eframe::App for HcomGraphApp {
             self.graph.node_styles = styles;
             // Edge indices may be reused in another order after a swap.
             self.window_cache_key = None;
+            self.layout.invalidate_caches();
             self.layout.sync_nodes(&self.graph);
             self.layout.wake_up();
             ctx.request_repaint();
@@ -1630,6 +1636,26 @@ impl eframe::App for HcomGraphApp {
                 {
                     self.state.show_side_panel = !self.state.show_side_panel;
                     self.save_state();
+                }
+
+                ui.separator();
+
+                // Layout mode
+                ui.label("Layout:");
+                for (mode, label) in [
+                    (LayoutMode::Hierarchy, "Hierarchy"),
+                    (LayoutMode::Cluster, "Cluster"),
+                    (LayoutMode::Manual, "Manual"),
+                ] {
+                    if ui
+                        .selectable_label(self.layout.mode == mode, label)
+                        .clicked()
+                        && self.layout.mode != mode
+                    {
+                        self.layout.set_mode(mode);
+                        self.state.layout_mode = mode.as_str().to_string();
+                        self.save_state();
+                    }
                 }
 
                 ui.separator();

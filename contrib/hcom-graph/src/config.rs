@@ -205,6 +205,9 @@ pub struct GraphState {
     /// Keep only the newest N messages in the window; `None` or 0 = off.
     #[serde(default)]
     pub window_last_n: Option<usize>,
+    /// Layout mode: "hierarchy", "cluster" (default) or "manual".
+    #[serde(default = "default_layout_mode")]
+    pub layout_mode: String,
 }
 
 impl GraphState {
@@ -217,6 +220,10 @@ impl GraphState {
             last_n: self.window_last_n.filter(|n| *n > 0),
         }
     }
+}
+
+fn default_layout_mode() -> String {
+    "cluster".into()
 }
 
 fn default_view_mode() -> String {
@@ -256,6 +263,7 @@ impl Default for GraphState {
             column_widths: HashMap::new(),
             window_span_secs: None,
             window_last_n: None,
+            layout_mode: default_layout_mode(),
         }
     }
 }
