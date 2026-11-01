@@ -1,8 +1,8 @@
 use crate::action::{ActionRequest, ActionResult, ActionWorkerHandle, SystemActionRunner};
 use crate::canvas::{CanvasAction, CanvasView};
 use crate::config::{
-    GraphConfig, GraphState, PlaceholderContext, SIDE_PANEL_MIN_WIDTH, load_config, load_state,
-    replace_placeholders_str, replace_placeholders_vec, save_state, screen_bar_buttons,
+    DETAIL_TABS, GraphConfig, GraphState, PlaceholderContext, SIDE_PANEL_MIN_WIDTH, load_config,
+    load_state, replace_placeholders_str, replace_placeholders_vec, save_state, screen_bar_buttons,
 };
 use crate::layout::{GraphLayout, LayoutMode};
 use crate::model::{AgentGraph, AgentStatus, EdgeKind, MessageWindow};
@@ -15,6 +15,10 @@ use petgraph::stable_graph::{EdgeIndex, NodeIndex};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// Minimum canvas height kept when the agent table panel is resized or restored.
+pub const CANVAS_MIN_HEIGHT: f32 = 150.0;
+pub const TABLE_PANEL_MIN_HEIGHT: f32 = 80.0;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContextMenuTarget {
     Node(NodeIndex),
@@ -25,12 +29,6 @@ pub enum ContextMenuTarget {
 pub struct ContextMenuState {
     pub target: ContextMenuTarget,
     pub screen_pos: egui::Pos2,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SidePanelTab {
-    Summary,
-    Report,
 }
 
 pub struct HcomGraphApp {
@@ -84,9 +82,6 @@ pub struct HcomGraphApp {
     // Screen tab inject bar
     pub screen_inject_text: String,
     pub screen_inject_enter: bool,
-
-    // UI tab state
-    pub side_panel_tab: SidePanelTab,
 
     // Dialogs
     pub selected_row_id: Option<String>,
@@ -224,7 +219,6 @@ impl HcomGraphApp {
             screen_inject_text: String::new(),
             screen_inject_enter: true,
             selected_row_id: None,
-            side_panel_tab: SidePanelTab::Summary,
             show_start_dialog: false,
             start_agent_name: String::new(),
             start_instance_name: String::new(),
@@ -296,7 +290,6 @@ impl HcomGraphApp {
             screen_inject_text: String::new(),
             screen_inject_enter: true,
             selected_row_id: None,
-            side_panel_tab: SidePanelTab::Summary,
             show_start_dialog: false,
             start_agent_name: String::new(),
             start_instance_name: String::new(),
@@ -389,6 +382,10 @@ impl HcomGraphApp {
     }
 
     pub fn on_selection_changed(&mut self) {
+        // A hidden detail panel loads nothing; showing it calls this again.
+        if !self.state.show_side_panel {
+            return;
+        }
         let row_opt = self.selected_row();
         let is_running = row_opt
             .as_ref()
@@ -403,7 +400,7 @@ impl HcomGraphApp {
         let agent = row_opt.unwrap().instance;
         self.selection_generation += 1;
         let gen_id = self.selection_generation;
-        match self.state.bottom_tab.as_str() {
+        match self.state.detail_tab.as_str() {
             "Screen" => {
                 self.dispatch_action(ActionRequest::Screen {
                     agent,
@@ -428,8 +425,38 @@ impl HcomGraphApp {
         }
     }
 
-    pub fn select_bottom_tab(&mut self, tab_name: &str) {
-        self.state.bottom_tab = tab_name.to_string();
+    /// Shows the detail panel on `tab_name` and loads its content.
+    pub fn select_detail_tab(&mut self, tab_name: &str) {
+        self.state.detail_tab = tab_name.to_string();
+        self.state.show_side_panel = true;
+        self.save_state();
+        self.on_selection_changed();
+    }
+
+    /// F4 toggles the agent table; F5-F9 select a detail panel tab.
+    pub fn apply_function_key(&mut self, key: egui::Key) {
+        let tab = match key {
+            egui::Key::F4 => {
+                self.toggle_table();
+                return;
+            }
+            egui::Key::F5 => "Screen",
+            egui::Key::F6 => "Transcript",
+            egui::Key::F7 => "Events",
+            egui::Key::F8 => "Log",
+            egui::Key::F9 => "Report",
+            _ => return,
+        };
+        self.select_detail_tab(tab);
+    }
+
+    pub fn toggle_table(&mut self) {
+        self.state.show_table = !self.state.show_table;
+        self.save_state();
+    }
+
+    pub fn toggle_detail_panel(&mut self) {
+        self.state.show_side_panel = !self.state.show_side_panel;
         self.save_state();
         self.on_selection_changed();
     }
@@ -550,8 +577,10 @@ impl HcomGraphApp {
             DEFAULT_COLUMNS.iter().map(|s| s.to_string()).collect()
         };
 
+        // Fill the panel, so its height follows the user's resize, not the rows.
         egui::ScrollArea::both()
             .id_salt("table_scroll_area")
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 egui::Grid::new("agent_table_grid")
                     .striped(true)
@@ -1045,32 +1074,10 @@ impl HcomGraphApp {
 
     fn render_screen_tab(&mut self, ui: &mut egui::Ui) {
         let agent = self.selected_agent_name();
-        ui.vertical(|ui| {
-            // Screen output area
-            egui::ScrollArea::both()
-                .id_salt("screen_terminal_scroll")
-                .auto_shrink([false, false])
-                .max_height(ui.available_height() - 40.0)
-                .show(ui, |ui| {
-                    if let Some(ref selected) = agent {
-                        if let Some((ref tr_agent, _, ref text)) = self.screen_content {
-                            if tr_agent == selected {
-                                ui.monospace(text);
-                            } else {
-                                ui.weak(format!("Loading screen for {}...", selected));
-                            }
-                        } else {
-                            ui.weak(format!("Loading screen for {}...", selected));
-                        }
-                    } else {
-                        ui.weak("No running agent selected");
-                    }
-                });
-
-            ui.separator();
-
-            // Screen bar buttons
-            ui.horizontal(|ui| {
+        // The inject bar is a bottom panel inside the tab, so it stays visible
+        // and wraps in a narrow detail panel; the screen scrolls above it.
+        egui::Panel::bottom("screen_inject_bar").show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
                 let current_agent = agent.clone();
 
                 // Inject input
@@ -1112,52 +1119,65 @@ impl HcomGraphApp {
                 }
             });
         });
-    }
 
-    fn render_bottom_tabs(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui
-                .selectable_label(self.state.bottom_tab == "Screen", "Screen (F5)")
-                .clicked()
-            {
-                self.select_bottom_tab("Screen");
-            }
-            if ui
-                .selectable_label(self.state.bottom_tab == "Transcript", "Transcript (F6)")
-                .clicked()
-            {
-                self.select_bottom_tab("Transcript");
-            }
-            if ui
-                .selectable_label(self.state.bottom_tab == "Events", "Events (F7)")
-                .clicked()
-            {
-                self.select_bottom_tab("Events");
-            }
-            if ui
-                .selectable_label(self.state.bottom_tab == "Log", "Log (F8)")
-                .clicked()
-            {
-                self.select_bottom_tab("Log");
-            }
-            if ui
-                .selectable_label(self.state.bottom_tab == "Report", "Report (F9)")
-                .clicked()
-            {
-                self.select_bottom_tab("Report");
-            }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("🔄 Refresh").clicked() {
-                    self.dispatch_action(ActionRequest::ReloadTableData);
-                    self.on_selection_changed();
+        // Terminal lines are 80-200 columns: scroll, never wrap.
+        egui::ScrollArea::both()
+            .id_salt("screen_terminal_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if let Some(ref selected) = agent {
+                    if let Some((ref tr_agent, _, ref text)) = self.screen_content {
+                        if tr_agent == selected {
+                            ui.add(egui::Label::new(RichText::new(text).monospace()).extend());
+                        } else {
+                            ui.weak(format!("Loading screen for {}...", selected));
+                        }
+                    } else {
+                        ui.weak(format!("Loading screen for {}...", selected));
+                    }
+                } else {
+                    ui.weak("No running agent selected");
                 }
             });
+    }
+
+    /// Tab row and content of the right detail panel; returns true when the
+    /// user closed the panel.
+    fn render_detail_tabs(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut close_panel = false;
+        ui.horizontal_wrapped(|ui| {
+            for (tab, label) in DETAIL_TABS.iter().zip([
+                "Summary",
+                "Report (F9)",
+                "Screen (F5)",
+                "Transcript (F6)",
+                "Events (F7)",
+                "Log (F8)",
+            ]) {
+                if ui
+                    .selectable_label(self.state.detail_tab == *tab, label)
+                    .clicked()
+                {
+                    self.select_detail_tab(tab);
+                }
+            }
+            ui.separator();
+            if ui.small_button("🔄 Refresh").clicked() {
+                self.dispatch_action(ActionRequest::ReloadTableData);
+                self.on_selection_changed();
+            }
+            if ui
+                .small_button("✖")
+                .on_hover_text("Close Detail Panel")
+                .clicked()
+            {
+                close_panel = true;
+            }
         });
 
         ui.separator();
 
-        match self.state.bottom_tab.as_str() {
+        match self.state.detail_tab.as_str() {
             "Screen" => {
                 self.render_screen_tab(ui);
             }
@@ -1231,14 +1251,26 @@ impl HcomGraphApp {
             "Report" => {
                 if let Some(row) = self.selected_row() {
                     self.render_report_view(ui, &row);
+                } else if let Some(node) = self
+                    .canvas
+                    .selected_node
+                    .and_then(|idx| self.graph.graph.node_weight(idx))
+                {
+                    let row = TableRow::from_agent_node(node);
+                    self.render_report_view(ui, &row);
                 } else {
                     ui.weak("No agent selected");
                 }
             }
             _ => {
-                ui.weak("Unknown tab");
+                // Scroll, so long content never overflows into the table below.
+                egui::ScrollArea::vertical()
+                    .id_salt("summary_scroll_tab")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.render_side_panel_summary(ui));
             }
         }
+        close_panel
     }
 
     fn get_all_rows(&self) -> Vec<TableRow> {
@@ -1429,11 +1461,6 @@ impl eframe::App for HcomGraphApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        // Ensure bottom_tab is never Table
-        if self.state.bottom_tab == "Table" {
-            self.state.bottom_tab = "Screen".to_string();
-        }
-
         // Periodic table data reload
         if !self.table_reload_in_flight
             && self.last_table_refresh.elapsed() >= Duration::from_secs(self.config.refresh_seconds)
@@ -1452,37 +1479,27 @@ impl eframe::App for HcomGraphApp {
             self.dispatch_action(ActionRequest::ReloadStats);
         }
 
-        // Keyboard shortcuts
-        let (clear_search, switch_tab) = ctx.input(|i| {
+        // Keyboard shortcuts (F-keys act even while a text field has focus)
+        let (clear_search, fkey) = ctx.input(|i| {
             let alt_x = i.modifiers.alt && i.key_pressed(egui::Key::X);
-            let tab = if i.key_pressed(egui::Key::F4) {
-                Some("Table")
-            } else if i.key_pressed(egui::Key::F5) {
-                Some("Screen")
-            } else if i.key_pressed(egui::Key::F6) {
-                Some("Transcript")
-            } else if i.key_pressed(egui::Key::F7) {
-                Some("Events")
-            } else if i.key_pressed(egui::Key::F8) {
-                Some("Log")
-            } else if i.key_pressed(egui::Key::F9) {
-                Some("Report")
-            } else {
-                None
-            };
-            (alt_x, tab)
+            let fkey = [
+                egui::Key::F4,
+                egui::Key::F5,
+                egui::Key::F6,
+                egui::Key::F7,
+                egui::Key::F8,
+                egui::Key::F9,
+            ]
+            .into_iter()
+            .find(|k| i.key_pressed(*k));
+            (alt_x, fkey)
         });
 
         if clear_search && !self.inject_input_has_focus {
             self.search_query.clear();
         }
-        if let Some(tab) = switch_tab {
-            if tab == "Table" {
-                self.state.view_mode = "table_only".to_string();
-                self.save_state();
-            } else {
-                self.select_bottom_tab(tab);
-            }
+        if let Some(key) = fkey {
+            self.apply_function_key(key);
         }
 
         // 1. Ingest non-blocking updates from BackgroundSync
@@ -1780,47 +1797,21 @@ impl eframe::App for HcomGraphApp {
 
             ui.separator();
 
-            // Row 2: View modes + Search Filter + Checkboxes + Count
+            // Row 2: Panel toggles + Search Filter + Checkboxes + Count
             ui.horizontal(|ui| {
-                // View modes
                 if ui
-                    .selectable_label(self.state.view_mode == "graph_only", "Graph")
+                    .selectable_label(self.state.show_table, "Table (F4)")
+                    .on_hover_text("Show or hide the agent table")
                     .clicked()
                 {
-                    self.state.view_mode = "graph_only".to_string();
-                    self.save_state();
+                    self.toggle_table();
                 }
-                if ui
-                    .selectable_label(self.state.view_mode == "table_only", "Table (F4)")
-                    .clicked()
-                {
-                    self.state.view_mode = "table_only".to_string();
-                    self.save_state();
-                }
-                if ui
-                    .selectable_label(self.state.view_mode == "split_horizontal", "Split H")
-                    .clicked()
-                {
-                    self.state.view_mode = "split_horizontal".to_string();
-                    self.save_state();
-                }
-                if ui
-                    .selectable_label(
-                        self.state.view_mode == "split" || self.state.view_mode == "split_vertical",
-                        "Split V",
-                    )
-                    .clicked()
-                {
-                    self.state.view_mode = "split_vertical".to_string();
-                    self.save_state();
-                }
-
                 if ui
                     .selectable_label(self.state.show_side_panel, "Detail")
+                    .on_hover_text("Show or hide the agent detail panel")
                     .clicked()
                 {
-                    self.state.show_side_panel = !self.state.show_side_panel;
-                    self.save_state();
+                    self.toggle_detail_panel();
                 }
 
                 ui.separator();
@@ -2456,7 +2447,34 @@ impl eframe::App for HcomGraphApp {
                 });
         }
 
-        // 6. Right Side Panel for Agent Details & Report
+        // 6. Bottom agent table across the full window width. Declared before
+        // the right panel, so the detail panel and the canvas sit above it.
+        if self.state.show_table {
+            // Keep a usable canvas when a saved height came from a taller window.
+            let max_h = (ui.available_height() - CANVAS_MIN_HEIGHT).max(TABLE_PANEL_MIN_HEIGHT);
+            let table_h = self
+                .state
+                .sash_pos
+                .unwrap_or(240.0)
+                .clamp(TABLE_PANEL_MIN_HEIGHT, max_h);
+            let table_resp = egui::Panel::bottom("agent_table_panel")
+                .resizable(true)
+                .default_size(table_h)
+                .min_size(TABLE_PANEL_MIN_HEIGHT)
+                .max_size(max_h)
+                .show(ui, |ui| {
+                    self.render_table(ui, &filtered_rows);
+                });
+            if ui.input(|i| i.pointer.any_down()) {
+                let cur_h = table_resp.response.rect.height();
+                if (cur_h - table_h).abs() > 2.0 {
+                    self.state.sash_pos = Some(cur_h);
+                    self.mark_view_dirty();
+                }
+            }
+        }
+
+        // 7. Right detail panel: all tabs of the selected agent
         if self.state.show_side_panel {
             let mut close_panel = false;
             let side_resp = egui::Panel::right("detail_side_panel")
@@ -2482,45 +2500,7 @@ impl eframe::App for HcomGraphApp {
                         self.action_error = None;
                     }
 
-                    // Tab selector: Summary vs Report
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(
-                            &mut self.side_panel_tab,
-                            SidePanelTab::Summary,
-                            "Summary",
-                        );
-                        ui.selectable_value(
-                            &mut self.side_panel_tab,
-                            SidePanelTab::Report,
-                            "Report",
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("✖").on_hover_text("Close Detail Panel").clicked() {
-                                close_panel = true;
-                            }
-                        });
-                    });
-                    ui.separator();
-
-                    match self.side_panel_tab {
-                        SidePanelTab::Summary => {
-                            self.render_side_panel_summary(ui);
-                        }
-                        SidePanelTab::Report => {
-                            if let Some(row) = self.selected_row() {
-                                self.render_report_view(ui, &row);
-                            } else if let Some(idx) = self.canvas.selected_node {
-                                if let Some(node) = self.graph.graph.node_weight(idx) {
-                                    let row = TableRow::from_agent_node(node);
-                                    self.render_report_view(ui, &row);
-                                } else {
-                                    ui.weak("No agent selected");
-                                }
-                            } else {
-                                ui.weak("No agent selected");
-                            }
-                        }
-                    }
+                    close_panel = self.render_detail_tabs(ui);
                 });
             let side_w = side_resp.response.rect.width();
             if !approx_eq(self.state.side_panel_width, side_w, 0.5) {
@@ -2529,120 +2509,16 @@ impl eframe::App for HcomGraphApp {
             }
 
             if close_panel {
-                self.state.show_side_panel = false;
-                self.save_state();
+                self.toggle_detail_panel();
             }
         }
 
-        // 7. Bottom Inspection Panel (always at bottom, holding Screen/Transcript/Events/Log/Report of selected agent)
-        let bottom_h = self.state.sash_pos.unwrap_or(240.0).clamp(100.0, 800.0);
-        let bottom_resp = egui::Panel::bottom("inspection_bottom_panel")
-            .resizable(true)
-            .default_size(bottom_h)
-            .min_size(100.0)
-            .show(ui, |ui| {
-                self.render_bottom_tabs(ui);
-            });
-        if ui.input(|i| i.pointer.any_down()) {
-            let cur_h = bottom_resp.response.rect.height();
-            if (cur_h - bottom_h).abs() > 2.0 && cur_h >= 80.0 {
-                self.state.sash_pos = Some(cur_h);
-                self.save_state();
-            }
-        }
-
-        // 8. Main Central Panel: View modes (Graph, Table, Split H, Split V)
-        egui::CentralPanel::default().show(ui, |ui| match self.state.view_mode.as_str() {
-            "graph_only" => {
-                self.show_canvas(ui, &visible_node_indices);
-            }
-            "table_only" => {
-                self.render_table(ui, &filtered_rows);
-            }
-            "split_horizontal" => {
-                let total_w = ui.available_width();
-                let total_h = ui.available_height();
-                let ratio = self.state.main_split_ratio.unwrap_or(0.5).clamp(0.15, 0.85);
-                let mut left_w = (total_w * ratio).clamp(100.0, (total_w - 100.0).max(100.0));
-
-                ui.horizontal(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(left_w, total_h),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            self.show_canvas(ui, &visible_node_indices);
-                        },
-                    );
-
-                    let (sep_rect, sep_resp) =
-                        ui.allocate_exact_size(egui::vec2(6.0, total_h), egui::Sense::drag());
-                    if sep_resp.hovered() || sep_resp.dragged() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-                    }
-                    if sep_resp.dragged() {
-                        let delta = sep_resp.drag_delta().x;
-                        left_w = (left_w + delta).clamp(100.0, (total_w - 100.0).max(100.0));
-                        if total_w > 0.0 {
-                            self.state.main_split_ratio = Some(left_w / total_w);
-                            self.save_state();
-                        }
-                    }
-                    let sep_color = if sep_resp.dragged() {
-                        Color32::from_rgb(52, 152, 219)
-                    } else if sep_resp.hovered() {
-                        Color32::from_rgb(100, 150, 200)
-                    } else {
-                        ui.visuals().widgets.noninteractive.bg_stroke.color
-                    };
-                    ui.painter().rect_filled(sep_rect, 0.0, sep_color);
-
-                    self.render_table(ui, &filtered_rows);
-                });
-            }
-            _ => {
-                // "split" or "split_vertical"
-                let total_w = ui.available_width();
-                let total_h = ui.available_height();
-                let ratio = self.state.main_split_ratio.unwrap_or(0.5).clamp(0.15, 0.85);
-                let mut top_h = (total_h * ratio).clamp(80.0, (total_h - 80.0).max(80.0));
-
-                ui.vertical(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(total_w, top_h),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            self.show_canvas(ui, &visible_node_indices);
-                        },
-                    );
-
-                    let (sep_rect, sep_resp) =
-                        ui.allocate_exact_size(egui::vec2(total_w, 6.0), egui::Sense::drag());
-                    if sep_resp.hovered() || sep_resp.dragged() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-                    }
-                    if sep_resp.dragged() {
-                        let delta = sep_resp.drag_delta().y;
-                        top_h = (top_h + delta).clamp(80.0, (total_h - 80.0).max(80.0));
-                        if total_h > 0.0 {
-                            self.state.main_split_ratio = Some(top_h / total_h);
-                            self.save_state();
-                        }
-                    }
-                    let sep_color = if sep_resp.dragged() {
-                        Color32::from_rgb(52, 152, 219)
-                    } else if sep_resp.hovered() {
-                        Color32::from_rgb(100, 150, 200)
-                    } else {
-                        ui.visuals().widgets.noninteractive.bg_stroke.color
-                    };
-                    ui.painter().rect_filled(sep_rect, 0.0, sep_color);
-
-                    self.render_table(ui, &filtered_rows);
-                });
-            }
+        // 8. Central panel: the graph canvas
+        egui::CentralPanel::default().show(ui, |ui| {
+            self.show_canvas(ui, &visible_node_indices);
         });
 
-        // 8. Context Menu Popup
+        // 9. Context Menu Popup
         if let Some(ref menu) = self.context_menu.clone() {
             let mut close_menu = false;
             #[allow(deprecated)]

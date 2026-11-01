@@ -1997,20 +1997,24 @@ fn test_state_fallback_and_save_never_touches_gui_state_json() {
 
     // 2. Load state -> should read from gui-state.json
     let mut state = load_state(hcom_dir);
-    assert_eq!(state.view_mode, "table_only");
+    assert!(state.show_table, "legacy view_mode is ignored");
     assert!(state.running_only);
     assert_eq!(state.sort_col.as_deref(), Some("age"));
-    assert_eq!(state.bottom_tab, "Transcript");
+    assert_eq!(
+        state.detail_tab, "Transcript",
+        "legacy gui-state bottom_tab maps"
+    );
 
     // 3. Mutate state and save
-    state.view_mode = "split".into();
+    state.show_table = false;
     state.running_only = false;
     save_state(hcom_dir, &state).unwrap();
 
     // 4. Verify graph-state.json was written
     assert!(hcom_dir.join("graph-state.json").is_file());
     let reloaded = load_state(hcom_dir);
-    assert_eq!(reloaded.view_mode, "split");
+    assert!(!reloaded.show_table);
+    assert_eq!(reloaded.detail_tab, "Transcript");
     assert!(!reloaded.running_only);
 
     // 5. CRITICAL BOUNDARY: verify gui-state.json content is COMPLETELY UNTOUCHED!
@@ -2377,7 +2381,8 @@ fn test_corrupt_config_logs_warning_and_uses_defaults() {
     // Corrupt graph-state.json
     std::fs::write(hcom_dir.join("graph-state.json"), "broken").unwrap();
     let st = load_state(hcom_dir);
-    assert_eq!(st.view_mode, "split");
+    assert!(st.show_table);
+    assert_eq!(st.detail_tab, "Summary");
     assert!(!st.running_only);
 }
 
@@ -2836,39 +2841,64 @@ fn test_canvas_filtering_excludes_hidden_nodes_and_edges() {
 }
 
 #[test]
-fn test_graph_state_split_ratio_and_side_panel_defaults_and_roundtrip() {
+fn test_graph_state_layout_defaults_and_roundtrip() {
     use hcom_graph::config::GraphState;
 
-    // Check defaults
     let default_state = GraphState::default();
     assert!(
         default_state.show_side_panel,
-        "Side panel should default to open"
+        "detail panel defaults to open"
     );
-    assert!(
-        default_state.main_split_ratio.is_none(),
-        "Main split ratio defaults to None"
-    );
+    assert!(default_state.show_table, "table defaults to shown");
+    assert_eq!(default_state.detail_tab, "Summary");
 
-    // Check json deserialization without the new fields uses defaults
-    let json_legacy = r#"{"view_mode":"split_horizontal"}"#;
+    // Legacy keys (view_mode, main_split_ratio) are ignored; new fields default.
+    let json_legacy = r#"{"view_mode":"split_horizontal","main_split_ratio":0.4}"#;
     let parsed: GraphState = serde_json::from_str(json_legacy).expect("parse legacy state");
-    assert!(
-        parsed.show_side_panel,
-        "Legacy state should default show_side_panel to true"
-    );
-    assert!(parsed.main_split_ratio.is_none());
+    assert!(parsed.show_side_panel);
+    assert!(parsed.show_table);
 
-    // Check roundtrip with explicit values
     let custom_state = GraphState {
         show_side_panel: false,
-        main_split_ratio: Some(0.42),
+        show_table: false,
+        detail_tab: "Events".into(),
         ..Default::default()
     };
     let serialized = serde_json::to_string(&custom_state).expect("serialize");
+    assert!(
+        !serialized.contains("bottom_tab"),
+        "legacy key is never written"
+    );
     let restored: GraphState = serde_json::from_str(&serialized).expect("deserialize");
     assert!(!restored.show_side_panel);
-    assert_eq!(restored.main_split_ratio, Some(0.42));
+    assert!(!restored.show_table);
+    assert_eq!(restored.detail_tab, "Events");
+}
+
+#[test]
+fn test_state_detail_tab_migrates_from_legacy_bottom_tab() {
+    use hcom_graph::config::load_state;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("graph-state.json");
+
+    // Only the legacy key: it becomes the detail tab.
+    std::fs::write(&path, r#"{"bottom_tab": "Report"}"#).unwrap();
+    assert_eq!(load_state(dir.path()).detail_tab, "Report");
+
+    // Both keys: the file still loads and the valid detail_tab wins.
+    std::fs::write(
+        &path,
+        r#"{"bottom_tab": "Screen", "detail_tab": "Log", "running_only": true}"#,
+    )
+    .unwrap();
+    let s = load_state(dir.path());
+    assert_eq!(s.detail_tab, "Log");
+    assert!(s.running_only, "file with both keys is not rejected");
+
+    // Invalid values everywhere (e.g. the old "Table" guard value): Summary.
+    std::fs::write(&path, r#"{"bottom_tab": "Table", "detail_tab": "Nope"}"#).unwrap();
+    assert_eq!(load_state(dir.path()).detail_tab, "Summary");
 }
 
 #[test]
@@ -3828,7 +3858,8 @@ fn test_state_load_drops_bad_position_entry_and_clamps_values() {
     std::fs::write(
         dir.path().join("graph-state.json"),
         r#"{
-            "view_mode": "graph_only",
+            "detail_tab": "Bogus",
+            "bottom_tab": "Log",
             "node_positions": {
                 "ok": {"x": 1.0, "y": 2.0, "saved_at": 5},
                 "nullx": {"x": null, "y": 2.0},
@@ -3842,7 +3873,10 @@ fn test_state_load_drops_bad_position_entry_and_clamps_values() {
     )
     .unwrap();
     let s = load_state(dir.path());
-    assert_eq!(s.view_mode, "graph_only");
+    assert_eq!(
+        s.detail_tab, "Log",
+        "invalid detail_tab falls back to legacy bottom_tab"
+    );
     assert_eq!(s.node_positions.keys().collect::<Vec<_>>(), ["ok"]);
     assert_eq!(s.canvas_zoom, Some(hcom_graph::canvas::ZOOM_MAX));
     assert_eq!((s.canvas_pan_x, s.canvas_pan_y), (Some(3.0), Some(4.0)));
@@ -3860,7 +3894,7 @@ fn test_state_corrupt_file_uses_defaults() {
     std::fs::write(dir.path().join("graph-state.json"), "{ not json").unwrap();
     let s = load_state(dir.path());
     let d = GraphState::default();
-    assert_eq!(s.view_mode, d.view_mode);
+    assert_eq!(s.detail_tab, d.detail_tab);
     assert!(s.node_positions.is_empty());
     assert_eq!(s.canvas_zoom, None);
     assert_eq!(s.side_panel_width, None);
@@ -4013,4 +4047,110 @@ fn test_canvas_plain_hover_sets_hovered_node() {
     }
     assert_eq!(canvas.hovered_node, Some(idx));
     assert!(!ctx.input(|i| i.pointer.any_down()));
+}
+
+/// Runs `frames` frames of the whole app on a 1000x700 window and returns the
+/// outer rects of the table and detail panels as egui stored them.
+fn run_app_frames(
+    ctx: &egui::Context,
+    app: &mut hcom_graph::app::HcomGraphApp,
+    frames: usize,
+) -> (Option<Rect>, Option<Rect>) {
+    use eframe::App;
+    use egui::containers::panel::PanelState;
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut root = egui::Id::NULL;
+    for _ in 0..frames {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            root = ui.scope_id();
+            app.ui(ui, &mut frame);
+        })
+        .textures_delta
+        .clear();
+    }
+    let rect = |salt: &str| {
+        PanelState::load(ctx, root.with_salt(egui::IdSalt::new(salt))).map(|p| p.outer_rect)
+    };
+    (rect("agent_table_panel"), rect("detail_side_panel"))
+}
+
+#[test]
+fn test_layout_table_spans_full_width_below_graph_and_detail_panel() {
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+    let ctx = egui::Context::default();
+    let (table, detail) = run_app_frames(&ctx, &mut app, 3);
+    let (table, detail) = (table.expect("table panel"), detail.expect("detail panel"));
+    assert_eq!(
+        (table.left(), table.right()),
+        (0.0, 1000.0),
+        "table spans the window"
+    );
+    assert_eq!(table.bottom(), 700.0);
+    assert_eq!(detail.right(), 1000.0, "detail panel on the right");
+    assert!(
+        detail.bottom() <= table.top() + 1.0,
+        "detail panel sits above the table"
+    );
+    assert!(detail.left() > 300.0, "graph keeps the left part");
+
+    // F4 hides the table: the detail panel then reaches the window bottom.
+    app.apply_function_key(egui::Key::F4);
+    assert!(!app.state.show_table);
+    let (_, detail) = run_app_frames(&ctx, &mut app, 3);
+    assert_eq!(detail.expect("detail panel").bottom(), 700.0);
+    app.apply_function_key(egui::Key::F4);
+    assert!(app.state.show_table);
+
+    // F-keys select tabs of the right panel and reopen it when hidden.
+    app.state.show_side_panel = false;
+    app.apply_function_key(egui::Key::F7);
+    assert_eq!(app.state.detail_tab, "Events");
+    assert!(app.state.show_side_panel);
+    app.apply_function_key(egui::Key::F9);
+    assert_eq!(app.state.detail_tab, "Report");
+    assert_eq!(
+        hcom_graph::config::load_state(dir.path()).detail_tab,
+        "Report"
+    );
+}
+
+#[test]
+fn test_layout_oversized_saved_table_height_keeps_canvas_visible() {
+    use hcom_graph::app::{CANVAS_MIN_HEIGHT, HcomGraphApp};
+    use hcom_graph::config::{GraphConfig, GraphState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState {
+            sash_pos: Some(5000.0),
+            ..Default::default()
+        },
+        dir.path().to_path_buf(),
+    );
+    let ctx = egui::Context::default();
+    let (table, detail) = run_app_frames(&ctx, &mut app, 3);
+    let (table, detail) = (table.expect("table panel"), detail.expect("detail panel"));
+    assert!(
+        table.top() - detail.top() >= CANVAS_MIN_HEIGHT - 1.0
+            && detail.bottom() <= table.top() + 1.0,
+        "the canvas and the detail panel keep their space above the table: {detail:?} / {table:?}"
+    );
+    assert!(
+        table.height() > 300.0,
+        "a large saved height is clamped, not dropped: {table:?}"
+    );
 }

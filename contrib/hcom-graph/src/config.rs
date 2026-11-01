@@ -182,10 +182,11 @@ impl Default for GraphConfig {
 pub struct GraphState {
     #[serde(default)]
     pub geometry: Option<String>,
+    /// Height of the bottom agent table panel in pixels.
     #[serde(default)]
     pub sash_pos: Option<f32>,
-    #[serde(default = "default_view_mode")]
-    pub view_mode: String,
+    #[serde(default = "default_true")]
+    pub show_table: bool,
     #[serde(default)]
     pub running_only: bool,
     #[serde(default)]
@@ -200,12 +201,15 @@ pub struct GraphState {
     pub sort_col: Option<String>,
     #[serde(default)]
     pub sort_reverse: bool,
-    #[serde(default = "default_bottom_tab")]
-    pub bottom_tab: String,
+    /// Active tab of the right detail panel (one of `DETAIL_TABS`).
+    #[serde(default)]
+    pub detail_tab: String,
+    /// Legacy tab key (old graph-state.json, gui-state.json); read only and
+    /// used by `sanitize` when `detail_tab` is missing or invalid.
+    #[serde(default, skip_serializing)]
+    pub bottom_tab: Option<String>,
     #[serde(default = "default_true")]
     pub show_side_panel: bool,
-    #[serde(default)]
-    pub main_split_ratio: Option<f32>,
     #[serde(default = "default_columns")]
     pub columns: Vec<String>,
     #[serde(default)]
@@ -266,7 +270,8 @@ where
 
 impl GraphState {
     /// Drops or clamps values that cannot be used (non-finite numbers,
-    /// zoom outside the canvas range, too narrow side panel) and keeps only
+    /// zoom outside the canvas range, too narrow side panel, unknown detail
+    /// tab, preferring the legacy `bottom_tab`) and keeps only
     /// the `MAX_NODE_POSITIONS` newest node positions.
     pub fn sanitize(&mut self) {
         use crate::canvas::{ZOOM_MAX, ZOOM_MIN};
@@ -298,6 +303,12 @@ impl GraphState {
             .side_panel_width
             .filter(|w| w.is_finite())
             .map(|w| w.max(SIDE_PANEL_MIN_WIDTH));
+        let legacy = self.bottom_tab.take();
+        if !DETAIL_TABS.contains(&self.detail_tab.as_str()) {
+            self.detail_tab = legacy
+                .filter(|t| DETAIL_TABS.contains(&t.as_str()))
+                .unwrap_or_else(|| DEFAULT_DETAIL_TAB.into());
+        }
     }
 
     /// Persisted window settings as a live window (end follows now);
@@ -315,10 +326,6 @@ fn default_layout_mode() -> String {
     "cluster".into()
 }
 
-fn default_view_mode() -> String {
-    "split".into()
-}
-
 fn default_true() -> bool {
     true
 }
@@ -327,16 +334,17 @@ fn default_sort_col() -> Option<String> {
     Some("instance".into())
 }
 
-fn default_bottom_tab() -> String {
-    "Screen".into()
-}
+/// Tabs of the right detail panel, in display order.
+pub const DETAIL_TABS: [&str; 6] = ["Summary", "Report", "Screen", "Transcript", "Events", "Log"];
+
+pub const DEFAULT_DETAIL_TAB: &str = "Summary";
 
 impl Default for GraphState {
     fn default() -> Self {
         Self {
             geometry: None,
             sash_pos: None,
-            view_mode: default_view_mode(),
+            show_table: true,
             running_only: false,
             blocked_only: false,
             hide_disabled: true,
@@ -344,9 +352,9 @@ impl Default for GraphState {
             empty_last: true,
             sort_col: default_sort_col(),
             sort_reverse: false,
-            bottom_tab: default_bottom_tab(),
+            detail_tab: DEFAULT_DETAIL_TAB.into(),
+            bottom_tab: None,
             show_side_panel: true,
-            main_split_ratio: None,
             columns: default_columns(),
             columns_known: Vec::new(),
             column_widths: HashMap::new(),

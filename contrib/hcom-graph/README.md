@@ -3,8 +3,8 @@
 Native Rust GUI for visualizing and managing `hcom` agents, instances, and message flows. Built with `egui`/`eframe`.
 
 `hcom-graph` integrates interactive 2D node-link graph visualization with full agent fleet management:
-- **Table view**: Real-time listing of active instances and catalog agents with configurable columns and search/filtering.
-- **Inspect panels**: Screen (interactive PTY viewer with shortcuts), Transcript, Events, Log, and structured Report.
+- **Layout**: the graph canvas fills the upper left; the right detail panel holds every tab of the selected agent: Summary, Report (F9), Screen (F5), Transcript (F6), Events (F7) and Log (F8). The agent table spans the full window width at the bottom. `Table (F4)` shows or hides the table, `Detail` shows or hides the detail panel; an F5–F9 key opens the detail panel on its tab. F-keys act even while a text field has focus. Both panels resize by dragging their edge; widen the detail panel for the Screen tab (terminal lines scroll horizontally, the inject bar stays at the panel bottom). The table keeps at least 150 px of canvas above it, also when a height saved on a taller screen is restored.
+- **Table**: Real-time listing of active instances and catalog agents with configurable columns and search/filtering.
 - **Graph styling**: dashed spawn edges (parent → child), solid message edges, a CLI-colored ring per node, context window fill from the bottom (green < 70 %, amber 70–85 %, red > 85 %), and a dashed outline for roaming agents.
 - **Layout modes** (top bar, persisted): *Hierarchy* arranges the spawn tree in layers (parents centered over children, message springs act horizontally); *Cluster* is force-directed with message springs scaled by ln(1 + count), so heavy communicators sit together; *Manual* stops the simulation and nodes move only by dragging (dragged positions are persisted). New nodes appear next to their parent or a message partner, otherwise on a spiral; a collision radius keeps nodes from overlapping.
 - **Message time window**: presets (5m, 15m, 1h, 6h, 24h, All), a custom span in minutes, a "Last N msgs" limit, and a timeline scrubber with a Live toggle. Edge badges, edge thickness and the conversation detail follow the window; edges without messages in it are dimmed but stay clickable. The header shows the range in UTC. Windowed counts cover the retained history (last 500 message events at start, 50 per edge); `N+` marks an edge whose count is a lower bound.
@@ -24,15 +24,15 @@ Native Rust GUI for visualizing and managing `hcom` agents, instances, and messa
 If neither exists or if syntax is corrupt, built-in defaults are used.
 
 ### State Persistence
-User layout preferences (view mode, active filters, sort order, active bottom tab, layout mode, the message window span and limit, zoom, pan, side panel width and visibility, and the positions of dragged nodes) are saved to:
+User layout preferences (table and detail panel visibility, active detail tab, table height, active filters, sort order, layout mode, the message window span and limit, zoom, pan, detail panel width, and the positions of dragged nodes) are saved to:
 ```
 ~/.hcom/graph-state.json
 ```
 > **CRITICAL BOUNDARY:** `hcom-graph` **NEVER** modifies or writes to `~/.hcom/gui-state.json`. It only reads `gui-state.json` as a one-way initial fallback if `graph-state.json` does not exist.
 
 - A node position is stored by instance name when a drag ends; the 500 most recently stored positions are kept. In *Manual* the position is final; in *Cluster* it is the start position and the simulation continues from there; *Hierarchy* ignores saved positions (the tree places nodes).
-- Zoom, pan and side panel width are saved 1 s after the last change (no mouse button held) and on a normal exit; a kill can lose the last second.
-- Invalid values are dropped or clamped on load and before saving (non-finite numbers, zoom outside 15–400 %, panel narrower than 240 px); a bad position entry is skipped without rejecting the file, and an unreadable `graph-state.json` falls back to defaults.
+- Zoom, pan, detail panel width and table height are saved 1 s after the last change (no mouse button held) and on a normal exit; a kill can lose the last second.
+- Invalid values are dropped or clamped on load and before saving (non-finite numbers, zoom outside 15–400 %, panel narrower than 240 px, an unknown detail tab becomes Summary; a legacy `bottom_tab` from an older file or `gui-state.json` is used when `detail_tab` is missing); a bad position entry is skipped without rejecting the file, and an unreadable `graph-state.json` falls back to defaults.
 - Several open `hcom-graph` windows share the file: each save writes a unique temp file and renames it, so the file stays valid and the last writer wins.
 
 ---
