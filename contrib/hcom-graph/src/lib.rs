@@ -1,7 +1,9 @@
 pub mod action;
 pub mod app;
 pub mod canvas;
+pub mod config;
 pub mod layout;
 pub mod model;
 pub mod source;
 pub mod sync;
+pub mod table_data;

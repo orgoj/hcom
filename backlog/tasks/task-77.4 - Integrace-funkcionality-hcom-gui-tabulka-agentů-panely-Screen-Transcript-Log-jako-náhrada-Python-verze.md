@@ -3,11 +3,11 @@ id: TASK-77.4
 title: >-
   Integrace funkcionality hcom-gui (tabulka agentů, panely
   Screen/Transcript/Log) jako náhrada Python verze
-status: In Progress
+status: Done
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-01 11:25'
-updated_date: '2026-11-01 15:28'
+updated_date: '2026-11-01 16:42'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -24,10 +24,10 @@ Rozšíření Rust GUI aplikace o plnohodnotnou náhradu stávajícího pythonov
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Tabulka instancí a katalogových agentů s řazením, filtry a zobrazením stavových sloupců
-- [ ] #2 Spodní/postranní panel se záložkami pro Screen (interaktivní PTY/term view), Transcript, Events a Log
-- [ ] #3 Toolbar a akční tlačítka (Start s parametry modelu, Restart, Kill, Inject prompt/klávesy)
-- [ ] #4 Plná parita se stávajícím contrib/hcom-gui v modernější a rychlejší nativní Rust binárce
+- [x] #1 Tabulka instancí a katalogových agentů s řazením, filtry a zobrazením stavových sloupců
+- [x] #2 Spodní/postranní panel se záložkami pro Screen (interaktivní PTY/term view), Transcript, Events a Log
+- [x] #3 Toolbar a akční tlačítka (Start s parametry modelu, Restart, Kill, Inject prompt/klávesy)
+- [x] #4 Plná parita se stávajícím contrib/hcom-gui v modernější a rychlejší nativní Rust binárce
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -42,3 +42,17 @@ Rozšíření Rust GUI aplikace o plnohodnotnou náhradu stávajícího pythonov
 7. Spodní záložky detailů: Screen tab (PTY + screen_bar), Transcript tab, Events tab, Log tab.
 8. Testy: Unit testy pro fallback konfigurace a stavu, parsování sloupců, screen_bar položky, placeholder substituci, generation counter a řazení s empty_last.
 <!-- SECTION:PLAN:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implementována kompletní integrace funkcionality hcom-gui v nativním egui dashboardu (contrib/hcom-graph):
+- Plná konfigurace graph.json s fallbackem na gui.json a striktní izolace graph-state.json bez modifikace gui-state.json.
+- 24-sloupcová tabulka s řazením (včetně empty_last), dynamickými status:* sloupci, filtry (text, running, blocked, hide disabled, hide adhoc).
+- Spodní notebook panely: Screen s PTY a screen_bar tlačítky, Transcript, Events, Log a Report.
+- Boční panel s detailem a konfigurovatelným reportem klíč-hodnota.
+- Akční lišta: Start dialog s parametry modelu a CLI, Send dialog (-b), Restart, Kill, Kill Group s potvrzovacími dialogy, Open with a vlastní příkazy s bezpečnou náhradou placeholderů ({dir}, {instance}, {pane_id}, {terminal}).
+- Asynchronní architektura s odděleným BackgroundSync, lehkým periodickým reloadem tabulky (10s git status TTL cache) a těžkým ReloadStats (každých 60s, 16MB cap) a ochranou proti zastaralým výsledkům (generation counter).
+- Sloupce idle/context/quota jsou v TASK-77.4 prázdné a byly vyčleněny do navazujícího úkolu TASK-77.12.
+Schváleno recenzentem @agent_review_hcom_884 (re-review #270704).
+<!-- SECTION:FINAL_SUMMARY:END -->

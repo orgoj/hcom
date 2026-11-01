@@ -3,14 +3,49 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::thread::{JoinHandle, sleep, spawn};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionRequest {
-    Attach { agent: String },
-    Inject { agent: String, text: String },
-    Transcript { agent: String, last_lines: usize },
-    Kill { agent: String },
+    Attach {
+        agent: String,
+        custom_cmd: Option<Vec<String>>,
+    },
+    Inject {
+        agent: String,
+        text: String,
+        enter: bool,
+    },
+    Transcript {
+        agent: String,
+        generation: u64,
+        last_lines: usize,
+    },
+    Screen {
+        agent: String,
+        generation: u64,
+    },
+    Events {
+        agent: String,
+        generation: u64,
+        last_n: usize,
+    },
+    Kill {
+        agent: String,
+    },
+    KillGroup {
+        agents: Vec<String>,
+    },
+    RunCommand {
+        cmd: Vec<String>,
+        cwd: Option<String>,
+    },
+    SpawnDetached {
+        cmd: Vec<String>,
+        cwd: Option<String>,
+    },
+    ReloadTableData,
+    ReloadStats,
     Shutdown,
 }
 
@@ -26,11 +61,47 @@ pub enum ActionResult {
     },
     TranscriptLoaded {
         agent: String,
+        generation: u64,
+        content: Result<String, String>,
+    },
+    ScreenLoaded {
+        agent: String,
+        generation: u64,
+        content: Result<String, String>,
+    },
+    EventsLoaded {
+        agent: String,
+        generation: u64,
         content: Result<String, String>,
     },
     KillFinished {
         agent: String,
         result: Result<(), String>,
+    },
+    KillGroupFinished {
+        count: usize,
+        result: Result<(), String>,
+    },
+    CommandFinished {
+        result: Result<String, String>,
+    },
+    SpawnDetachedFinished {
+        cmd: Vec<String>,
+        result: Result<(), String>,
+    },
+    TableDataLoaded {
+        rows: Vec<crate::table_data::TableRow>,
+        catalog_groups: Vec<String>,
+        tool_groups: Vec<String>,
+    },
+    TableDataFailed {
+        error: String,
+    },
+    StatsLoaded {
+        stats: std::collections::HashMap<String, crate::table_data::EventStatsEntry>,
+    },
+    StatsFailed {
+        error: String,
     },
 }
 
@@ -51,14 +122,17 @@ pub fn build_attach_argv(agent: &str) -> Vec<String> {
     vec!["agent".to_string(), "attach".to_string(), agent.to_string()]
 }
 
-pub fn build_inject_argv(agent: &str, text: &str) -> Vec<String> {
-    vec![
+pub fn build_inject_argv(agent: &str, text: &str, enter: bool) -> Vec<String> {
+    let mut argv = vec![
         "term".to_string(),
         "inject".to_string(),
         agent.to_string(),
         text.to_string(),
-        "--enter".to_string(),
-    ]
+    ];
+    if enter {
+        argv.push("--enter".to_string());
+    }
+    argv
 }
 
 pub fn build_kill_argv(agent: &str) -> Vec<String> {
@@ -70,15 +144,19 @@ pub trait ActionRunner: Send + Sync {
     fn cancel(&self) {}
 }
 
+type GitStatusCache = Arc<Mutex<std::collections::HashMap<String, (Instant, String, String)>>>;
+
 #[derive(Clone, Default)]
 pub struct SystemActionRunner {
     active_child: Arc<Mutex<Option<Child>>>,
+    git_cache: GitStatusCache,
 }
 
 impl SystemActionRunner {
     pub fn new() -> Self {
         Self {
             active_child: Arc::new(Mutex::new(None)),
+            git_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -88,11 +166,16 @@ impl SystemActionRunner {
         argv: &[&str],
         max_stdout: usize,
         max_stderr: usize,
+        cwd: Option<&str>,
     ) -> Result<String, String> {
-        let mut child = Command::new(program)
-            .args(argv)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+        let mut cmd = Command::new(program);
+        cmd.args(argv).stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to spawn {} {}: {}", program, argv.join(" "), e))?;
 
@@ -113,7 +196,6 @@ impl SystemActionRunner {
             let mut err_buf = Vec::new();
             let mut take = Read::take(&mut stderr, (max_stderr + 1) as u64);
             let _ = take.read_to_end(&mut err_buf);
-            // Drain remaining stderr to sink to prevent child from blocking on stderr write
             let mut sink = std::io::sink();
             let _ = std::io::copy(&mut stderr, &mut sink);
             err_buf
@@ -142,7 +224,14 @@ impl SystemActionRunner {
         }
 
         // Wait for child process while keeping it cancellable until termination
+        let start_time = Instant::now();
+        let timeout = Duration::from_secs(30);
         let status = loop {
+            if start_time.elapsed() > timeout {
+                self.cancel();
+                let _ = stderr_handle.join();
+                return Err(format!("Command {} timed out after 30 seconds", program));
+            }
             let mut guard = self.active_child.lock().unwrap();
             if let Some(mut child) = guard.take() {
                 match child.try_wait() {
@@ -194,41 +283,307 @@ impl SystemActionRunner {
 impl ActionRunner for SystemActionRunner {
     fn execute(&self, req: ActionRequest) -> Option<ActionResult> {
         match req {
-            ActionRequest::Attach { agent } => {
-                let argv = build_attach_argv(&agent);
-                let argv_ref: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-                let res = self.run_command_bounded("hcom", &argv_ref, 4096, 4096);
+            ActionRequest::Attach { agent, custom_cmd } => {
+                let res = if let Some(cmd) = custom_cmd {
+                    if cmd.is_empty() {
+                        Err("Empty attach command".into())
+                    } else {
+                        let argv_ref: Vec<&str> = cmd[1..].iter().map(|s| s.as_str()).collect();
+                        self.run_command_bounded(&cmd[0], &argv_ref, 4096, 4096, None)
+                    }
+                } else {
+                    let argv = build_attach_argv(&agent);
+                    let argv_ref: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+                    self.run_command_bounded("hcom", &argv_ref, 4096, 4096, None)
+                };
                 Some(ActionResult::AttachFinished {
                     agent,
                     result: res.map(|_| ()),
                 })
             }
-            ActionRequest::Inject { agent, text } => {
-                let argv = build_inject_argv(&agent, &text);
+            ActionRequest::Inject { agent, text, enter } => {
+                let argv = build_inject_argv(&agent, &text, enter);
                 let argv_ref: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-                let res = self.run_command_bounded("hcom", &argv_ref, 4096, 4096);
+                let res = self.run_command_bounded("hcom", &argv_ref, 4096, 4096, None);
                 Some(ActionResult::InjectFinished {
                     agent,
                     result: res.map(|_| ()),
                 })
             }
-            ActionRequest::Transcript { agent, last_lines } => {
+            ActionRequest::Transcript {
+                agent,
+                generation,
+                last_lines,
+            } => {
                 let argv = build_transcript_argv(&agent, last_lines);
                 let argv_ref: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-                let res = self.run_command_bounded("hcom", &argv_ref, 32768, 4096);
+                let res = self.run_command_bounded("hcom", &argv_ref, 32768, 4096, None);
                 Some(ActionResult::TranscriptLoaded {
                     agent,
+                    generation,
+                    content: res,
+                })
+            }
+            ActionRequest::Screen { agent, generation } => {
+                let res = self.run_command_bounded("hcom", &["term", &agent], 32768, 4096, None);
+                Some(ActionResult::ScreenLoaded {
+                    agent,
+                    generation,
+                    content: res,
+                })
+            }
+            ActionRequest::Events {
+                agent,
+                generation,
+                last_n,
+            } => {
+                let last_str = last_n.clamp(1, 100).to_string();
+                let res = self.run_command_bounded(
+                    "hcom",
+                    &["events", "--agent", &agent, "--last", &last_str],
+                    32768,
+                    4096,
+                    None,
+                );
+                Some(ActionResult::EventsLoaded {
+                    agent,
+                    generation,
                     content: res,
                 })
             }
             ActionRequest::Kill { agent } => {
                 let argv = build_kill_argv(&agent);
                 let argv_ref: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-                let res = self.run_command_bounded("hcom", &argv_ref, 4096, 4096);
+                let res = self.run_command_bounded("hcom", &argv_ref, 4096, 4096, None);
                 Some(ActionResult::KillFinished {
                     agent,
                     result: res.map(|_| ()),
                 })
+            }
+            ActionRequest::KillGroup { agents } => {
+                let count = agents.len();
+                let mut argv: Vec<String> = vec!["kill".into()];
+                argv.extend(agents);
+                let argv_ref: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+                let res = self.run_command_bounded("hcom", &argv_ref, 8192, 4096, None);
+                Some(ActionResult::KillGroupFinished {
+                    count,
+                    result: res.map(|_| ()),
+                })
+            }
+            ActionRequest::RunCommand { cmd, cwd } => {
+                let res = if cmd.is_empty() {
+                    Err("Empty command".into())
+                } else {
+                    let argv_ref: Vec<&str> = cmd[1..].iter().map(|s| s.as_str()).collect();
+                    self.run_command_bounded(&cmd[0], &argv_ref, 32768, 4096, cwd.as_deref())
+                };
+                Some(ActionResult::CommandFinished { result: res })
+            }
+            ActionRequest::SpawnDetached { cmd, cwd } => {
+                if cmd.is_empty() {
+                    return Some(ActionResult::SpawnDetachedFinished {
+                        cmd,
+                        result: Err("Empty command".into()),
+                    });
+                }
+                let mut command = Command::new(&cmd[0]);
+                command.args(&cmd[1..]);
+
+                let effective_cwd = if let Some(ref dir) = cwd {
+                    if let Some(stripped) = dir.strip_prefix("~/") {
+                        if let Ok(home) = std::env::var("HOME") {
+                            format!("{}/{}", home, stripped)
+                        } else {
+                            dir.clone()
+                        }
+                    } else if dir == "~" {
+                        std::env::var("HOME").unwrap_or_else(|_| dir.clone())
+                    } else {
+                        dir.clone()
+                    }
+                } else {
+                    std::env::var("HOME").unwrap_or_default()
+                };
+
+                if !effective_cwd.is_empty() {
+                    command.current_dir(effective_cwd);
+                }
+                command.stdin(Stdio::null());
+                command.stdout(Stdio::null());
+                command.stderr(Stdio::null());
+                let res = match command.spawn() {
+                    Ok(mut child) => {
+                        std::thread::spawn(move || {
+                            let _ = child.wait();
+                        });
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("Failed to spawn {}: {}", cmd.join(" "), e)),
+                };
+                Some(ActionResult::SpawnDetachedFinished { cmd, result: res })
+            }
+            ActionRequest::ReloadTableData => {
+                let live_res =
+                    self.run_command_bounded("hcom", &["list", "--json"], 1024 * 1024, 4096, None);
+                let agent_res = self.run_command_bounded(
+                    "hcom",
+                    &["agent", "list", "--all", "--status", "--json"],
+                    1024 * 1024,
+                    4096,
+                    None,
+                );
+
+                let (live_out, agent_out) = match (live_res, agent_res) {
+                    (Ok(l), Ok(a)) => (l, a),
+                    (Err(e), _) | (_, Err(e)) => {
+                        return Some(ActionResult::TableDataFailed {
+                            error: format!("Failed to fetch live/agent data: {}", e),
+                        });
+                    }
+                };
+
+                let now = chrono::Utc::now().timestamp() as u64;
+                let mut rows = match crate::table_data::build_table_rows(&live_out, &agent_out, now)
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return Some(ActionResult::TableDataFailed {
+                            error: format!("Failed to parse table rows: {}", e),
+                        });
+                    }
+                };
+
+                // Enrich Git status for unique directories with 10s TTL
+                let mut seen_dirs = std::collections::HashSet::new();
+                for r in &rows {
+                    if !r.directory.is_empty() {
+                        seen_dirs.insert(r.directory.clone());
+                    }
+                }
+                for dir in seen_dirs {
+                    let cached = {
+                        let cache = self.git_cache.lock().unwrap();
+                        cache.get(&dir).and_then(|(inst, b, s)| {
+                            if inst.elapsed() < Duration::from_secs(10) {
+                                Some((b.clone(), s.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                    };
+
+                    let (b, s) = if let Some(c) = cached {
+                        c
+                    } else if let Ok(git_out) = self.run_command_bounded(
+                        "git",
+                        &["-C", &dir, "status", "--porcelain=v2", "--branch"],
+                        256 * 1024,
+                        4096,
+                        None,
+                    ) {
+                        let parsed = crate::table_data::parse_git_porcelain_v2(&git_out);
+                        let mut cache = self.git_cache.lock().unwrap();
+                        cache.insert(
+                            dir.clone(),
+                            (Instant::now(), parsed.0.clone(), parsed.1.clone()),
+                        );
+                        parsed
+                    } else {
+                        (String::new(), String::new())
+                    };
+
+                    for r in rows.iter_mut().filter(|r| r.directory == dir) {
+                        if r.branch.is_empty() && !b.is_empty() {
+                            r.branch = b.clone();
+                        }
+                        r.git_status = s.clone();
+                    }
+                }
+
+                let mut groups_set = std::collections::HashSet::new();
+                let mut tool_set = std::collections::HashSet::new();
+
+                if let Ok(agents) =
+                    serde_json::from_str::<Vec<crate::table_data::CatalogAgentItem>>(&agent_out)
+                {
+                    for a in agents {
+                        for g in a.groups {
+                            groups_set.insert(g);
+                        }
+                        if let Some(c) = a.cli
+                            && !c.is_empty()
+                        {
+                            tool_set.insert(c);
+                        }
+                    }
+                }
+                for r in &rows {
+                    if !r.cli.is_empty() {
+                        tool_set.insert(r.cli.clone());
+                    }
+                }
+
+                let mut catalog_groups: Vec<String> = groups_set.into_iter().collect();
+                catalog_groups.sort();
+                let mut tool_groups: Vec<String> = tool_set.into_iter().collect();
+                tool_groups.sort();
+
+                Some(ActionResult::TableDataLoaded {
+                    rows,
+                    catalog_groups,
+                    tool_groups,
+                })
+            }
+            ActionRequest::ReloadStats => {
+                let life_res = self.run_command_bounded(
+                    "hcom",
+                    &["events", "--type", "life", "--last", "100000"],
+                    16 * 1024 * 1024,
+                    4096,
+                    None,
+                );
+                let msg_res = self.run_command_bounded(
+                    "hcom",
+                    &["events", "--type", "message", "--full", "--last", "100000"],
+                    16 * 1024 * 1024,
+                    4096,
+                    None,
+                );
+                let live_res =
+                    self.run_command_bounded("hcom", &["list", "--json"], 1024 * 1024, 4096, None);
+
+                let (life_events, msg_events) = match (life_res, msg_res) {
+                    (Ok(l), Ok(m)) => (l, m),
+                    (Err(e), _) | (_, Err(e)) => {
+                        return Some(ActionResult::StatsFailed {
+                            error: format!("Failed to load events for usage stats: {}", e),
+                        });
+                    }
+                };
+
+                let running_set: std::collections::HashSet<String> = live_res
+                    .ok()
+                    .and_then(|out| {
+                        serde_json::from_str::<Vec<crate::table_data::LiveInstanceItem>>(&out).ok()
+                    })
+                    .map(|items| {
+                        items
+                            .into_iter()
+                            .filter(|i| i.status.as_deref() != Some("stopped"))
+                            .map(|i| i.name)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let now = chrono::Utc::now().timestamp() as u64;
+                let stats = crate::table_data::compute_event_stats(
+                    &life_events,
+                    &msg_events,
+                    &running_set,
+                    now,
+                );
+                Some(ActionResult::StatsLoaded { stats })
             }
             ActionRequest::Shutdown => None,
         }
@@ -252,7 +607,6 @@ pub struct ActionWorkerHandle {
 impl ActionWorkerHandle {
     pub fn new<R: ActionRunner + 'static>(runner: R) -> Self {
         let runner = Arc::new(runner);
-        // Bounded sync channel (capacity 16) to prevent UI spamming/backpressure
         let (req_tx, req_rx) = sync_channel::<ActionRequest>(16);
         let (res_tx, res_rx) = std::sync::mpsc::channel::<ActionResult>();
 
