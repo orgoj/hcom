@@ -7,7 +7,9 @@ use crate::config::{
 use crate::layout::{GraphLayout, LayoutMode};
 use crate::model::{AgentGraph, AgentStatus, EdgeKind, MessageWindow};
 use crate::sync::BackgroundSync;
-use crate::table_data::{DEFAULT_COLUMNS, REPORT_FIELDS, TableRow, filter_row, sort_rows};
+use crate::table_data::{
+    DEFAULT_COLUMNS, REPORT_FIELDS, TableRow, filter_row, sort_rows, tooltip_lines,
+};
 use egui::{Color32, RichText};
 use petgraph::stable_graph::{EdgeIndex, NodeIndex};
 use std::path::{Path, PathBuf};
@@ -46,6 +48,9 @@ pub struct HcomGraphApp {
     pub inject_input: String,
     pub loaded_transcript: Option<(String, String)>,
     pub context_menu: Option<ContextMenuState>,
+    /// Node and pointer position of the hover tooltip (kept while it fades out).
+    pub tooltip_node: Option<NodeIndex>,
+    pub tooltip_pos: egui::Pos2,
 
     // Config & state
     pub hcom_dir: PathBuf,
@@ -192,6 +197,8 @@ impl HcomGraphApp {
             inject_input: String::new(),
             loaded_transcript: None,
             context_menu: None,
+            tooltip_node: None,
+            tooltip_pos: egui::Pos2::ZERO,
             hcom_dir,
             config,
             msg_window: state.message_window(),
@@ -258,6 +265,8 @@ impl HcomGraphApp {
             confirm_kill_group: None,
             custom_cmd_confirm: None,
             context_menu: None,
+            tooltip_node: None,
+            tooltip_pos: egui::Pos2::ZERO,
             inject_input: String::new(),
             loaded_transcript: None,
             hcom_dir,
@@ -1237,6 +1246,112 @@ impl HcomGraphApp {
                 .map(TableRow::from_agent_node)
                 .collect()
         }
+    }
+
+    /// True while a dialog, confirmation or the canvas context menu is open.
+    pub fn overlay_open(&self) -> bool {
+        self.context_menu.is_some()
+            || self.confirm_kill_target.is_some()
+            || self.confirm_restart_target.is_some()
+            || self.confirm_kill_group.is_some()
+            || self.custom_cmd_confirm.is_some()
+            || self.show_start_dialog
+            || self.show_send_dialog
+    }
+
+    /// Node whose hover tooltip shows this frame: the hovered node, unless the
+    /// tooltip is off, a popup menu or dialog is open, or the pointer is pressed.
+    pub fn tooltip_target(&self, popup_open: bool, pointer_down: bool) -> Option<NodeIndex> {
+        if self.config.tooltip.is_empty()
+            || popup_open
+            || pointer_down
+            || self.overlay_open()
+            || self.canvas.dragged_node.is_some()
+        {
+            return None;
+        }
+        self.canvas.hovered_node
+    }
+
+    /// Tooltip header and lines for a node; a node without a table row
+    /// (e.g. a placeholder parent) gets its name only.
+    pub fn tooltip_content(&self, idx: NodeIndex) -> Option<(String, Vec<(String, String)>)> {
+        let node = self.graph.graph.node_weight(idx)?;
+        let lines = if self.table_rows.is_empty() {
+            tooltip_lines(&TableRow::from_agent_node(node), &self.config.tooltip)
+        } else {
+            self.table_rows
+                .iter()
+                .find(|r| r.instance == node.name)
+                .map(|r| tooltip_lines(r, &self.config.tooltip))
+                .unwrap_or_default()
+        };
+        Some((node.name.clone(), lines))
+    }
+
+    fn show_canvas(&mut self, ui: &mut egui::Ui, visible: &std::collections::HashSet<NodeIndex>) {
+        let (response, action) = self
+            .canvas
+            .show(ui, &self.graph, &mut self.layout, Some(visible));
+        self.handle_canvas_action(action);
+        self.render_node_tooltip(ui.ctx(), response.rect);
+    }
+
+    /// Hover card next to the pointer, kept inside the canvas; it switches
+    /// immediately between nodes and fades out when the hover ends.
+    fn render_node_tooltip(&mut self, ctx: &egui::Context, canvas_rect: egui::Rect) {
+        let pointer_down = ctx.input(|i| i.pointer.any_down());
+        let shown = self.tooltip_target(egui::Popup::is_any_open(ctx), pointer_down);
+        if let Some(idx) = shown {
+            self.tooltip_node = Some(idx);
+            if let Some(pos) = ctx.pointer_hover_pos() {
+                self.tooltip_pos = pos;
+            }
+        }
+        let opacity = ctx.animate_bool_with_time(
+            egui::Id::unique("node_hover_tooltip"),
+            shown.is_some(),
+            0.15,
+        );
+        let Some(idx) = self.tooltip_node else {
+            return;
+        };
+        let content = if opacity > 0.0 {
+            self.tooltip_content(idx)
+        } else {
+            None
+        };
+        let Some((name, lines)) = content else {
+            self.tooltip_node = None;
+            return;
+        };
+        egui::Area::new(egui::Id::unique("node_hover_tooltip_area"))
+            .order(egui::Order::Tooltip)
+            .interactable(false)
+            .fixed_pos(self.tooltip_pos + egui::vec2(16.0, 16.0))
+            .constrain_to(canvas_rect)
+            .show(ctx, |ui| {
+                ui.multiply_opacity(opacity);
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_max_width(360.0);
+                    ui.label(RichText::new(&name).strong());
+                    if lines.is_empty() {
+                        return;
+                    }
+                    ui.separator();
+                    egui::Grid::new("node_hover_tooltip_grid")
+                        .num_columns(2)
+                        .spacing([12.0, 2.0])
+                        .max_col_width(280.0)
+                        .show(ui, |ui| {
+                            for (key, val) in &lines {
+                                ui.label(RichText::new(key).weak());
+                                ui.add(egui::Label::new(val).truncate());
+                                ui.end_row();
+                            }
+                        });
+                });
+            });
     }
 }
 
@@ -2364,13 +2479,7 @@ impl eframe::App for HcomGraphApp {
         // 8. Main Central Panel: View modes (Graph, Table, Split H, Split V)
         egui::CentralPanel::default().show(ui, |ui| match self.state.view_mode.as_str() {
             "graph_only" => {
-                let (_response, action) = self.canvas.show(
-                    ui,
-                    &self.graph,
-                    &mut self.layout,
-                    Some(&visible_node_indices),
-                );
-                self.handle_canvas_action(action);
+                self.show_canvas(ui, &visible_node_indices);
             }
             "table_only" => {
                 self.render_table(ui, &filtered_rows);
@@ -2386,13 +2495,7 @@ impl eframe::App for HcomGraphApp {
                         egui::vec2(left_w, total_h),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            let (_response, action) = self.canvas.show(
-                                ui,
-                                &self.graph,
-                                &mut self.layout,
-                                Some(&visible_node_indices),
-                            );
-                            self.handle_canvas_action(action);
+                            self.show_canvas(ui, &visible_node_indices);
                         },
                     );
 
@@ -2433,13 +2536,7 @@ impl eframe::App for HcomGraphApp {
                         egui::vec2(total_w, top_h),
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| {
-                            let (_response, action) = self.canvas.show(
-                                ui,
-                                &self.graph,
-                                &mut self.layout,
-                                Some(&visible_node_indices),
-                            );
-                            self.handle_canvas_action(action);
+                            self.show_canvas(ui, &visible_node_indices);
                         },
                     );
 

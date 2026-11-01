@@ -3613,3 +3613,142 @@ fn test_cluster_springs_follow_reparent_without_new_event() {
         k.x
     );
 }
+
+#[test]
+fn test_tooltip_config_default_custom_and_empty() {
+    use hcom_graph::config::{GraphConfig, default_tooltip};
+
+    let cfg: GraphConfig = serde_json::from_str("{}").unwrap();
+    assert_eq!(cfg.tooltip, default_tooltip());
+    assert_eq!(
+        cfg.tooltip,
+        [
+            "status", "detail", "cli", "since", "age", "dir", "unread", "context"
+        ]
+    );
+
+    let cfg: GraphConfig =
+        serde_json::from_str(r#"{"tooltip": ["dir", "status:done", "cli"]}"#).unwrap();
+    assert_eq!(cfg.tooltip, ["dir", "status:done", "cli"]);
+    assert_eq!(cfg.report.len(), 28, "report stays independent of tooltip");
+
+    let cfg: GraphConfig = serde_json::from_str(r#"{"tooltip": []}"#).unwrap();
+    assert!(cfg.tooltip.is_empty());
+}
+
+#[test]
+fn test_tooltip_lines_order_skip_empty_status_and_multiline() {
+    use hcom_graph::table_data::{TableRow, tooltip_lines};
+
+    let mut row = TableRow {
+        instance: "worker_1".into(),
+        cli: "claude".into(),
+        status: "active".into(),
+        detail: "first line\nsecond line".into(),
+        ..Default::default()
+    };
+    row.status_values.insert("done".into(), "built it".into());
+
+    let fields: Vec<String> = ["dir", "status:done", "cli", "unknown", "detail", "status"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let lines = tooltip_lines(&row, &fields);
+    assert_eq!(
+        lines,
+        vec![
+            ("status:done".to_string(), "built it".to_string()),
+            ("cli".to_string(), "claude".to_string()),
+            ("detail".to_string(), "first line…".to_string()),
+            ("status".to_string(), "active".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn test_tooltip_target_gates_and_content() {
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_graph::table_data::TableRow;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+    app.graph.apply_instance_snapshot(&[InstanceSnapshot {
+        name: "worker_1".into(),
+        status: Some("active".into()),
+        status_context: None,
+        status_age_seconds: None,
+        unread_count: None,
+        parent_name: Some("parent_x".into()),
+        directory: None,
+        tool: Some("claude".into()),
+    }]);
+    let idx = app.graph.get_node_index("worker_1").unwrap();
+    app.table_rows = vec![TableRow {
+        instance: "worker_1".into(),
+        cli: "codex".into(),
+        status: "listening".into(),
+        ..Default::default()
+    }];
+
+    // Not hovered -> nothing.
+    assert_eq!(app.tooltip_target(false, false), None);
+    app.canvas.hovered_node = Some(idx);
+    assert_eq!(app.tooltip_target(false, false), Some(idx));
+
+    // Gates: popup menu, pressed pointer, drag, dialogs, empty config.
+    assert_eq!(app.tooltip_target(true, false), None);
+    assert_eq!(app.tooltip_target(false, true), None);
+    app.canvas.dragged_node = Some(idx);
+    assert_eq!(app.tooltip_target(false, false), None);
+    app.canvas.dragged_node = None;
+    app.show_start_dialog = true;
+    assert_eq!(app.tooltip_target(false, false), None);
+    app.show_start_dialog = false;
+    app.show_send_dialog = true;
+    assert_eq!(app.tooltip_target(false, false), None);
+    app.show_send_dialog = false;
+    app.confirm_kill_target = Some("worker_1".into());
+    assert_eq!(app.tooltip_target(false, false), None);
+    app.confirm_kill_target = None;
+    app.confirm_restart_target = Some(("worker_1".into(), Vec::new()));
+    assert_eq!(app.tooltip_target(false, false), None);
+    app.confirm_restart_target = None;
+    app.confirm_kill_group = Some(vec!["worker_1".into()]);
+    assert_eq!(app.tooltip_target(false, false), None);
+    app.confirm_kill_group = None;
+    app.custom_cmd_confirm = Some(("x".into(), Vec::new(), None));
+    assert_eq!(app.tooltip_target(false, false), None);
+    app.custom_cmd_confirm = None;
+    app.context_menu = Some(hcom_graph::app::ContextMenuState {
+        target: hcom_graph::app::ContextMenuTarget::Node(idx),
+        screen_pos: Pos2::ZERO,
+    });
+    assert_eq!(app.tooltip_target(false, false), None);
+    app.context_menu = None;
+    assert_eq!(app.tooltip_target(false, false), Some(idx));
+
+    // Content comes from the table row, in config order.
+    let (name, lines) = app.tooltip_content(idx).unwrap();
+    assert_eq!(name, "worker_1");
+    assert_eq!(
+        lines,
+        vec![
+            ("status".to_string(), "listening".to_string()),
+            ("cli".to_string(), "codex".to_string()),
+        ]
+    );
+
+    // Placeholder parent without a table row: name only.
+    let parent = app.graph.get_node_index("parent_x").unwrap();
+    let (name, lines) = app.tooltip_content(parent).unwrap();
+    assert_eq!(name, "parent_x");
+    assert!(lines.is_empty());
+
+    app.config.tooltip.clear();
+    assert_eq!(app.tooltip_target(false, false), None);
+}

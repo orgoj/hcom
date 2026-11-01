@@ -505,6 +505,26 @@ impl TableRow {
     }
 }
 
+/// Tooltip `(key, value)` lines in `fields` order. Empty values are skipped;
+/// a multi-line value keeps only its first line plus an ellipsis.
+pub fn tooltip_lines(row: &TableRow, fields: &[String]) -> Vec<(String, String)> {
+    fields
+        .iter()
+        .filter_map(|key| {
+            let val = row.get_cell_value(key);
+            let val = val.trim();
+            if val.is_empty() {
+                return None;
+            }
+            let shown = match val.split_once('\n') {
+                Some((first, _)) => format!("{}…", first.trim_end()),
+                None => val.to_string(),
+            };
+            Some((key.clone(), shown))
+        })
+        .collect()
+}
+
 pub fn sort_rows(rows: &mut [TableRow], col_key: &str, reverse: bool, empty_last: bool) {
     rows.sort_by(|a, b| {
         let val_a = a.get_cell_value(col_key);

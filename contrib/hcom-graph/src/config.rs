@@ -63,6 +63,18 @@ pub struct GraphConfig {
     pub screen_bar: Vec<ScreenBarDef>,
     #[serde(default = "default_report")]
     pub report: Vec<String>,
+    /// Fields of the node hover tooltip (same keys as `report`); empty = off.
+    #[serde(default = "default_tooltip")]
+    pub tooltip: Vec<String>,
+}
+
+pub fn default_tooltip() -> Vec<String> {
+    [
+        "status", "detail", "cli", "since", "age", "dir", "unread", "context",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 fn default_refresh_seconds() -> u64 {
@@ -161,6 +173,7 @@ impl Default for GraphConfig {
             attach: HashMap::new(),
             screen_bar: default_screen_bar(),
             report: default_report(),
+            tooltip: default_tooltip(),
         }
     }
 }
