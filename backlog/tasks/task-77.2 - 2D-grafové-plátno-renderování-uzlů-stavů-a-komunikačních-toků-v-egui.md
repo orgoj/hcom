@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-01 11:21'
-updated_date: '2026-11-01 12:18'
+updated_date: '2026-11-01 12:20'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -30,8 +30,9 @@ Vizuální komponenta v egui/eframe s využitím egui_graphs a petgraph pro 2D g
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. src/layout.rs: Force-directed / spring layout (Coulomb repulsion, Hooke springs on Spawn/Message edges, central gravity, damping, velocity cap). 100% unit testable without GUI.
-2. src/canvas.rs: CanvasView with pan & zoom (scroll wheel anchored to cursor), node rendering with status colors (active: green, listening: blue, blocked: red/orange, stopped: gray), message edge arrows with message count badges, quadratic Bezier curvature for bidirectional message edges, drag & drop node positioning with pinning.
-3. src/app.rs & src/main.rs: HcomGraphApp implementing eframe::App, dark theme, top status bar (agent counts, sync status, zoom controls), CentralPanel with CanvasView, HcomSyncWorker event polling.
-4. Acceptance criteria verification: unit tests for layout physics, coordinate transforms (world_to_screen/screen_to_world), hit testing, drag-pinning; cargo fmt, clippy and tests passing.
+1. Background worker + mpsc channel: HcomSyncWorker bezi ve std::thread, UI thread (eframe::App::update) pouze neblokujici try_iter(), tichy stream nikdy nezmrazi GUI; child follower je drzen ve workeru a bezpecne ukoncen pri dropu/shutdown; unit test overi neblokujici update bez eventu.
+2. Layout frame budget & dt clamp: zmereno 17 agentu na hostu; dt clampovano na [0.001, 0.033]s, max 2 sub-kroky simulace (max 2ms per frame); po vycerpani kineticke energie simulace usina (0ms).
+3. Drag & drop pinning lifecycle: behem dragu pinned=true a pozice sleduje kurzor (vel=0); pri mouse-up (uvolneni) pinned=false a uzel se plynule dotvaruje v pruzinovem poli.
+4. Canvas rendering a interaktivita: status barvy (active green, listening blue, blocked red, stopped gray), Bezier orientovane message edges s badge poctu zprav, zoom (kolecko ukotvene ke kurzoru), pan.
+5. Dokumentace: kapitola v contrib/README.md s popisem behu a ovladani (cargo run -p hcom-graph).
 <!-- SECTION:PLAN:END -->
