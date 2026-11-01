@@ -609,15 +609,8 @@ impl HcomGraphApp {
         });
     }
 
-    fn render_bottom_tabs(&mut self, ui: &mut egui::Ui, is_split: bool) {
+    fn render_bottom_tabs(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if is_split
-                && ui
-                    .selectable_label(self.state.bottom_tab == "Table", "Table (F4)")
-                    .clicked()
-            {
-                self.select_bottom_tab("Table");
-            }
             if ui
                 .selectable_label(self.state.bottom_tab == "Screen", "Screen (F5)")
                 .clicked()
@@ -660,29 +653,6 @@ impl HcomGraphApp {
         ui.separator();
 
         match self.state.bottom_tab.as_str() {
-            "Table" => {
-                let all_rows = self.get_all_rows();
-                let mut filtered_rows: Vec<TableRow> = all_rows
-                    .into_iter()
-                    .filter(|r| {
-                        filter_row(
-                            r,
-                            &self.search_query,
-                            self.state.running_only,
-                            self.state.blocked_only,
-                            self.state.hide_disabled,
-                            self.state.hide_adhoc,
-                        )
-                    })
-                    .collect();
-                sort_rows(
-                    &mut filtered_rows,
-                    self.state.sort_col.as_deref().unwrap_or("instance"),
-                    self.state.sort_reverse,
-                    self.state.empty_last,
-                );
-                self.render_table(ui, &filtered_rows);
-            }
             "Screen" => {
                 self.render_screen_tab(ui);
             }
@@ -780,8 +750,8 @@ impl eframe::App for HcomGraphApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        // Ensure table_only mode never uses Table tab in bottom panel
-        if self.state.view_mode == "table_only" && self.state.bottom_tab == "Table" {
+        // Ensure bottom_tab is never Table
+        if self.state.bottom_tab == "Table" {
             self.state.bottom_tab = "Screen".to_string();
         }
 
@@ -828,7 +798,12 @@ impl eframe::App for HcomGraphApp {
             self.search_query.clear();
         }
         if let Some(tab) = switch_tab {
-            self.select_bottom_tab(tab);
+            if tab == "Table" {
+                self.state.view_mode = "table_only".to_string();
+                self.save_state();
+            } else {
+                self.select_bottom_tab(tab);
+            }
         }
 
         // 1. Ingest non-blocking updates from BackgroundSync
@@ -1050,6 +1025,18 @@ impl eframe::App for HcomGraphApp {
         );
         let shown_count = filtered_rows.len();
 
+        let visible_node_indices: std::collections::HashSet<NodeIndex> = filtered_rows
+            .iter()
+            .filter_map(|r| {
+                let name = if !r.instance.is_empty() {
+                    &r.instance
+                } else {
+                    &r.agent
+                };
+                self.graph.get_node_index(name)
+            })
+            .collect();
+
         // 4. Top Status & Toolbar Panel
         egui::Panel::top("top_status_bar").show(ui, |ui| {
             // Row 1: Header + Counts
@@ -1111,24 +1098,34 @@ impl eframe::App for HcomGraphApp {
             ui.horizontal(|ui| {
                 // View modes
                 if ui
-                    .selectable_label(self.state.view_mode == "split", "Split View")
-                    .clicked()
-                {
-                    self.state.view_mode = "split".to_string();
-                    self.save_state();
-                }
-                if ui
-                    .selectable_label(self.state.view_mode == "graph_only", "Graph Only")
+                    .selectable_label(self.state.view_mode == "graph_only", "Graph")
                     .clicked()
                 {
                     self.state.view_mode = "graph_only".to_string();
                     self.save_state();
                 }
                 if ui
-                    .selectable_label(self.state.view_mode == "table_only", "Table Only")
+                    .selectable_label(self.state.view_mode == "table_only", "Table (F4)")
                     .clicked()
                 {
                     self.state.view_mode = "table_only".to_string();
+                    self.save_state();
+                }
+                if ui
+                    .selectable_label(self.state.view_mode == "split_horizontal", "Split H")
+                    .clicked()
+                {
+                    self.state.view_mode = "split_horizontal".to_string();
+                    self.save_state();
+                }
+                if ui
+                    .selectable_label(
+                        self.state.view_mode == "split" || self.state.view_mode == "split_vertical",
+                        "Split V",
+                    )
+                    .clicked()
+                {
+                    self.state.view_mode = "split_vertical".to_string();
                     self.save_state();
                 }
 
@@ -1998,43 +1995,79 @@ impl eframe::App for HcomGraphApp {
             });
         }
 
-        // 7. Main / Bottom Layout based on View Mode
-        match self.state.view_mode.as_str() {
+        // 7. Bottom Inspection Panel (always at bottom, holding Screen/Transcript/Events/Log/Report of selected agent)
+        let bottom_h = self.state.sash_pos.unwrap_or(240.0).clamp(100.0, 800.0);
+        let bottom_resp = egui::Panel::bottom("inspection_bottom_panel")
+            .resizable(true)
+            .default_size(bottom_h)
+            .min_size(100.0)
+            .show(ui, |ui| {
+                self.render_bottom_tabs(ui);
+            });
+        let cur_h = bottom_resp.response.rect.height();
+        if (cur_h - bottom_h).abs() > 2.0 && cur_h >= 80.0 {
+            self.state.sash_pos = Some(cur_h);
+            self.save_state();
+        }
+
+        // 8. Main Central Panel: View modes (Graph, Table, Split H, Split V)
+        egui::CentralPanel::default().show(ui, |ui| match self.state.view_mode.as_str() {
             "graph_only" => {
-                egui::CentralPanel::default().show(ui, |ui| {
-                    let (_response, action) = self.canvas.show(ui, &self.graph, &mut self.layout);
-                    self.handle_canvas_action(action);
-                });
+                let (_response, action) = self.canvas.show(
+                    ui,
+                    &self.graph,
+                    &mut self.layout,
+                    Some(&visible_node_indices),
+                );
+                self.handle_canvas_action(action);
             }
             "table_only" => {
-                let default_h = self.state.sash_pos.unwrap_or(260.0);
-                egui::Panel::bottom("bottom_tabs_panel")
-                    .resizable(true)
-                    .default_size(default_h)
-                    .show(ui, |ui| {
-                        self.render_bottom_tabs(ui, false);
-                    });
-
-                egui::CentralPanel::default().show(ui, |ui| {
+                self.render_table(ui, &filtered_rows);
+            }
+            "split_horizontal" => {
+                let total_w = ui.available_width();
+                let left_w = (total_w * 0.5).max(150.0);
+                ui.horizontal(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(left_w, ui.available_height()),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            let (_response, action) = self.canvas.show(
+                                ui,
+                                &self.graph,
+                                &mut self.layout,
+                                Some(&visible_node_indices),
+                            );
+                            self.handle_canvas_action(action);
+                        },
+                    );
+                    ui.separator();
                     self.render_table(ui, &filtered_rows);
                 });
             }
             _ => {
-                // "split"
-                let default_h = self.state.sash_pos.unwrap_or(280.0);
-                egui::Panel::bottom("bottom_split_panel")
-                    .resizable(true)
-                    .default_size(default_h)
-                    .show(ui, |ui| {
-                        self.render_bottom_tabs(ui, true);
-                    });
-
-                egui::CentralPanel::default().show(ui, |ui| {
-                    let (_response, action) = self.canvas.show(ui, &self.graph, &mut self.layout);
-                    self.handle_canvas_action(action);
+                // "split" or "split_vertical"
+                let total_h = ui.available_height();
+                let top_h = (total_h * 0.5).max(100.0);
+                ui.vertical(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), top_h),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            let (_response, action) = self.canvas.show(
+                                ui,
+                                &self.graph,
+                                &mut self.layout,
+                                Some(&visible_node_indices),
+                            );
+                            self.handle_canvas_action(action);
+                        },
+                    );
+                    ui.separator();
+                    self.render_table(ui, &filtered_rows);
                 });
             }
-        }
+        });
 
         // 8. Context Menu Popup
         if let Some(ref menu) = self.context_menu.clone() {

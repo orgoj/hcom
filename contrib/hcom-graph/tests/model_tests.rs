@@ -2760,3 +2760,77 @@ fn test_in_flight_flags_reset_on_dispatch_failure() {
         "stats_reload_in_flight must be reset on dispatch failure"
     );
 }
+
+#[test]
+fn test_canvas_filtering_excludes_hidden_nodes_and_edges() {
+    let mut graph = AgentGraph::new();
+    let snap = vec![
+        InstanceSnapshot {
+            name: "agent_a".into(),
+            status: Some("blocked".into()),
+            status_context: None,
+            status_age_seconds: None,
+            unread_count: None,
+            parent_name: None,
+            directory: None,
+            tool: None,
+        },
+        InstanceSnapshot {
+            name: "agent_b".into(),
+            status: Some("active".into()),
+            status_context: None,
+            status_age_seconds: None,
+            unread_count: None,
+            parent_name: None,
+            directory: None,
+            tool: None,
+        },
+    ];
+    graph.apply_instance_snapshot(&snap);
+
+    let idx_a = graph.get_node_index("agent_a").unwrap();
+    let idx_b = graph.get_node_index("agent_b").unwrap();
+
+    let ev = MessageEvent {
+        id: 100,
+        ts: Utc::now(),
+        instance: "agent_a".into(),
+        data: MessageData {
+            from: "agent_a".into(),
+            delivered_to: vec!["agent_b".into()],
+            mentions: vec![],
+            intent: None,
+            text: "test".into(),
+        },
+    };
+    graph.apply_message_event(&ev);
+
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+    layout.set_node_pos(idx_a, Pos2::new(-100.0, 0.0), true);
+    layout.set_node_pos(idx_b, Pos2::new(100.0, 0.0), true);
+
+    let canvas = CanvasView::new();
+    let rect = Rect::from_center_size(Pos2::new(300.0, 300.0), Vec2::new(600.0, 600.0));
+
+    // When no filter is applied (visible_nodes is None), edge is hit at midpoint (300, 300)
+    let hit_all =
+        canvas.hit_test_edge_filtered(Pos2::new(300.0, 300.0), &graph, &layout, rect, 8.0, None);
+    assert!(hit_all.is_some(), "Edge should be hit when unfiltered");
+
+    // When filter includes only agent_a, edge to agent_b must NOT be hit
+    let mut only_a = std::collections::HashSet::new();
+    only_a.insert(idx_a);
+    let hit_only_a = canvas.hit_test_edge_filtered(
+        Pos2::new(300.0, 300.0),
+        &graph,
+        &layout,
+        rect,
+        8.0,
+        Some(&only_a),
+    );
+    assert!(
+        hit_only_a.is_none(),
+        "Edge must be hidden when target node is filtered out"
+    );
+}

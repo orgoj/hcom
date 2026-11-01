@@ -108,10 +108,28 @@ impl CanvasView {
         rect: Rect,
         hit_threshold: f32,
     ) -> Option<EdgeIndex> {
+        self.hit_test_edge_filtered(screen_pos, graph, layout, rect, hit_threshold, None)
+    }
+
+    pub fn hit_test_edge_filtered(
+        &self,
+        screen_pos: Pos2,
+        graph: &AgentGraph,
+        layout: &GraphLayout,
+        rect: Rect,
+        hit_threshold: f32,
+        visible_nodes: Option<&std::collections::HashSet<NodeIndex>>,
+    ) -> Option<EdgeIndex> {
         let node_radius = 26.0 * self.zoom;
         for edge_ref in graph.graph.edge_references() {
             let source_idx = edge_ref.source();
             let target_idx = edge_ref.target();
+
+            if let Some(v) = visible_nodes
+                && (!v.contains(&source_idx) || !v.contains(&target_idx))
+            {
+                continue;
+            }
 
             let Some(source_phys) = layout.nodes.get(&source_idx) else {
                 continue;
@@ -157,11 +175,31 @@ impl CanvasView {
         ui: &mut egui::Ui,
         graph: &AgentGraph,
         layout: &mut GraphLayout,
+        visible_nodes: Option<&std::collections::HashSet<NodeIndex>>,
     ) -> (egui::Response, Option<CanvasAction>) {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let mut triggered_action = None;
+
+        // Clear selection if selected element became filtered out
+        if let Some(sel) = self.selected_node
+            && let Some(v) = visible_nodes
+            && !v.contains(&sel)
+        {
+            self.selected_node = None;
+        }
+        if let Some(sel_e) = self.selected_edge
+            && let Some(v) = visible_nodes
+        {
+            if let Some((src, tgt)) = graph.graph.edge_endpoints(sel_e) {
+                if !v.contains(&src) || !v.contains(&tgt) {
+                    self.selected_edge = None;
+                }
+            } else {
+                self.selected_edge = None;
+            }
+        }
 
         // 1. Zoom interaction (anchored at mouse cursor)
         let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
@@ -185,9 +223,18 @@ impl CanvasView {
 
         if let Some(mouse_pos) = response.interact_pointer_pos() {
             let world_mouse = self.screen_to_world(mouse_pos, rect);
-            self.hovered_node = layout.hit_test(world_mouse, hit_radius_world);
+            self.hovered_node = layout
+                .hit_test(world_mouse, hit_radius_world)
+                .filter(|idx| visible_nodes.is_none_or(|v| v.contains(idx)));
             if self.hovered_node.is_none() {
-                self.hovered_edge = self.hit_test_edge(mouse_pos, graph, layout, rect, 10.0);
+                self.hovered_edge = self.hit_test_edge_filtered(
+                    mouse_pos,
+                    graph,
+                    layout,
+                    rect,
+                    10.0,
+                    visible_nodes,
+                );
             } else {
                 self.hovered_edge = None;
             }
@@ -301,6 +348,12 @@ impl CanvasView {
             let source_idx = edge_ref.source();
             let target_idx = edge_ref.target();
 
+            if let Some(v) = visible_nodes
+                && (!v.contains(&source_idx) || !v.contains(&target_idx))
+            {
+                continue;
+            }
+
             let Some(source_phys) = layout.nodes.get(&source_idx) else {
                 continue;
             };
@@ -388,6 +441,11 @@ impl CanvasView {
 
         // 5. Render Nodes
         for (idx, phys) in &layout.nodes {
+            if let Some(v) = visible_nodes
+                && !v.contains(idx)
+            {
+                continue;
+            }
             let Some(node_data) = graph.graph.node_weight(*idx) else {
                 continue;
             };
