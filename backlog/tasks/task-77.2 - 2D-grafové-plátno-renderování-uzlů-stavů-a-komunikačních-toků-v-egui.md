@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-01 11:21'
-updated_date: '2026-11-01 12:26'
+updated_date: '2026-11-01 12:49'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -21,10 +21,10 @@ Vizuální komponenta v egui/eframe s využitím egui_graphs a petgraph pro 2D g
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Uzly jsou vykresleny s názvy a barvou odpovídající stavu (active, listening, blocked, stopped)
-- [ ] #2 Komunikační hrany zobrazují směr a počet zpráv mezi agenty
-- [ ] #3 Podpora zoomu (kolečko myši) a posunu plátna (pan)
-- [ ] #4 Uzel lze myší uchopit a přesunout (drag & drop pozicování)
+- [x] #1 Uzly jsou vykresleny s názvy a barvou odpovídající stavu (active, listening, blocked, stopped)
+- [x] #2 Komunikační hrany zobrazují směr a počet zpráv mezi agenty
+- [x] #3 Podpora zoomu (kolečko myši) a posunu plátna (pan)
+- [x] #4 Uzel lze myší uchopit a přesunout (drag & drop pozicování)
 <!-- AC:END -->
 
 ## Implementation Plan
