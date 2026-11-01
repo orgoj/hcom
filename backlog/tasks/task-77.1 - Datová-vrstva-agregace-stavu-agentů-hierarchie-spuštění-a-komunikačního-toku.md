@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-01 11:21'
-updated_date: '2026-11-01 11:28'
+updated_date: '2026-11-01 11:29'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -30,8 +30,9 @@ Implementace načítání a aktualizace dat z hcom (čtení stavu z hcom list/ev
 
 <!-- SECTION:PLAN:BEGIN -->
 1. Založit crate contrib/hcom-graph s vlastním Cargo.toml (petgraph, serde, serde_json, chrono).
-2. Implementovat datové struktury v model.rs: AgentNode (stav, unread, parent), SpawnEdge (hierarchie) a MessageEdge (směr, počet unikátních zpráv, timestamp, intent).
-3. Implementovat AgentGraph s explicitním kurzorem (last_event_id), deduplikační sadou (processed_event_ids: HashSet<u64>) a idempotentním ingestem apply_message_event().
-4. Definovat kontrakt zdroje dat v source.rs: initial load instancí (hcom list --json) a zpráv (hcom events --type message --full --all --last N), streaming s follow/reconnect (hcom events --follow --full --type message --after-id <last_id>) a obsluhu db_reset.
-5. Unit testy v tests/model_tests.rs: sestavení grafu, akumulace cyklických zpráv, idempotentní aplikace překrývajících se dávek (ochrana proti zdvojení count a regresi timestampu) a db_reset.
+2. Implementovat datové struktury v model.rs: AgentNode, SpawnEdge a MessageEdge (s počtem unikátních zpráv v aktuální epoše, timestampem a náhledem).
+3. Implementovat AgentGraph s watermarkem last_event_id: události s id <= last_event_id se zahazují (idempotence bez neomezeného HashSetu).
+4. Implementovat reset_events(): kompletní odstranění všech MessageEdge z grafu a vynulování last_event_id na 0 po db_reset.
+5. Ingest kontrakt v source.rs: snapshot historie zpráv (hcom events) se před aplikací do grafu VŽDY seřadí vzestupně (newest-first reverse), streamování (events --follow --after-id <last_id>) s obsluhou db_reset.
+6. Unit testy v tests/model_tests.rs: sestavení grafu, akumulace zpráv, watermark dedup, řazení initial loadu a test db_resetu (vymazání starých hran a korektní přijetí nových zpráv s nízkými znovupoužitými ID).
 <!-- SECTION:PLAN:END -->
