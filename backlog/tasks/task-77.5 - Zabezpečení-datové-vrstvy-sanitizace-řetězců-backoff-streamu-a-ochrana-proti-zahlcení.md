@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-01 11:57'
-updated_date: '2026-11-01 12:00'
+updated_date: '2026-11-01 12:01'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -32,7 +32,7 @@ Zapracování bezpečnostních nálezů z review agentem bin: 1. Důkladná sani
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. model.rs: ECMA-48 stavový automat/scanner pro 7-bit i C1 CSI a OSC sekvence (včetně subparametrů :, parametrů ?, intermediate bytes, final bytes @..~ a ST/BEL ukončení). Následné čištění C0/C1, bidi overrides a zero-width znaků. Kolizní pravidlo: pokud raw != sanitized pro jméno agenta, entita je neplatná a přeskočí se.
-2. source.rs: čtení řádky s limitem 1 MiB a drainem zbytku řádky do dalšího \n. Ne-blokující exponenciální backoff s počátkem na 500 ms (další retry se zdvojnásobují až do 30 s) a sledováním deadline (Instant).
-3. tests/model_tests.rs: unit testy pro ECMA-48 escape sekvence (subparametry, ~, C1 OSC/CSI, BEL/ST), kolizní pravidlo, capped read s drainem a časování neblokujícího backoffu.
+1. model.rs: ECMA-48 parser s explicitním rozpoznáváním 7-bit (\x1b) i UTF-8 2-byte C1 kódů (\u{009B} = [0xC2, 0x9B], \u{009D} = [0xC2, 0x9D], \u{009C} = [0xC2, 0x9C]). Fail-closed chování: neukončené CSI/OSC sekvence se bezpečně zahazují od začátku sekvence až do konce řetězce. Kolizní pravidlo pro jména agentů: raw != sanitized způsobí přeskočení entity.
+2. source.rs: read_line_capped s 1 MiB limitem a drainem do dalšího \n. Ne-blokující exponenciální backoff s 500 ms počáteční prodlevou a časovou deadlinou (Instant).
+3. tests/model_tests.rs: testy pro UTF-8 C1 sekvence, fail-closed neukončené sekvence, subparametry, kolizní pravidlo, capped read s drainem a timing backoffu.
 <!-- SECTION:PLAN:END -->
