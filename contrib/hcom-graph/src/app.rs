@@ -169,6 +169,11 @@ pub struct HcomGraphApp {
 
     // Dialogs
     pub selected_row_id: Option<String>,
+    /// Data row (0-based) under the pointer in the last frame; painted as a
+    /// weaker band than the selection.
+    table_hover_row: Option<usize>,
+    /// Screen bands of the data rows in the last frame, full grid width.
+    pub table_row_bands: Vec<egui::Rect>,
     pub show_start_dialog: bool,
     pub start_agent_name: String,
     pub start_instance_name: String,
@@ -308,6 +313,8 @@ impl HcomGraphApp {
             screen_inject_text: String::new(),
             screen_inject_enter: true,
             selected_row_id: None,
+            table_hover_row: None,
+            table_row_bands: Vec::new(),
             show_start_dialog: false,
             start_agent_name: String::new(),
             start_instance_name: String::new(),
@@ -384,6 +391,8 @@ impl HcomGraphApp {
             screen_inject_text: String::new(),
             screen_inject_enter: true,
             selected_row_id: None,
+            table_hover_row: None,
+            table_row_bands: Vec::new(),
             show_start_dialog: false,
             start_agent_name: String::new(),
             start_instance_name: String::new(),
@@ -695,14 +704,65 @@ impl HcomGraphApp {
             DEFAULT_COLUMNS.iter().map(|s| s.to_string()).collect()
         };
 
+        let target_of = |row: &TableRow| {
+            if !row.instance.is_empty() {
+                row.instance.clone()
+            } else {
+                row.agent.clone()
+            }
+        };
+        let selected_row = self
+            .selected_row_id
+            .as_deref()
+            .and_then(|id| rows.iter().position(|r| target_of(r) == id));
+        let hover_row = self.table_hover_row;
+        // Grid row 0 is the header; data row i is grid row i + 1. The band
+        // covers the full grid width, including spacing and empty cells.
+        let row_color = move |row: usize, style: &egui::Style| {
+            let data_row = row.checked_sub(1)?;
+            let selection = style.visuals.selection.bg_fill;
+            if Some(data_row) == selected_row {
+                Some(selection)
+            } else if Some(data_row) == hover_row {
+                Some(selection.gamma_multiply(0.4))
+            } else if row % 2 == 1 {
+                Some(style.visuals.faint_bg_color)
+            } else {
+                None
+            }
+        };
+
         // Fill the panel, so its height follows the user's resize, not the rows.
+        let mut row_spans: Vec<egui::Rangef> = Vec::with_capacity(rows.len());
+        let mut grid_x = egui::Rangef::NOTHING;
+        let mut spacing_y = 0.0;
+        let mut pointer_row = None;
+        let mut clicked_row = None;
+        let prev_bands = std::mem::take(&mut self.table_row_bands);
         egui::ScrollArea::both()
             .id_salt("table_scroll_area")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                egui::Grid::new("agent_table_grid")
-                    .striped(true)
+                spacing_y = ui.spacing().item_spacing.y;
+                // Row bands from the last frame, registered before the cells:
+                // labels (tooltips), headers and scroll bars stay on top.
+                for (i, band) in prev_bands.iter().take(rows.len()).enumerate() {
+                    let resp = ui.interact(
+                        *band,
+                        ui.scope_id().with(("table_row", i)),
+                        egui::Sense::click(),
+                    );
+                    if resp.contains_pointer() {
+                        pointer_row = Some(i);
+                    }
+                    if resp.clicked() {
+                        clicked_row = Some(i);
+                    }
+                }
+                let grid = egui::Grid::new("agent_table_grid")
+                    .with_row_color(row_color)
                     .min_col_width(60.0)
+                    .max_col_width(300.0)
                     .show(ui, |ui| {
                         // Header row
                         for col in &columns {
@@ -716,53 +776,55 @@ impl HcomGraphApp {
                                 } else {
                                     ""
                                 };
-                            if ui
-                                .button(
-                                    RichText::new(format!("{}{}", col, sort_indicator)).strong(),
-                                )
-                                .clicked()
-                            {
+                            let text = RichText::new(format!("{}{}", col, sort_indicator)).strong();
+                            if ui.add(egui::Button::new(text).frame(false)).clicked() {
                                 self.cycle_sort(col);
                             }
                         }
                         ui.end_row();
 
-                        // Rows
-                        let selected_id = self.selected_row_id.clone();
-                        for row in rows {
-                            let target_name = if !row.instance.is_empty() {
-                                row.instance.clone()
-                            } else {
-                                row.agent.clone()
-                            };
-                            let is_selected = selected_id.as_deref() == Some(&target_name);
-                            let mut row_clicked = false;
+                        // Rows: plain truncated labels; the band is the row color.
+                        let selected_text = ui.visuals().selection.stroke.color;
+                        for (i, row) in rows.iter().enumerate() {
+                            let mut span = egui::Rangef::NOTHING;
                             for col in &columns {
-                                let val = row.get_cell_value(col);
-                                let resp = ui.selectable_label(is_selected, &val);
-                                if resp.clicked() {
-                                    row_clicked = true;
+                                let mut text = RichText::new(row.get_cell_value(col));
+                                if Some(i) == selected_row {
+                                    text = text.color(selected_text);
                                 }
+                                let resp = ui.add(egui::Label::new(text).truncate());
+                                span = span.union(resp.rect.y_range());
                             }
                             ui.end_row();
-
-                            if row_clicked {
-                                self.selected_row_id = Some(target_name.clone());
-                                if !row.instance.is_empty() {
-                                    if let Some(idx) = self.graph.get_node_index(&row.instance) {
-                                        self.canvas.selected_node = Some(idx);
-                                        self.canvas.selected_edge = None;
-                                    } else {
-                                        self.canvas.selected_node = None;
-                                    }
-                                } else {
-                                    self.canvas.selected_node = None;
-                                }
-                                self.on_selection_changed();
-                            }
+                            row_spans.push(span);
                         }
                     });
+                grid_x = grid.response.rect.x_range();
             });
+
+        self.table_row_bands = row_spans
+            .iter()
+            .map(|y| egui::Rect::from_x_y_ranges(grid_x, y.expand(0.5 * spacing_y)))
+            .collect();
+        if pointer_row != self.table_hover_row {
+            self.table_hover_row = pointer_row;
+            ui.ctx().request_repaint();
+        }
+        if let Some(i) = clicked_row {
+            let row = &rows[i];
+            self.selected_row_id = Some(target_of(row));
+            if !row.instance.is_empty() {
+                if let Some(idx) = self.graph.get_node_index(&row.instance) {
+                    self.canvas.selected_node = Some(idx);
+                    self.canvas.selected_edge = None;
+                } else {
+                    self.canvas.selected_node = None;
+                }
+            } else {
+                self.canvas.selected_node = None;
+            }
+            self.on_selection_changed();
+        }
     }
 
     fn render_report_view(&self, ui: &mut egui::Ui, row: &TableRow) {

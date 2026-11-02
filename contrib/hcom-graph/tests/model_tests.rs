@@ -4962,3 +4962,157 @@ fn test_layout_realistic_graph_sleeps_in_cluster_and_hierarchy() {
         }
     }
 }
+
+/// Filled rects of a frame's output (screen rect, fill color).
+fn filled_rects(output: &egui::FullOutput) -> Vec<(Rect, Color32)> {
+    output
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Rect(r) if r.fill != Color32::TRANSPARENT => Some((r.rect, r.fill)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Selected and hovered table rows are one band over the full grid width;
+/// a click into an empty cell selects the row and its graph node; long values
+/// are elided; headers carry no filled frame (TASK-77.19).
+#[test]
+fn test_table_row_selection_is_one_full_width_band() {
+    use eframe::App;
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_graph::table_data::TableRow;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = GraphState {
+        columns: vec!["instance".into(), "roaming".into(), "detail".into()],
+        ..Default::default()
+    };
+    let mut app =
+        HcomGraphApp::new_for_test(GraphConfig::default(), state, dir.path().to_path_buf());
+    app.graph
+        .apply_instance_snapshot(&[snap("worker_1", None), snap("worker_2", None)]);
+    let w2 = app.graph.get_node_index("worker_2").unwrap();
+    app.table_rows = vec![
+        TableRow {
+            instance: "worker_1".into(),
+            detail: "x".repeat(1000),
+            ..Default::default()
+        },
+        TableRow {
+            instance: "worker_2".into(),
+            ..Default::default()
+        },
+    ];
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut time = 0.0;
+    let mut run = |app: &mut HcomGraphApp, events: Vec<egui::Event>| {
+        time += 0.1;
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        out.textures_delta.clear();
+        out
+    };
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    assert_eq!(app.table_row_bands.len(), 2, "one band per data row");
+    let (b0, b1) = (app.table_row_bands[0], app.table_row_bands[1]);
+    assert!(
+        b1.width() > 300.0,
+        "band spans the grid, width {}",
+        b1.width()
+    );
+
+    // Click into the empty detail cell of worker_2 (right end of its band).
+    let p = Pos2::new(b1.right() - 5.0, b1.center().y);
+    let press = |pressed| egui::Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    run(&mut app, vec![egui::Event::PointerMoved(p)]);
+    run(&mut app, vec![press(true)]);
+    run(&mut app, vec![press(false)]);
+    assert_eq!(app.selected_row_id.as_deref(), Some("worker_2"));
+    assert_eq!(app.canvas.selected_node, Some(w2));
+
+    // Pointer over worker_1: selection band on worker_2, weaker hover band on worker_1.
+    let selection = ctx.global_style().visuals.selection.bg_fill;
+    let hover = selection.gamma_multiply(0.4);
+    let h = Pos2::new(b0.center().x, b0.center().y);
+    run(&mut app, vec![egui::Event::PointerMoved(h)]);
+    let out = run(&mut app, vec![]);
+    let rects = filled_rects(&out);
+    let in_row = |band: Rect, fill: Color32| -> Vec<Rect> {
+        rects
+            .iter()
+            .filter(|(r, f)| *f == fill && r.intersects(band.shrink(1.0)))
+            .map(|(r, _)| *r)
+            .collect()
+    };
+    let sel = in_row(b1, selection);
+    assert_eq!(sel.len(), 1, "one selection shape in the row: {sel:?}");
+    assert!(sel[0].left() <= b1.left() && sel[0].right() >= b1.right());
+    let hov = in_row(b0, hover);
+    assert_eq!(hov.len(), 1, "one hover band: {hov:?}");
+    assert!(hov[0].left() <= b0.left() && hov[0].right() >= b0.right());
+    assert!(
+        in_row(b0, selection).is_empty(),
+        "hover is not the selection color"
+    );
+
+    // The long detail is elided.
+    let elided = out.shapes.iter().any(|c| match &c.shape {
+        egui::Shape::Text(t) => t.galley.elided && t.galley.text().starts_with("xxx"),
+        _ => false,
+    });
+    assert!(elided, "long cell text ends with an ellipsis");
+
+    // Headers: no button pill above the first row band.
+    let pill = ctx.global_style().visuals.widgets.inactive.weak_bg_fill;
+    let header = Rect::from_x_y_ranges(b0.x_range(), (b0.top() - 30.0)..=(b0.top() - 4.0));
+    let pills: Vec<_> = rects
+        .iter()
+        .filter(|(r, f)| *f == pill && r.intersects(header))
+        .collect();
+    assert!(pills.is_empty(), "header has no pill: {pills:?}");
+
+    // Hovering the elided cell shows the full value in a tooltip.
+    let full = "x".repeat(1000);
+    let cell = Pos2::new(b0.right() - 20.0, b0.center().y);
+    let mut tooltip = false;
+    let mut moved = Some(egui::Event::PointerMoved(cell));
+    for _ in 0..12 {
+        let out = run(&mut app, moved.take().into_iter().collect());
+        tooltip |= out.shapes.iter().any(|c| match &c.shape {
+            egui::Shape::Text(t) => !t.galley.elided && t.galley.text() == full,
+            _ => false,
+        });
+    }
+    assert!(tooltip, "tooltip carries the full value");
+
+    // Sorting still works: a click on the first header sorts by it.
+    let hp = Pos2::new(b0.left() + 15.0, b0.top() - 14.0);
+    let click = |pressed| egui::Event::PointerButton {
+        pos: hp,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    run(&mut app, vec![egui::Event::PointerMoved(hp)]);
+    run(&mut app, vec![click(true)]);
+    run(&mut app, vec![click(false)]);
+    assert_eq!(app.state.sort_col.as_deref(), Some("instance"));
+}
