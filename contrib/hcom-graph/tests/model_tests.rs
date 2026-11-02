@@ -3136,7 +3136,7 @@ fn test_windowed_edge_counts_window_last_n_and_unfiltered_totals() {
 #[test]
 fn test_windowed_count_is_lower_bound_when_edge_history_is_full() {
     use chrono::Duration;
-    use hcom_graph::model::{MAX_EDGE_HISTORY, MessageWindow};
+    use hcom_graph::model::{MAX_EDGE_HISTORY, MessageWindow, WindowedCount};
     let now = Utc::now();
     let mut graph = AgentGraph::new();
     let total = MAX_EDGE_HISTORY as u64 + 10;
@@ -3175,6 +3175,64 @@ fn test_windowed_count_is_lower_bound_when_edge_history_is_full() {
     assert_eq!(
         hcom_graph::canvas::edge_badge_label(Default::default()),
         None
+    );
+    assert_eq!(
+        hcom_graph::canvas::edge_badge_label(WindowedCount {
+            count: 1,
+            lower_bound: false
+        })
+        .as_deref(),
+        Some("1 msg")
+    );
+}
+
+#[test]
+fn test_edge_badge_shown_from_two_messages_or_on_focus_edges() {
+    use hcom_graph::canvas::show_edge_badge;
+    assert!(!show_edge_badge(1, false));
+    assert!(show_edge_badge(1, true));
+    assert!(show_edge_badge(2, false));
+    assert!(show_edge_badge(7, true));
+}
+
+#[test]
+fn test_label_rect_sits_below_the_selection_ring() {
+    use hcom_graph::canvas::label_rect;
+    for zoom in [0.5, 1.0, 2.5] {
+        let c = Pos2::new(200.0, 100.0);
+        let r = label_rect(c, Vec2::new(40.0, 14.0), zoom);
+        assert!(r.min.y > c.y + 37.0 * zoom, "{r:?}");
+        assert!((r.center().x - c.x).abs() < 1e-3);
+        assert!(r.width() > 40.0 && r.height() > 14.0);
+    }
+}
+
+#[test]
+fn test_visible_labels_hide_the_quieter_overlapping_label() {
+    use hcom_graph::canvas::visible_labels;
+    let a = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(50.0, 10.0));
+    let b = a.translate(Vec2::new(20.0, 2.0)); // overlaps a
+    let far = a.translate(Vec2::new(200.0, 0.0));
+
+    // Lower count hidden, regardless of input order.
+    assert_eq!(
+        visible_labels(&[(a, 1, false), (b, 5, false)]),
+        [false, true]
+    );
+    assert_eq!(
+        visible_labels(&[(b, 5, false), (a, 1, false)]),
+        [true, false]
+    );
+    // A forced quieter label stays, the busier unforced one yields.
+    assert_eq!(
+        visible_labels(&[(a, 1, true), (b, 5, false)]),
+        [true, false]
+    );
+    // Two forced labels both stay; no overlap: all shown.
+    assert_eq!(visible_labels(&[(a, 1, true), (b, 5, true)]), [true, true]);
+    assert_eq!(
+        visible_labels(&[(a, 1, false), (far, 0, false), (b, 5, false)]),
+        [false, true, true]
     );
 }
 
@@ -4771,13 +4829,15 @@ fn test_fit_view_fits_far_nodes_and_long_labels_with_margin() {
     for (pos, w12) in items {
         let c = view.world_to_screen(pos, rect);
         let font = (12.0 * view.zoom).clamp(8.0, 18.0);
-        let half_x = (37.0 * view.zoom).max(w12 * font / 24.0);
+        let label =
+            hcom_graph::canvas::label_rect(c, Vec2::new(w12 * font / 12.0, font * 1.2), view.zoom);
+        let half_x = (37.0 * view.zoom).max(label.width() / 2.0);
         assert!(
             inner.contains(c - Vec2::new(half_x, 37.0 * view.zoom)),
             "{c:?}"
         );
         assert!(
-            inner.contains(c + Vec2::new(half_x, 37.0 * view.zoom)),
+            inner.contains(Pos2::new(c.x + half_x, label.max.y)),
             "{c:?}"
         );
     }
@@ -4790,7 +4850,16 @@ fn test_fit_view_fits_far_nodes_and_long_labels_with_margin() {
     view.zoom = z;
     view.pan = pan;
     let c = view.world_to_screen(one[0].0, rect);
-    assert!((c - rect.center()).length() < 0.5, "centered: {c:?}");
+    // Node and the label below it are centered together: the node sits
+    // centered in x and above the center by half the label's extension.
+    let font = (12.0 * z).clamp(8.0, 18.0);
+    let label = hcom_graph::canvas::label_rect(c, Vec2::new(40.0 * font / 12.0, font * 1.2), z);
+    let content = Rect::from_min_max(c - Vec2::splat(37.0 * z), label.max);
+    assert!((c.x - rect.center().x).abs() < 0.5, "x centered: {c:?}");
+    assert!(
+        (content.center().y - rect.center().y).abs() < 0.5,
+        "content centered: {c:?}"
+    );
 }
 
 #[test]

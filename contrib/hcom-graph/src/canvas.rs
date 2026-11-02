@@ -503,7 +503,11 @@ impl CanvasView {
                     } else {
                         Color32::from_rgb(165, 105, 189)
                     };
-                    let badge = edge_badge_label(wc);
+                    let focus = [self.selected_node, self.hovered_node]
+                        .iter()
+                        .flatten()
+                        .any(|n| *n == source_idx || *n == target_idx);
+                    let badge = edge_badge_label(wc).filter(|_| show_edge_badge(wc.count, focus));
                     let stroke = Stroke::new(thickness, color);
 
                     if curve_offset.abs() > 0.1 {
@@ -532,6 +536,29 @@ impl CanvasView {
         }
 
         // 5. Render Nodes
+        // Messages in the window per node (in + out), the same counts as the
+        // badges, and the nodes whose label is always drawn.
+        let mut node_msgs: std::collections::HashMap<NodeIndex, usize> =
+            std::collections::HashMap::new();
+        for e in graph.graph.edge_references() {
+            if let EdgeKind::Message(msg) = e.weight() {
+                let n = match &self.edge_counts {
+                    Some(map) => map.get(&e.id()).map_or(0, |c| c.count),
+                    None => msg.count,
+                };
+                *node_msgs.entry(e.source()).or_default() += n;
+                *node_msgs.entry(e.target()).or_default() += n;
+            }
+        }
+        let mut forced_labels: std::collections::HashSet<NodeIndex> =
+            [self.hovered_node, self.selected_node]
+                .into_iter()
+                .flatten()
+                .collect();
+        if let Some(sel) = self.selected_node {
+            forced_labels.extend(graph.graph.neighbors_undirected(sel));
+        }
+        let mut labels = Vec::new();
         let mut off_view = Vec::new();
         for (idx, phys) in &layout.nodes {
             if let Some(v) = visible_nodes
@@ -628,18 +655,34 @@ impl CanvasView {
                 );
             }
 
-            // Agent name text
-            let font_size = label_font_size(self.zoom);
-            painter.text(
-                center,
-                egui::Align2::CENTER_CENTER,
-                &node_data.name,
-                FontId::proportional(font_size),
+            // Agent name text, drawn after all nodes (5b)
+            let galley = painter.layout_no_wrap(
+                node_data.name.clone(),
+                FontId::proportional(label_font_size(self.zoom)),
                 Color32::WHITE,
             );
+            let label = label_rect(center, galley.size(), self.zoom);
+            labels.push((
+                (
+                    label,
+                    node_msgs.get(idx).copied().unwrap_or(0),
+                    forced_labels.contains(idx),
+                ),
+                galley,
+            ));
 
             if let Some(marker) = edge_marker(rect, center) {
                 off_view.push((marker, status_color));
+            }
+        }
+
+        // 5b. Node labels on a canvas-colored background; a label that would
+        // overlap a label of a busier node is hidden (see `visible_labels`).
+        let items: Vec<(Rect, usize, bool)> = labels.iter().map(|(item, _)| *item).collect();
+        for ((item, galley), shown) in labels.into_iter().zip(visible_labels(&items)) {
+            if shown {
+                painter.rect_filled(item.0, 3.0 * self.zoom, bg_color);
+                painter.galley(item.0.min + LABEL_PAD * self.zoom, galley, Color32::WHITE);
             }
         }
 
@@ -680,12 +723,17 @@ pub fn fit_view(items: &[(Pos2, f32)], rect: Rect, max_zoom: f32) -> Option<(f32
         let font = label_font_size(z);
         let mut b = Rect::NOTHING;
         for &(pos, label_w12) in items {
-            let half = Vec2::new(
-                (NODE_EXTENT * z).max(label_w12 * font / 12.0 / 2.0),
-                (NODE_EXTENT * z).max(font * 0.6),
-            );
-            let c = pos.to_vec2() * z;
-            b = b.union(Rect::from_center_size(c.to_pos2(), half * 2.0));
+            let c = (pos.to_vec2() * z).to_pos2();
+            b = b.union(Rect::from_center_size(
+                c,
+                Vec2::splat(NODE_EXTENT * z * 2.0),
+            ));
+            // Label below the node; its height approximated as 1.2 × font.
+            b = b.union(label_rect(
+                c,
+                Vec2::new(label_w12 * font / 12.0, font * 1.2),
+                z,
+            ));
         }
         b
     };
@@ -741,8 +789,49 @@ pub fn edge_badge_label(wc: WindowedCount) -> Option<String> {
     match (wc.count, wc.lower_bound) {
         (0, _) => None,
         (n, true) => Some(format!("{n}+ msgs")),
+        (1, false) => Some("1 msg".to_string()),
         (n, false) => Some(format!("{n} msgs")),
     }
+}
+
+/// Whether a message edge with `count` messages in the window shows its
+/// badge: from 2 messages on, or always on an edge of the selected or
+/// hovered node (`focus_edge`).
+pub fn show_edge_badge(count: usize, focus_edge: bool) -> bool {
+    count >= 2 || focus_edge
+}
+
+/// Gap between the outermost node decoration and the label, in world units.
+const LABEL_GAP: f32 = 2.0;
+/// Label background padding (x, y), in world units.
+const LABEL_PAD: Vec2 = Vec2::new(3.0, 1.0);
+
+/// Screen rect of a node label (background included) for a text of
+/// `text_size` at `zoom`: centered below the node's outermost decoration
+/// (the selection ring), so the label never covers the node's rings.
+pub fn label_rect(center: Pos2, text_size: Vec2, zoom: f32) -> Rect {
+    let size = text_size + LABEL_PAD * 2.0 * zoom;
+    let top = center.y + (NODE_EXTENT + LABEL_GAP) * zoom;
+    Rect::from_min_size(Pos2::new(center.x - size.x / 2.0, top), size)
+}
+
+/// Which labels are drawn, per item `(rect, messages in window, forced)`.
+/// Forced labels (hovered, selected, neighbours of the selected node) are
+/// always drawn; the others in descending message count (ties in input
+/// order), each only when it does not overlap an already drawn label.
+pub fn visible_labels(items: &[(Rect, usize, bool)]) -> Vec<bool> {
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by_key(|&i| (!items[i].2, std::cmp::Reverse(items[i].1)));
+    let mut shown = vec![false; items.len()];
+    let mut placed: Vec<Rect> = Vec::new();
+    for i in order {
+        let (rect, _, forced) = items[i];
+        if forced || !placed.iter().any(|p| p.intersects(rect)) {
+            shown[i] = true;
+            placed.push(rect);
+        }
+    }
+    shown
 }
 
 /// Closed polyline around a circle (first point repeated at the end).
