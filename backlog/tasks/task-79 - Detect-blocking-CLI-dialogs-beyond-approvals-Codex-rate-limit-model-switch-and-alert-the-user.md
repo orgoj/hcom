@@ -6,7 +6,7 @@ title: >-
 status: Idea
 assignee: []
 created_date: '2026-11-02 14:41'
-updated_date: '2026-11-02 15:08'
+updated_date: '2026-11-02 15:13'
 labels: []
 dependencies: []
 priority: high
@@ -17,14 +17,20 @@ ordinal: 107000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Incident: an awaited Codex delegate hung on the interactive dialog 'usage limit running out, switch model?'. hcom messages were not delivered, status questions could never arrive and nobody noticed.
+Problem: a Codex modal dialog (any screen with the footer 'enter <action> · esc <action>') blocks the agent, but hcom reports it as listening, so nobody sees that the agent is stuck.
 
-Findings (current code):
-- Codex blocked state comes only from the PTY approval scrape (src/pty/shared.rs, src/pty/screen.rs): OSC title 'Action Required' or is_codex_approval_visible() strings (allow command?, 'press enter to confirm or esc to cancel', enter to submit answer, [y/n], yes (y), do you want to). The rate-limit/model-switch nudge is not an approval: Codex sets no 'Action Required' title for it and its footer (likely 'esc to go back') matches none of the strings, so the row stays active/listening instead of blocked (exact dialog text unverified; capture it).
-- Even a blocked row alerts nobody: reqwatch (create_request_watches, src/db/subscriptions.rs) fires only on status listening or life stopped, never on blocked. hcom-gui only highlights blocked rows (orange) for a user who is looking. No user notification exists.
-So it is unsupported, not misconfigured.
+Live case (agent_review_hcom_884, Codex 0.166.0, after turn end):
+  Approaching rate limits
+  Switch to gpt-6-luna for lower credit usage?
+  › 1. Switch to gpt-6-luna / 2. Keep current model / 3. Keep current model (never show again)
+  enter select · esc back
+hcom showed status listening, context tui:not-ready ('prompt not visible'), unread 1; the waiting request was never delivered and the GUI did not highlight the row.
 
-Suggested direction: (1) generic Codex modal detection (e.g. is_codex_modal_footer-style footer 'enter ... esc' outside the composer) mapped to blocked with its own context such as pty:dialog, without breaking delivery gating or the auto-review fix; (2) reqwatch/sender notification when an awaited target turns blocked for longer than a grace period; (3) a user-facing alert path (decide: hcom message to bigboss, desktop notification, GUI). Needs analysis and user decisions before implementation.
+Cause: is_codex_modal_footer (src/pty/screen.rs:271) makes is_ready() false, so the delivery gate only holds messages (gate context tui:not-ready). Blocked status comes only from the approval scrape in update_delivery_state (src/pty/shared.rs:193: OSC title 'Action Required' or is_codex_approval_visible strings), which this dialog does not match. Codex has no hook for it.
+
+User decision: every open Codex modal dialog is blocked, including pickers the user opened (/model, resume, ...) and then forgot; no exception for user activity. Scope is only the blocked status; alerting (reqwatch, notifications) is out of scope.
+
+Direction: after the launch phase, a Codex modal footer without an approval -> blocked with its own context (e.g. pty:dialog), same latch as the approval scrape; on close restore the status from before the dialog (listening here, not active); PostToolUse/turn-end must also clear it. Delivery gating stays unchanged. Analysis: notes below.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Implementation Notes
