@@ -364,6 +364,10 @@ impl CanvasView {
                 self.selected_edge = Some(edge_idx);
                 self.selected_node = None;
                 triggered_action = Some(CanvasAction::EdgeSecondaryClicked(edge_idx, pos));
+            } else {
+                self.selected_node = None;
+                self.selected_edge = None;
+                triggered_action = Some(CanvasAction::SelectionCleared);
             }
         }
 

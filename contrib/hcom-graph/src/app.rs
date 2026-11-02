@@ -121,6 +121,7 @@ pub struct HcomGraphApp {
     pub inject_input: String,
     pub loaded_transcript: Option<(String, String)>,
     pub context_menu: Option<ContextMenuState>,
+    pub context_menu_opened_this_frame: bool,
     /// Node and pointer position of the hover tooltip (kept while it fades out).
     pub tooltip_node: Option<NodeIndex>,
     pub tooltip_pos: egui::Pos2,
@@ -277,6 +278,7 @@ impl HcomGraphApp {
             inject_input: String::new(),
             loaded_transcript: None,
             context_menu: None,
+            context_menu_opened_this_frame: false,
             tooltip_node: None,
             tooltip_pos: egui::Pos2::ZERO,
             view_dirty_since: None,
@@ -350,6 +352,7 @@ impl HcomGraphApp {
             confirm_kill_group: None,
             custom_cmd_confirm: None,
             context_menu: None,
+            context_menu_opened_this_frame: false,
             tooltip_node: None,
             tooltip_pos: egui::Pos2::ZERO,
             view_dirty_since: None,
@@ -2743,6 +2746,9 @@ impl eframe::App for HcomGraphApp {
         }
 
         // 9. Context Menu Popup
+        let just_opened = self.context_menu_opened_this_frame;
+        self.context_menu_opened_this_frame = false;
+
         if let Some(ref menu) = self.context_menu.clone() {
             let mut close_menu = false;
             #[allow(deprecated)]
@@ -2750,7 +2756,7 @@ impl eframe::App for HcomGraphApp {
                 .fixed_pos(menu.screen_pos)
                 .order(egui::Order::Foreground);
 
-            area.show(ui.ctx(), |ui| {
+            let inner = area.show(ui.ctx(), |ui| {
                 egui::Frame::menu(ui.style()).show(ui, |ui| match menu.target {
                     ContextMenuTarget::Node(node_idx) => {
                         if let Some(node) = self.graph.graph.node_weight(node_idx) {
@@ -2803,15 +2809,16 @@ impl eframe::App for HcomGraphApp {
                 });
             });
 
-            if close_menu
-                || ui.input(|i| {
-                    i.pointer.primary_clicked()
-                        && !ui.rect_contains_pointer(egui::Rect::from_center_size(
-                            menu.screen_pos,
-                            [150.0, 150.0].into(),
-                        ))
-                })
-            {
+            let menu_rect = inner.response.rect;
+            let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            let clicked_outside = !just_opened
+                && ui.input(|i| {
+                    let any_click = i.pointer.primary_clicked() || i.pointer.secondary_clicked();
+                    let pos = i.pointer.interact_pos().or_else(|| i.pointer.latest_pos());
+                    any_click && pos.is_some_and(|p| !menu_rect.contains(p))
+                });
+
+            if close_menu || escape || clicked_outside {
                 self.context_menu = None;
             }
         }
@@ -2864,12 +2871,14 @@ impl HcomGraphApp {
                         target: ContextMenuTarget::Node(idx),
                         screen_pos: pos,
                     });
+                    self.context_menu_opened_this_frame = true;
                 }
                 CanvasAction::EdgeSecondaryClicked(idx, pos) => {
                     self.context_menu = Some(ContextMenuState {
                         target: ContextMenuTarget::Edge(idx),
                         screen_pos: pos,
                     });
+                    self.context_menu_opened_this_frame = true;
                 }
                 CanvasAction::SelectionCleared => {
                     self.context_menu = None;

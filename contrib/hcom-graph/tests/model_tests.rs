@@ -4715,3 +4715,151 @@ fn test_fit_button_ends_auto_fit_and_keeps_its_zoom() {
     assert!(!app.auto_fit);
     assert!(app.canvas.zoom > 1.0, "Fit zoom kept: {}", app.canvas.zoom);
 }
+
+#[test]
+fn test_context_menu_lifecycle_and_outside_clicks() {
+    use hcom_graph::app::ContextMenuTarget;
+    use hcom_graph::config::GraphState;
+
+    let (_dir, mut app) = split_test_app(GraphState::default());
+    app.apply_persisted_view();
+    app.layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    app.graph
+        .apply_instance_snapshot(&[snap("worker_1", None), snap("worker_2", Some("worker_1"))]);
+    app.layout.sync_nodes(&app.graph);
+    let ctx = egui::Context::default();
+    run_app_frames(&ctx, &mut app, 5);
+
+    let idx1 = app.graph.get_node_index("worker_1").unwrap();
+    let idx2 = app.graph.get_node_index("worker_2").unwrap();
+    let node_screen_pos = |app: &hcom_graph::app::HcomGraphApp, idx| {
+        app.canvas
+            .world_to_screen(app.layout.nodes[&idx].pos, app.canvas_rect)
+    };
+
+    let right_click = |pos: Pos2| {
+        vec![
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ]
+    };
+
+    let left_click = |pos: Pos2| {
+        vec![
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ]
+    };
+
+    // 1. Right click on worker_1 opens context menu for worker_1
+    let pos1 = node_screen_pos(&app, idx1);
+    run_app_events(&ctx, &mut app, Vec2::new(1000.0, 700.0), right_click(pos1));
+    assert!(app.context_menu.is_some(), "Menu opened on worker_1");
+    assert_eq!(
+        app.context_menu.as_ref().map(|m| m.target.clone()),
+        Some(ContextMenuTarget::Node(idx1))
+    );
+
+    // 2. AC #3: Right click on worker_2 switches menu to worker_2
+    run_app_frames(&ctx, &mut app, 1);
+    let pos2 = node_screen_pos(&app, idx2);
+    run_app_events(&ctx, &mut app, Vec2::new(1000.0, 700.0), right_click(pos2));
+    assert!(app.context_menu.is_some(), "Menu switched to worker_2");
+    assert_eq!(
+        app.context_menu.as_ref().map(|m| m.target.clone()),
+        Some(ContextMenuTarget::Node(idx2))
+    );
+    assert_eq!(app.context_menu.as_ref().unwrap().screen_pos, pos2);
+
+    // 3. AC #2: Right click on empty canvas dismisses the context menu
+    let empty_pos = Pos2::new(100.0, 100.0);
+    run_app_events(
+        &ctx,
+        &mut app,
+        Vec2::new(1000.0, 700.0),
+        right_click(empty_pos),
+    );
+    assert!(
+        app.context_menu.is_none(),
+        "AC #2: Right click on empty canvas closes menu"
+    );
+
+    // 4. AC #1: Left click outside closes menu
+    run_app_frames(&ctx, &mut app, 1);
+    let pos1 = node_screen_pos(&app, idx1);
+    run_app_events(&ctx, &mut app, Vec2::new(1000.0, 700.0), right_click(pos1));
+    assert!(app.context_menu.is_some());
+    run_app_events(
+        &ctx,
+        &mut app,
+        Vec2::new(1000.0, 700.0),
+        left_click(empty_pos),
+    );
+    assert!(
+        app.context_menu.is_none(),
+        "AC #1: Left click outside closes menu"
+    );
+
+    // 5. AC #4: Escape key closes menu
+    run_app_frames(&ctx, &mut app, 1);
+    let pos1 = node_screen_pos(&app, idx1);
+    run_app_events(&ctx, &mut app, Vec2::new(1000.0, 700.0), right_click(pos1));
+    assert!(app.context_menu.is_some());
+    run_app_events(
+        &ctx,
+        &mut app,
+        Vec2::new(1000.0, 700.0),
+        vec![vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: Some(egui::Key::Escape),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]],
+    );
+    assert!(app.context_menu.is_none(), "AC #4: Escape key closes menu");
+
+    // 6. Edge secondary click opens edge context menu
+    use petgraph::visit::{EdgeRef, IntoEdgeReferences};
+    let edge_idx = app.graph.graph.edge_references().next().unwrap().id();
+    let pos1 = node_screen_pos(&app, idx1);
+    let pos2 = node_screen_pos(&app, idx2);
+    let edge_screen_pos = (pos1.to_vec2() * 0.5 + pos2.to_vec2() * 0.5).to_pos2();
+    run_app_events(
+        &ctx,
+        &mut app,
+        Vec2::new(1000.0, 700.0),
+        right_click(edge_screen_pos),
+    );
+    assert!(app.context_menu.is_some(), "Edge context menu opened");
+    assert_eq!(
+        app.context_menu.as_ref().map(|m| m.target.clone()),
+        Some(ContextMenuTarget::Edge(edge_idx))
+    );
+}
