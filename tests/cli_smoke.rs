@@ -6138,7 +6138,7 @@ fn roaming_send_from_same_basename_roots_addresses_distinct_instances() {
         );
         assert!(
             stdout.contains(&format!(
-                "Note: @reviewer is a roaming agent; in this project it is {own} (use that name)."
+                "Note: @reviewer is a roaming agent; delivered to {own} in this project. Keep addressing @reviewer."
             )),
             "stdout={stdout}"
         );
@@ -6182,7 +6182,7 @@ fn roaming_send_autostarts_own_project_instance_while_another_project_runs_one()
     assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
     assert!(
         stdout.contains(&format!(
-            "Note: @reviewer is a roaming agent; in this project it is {own} (use that name)."
+            "Note: @reviewer is a roaming agent; delivered to {own} in this project. Keep addressing @reviewer."
         )),
         "stdout={stdout}"
     );

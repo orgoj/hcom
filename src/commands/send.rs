@@ -1551,7 +1551,7 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
     );
     for (alias, instance) in &outcome.roaming_aliases {
         feedback.push_str(&format!(
-            "\nNote: @{alias} is a roaming agent; in this project it is {instance} (use that name)."
+            "\nNote: @{alias} is a roaming agent; delivered to {instance} in this project. Keep addressing @{alias}."
         ));
     }
 

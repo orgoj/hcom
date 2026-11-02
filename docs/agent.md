@@ -433,9 +433,11 @@ The instance name is `<name>_<project>_<hash>`. `<project>` is the root basename
 lowercase ASCII with runs of other characters replaced by one underscore; `<hash>` is a 3-digit
 number (100-999) derived from the SHA-256 of the root path, so roots with the same basename, such
 as `~/.hcom` and `~/projects/hcom`, get different instances. `hcom send @reviewer` from
-`~/projects/weather-app` therefore addresses `reviewer_weather_app_<hash>`. The send and
-`hcom agent reviewer` print a stdout line such as
-`Note: @reviewer is a roaming agent; in this project it is reviewer_weather_app_412 (use that name).`;
+`~/projects/weather-app` therefore addresses `reviewer_weather_app_<hash>`. The send prints a
+stdout line such as
+`Note: @reviewer is a roaming agent; delivered to reviewer_weather_app_412 in this project. Keep addressing @reviewer.`
+(`hcom agent reviewer` prints `Note: reviewer is a roaming agent; in this project it runs as
+reviewer_weather_app_412.`);
 sends to the exact instance name print no note. Instances of the role in other projects are
 separate agents and never receive the message.
 
