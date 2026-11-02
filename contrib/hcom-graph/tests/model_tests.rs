@@ -3809,7 +3809,7 @@ fn test_state_save_sanitizes_non_finite_and_keeps_other_keys() {
         side_panel_width: Some(f32::INFINITY),
         ..Default::default()
     };
-    state.node_positions.insert(
+    state.pinned_positions.insert(
         "bad".into(),
         SavedNodePos {
             x: f32::NAN,
@@ -3817,7 +3817,7 @@ fn test_state_save_sanitizes_non_finite_and_keeps_other_keys() {
             saved_at: 1,
         },
     );
-    state.node_positions.insert(
+    state.pinned_positions.insert(
         "good".into(),
         SavedNodePos {
             x: 10.0,
@@ -3832,9 +3832,9 @@ fn test_state_save_sanitizes_non_finite_and_keeps_other_keys() {
     assert_eq!(loaded.canvas_zoom, Some(2.0));
     assert_eq!((loaded.canvas_pan_x, loaded.canvas_pan_y), (None, None));
     assert_eq!(loaded.side_panel_width, None);
-    assert_eq!(loaded.node_positions.len(), 1);
+    assert_eq!(loaded.pinned_positions.len(), 1);
     assert_eq!(
-        loaded.node_positions["good"],
+        loaded.pinned_positions["good"],
         SavedNodePos {
             x: 10.0,
             y: -20.0,
@@ -3860,7 +3860,7 @@ fn test_state_load_drops_bad_position_entry_and_clamps_values() {
         r#"{
             "detail_tab": "Bogus",
             "bottom_tab": "Log",
-            "node_positions": {
+            "pinned_positions": {
                 "ok": {"x": 1.0, "y": 2.0, "saved_at": 5},
                 "nullx": {"x": null, "y": 2.0},
                 "wrong": "text"
@@ -3879,7 +3879,7 @@ fn test_state_load_drops_bad_position_entry_and_clamps_values() {
         s.detail_tab, "Log",
         "invalid detail_tab falls back to legacy bottom_tab"
     );
-    assert_eq!(s.node_positions.keys().collect::<Vec<_>>(), ["ok"]);
+    assert_eq!(s.pinned_positions.keys().collect::<Vec<_>>(), ["ok"]);
     assert_eq!(s.canvas_zoom, Some(hcom_graph::canvas::ZOOM_MAX));
     assert_eq!((s.canvas_pan_x, s.canvas_pan_y), (Some(3.0), Some(4.0)));
     assert_eq!(
@@ -3903,7 +3903,7 @@ fn test_state_corrupt_file_uses_defaults() {
     let s = load_state(dir.path());
     let d = GraphState::default();
     assert_eq!(s.detail_tab, d.detail_tab);
-    assert!(s.node_positions.is_empty());
+    assert!(s.pinned_positions.is_empty());
     assert_eq!(s.canvas_zoom, None);
     assert_eq!(s.side_panel_width, None);
 }
@@ -3914,7 +3914,7 @@ fn test_state_sanitize_caps_node_positions_to_newest() {
 
     let mut s = GraphState::default();
     for i in 0..(MAX_NODE_POSITIONS + 10) {
-        s.node_positions.insert(
+        s.pinned_positions.insert(
             format!("n{i}"),
             SavedNodePos {
                 x: 0.0,
@@ -3925,35 +3925,128 @@ fn test_state_sanitize_caps_node_positions_to_newest() {
     }
     s.canvas_zoom = Some(f32::NAN);
     s.sanitize();
-    assert_eq!(s.node_positions.len(), MAX_NODE_POSITIONS);
-    assert!(!s.node_positions.contains_key("n0"));
-    assert!(!s.node_positions.contains_key("n9"));
-    assert!(s.node_positions.contains_key("n10"));
+    assert_eq!(s.pinned_positions.len(), MAX_NODE_POSITIONS);
+    assert!(!s.pinned_positions.contains_key("n0"));
+    assert!(!s.pinned_positions.contains_key("n9"));
+    assert!(s.pinned_positions.contains_key("n10"));
     assert_eq!(s.canvas_zoom, None);
 }
 
 #[test]
-fn test_layout_uses_saved_position_except_in_hierarchy() {
+fn test_layout_pinned_node_starts_at_pin_and_stays_in_every_mode() {
+    use hcom_graph::layout::LayoutMode;
+
+    // "a" is pinned; its child "b" and the partner "c" pull and push on it.
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[snap("a", None), snap("b", Some("a")), snap("c", None)]);
+    let idx = graph.get_node_index("a").unwrap();
+    let saved = Pos2::new(321.0, -123.0);
+
+    for mode in [
+        LayoutMode::Cluster,
+        LayoutMode::Hierarchy,
+        LayoutMode::Manual,
+    ] {
+        let mut layout = GraphLayout::new();
+        layout.set_mode(mode);
+        layout.pinned_positions.insert("a".into(), saved);
+        layout.sync_nodes(&graph);
+        assert_eq!(layout.nodes[&idx].pos, saved, "{mode:?}");
+        assert!(layout.nodes[&idx].pinned, "{mode:?}");
+        let other = graph.get_node_index("b").unwrap();
+        assert!(!layout.nodes[&other].pinned, "{mode:?}");
+        for _ in 0..200 {
+            layout.step(&graph, 0.016);
+        }
+        assert_eq!(
+            layout.nodes[&idx].pos, saved,
+            "{mode:?}: simulation moved the pin"
+        );
+    }
+}
+
+#[test]
+fn test_layout_set_pinned_pins_current_position_and_releases() {
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[snap("a", None)]);
+    let idx = graph.get_node_index("a").unwrap();
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+    layout.set_node_pos(idx, Pos2::new(5.0, 6.0), false);
+
+    assert_eq!(layout.set_pinned(idx, "a", true), Some(Pos2::new(5.0, 6.0)));
+    assert!(layout.nodes[&idx].pinned);
+    assert_eq!(layout.pinned_positions["a"], Pos2::new(5.0, 6.0));
+
+    assert_eq!(layout.set_pinned(idx, "a", false), None);
+    assert!(!layout.nodes[&idx].pinned);
+    assert!(layout.pinned_positions.is_empty());
+}
+
+#[test]
+fn test_canvas_drag_release_keeps_only_user_pins() {
     use hcom_graph::layout::LayoutMode;
 
     let mut graph = AgentGraph::new();
     graph.apply_instance_snapshot(&[snap("a", None)]);
     let idx = graph.get_node_index("a").unwrap();
-    let saved = Pos2::new(321.0, -123.0);
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
 
-    for mode in [LayoutMode::Cluster, LayoutMode::Manual] {
+    for user_pin in [false, true] {
         let mut layout = GraphLayout::new();
-        layout.set_mode(mode);
-        layout.saved_positions.insert("a".into(), saved);
+        layout.set_mode(LayoutMode::Manual);
         layout.sync_nodes(&graph);
-        assert_eq!(layout.nodes[&idx].pos, saved, "{mode:?}");
+        layout.set_node_pos(idx, Pos2::ZERO, false);
+        if user_pin {
+            layout.set_pinned(idx, "a", true);
+        }
+        let mut canvas = CanvasView::new();
+        let mut center = Pos2::ZERO;
+        let press = |p: Pos2, pressed: bool| egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // First frame only finds the node's screen position.
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                center = canvas.world_to_screen(Pos2::ZERO, ui.max_rect());
+                canvas.show(ui, &graph, &mut layout, None);
+            },
+        )
+        .textures_delta
+        .clear();
+        // Hover, press on the node, move 40 px, release.
+        let to = center + Vec2::new(40.0, 0.0);
+        for events in [
+            vec![egui::Event::PointerMoved(center)],
+            vec![press(center, true)],
+            vec![egui::Event::PointerMoved(center + Vec2::new(20.0, 0.0))],
+            vec![egui::Event::PointerMoved(to)],
+            vec![press(to, false)],
+            vec![],
+        ] {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                canvas.show(ui, &graph, &mut layout, None);
+            })
+            .textures_delta
+            .clear();
+        }
+        assert!(canvas.dragged_node.is_none(), "drag ended");
+        assert!(layout.nodes[&idx].pos.x > 10.0, "node was dragged");
+        assert_eq!(layout.nodes[&idx].pinned, user_pin, "user_pin={user_pin}");
     }
-
-    let mut layout = GraphLayout::new();
-    layout.set_mode(LayoutMode::Hierarchy);
-    layout.saved_positions.insert("a".into(), saved);
-    layout.sync_nodes(&graph);
-    assert_ne!(layout.nodes[&idx].pos, saved);
 }
 
 #[test]
@@ -3973,13 +4066,23 @@ fn test_app_persists_drag_and_view_with_debounce() {
     let idx = app.graph.get_node_index("worker_1").unwrap();
     app.layout.set_node_pos(idx, Pos2::new(50.0, 60.0), false);
 
+    // A drag of an unpinned node stores nothing.
+    app.record_dragged_position(idx);
+    assert!(app.layout.pinned_positions.is_empty());
+    assert!(!dir.path().join("graph-state.json").exists());
+
+    // Pin, then a drag of the pinned node moves its pin.
+    app.toggle_pin(idx);
+    app.layout.set_node_pos(idx, Pos2::new(70.0, 80.0), true);
+    app.record_dragged_position(idx);
+    app.layout.set_node_pos(idx, Pos2::new(50.0, 60.0), true);
     app.record_dragged_position(idx);
     let s = load_state(dir.path());
-    let p = s.node_positions["worker_1"];
+    let p = s.pinned_positions["worker_1"];
     assert_eq!((p.x, p.y), (50.0, 60.0));
     assert!(p.saved_at > 0);
     assert_eq!(
-        app.layout.saved_positions["worker_1"],
+        app.layout.pinned_positions["worker_1"],
         Pos2::new(50.0, 60.0)
     );
 
@@ -4009,9 +4112,173 @@ fn test_app_persists_drag_and_view_with_debounce() {
     assert_eq!(fresh.canvas.zoom, 1.5);
     assert_eq!(fresh.canvas.pan, Vec2::new(7.0, -8.0));
     assert_eq!(
-        fresh.layout.saved_positions["worker_1"],
+        fresh.layout.pinned_positions["worker_1"],
         Pos2::new(50.0, 60.0)
     );
+}
+
+#[test]
+fn test_pin_survives_restart_when_initial_sync_runs_first() {
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState, load_state};
+    use hcom_graph::layout::LayoutMode;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+    app.graph
+        .apply_instance_snapshot(&[snap("worker_1", None), snap("worker_2", None)]);
+    app.layout.sync_nodes(&app.graph);
+    let idx = app.graph.get_node_index("worker_1").unwrap();
+    app.layout
+        .set_node_pos(idx, Pos2::new(400.0, -300.0), false);
+    app.toggle_pin(idx);
+
+    // Restart in the order `HcomGraphApp::new` uses: the initial graph is
+    // synced into the layout before the persisted view is applied.
+    let mut fresh = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        load_state(dir.path()),
+        dir.path().to_path_buf(),
+    );
+    fresh.layout.set_mode(LayoutMode::Cluster);
+    fresh
+        .graph
+        .apply_instance_snapshot(&[snap("worker_1", None), snap("worker_2", None)]);
+    fresh.layout.sync_nodes(&fresh.graph);
+    fresh.apply_persisted_view();
+    let idx = fresh.graph.get_node_index("worker_1").unwrap();
+    let other = fresh.graph.get_node_index("worker_2").unwrap();
+    assert_eq!(fresh.layout.nodes[&idx].pos, Pos2::new(400.0, -300.0));
+    assert!(fresh.layout.nodes[&idx].pinned);
+    assert!(!fresh.layout.nodes[&other].pinned);
+    for _ in 0..200 {
+        fresh.layout.step(&fresh.graph, 0.016);
+    }
+    assert_eq!(fresh.layout.nodes[&idx].pos, Pos2::new(400.0, -300.0));
+
+    // Unpin removes the entry from memory and from graph-state.json.
+    fresh.toggle_pin(idx);
+    assert!(!fresh.layout.nodes[&idx].pinned);
+    assert!(fresh.layout.pinned_positions.is_empty());
+    assert!(load_state(dir.path()).pinned_positions.is_empty());
+}
+
+#[test]
+fn test_state_legacy_node_positions_are_dropped() {
+    use hcom_graph::config::{load_state, save_state};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("graph-state.json");
+    std::fs::write(
+        &path,
+        r#"{
+            "layout_mode": "manual",
+            "node_positions": {"old": {"x": 1.0, "y": 2.0, "saved_at": 5}}
+        }"#,
+    )
+    .unwrap();
+    let s = load_state(dir.path());
+    assert_eq!(s.layout_mode, "manual", "other keys are kept");
+    assert!(s.pinned_positions.is_empty(), "legacy drags are not pins");
+    save_state(dir.path(), &s).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("node_positions"), "{text}");
+}
+
+/// Screen rect of the first accesskit node whose label is `label`.
+fn widget_rect(output: &egui::FullOutput, label: &str) -> Option<Rect> {
+    let update = output.platform_output.accesskit_update.as_ref()?;
+    update.nodes.iter().find_map(|(_, node)| {
+        if node.label() != Some(label) {
+            return None;
+        }
+        let b = node.bounds()?;
+        Some(Rect::from_min_max(
+            Pos2::new(b.x0 as f32, b.y0 as f32),
+            Pos2::new(b.x1 as f32, b.y1 as f32),
+        ))
+    })
+}
+
+#[test]
+fn test_context_menu_pins_and_unpins_node() {
+    use eframe::App;
+    use hcom_graph::config::{GraphState, load_state};
+
+    let (dir, mut app) = split_test_app(GraphState::default());
+    app.apply_persisted_view();
+    app.layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    app.graph.apply_instance_snapshot(&[snap("worker_1", None)]);
+    app.layout.sync_nodes(&app.graph);
+    let idx = app.graph.get_node_index("worker_1").unwrap();
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    run_app_frames(&ctx, &mut app, 5);
+
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut run = |app: &mut hcom_graph::app::HcomGraphApp, events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        out.textures_delta.clear();
+        out
+    };
+    let click = |pos: Pos2, button| {
+        vec![
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+            vec![egui::Event::PointerButton {
+                pos,
+                button,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ]
+    };
+    // Opens the node menu and clicks the entry `label`.
+    let mut choose = |app: &mut hcom_graph::app::HcomGraphApp, label: &str| {
+        let node = app
+            .canvas
+            .world_to_screen(app.layout.nodes[&idx].pos, app.canvas_rect);
+        for events in click(node, egui::PointerButton::Secondary) {
+            run(app, events);
+        }
+        let out = run(app, vec![]);
+        let rect =
+            widget_rect(&out, label).unwrap_or_else(|| panic!("menu entry {label:?} missing"));
+        for events in click(rect.center(), egui::PointerButton::Primary) {
+            run(app, events);
+        }
+        run(app, vec![]);
+    };
+
+    choose(&mut app, "Pin Position");
+    assert!(app.context_menu.is_none(), "menu closes after the choice");
+    assert!(app.layout.nodes[&idx].pinned);
+    assert!(
+        load_state(dir.path())
+            .pinned_positions
+            .contains_key("worker_1")
+    );
+
+    choose(&mut app, "Unpin Position");
+    assert!(!app.layout.nodes[&idx].pinned);
+    assert!(load_state(dir.path()).pinned_positions.is_empty());
 }
 
 #[test]

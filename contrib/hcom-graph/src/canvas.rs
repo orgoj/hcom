@@ -325,8 +325,13 @@ impl CanvasView {
             }
 
             if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+                // A user-pinned node stays pinned; any other node is released.
+                let keep_pinned = graph
+                    .graph
+                    .node_weight(dragged)
+                    .is_some_and(|n| layout.pinned_positions.contains_key(&n.name));
                 if let Some(phys) = layout.nodes.get(&dragged) {
-                    layout.set_node_pos(dragged, phys.pos, false);
+                    layout.set_node_pos(dragged, phys.pos, keep_pinned);
                 }
                 self.dragged_node = None;
             }
@@ -611,6 +616,16 @@ impl CanvasView {
                     5.0 * self.zoom,
                     3.5 * self.zoom,
                 ));
+            }
+
+            // User pin: a small light dot on the upper right of the node
+            if layout.pinned_positions.contains_key(&node_data.name) {
+                painter.circle(
+                    center + Vec2::new(0.72, -0.72) * node_radius,
+                    4.0 * self.zoom,
+                    Color32::from_rgb(236, 240, 241),
+                    Stroke::new(1.5 * self.zoom, Color32::from_rgb(18, 19, 24)),
+                );
             }
 
             // Agent name text

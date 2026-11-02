@@ -104,8 +104,9 @@ pub struct GraphLayout {
     pub tree_targets: HashMap<NodeIndex, egui::Pos2>,
     springs_key: Option<(usize, u64, usize, u64)>,
     springs: Vec<Spring>,
-    /// Start positions of nodes by name (persisted drags); not used in Hierarchy.
-    pub saved_positions: HashMap<String, egui::Pos2>,
+    /// Positions of user-pinned nodes by name; a pinned node starts there and
+    /// the simulation does not move it, in every mode.
+    pub pinned_positions: HashMap<String, egui::Pos2>,
 }
 
 impl Default for GraphLayout {
@@ -152,7 +153,7 @@ impl GraphLayout {
             tree_targets: HashMap::new(),
             springs_key: None,
             springs: Vec::new(),
-            saved_positions: HashMap::new(),
+            pinned_positions: HashMap::new(),
         }
     }
 
@@ -200,12 +201,13 @@ impl GraphLayout {
             }
             for idx in new_nodes {
                 let pos = self.initial_position(graph, idx);
+                let pinned = self.pinned_positions.contains_key(&graph.graph[idx].name);
                 self.nodes.insert(
                     idx,
                     NodePhysics {
                         pos,
                         vel: egui::Vec2::ZERO,
-                        pinned: false,
+                        pinned,
                     },
                 );
             }
@@ -247,15 +249,13 @@ impl GraphLayout {
     /// next to its placed parent or first placed message partner; otherwise
     /// a deterministic spiral position (no fixed circle).
     fn initial_position(&self, graph: &AgentGraph, idx: NodeIndex) -> egui::Pos2 {
+        if let Some(p) = self.pinned_positions.get(&graph.graph[idx].name) {
+            return *p;
+        }
         if self.mode == LayoutMode::Hierarchy
             && let Some(t) = self.tree_targets.get(&idx)
         {
             return *t;
-        }
-        if self.mode != LayoutMode::Hierarchy
-            && let Some(p) = self.saved_positions.get(&graph.graph[idx].name)
-        {
-            return *p;
         }
         let k = idx.index() as f32;
         let parent = graph.graph[idx]
@@ -377,6 +377,24 @@ impl GraphLayout {
             phys.pinned = pinned;
             self.is_sleeping = false;
             self.calm_steps = 0;
+        }
+    }
+
+    /// Pins a node at its current position (`pin`) or releases it; returns
+    /// the pinned position, `None` when unpinned or the node is unknown.
+    pub fn set_pinned(&mut self, idx: NodeIndex, name: &str, pin: bool) -> Option<egui::Pos2> {
+        let phys = self.nodes.get_mut(&idx)?;
+        phys.pinned = pin;
+        phys.vel = egui::Vec2::ZERO;
+        self.is_sleeping = false;
+        self.calm_steps = 0;
+        if pin {
+            let pos = phys.pos;
+            self.pinned_positions.insert(name.to_string(), pos);
+            Some(pos)
+        } else {
+            self.pinned_positions.remove(name);
+            None
         }
     }
 

@@ -232,10 +232,11 @@ pub struct GraphState {
     /// Layout mode: "hierarchy", "cluster" (default) or "manual".
     #[serde(default = "default_layout_mode")]
     pub layout_mode: String,
-    /// World positions of dragged nodes by instance name; invalid entries
-    /// are dropped on load so one bad entry cannot reject the file.
-    #[serde(default, deserialize_with = "deserialize_node_positions")]
-    pub node_positions: HashMap<String, SavedNodePos>,
+    /// World positions of user-pinned nodes by instance name; invalid entries
+    /// are dropped on load so one bad entry cannot reject the file. The
+    /// legacy `node_positions` key (every dragged node) is ignored.
+    #[serde(default, deserialize_with = "deserialize_pinned_positions")]
+    pub pinned_positions: HashMap<String, SavedNodePos>,
     #[serde(default)]
     pub canvas_zoom: Option<f32>,
     #[serde(default)]
@@ -264,7 +265,7 @@ pub const SIDE_PANEL_MIN_WIDTH: f32 = 240.0;
 pub const SPLIT_FRAC_MIN: f32 = 0.05;
 pub const SPLIT_FRAC_MAX: f32 = 0.95;
 
-fn deserialize_node_positions<'de, D>(d: D) -> Result<HashMap<String, SavedNodePos>, D::Error>
+fn deserialize_pinned_positions<'de, D>(d: D) -> Result<HashMap<String, SavedNodePos>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -286,18 +287,18 @@ impl GraphState {
     /// the `MAX_NODE_POSITIONS` newest node positions.
     pub fn sanitize(&mut self) {
         use crate::canvas::{ZOOM_MAX, ZOOM_MIN};
-        self.node_positions
+        self.pinned_positions
             .retain(|_, p| p.x.is_finite() && p.y.is_finite());
-        if self.node_positions.len() > MAX_NODE_POSITIONS {
+        if self.pinned_positions.len() > MAX_NODE_POSITIONS {
             let mut by_age: Vec<(i64, String)> = self
-                .node_positions
+                .pinned_positions
                 .iter()
                 .map(|(k, p)| (p.saved_at, k.clone()))
                 .collect();
             by_age.sort();
             let excess = by_age.len() - MAX_NODE_POSITIONS;
             for (_, k) in by_age.into_iter().take(excess) {
-                self.node_positions.remove(&k);
+                self.pinned_positions.remove(&k);
             }
         }
         self.canvas_zoom = self
@@ -379,7 +380,7 @@ impl Default for GraphState {
             window_span_secs: None,
             window_last_n: None,
             layout_mode: default_layout_mode(),
-            node_positions: HashMap::new(),
+            pinned_positions: HashMap::new(),
             canvas_zoom: None,
             canvas_pan_x: None,
             canvas_pan_y: None,

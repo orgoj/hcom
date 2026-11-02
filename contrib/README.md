@@ -247,6 +247,7 @@ skipped; a `screen_bar` that is not a list keeps the default bar.
   - Zoom with mouse wheel (anchored to cursor position).
   - Pan by dragging the canvas background or using middle/secondary mouse buttons.
   - Drag & drop agents to manually position them (pinned while held, smoothly relax on release).
+  - `Pin Position` / `Unpin Position` in a node's right-click menu keeps a node in place across layout modes and restarts.
   - Top status bar with agent counts by state, message stats, zoom reset and zoom percentage.
 
 ### Running

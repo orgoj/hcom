@@ -1586,8 +1586,9 @@ impl HcomGraphApp {
         Some((node.name.clone(), lines))
     }
 
-    /// Restores persisted zoom, pan and dragged node positions (state is
-    /// already sanitized by `load_state`).
+    /// Restores persisted zoom, pan and pinned node positions (state is
+    /// already sanitized by `load_state`). Nodes already in the layout (the
+    /// initial sync runs first) move to their pin and are pinned.
     pub fn apply_persisted_view(&mut self) {
         if let Some(z) = self.state.canvas_zoom {
             self.canvas.zoom = z;
@@ -1598,16 +1599,63 @@ impl HcomGraphApp {
         if let (Some(x), Some(y)) = (self.state.canvas_pan_x, self.state.canvas_pan_y) {
             self.canvas.pan = egui::vec2(x, y);
         }
-        self.layout.saved_positions = self
+        self.layout.pinned_positions = self
             .state
-            .node_positions
+            .pinned_positions
             .iter()
             .map(|(name, p)| (name.clone(), egui::pos2(p.x, p.y)))
             .collect();
+        let existing: Vec<(NodeIndex, egui::Pos2)> = self
+            .graph
+            .graph
+            .node_indices()
+            .filter_map(|idx| {
+                let name = &self.graph.graph[idx].name;
+                self.layout.pinned_positions.get(name).map(|p| (idx, *p))
+            })
+            .collect();
+        for (idx, pos) in existing {
+            self.layout.set_node_pos(idx, pos, true);
+        }
     }
 
-    /// Stores the position of a node the user just dropped and saves it.
+    /// Pins the node at its current position or releases its pin, and saves.
+    pub fn toggle_pin(&mut self, idx: NodeIndex) {
+        let Some(name) = self.graph.graph.node_weight(idx).map(|n| n.name.clone()) else {
+            return;
+        };
+        let pin = !self.layout.pinned_positions.contains_key(&name);
+        if !pin {
+            self.layout.set_pinned(idx, &name, false);
+            self.state.pinned_positions.remove(&name);
+            self.save_state();
+            return;
+        }
+        if self
+            .layout
+            .nodes
+            .get(&idx)
+            .is_some_and(|p| p.pos.x.is_finite() && p.pos.y.is_finite())
+        {
+            self.layout.set_pinned(idx, &name, true);
+            self.store_pinned_position(idx);
+        }
+    }
+
+    /// Stores the new position of a pinned node the user just dropped; a
+    /// drag of an unpinned node stores nothing.
     pub fn record_dragged_position(&mut self, idx: NodeIndex) {
+        let pinned = self
+            .graph
+            .graph
+            .node_weight(idx)
+            .is_some_and(|n| self.layout.pinned_positions.contains_key(&n.name));
+        if pinned {
+            self.store_pinned_position(idx);
+        }
+    }
+
+    fn store_pinned_position(&mut self, idx: NodeIndex) {
         let (Some(node), Some(phys)) = (
             self.graph.graph.node_weight(idx),
             self.layout.nodes.get(&idx),
@@ -1618,8 +1666,8 @@ impl HcomGraphApp {
         if !(pos.x.is_finite() && pos.y.is_finite()) {
             return;
         }
-        self.layout.saved_positions.insert(name.clone(), pos);
-        self.state.node_positions.insert(
+        self.layout.pinned_positions.insert(name.clone(), pos);
+        self.state.pinned_positions.insert(
             name,
             crate::config::SavedNodePos {
                 x: pos.x,
@@ -2924,6 +2972,16 @@ impl eframe::App for HcomGraphApp {
                                     generation: self.selection_generation,
                                     last_lines: 30,
                                 });
+                                close_menu = true;
+                            }
+                            let pin_label =
+                                if self.layout.pinned_positions.contains_key(&agent_name) {
+                                    "Unpin Position"
+                                } else {
+                                    "Pin Position"
+                                };
+                            if ui.button(pin_label).clicked() {
+                                self.toggle_pin(node_idx);
                                 close_menu = true;
                             }
                             if ui.button("Inject...").clicked() {
