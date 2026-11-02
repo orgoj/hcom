@@ -1532,13 +1532,15 @@ pub(crate) fn classify_autostart_exit(code: i32) -> AutostartOutcome {
 /// is written to the DB after the instance row is reserved, so the agent
 /// receives it once its delivery loop starts. Treating that as a start failure
 /// used to discard the payload while reporting a failure that had not happened.
-pub(crate) fn autostart_catalog_agent(db: &HcomDb, route: &CatalogRoute) -> Result<()> {
+///
+/// Returns whether this call started the agent with an empty context.
+pub(crate) fn autostart_catalog_agent(db: &HcomDb, route: &CatalogRoute) -> Result<bool> {
     let catalogs = Catalogs::load(false, None)?;
     let cli = Cli {
         as_name: Some(route.instance.clone()),
         ..Cli::default()
     };
-    let code = launch_named_with_roaming(
+    let (code, clean) = launch_named_with_roaming(
         &route.launch_name,
         &cli,
         &catalogs,
@@ -1550,14 +1552,15 @@ pub(crate) fn autostart_catalog_agent(db: &HcomDb, route: &CatalogRoute) -> Resu
     let name = &route.instance;
     match classify_autostart_exit(code) {
         AutostartOutcome::Started => {
-            wait_for_catalog_agent_registration(db, name, CATALOG_REGISTRATION_WAIT)
+            wait_for_catalog_agent_registration(db, name, CATALOG_REGISTRATION_WAIT)?;
+            Ok(clean)
         }
         AutostartOutcome::StillLaunching => {
             wait_for_catalog_agent_registration(db, name, CATALOG_REGISTRATION_WAIT)?;
             println!(
                 "Agent '{name}' is still starting - message queued, it is delivered when the agent is ready."
             );
-            Ok(())
+            Ok(clean)
         }
         AutostartOutcome::Failed => {
             bail!("could not start catalog agent '{name}' (exit {code})")
@@ -2608,15 +2611,23 @@ fn cmd_launch(name: &str, rest: &[String]) -> Result<i32> {
 }
 
 fn launch_named(name: &str, cli: &Cli, catalogs: &Catalogs) -> Result<i32> {
-    launch_named_with_roaming(name, cli, catalogs, None)
+    launch_named_with_roaming(name, cli, catalogs, None).map(|(code, _)| code)
 }
 
+/// A launch that starts a new session with an empty context: neither resume
+/// nor continue, and not a dry run.
+fn clean_start(eff: &Effective, cli: &Cli) -> bool {
+    !cli.dry_run && !eff.resume && !eff.continue_session
+}
+
+/// Exit code, and whether this call itself launched a clean session
+/// (`clean_start`); an already running agent returns false.
 fn launch_named_with_roaming(
     name: &str,
     cli: &Cli,
     catalogs: &Catalogs,
     materialized: Option<(&str, &Path)>,
-) -> Result<i32> {
+) -> Result<(i32, bool)> {
     let mut def = catalogs
         .resolve(name)
         .ok_or_else(|| unknown_agent_error(name, catalogs))?;
@@ -2687,14 +2698,15 @@ fn launch_named_with_roaming(
             if cli.attach {
                 focus_running(&eff, live)?;
             }
-            return Ok(0);
+            return Ok((0, false));
         }
     }
 
     if !cli.dry_run {
         ensure_claude_skill_link(&eff)?;
     }
-    launch(&eff, cli, eff.resume)
+    let clean = clean_start(&eff, cli);
+    Ok((launch(&eff, cli, eff.resume)?, clean))
 }
 
 fn cmd_launch_group(group: &str, rest: &[String]) -> Result<i32> {
@@ -4965,6 +4977,19 @@ mod tests {
         assert!(eff_of(r#"{"resume":true}"#, &[]).resume);
         assert!(!eff_of(r#"{"resume":true}"#, &["--clean"]).resume);
         assert!(eff_of(r#"{"resume":false}"#, &["--resume"]).resume);
+    }
+
+    #[test]
+    fn clean_start_excludes_resume_continue_and_dry_run() {
+        let clean = |json: &str, args: &[&str]| {
+            let cli = parse_cli(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+                .expect("parse cli");
+            clean_start(&eff_of(json, args), &cli)
+        };
+        assert!(clean(r#"{}"#, &[]));
+        assert!(!clean(r#"{"resume":true}"#, &[]));
+        assert!(!clean(r#"{"continue":true}"#, &[]));
+        assert!(!clean(r#"{}"#, &["--dry-run"]));
     }
 
     #[test]

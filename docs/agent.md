@@ -655,6 +655,11 @@ For an autostarted target, `Sent to:` means the initial event was acknowledged d
 post-start check. `Queued; delivery pending:` means the check expired first; the message remains
 stored and the delivery loop continues after the command returns.
 
+When the autostart begins a clean session (the catalog sets neither `resume` nor `continue`), send
+adds `Note: <name> started with an empty context; it does not remember earlier sessions.`, so the
+sender includes the context the agent needs. A target that was already running, or that resumes or
+continues a session, gets no such note.
+
 ## Self handoff
 
 A catalog agent can replace itself with a clean session that starts from a prompt it writes:

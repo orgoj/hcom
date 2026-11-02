@@ -346,6 +346,8 @@ struct SendOutcome {
     delivered_to: Vec<String>,
     autostarted: Vec<String>,
     roaming_aliases: Vec<(String, String)>,
+    /// Agents this send started with an empty context.
+    fresh_starts: Vec<String>,
     event_id: i64,
 }
 
@@ -617,8 +619,11 @@ fn send_message_with_catalog_outcome(
         explicit_targets,
         catalog_instances,
     )?;
+    let mut fresh_starts = Vec::new();
     for route in &delivery.catalog_starts {
-        super::agent::autostart_catalog_agent(db, route).map_err(|e| e.to_string())?;
+        if super::agent::autostart_catalog_agent(db, route).map_err(|e| e.to_string())? {
+            fresh_starts.push(route.instance.clone());
+        }
     }
     let scope_str = delivery.effective_scope.as_str();
 
@@ -716,6 +721,7 @@ fn send_message_with_catalog_outcome(
             .map(|route| route.instance)
             .collect(),
         roaming_aliases: delivery.roaming_aliases,
+        fresh_starts,
         event_id,
     })
 }
@@ -1552,6 +1558,11 @@ pub fn cmd_send(db: &HcomDb, args: &SendArgs, ctx: Option<&CommandContext>) -> i
     for (alias, instance) in &outcome.roaming_aliases {
         feedback.push_str(&format!(
             "\nNote: @{alias} is a roaming agent; in this project it is {instance} (use that name)."
+        ));
+    }
+    for name in &outcome.fresh_starts {
+        feedback.push_str(&format!(
+            "\nNote: {name} started with an empty context; it does not remember earlier sessions."
         ));
     }
 

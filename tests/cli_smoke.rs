@@ -7825,3 +7825,75 @@ fn roaming_send_to_the_instance_name_autostarts_it_in_its_own_project() {
         "{output}"
     );
 }
+
+#[test]
+fn send_autostart_notes_an_empty_context_only_for_a_clean_start() {
+    let h = Hcom::new();
+    let project = h.root_path().join("app");
+    std::fs::create_dir_all(project.join(".git")).expect("create git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex",
+            "terminal_command":"sh -c true {script}"},
+            "keeper":{"cli":"codex","resume":true,
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+    let instance = roaming_instance("reviewer_app", &project);
+    let send = |target: &str| {
+        let output = h
+            .cmd()
+            .current_dir(&project)
+            .args([
+                "send",
+                "--from",
+                "bigboss",
+                &format!("@{target}"),
+                "--",
+                "inspect",
+            ])
+            .output()
+            .expect("send");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(output.status.success(), "stdout={stdout} stderr={stderr}");
+        stdout
+    };
+    let note = |name: &str| {
+        format!(
+            "Note: {name} started with an empty context; it does not remember earlier sessions."
+        )
+    };
+
+    // Clean autostart, by role and again by instance name after a stop.
+    let stdout = send("reviewer");
+    assert!(stdout.contains(&note(&instance)), "stdout={stdout}");
+    let stdout = send("reviewer");
+    assert!(
+        !stdout.contains("empty context"),
+        "running agent: stdout={stdout}"
+    );
+    let (code, out, err) = h.run(["stop", &instance]);
+    assert_eq!(code, 0, "stdout={out} stderr={err}");
+    let stdout = send(&instance);
+    assert!(stdout.contains(&note(&instance)), "stdout={stdout}");
+
+    // A resume start carries its session: no note. Continue and dry-run are
+    // covered by the `clean_start` unit test.
+    let (code, stdout, stderr) = h.run(["list"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).expect("open hcom db");
+    conn.execute(
+        "INSERT INTO events (timestamp, type, instance, data) VALUES (datetime('now'), 'life', 'keeper', ?1)",
+        [serde_json::json!({
+            "action": "stopped",
+            "snapshot": {"name": "keeper", "tool": "codex", "session_id": "sess-keeper",
+                "directory": project.to_string_lossy()}
+        })
+        .to_string()],
+    )
+    .expect("insert stopped snapshot");
+    let stdout = send("keeper");
+    assert!(stdout.contains("resuming 'keeper'"), "stdout={stdout}");
+    assert!(!stdout.contains("empty context"), "stdout={stdout}");
+}

@@ -313,6 +313,10 @@ const SEND_HELP: &[HelpEntry] = &[
     ),
     (
         "",
+        "An agent started with a clean session (no resume/continue) gets a Note: it has an empty context and remembers no earlier session.",
+    ),
+    (
+        "",
         "A catalog agent with roaming=true materializes as <name>_<project>_<hash> in the sender's Git/project root; a Note line names that instance.",
     ),
     (
@@ -1343,6 +1347,7 @@ Commands:\n\
 \x20              send --project-dir <DIR> picks another project for them;\n\
 \x20              roaming_dirs limits the projects they may run in;\n\
 \x20              <stem>.local.json beside a catalog overrides it;\n\
+\x20              send autostart of a clean session prints an empty-context Note;\n\
 \x20              Herdr workspace defaults to the agent's dir name,\n\
 \x20              or the caller's project name when it has no dir;\n\
 \x20              agent list --status: values from each agent's last reply)\n\
@@ -1843,6 +1848,17 @@ mod tests {
         assert!(help.contains("[--for-agents|--for-humans] [--status]"));
         assert!(help.contains("[[status_column]] tables in config.toml"));
         assert!(help.contains("Remote (relay) agents and instances without a"));
+    }
+
+    #[test]
+    fn help_documents_the_empty_context_autostart_note() {
+        assert!(get_command_help("send").contains(
+            "An agent started with a clean session (no resume/continue) gets a Note: it has an empty context"
+        ));
+        assert!(
+            get_help_text()
+                .contains("send autostart of a clean session prints an empty-context Note;")
+        );
     }
 
     #[test]

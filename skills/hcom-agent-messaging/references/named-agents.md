@@ -260,6 +260,8 @@ hcom send @ops_main --as review_api -- "Review this"
 
 If `review_api` is already running, send delivers directly without relaunching. If stopped or not yet running, it autostarts the catalog agent under that instance name. Targeted sends without `--spawn-as` only auto-start the canonical catalog instance.
 
+An autostart with a clean session (catalog without `resume`/`continue`) prints `Note: <name> started with an empty context; it does not remember earlier sessions.`: the agent knows nothing from before, so give it the context it needs.
+
 ## Roaming archetypes
 
 `"roaming": true` defines a role that materializes once per project. Do not set `dir`, `session`,

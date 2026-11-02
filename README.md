@@ -318,7 +318,7 @@ hcom update                    # install the latest orgoj/hcom release
 
 ### Agent catalog
 
-`hcom agent` launches named agents from a JSON catalog. Each entry fixes the CLI, directory, model, terminal placement and prompts, so `hcom agent docs` starts the same agent every time, and `hcom send @docs` starts it if it is not running. The full reference, including bundles with file-based memory and instruction transport per CLI, is [docs/agent.md](docs/agent.md).
+`hcom agent` launches named agents from a JSON catalog. Each entry fixes the CLI, directory, model, terminal placement and prompts, so `hcom agent docs` starts the same agent every time, and `hcom send @docs` starts it if it is not running; when that start is a clean session (no `resume`/`continue`), send prints a `Note` that the agent has an empty context and remembers no earlier session. The full reference, including bundles with file-based memory and instruction transport per CLI, is [docs/agent.md](docs/agent.md).
 
 ```json
 {
