@@ -1,11 +1,12 @@
 ---
 id: TASK-79
 title: >-
-  Detect blocking CLI dialogs beyond approvals (Codex rate-limit model switch)
-  and alert the user
+  Codex: blocking non-approval dialogs (rate-limit model switch) must set status
+  blocked
 status: Idea
 assignee: []
 created_date: '2026-11-02 14:41'
+updated_date: '2026-11-02 14:48'
 labels: []
 dependencies: []
 priority: high
@@ -25,3 +26,9 @@ So it is unsupported, not misconfigured.
 
 Suggested direction: (1) generic Codex modal detection (e.g. is_codex_modal_footer-style footer 'enter ... esc' outside the composer) mapped to blocked with its own context such as pty:dialog, without breaking delivery gating or the auto-review fix; (2) reqwatch/sender notification when an awaited target turns blocked for longer than a grace period; (3) a user-facing alert path (decide: hcom message to bigboss, desktop notification, GUI). Needs analysis and user decisions before implementation.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+User decision: scope is only the missing blocked status; once the row shows blocked, the user handles it (GUI highlight is enough). Alerting via reqwatch or notifications is out of scope. Next step when specified: capture the exact dialog text, then extend Codex PTY detection so this dialog (and similar modal dialogs) sets blocked.
+<!-- SECTION:NOTES:END -->
