@@ -24,7 +24,7 @@ use crate::delivery::{
 };
 use crate::log::{log_error, log_info, log_warn};
 use crate::notify::NotifyServer;
-use crate::shared::{ST_ACTIVE, ST_BLOCKED};
+use crate::shared::{ST_ACTIVE, ST_BLOCKED, ST_LISTENING};
 use crate::tool::Tool;
 
 use super::PtyTarget;
@@ -174,14 +174,19 @@ fn preview(data: &[u8]) -> String {
 /// `publish` is the caller's approval-status publisher (it owns the
 /// `instance_name`/`current_status` plumbing); it is invoked on the approval
 /// edge exactly as the Unix proxy invoked `self.publish_approval_status`.
+///
+/// Returns the Codex modal-dialog edge (`Some(Some(title))` opened,
+/// `Some(None)` closed) for [`publish_dialog_status`]. Only the Unix proxy
+/// publishes it; the Windows reader ignores it (this fork builds Linux only).
 pub(super) fn update_delivery_state(
     screen_state: &Arc<RwLock<ScreenState>>,
     screen: &ScreenTracker,
     target: &PtyTarget,
     launch_phase_active: &Arc<AtomicBool>,
     publish: &dyn Fn(bool),
-) {
+) -> Option<Option<String>> {
     let mut approval_changed = None;
+    let mut dialog_changed = None;
     if let Ok(mut state) = screen_state.write() {
         state.ready = screen.is_ready();
         // Cursor and Codex can briefly erase their approval surfaces during
@@ -212,6 +217,34 @@ pub(super) fn update_delivery_state(
             approval_changed = Some(approval);
         }
         state.approval = approval;
+        // Codex has no hook for its non-approval modal dialogs (rate-limit
+        // model switch, pickers): they only hold delivery as not-ready, so
+        // report them as blocked. Launch-phase dialogs (trust, update) belong
+        // to the launch_blocked path; an approval keeps precedence.
+        let scraped_dialog = (matches!(target.known_tool(), Some(Tool::Codex))
+            && !launch_phase_active.load(Ordering::Acquire)
+            && !approval)
+            .then(|| screen.codex_modal_dialog_title())
+            .flatten();
+        state.dialog_scrape_negative_since = if scraped_dialog.is_some() {
+            None
+        } else {
+            Some(state.dialog_scrape_negative_since.unwrap_or(now))
+        };
+        let dialog = match scraped_dialog {
+            Some(title) => Some(title),
+            None if approval
+                || screen.is_output_stable(APPROVAL_SCRAPE_CLEAR_MS)
+                || approval_scrape_cleared(state.dialog_scrape_negative_since, now) =>
+            {
+                None
+            }
+            None => state.dialog.clone(),
+        };
+        if dialog.is_some() != state.dialog.is_some() {
+            dialog_changed = Some(dialog.clone());
+        }
+        state.dialog = dialog;
         let input_text = screen.get_input_box_text(target.name());
         let new_prompt_empty = input_text.as_ref().is_some_and(|t| t.is_empty());
         // Stamp submit-edge cooldown when input transitions from a known
@@ -252,6 +285,7 @@ pub(super) fn update_delivery_state(
     if let Some(approval) = approval_changed {
         publish(approval);
     }
+    dialog_changed
 }
 
 /// Clear a pending approval answered by an injected keystroke.
@@ -337,16 +371,7 @@ pub(super) fn publish_approval_status(
         return;
     };
 
-    let config = Config::get();
-    // A launched PTY speaks only for its current binding; after a stop the
-    // configured name may belong to a resumed launch.
-    let instance_name = match config.process_id.as_deref() {
-        Some(process_id) => db.get_process_binding(process_id).ok().flatten(),
-        None => instance_name_cfg
-            .map(str::to_string)
-            .or(config.instance_name),
-    };
-    let Some(instance_name) = instance_name.filter(|name| !name.is_empty()) else {
+    let Some(instance_name) = pty_instance_name(&db, instance_name_cfg) else {
         return;
     };
 
@@ -431,6 +456,99 @@ pub(super) fn publish_approval_status(
         );
     }
 
+    if let Ok(mut shared_status) = current_status.write() {
+        *shared_status = status.to_string();
+    }
+}
+
+/// The instance this PTY currently speaks for.
+fn pty_instance_name(db: &HcomDb, instance_name_cfg: Option<&str>) -> Option<String> {
+    let config = Config::get();
+    // A launched PTY speaks only for its current binding; after a stop the
+    // configured name may belong to a resumed launch.
+    let instance_name = match config.process_id.as_deref() {
+        Some(process_id) => db.get_process_binding(process_id).ok().flatten(),
+        None => instance_name_cfg
+            .map(str::to_string)
+            .or(config.instance_name),
+    };
+    instance_name.filter(|name| !name.is_empty())
+}
+
+/// Publish a Codex modal-dialog edge from [`update_delivery_state`].
+pub(super) fn publish_dialog_status(
+    dialog: Option<&str>,
+    prior_status: &mut Option<String>,
+    instance_name_cfg: Option<&str>,
+    current_status: &Arc<RwLock<String>>,
+) {
+    let Ok(db) = HcomDb::open() else {
+        log_warn(
+            "native",
+            "pty.dialog_status_open_failed",
+            "Failed to open database for PTY dialog status",
+        );
+        return;
+    };
+    let Some(instance_name) = pty_instance_name(&db, instance_name_cfg) else {
+        return;
+    };
+    let Ok(Some(row)) = db.get_instance_full(&instance_name) else {
+        return;
+    };
+    if let Some(edge) = dialog_status_edge(&row.status, &row.status_context, dialog, prior_status) {
+        apply_dialog_status_edge(&db, &instance_name, edge, current_status);
+    }
+}
+
+/// Status, context and detail to write for a dialog edge, or `None` to leave
+/// the row alone.
+fn dialog_status_edge<'a>(
+    status: &str,
+    context: &str,
+    dialog: Option<&'a str>,
+    prior_status: &mut Option<String>,
+) -> Option<(&'static str, &'static str, &'a str)> {
+    match dialog {
+        // Block only an agent that is working or waiting; any existing block
+        // (approval, launch) keeps its own context.
+        Some(title) if status == ST_LISTENING || status == ST_ACTIVE => {
+            *prior_status = Some(status.to_string());
+            Some((ST_BLOCKED, "pty:dialog", title))
+        }
+        Some(_) => None,
+        None => {
+            let prior = prior_status.take();
+            if status != ST_BLOCKED || context != "pty:dialog" {
+                return None;
+            }
+            // A dialog opened after the turn ended (the live rate-limit case)
+            // goes back to listening; one opened mid-turn returns to the turn.
+            Some(if prior.as_deref() == Some(ST_LISTENING) {
+                (ST_LISTENING, "", "")
+            } else {
+                (ST_ACTIVE, "pty:dialog_closed", "")
+            })
+        }
+    }
+}
+
+fn apply_dialog_status_edge(
+    db: &HcomDb,
+    instance_name: &str,
+    (status, context, detail): (&str, &str, &str),
+    current_status: &Arc<RwLock<String>>,
+) {
+    crate::instance_lifecycle::set_status(
+        db,
+        instance_name,
+        status,
+        context,
+        crate::instance_lifecycle::StatusUpdate {
+            detail,
+            ..Default::default()
+        },
+    );
     if let Ok(mut shared_status) = current_status.write() {
         *shared_status = status.to_string();
     }
@@ -2044,6 +2162,89 @@ No session found matching 'never-saved'"
         update_delivery_state(&state, &screen, &target, &launch, &publish);
         assert!(!state.read().unwrap().approval);
         assert_eq!(*edges.borrow(), vec![true, false]);
+    }
+
+    #[test]
+    fn codex_modal_dialog_edges_only_after_launch_and_without_approval() {
+        let target = PtyTarget::Known(Tool::Codex);
+        let mut screen = ScreenTracker::new_with_instance(24, 100, &[], None);
+        let state = Arc::new(RwLock::new(ScreenState::default()));
+        let launch = Arc::new(AtomicBool::new(true));
+        let dialog = "\x1b[2J\x1b[H  Approaching rate limits\r\n\r\n\u{203a} 1. Switch to gpt-6-luna\r\n  2. Keep current model\r\n\r\n  enter select \u{b7} esc back\r\n";
+        let idle = "\x1b[2J\x1b[H\u{203a} Ask Codex to do anything\r\n\r\n  ? for shortcuts\r\n";
+        let approval = "\x1b[2J\x1b[HAllow command?\r\n\u{203a} 1. Yes\r\n\r\n  enter confirm \u{b7} esc cancel\r\n  Press enter to confirm or esc to cancel\r\n";
+        let refresh = |screen: &ScreenTracker| {
+            update_delivery_state(&state, screen, &target, &launch, &|_| {})
+        };
+
+        // Launch phase: trust/update dialogs belong to launch_blocked.
+        screen.process(dialog.as_bytes());
+        assert_eq!(refresh(&screen), None);
+        assert_eq!(state.read().unwrap().dialog, None);
+
+        launch.store(false, Ordering::Release);
+        assert_eq!(
+            refresh(&screen),
+            Some(Some("Approaching rate limits".to_string()))
+        );
+        assert_eq!(refresh(&screen), None, "a standing dialog is no new edge");
+
+        // A partial redraw does not close it; the full wait does.
+        screen.process(idle.as_bytes());
+        assert_eq!(refresh(&screen), None);
+        state.write().unwrap().dialog_scrape_negative_since =
+            Some(Instant::now() - Duration::from_millis(APPROVAL_SCRAPE_CLEAR_MS));
+        assert_eq!(refresh(&screen), Some(None));
+
+        // An approval keeps its own block.
+        screen.process(approval.as_bytes());
+        assert_eq!(refresh(&screen), None);
+        assert!(state.read().unwrap().approval);
+        assert_eq!(state.read().unwrap().dialog, None);
+    }
+
+    #[test]
+    fn dialog_status_edge_restores_the_status_before_the_dialog() {
+        let mut prior = None;
+        // Opened after the turn ended: back to listening.
+        assert_eq!(
+            dialog_status_edge(
+                "listening",
+                "tui:not-ready",
+                Some("Approaching rate limits"),
+                &mut prior
+            ),
+            Some((ST_BLOCKED, "pty:dialog", "Approaching rate limits"))
+        );
+        assert_eq!(
+            dialog_status_edge("blocked", "pty:dialog", None, &mut prior),
+            Some((ST_LISTENING, "", ""))
+        );
+        assert_eq!(prior, None);
+
+        // Opened mid-turn: back to the turn.
+        assert!(dialog_status_edge("active", "", Some(""), &mut prior).is_some());
+        assert_eq!(
+            dialog_status_edge("blocked", "pty:dialog", None, &mut prior),
+            Some((ST_ACTIVE, "pty:dialog_closed", ""))
+        );
+
+        // Another block keeps its context; a hook that already moved the row
+        // on is not overwritten.
+        assert_eq!(
+            dialog_status_edge("blocked", "pty:approval", Some("x"), &mut prior),
+            None
+        );
+        assert_eq!(
+            dialog_status_edge("inactive", "", Some("x"), &mut prior),
+            None
+        );
+        assert!(dialog_status_edge("listening", "", Some("x"), &mut prior).is_some());
+        assert_eq!(
+            dialog_status_edge("active", "approved:Bash", None, &mut prior),
+            None
+        );
+        assert_eq!(prior, None);
     }
 
     #[test]

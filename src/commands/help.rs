@@ -261,7 +261,10 @@ const LIST_HELP: &[HelpEntry] = &[
         "\u{25b6}  active      processing, reads messages very soon",
     ),
     ("", "\u{25c9}  listening   idle, reads messages in <1s"),
-    ("", "\u{25a0}  blocked     needs human approval"),
+    (
+        "",
+        "\u{25a0}  blocked     needs human approval or a dialog answer",
+    ),
     ("", "\u{25cb}  inactive    dead or stale"),
     ("", "\u{25e6}  unknown     neutral"),
     ("", ""),
@@ -1575,6 +1578,12 @@ mod tests {
         // Capture what print_help would output by checking the format string
         let version = env!("CARGO_PKG_VERSION");
         assert!(!version.is_empty());
+    }
+
+    #[test]
+    fn list_help_says_blocked_covers_dialogs() {
+        let legend = "blocked     needs human approval or a dialog answer";
+        assert!(get_command_help("list").contains(legend));
     }
 
     #[test]

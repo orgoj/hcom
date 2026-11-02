@@ -44,6 +44,8 @@ use nix::sys::signal::{Signal, kill};
 #[cfg(unix)]
 use nix::unistd::{Pid, pipe, read, write};
 #[cfg(unix)]
+use std::cell::RefCell;
+#[cfg(unix)]
 use std::io;
 #[cfg(unix)]
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
@@ -684,6 +686,8 @@ pub struct Proxy {
     title_notify_write: Arc<OwnedFd>,
     /// Startup timeline, measured from the child's spawn.
     startup_trace: shared::StartupTrace,
+    /// Status a Codex modal dialog blocked, restored when it closes.
+    dialog_prior_status: RefCell<Option<String>>,
 }
 
 #[cfg(unix)]
@@ -848,6 +852,7 @@ impl Proxy {
             title_notify_read,
             title_notify_write: Arc::new(title_notify_write),
             startup_trace,
+            dialog_prior_status: RefCell::new(None),
         })
     }
 
@@ -1052,7 +1057,7 @@ impl Proxy {
             if self
                 .delivery_state
                 .read()
-                .is_ok_and(|s| s.approval_scrape_latched)
+                .is_ok_and(|s| s.approval_scrape_latched || s.dialog.is_some())
             {
                 poll_timeout = poll_timeout.min(crate::delivery::APPROVAL_SCRAPE_CLEAR_MS as u16);
             }
@@ -1063,13 +1068,7 @@ impl Proxy {
                     }
                     // Timeout - still update delivery state for time-based checks
                     if ready_signaled {
-                        shared::update_delivery_state(
-                            &self.delivery_state,
-                            &self.screen,
-                            &self.config.target,
-                            &self.launch_phase_active,
-                            &|a| self.publish_approval(a),
-                        );
+                        self.refresh_delivery_state();
                     }
                     // Start delivery thread on timeout if startup_time exceeded
                     // (child may produce no output after initial render, so the
@@ -1109,13 +1108,7 @@ impl Proxy {
                 Err(Errno::EINTR) => {
                     // Interrupted - still update delivery state
                     if ready_signaled {
-                        shared::update_delivery_state(
-                            &self.delivery_state,
-                            &self.screen,
-                            &self.config.target,
-                            &self.launch_phase_active,
-                            &|a| self.publish_approval(a),
-                        );
+                        self.refresh_delivery_state();
                     }
                     continue;
                 }
@@ -1256,13 +1249,7 @@ impl Proxy {
                         self.screen.process(raw);
                     }
                     if !raw_chunks.is_empty() {
-                        shared::update_delivery_state(
-                            &self.delivery_state,
-                            &self.screen,
-                            &self.config.target,
-                            &self.launch_phase_active,
-                            &|a| self.publish_approval(a),
-                        );
+                        self.refresh_delivery_state();
                         if !ready_signaled && self.screen.is_ready() {
                             ready_signaled = true;
                             self.screen.dump_screen(
@@ -1526,6 +1513,26 @@ impl Proxy {
         self.running.store(false, Ordering::Release);
 
         Ok(exit_code)
+    }
+
+    /// Refresh the shared delivery state and publish its approval and dialog
+    /// status edges.
+    fn refresh_delivery_state(&self) {
+        let dialog = shared::update_delivery_state(
+            &self.delivery_state,
+            &self.screen,
+            &self.config.target,
+            &self.launch_phase_active,
+            &|a| self.publish_approval(a),
+        );
+        if let Some(dialog) = dialog {
+            shared::publish_dialog_status(
+                dialog.as_deref(),
+                &mut self.dialog_prior_status.borrow_mut(),
+                self.config.instance_name.as_deref(),
+                &self.current_status,
+            );
+        }
     }
 
     /// Publish an approval-status edge for this proxy's instance.

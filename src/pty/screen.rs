@@ -273,6 +273,32 @@ fn is_codex_modal_footer(line: &str) -> bool {
     line.starts_with("enter ") && line.contains(" \u{b7} esc ")
 }
 
+/// Title of a Codex modal dialog drawn above its footer: the top line of the
+/// text block above the numbered options (`› 1. ...`), or empty when there is
+/// none.
+fn codex_dialog_title(above_footer: &[String]) -> String {
+    let is_option = |line: &str| {
+        let line = line
+            .trim_start()
+            .trim_start_matches('\u{203a}')
+            .trim_start();
+        line.split_once(". ")
+            .is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    };
+    let mut i = above_footer.len();
+    while i > 0 && (above_footer[i - 1].trim().is_empty() || is_option(&above_footer[i - 1])) {
+        i -= 1;
+    }
+    let end = i;
+    while i > 0 && !above_footer[i - 1].trim().is_empty() {
+        i -= 1;
+    }
+    if i == end {
+        return String::new();
+    }
+    above_footer[i].trim().to_string()
+}
+
 impl ScreenTracker {
     /// Create a new screen tracker with instance name (for debug logging)
     pub fn new_with_instance(
@@ -473,6 +499,14 @@ impl ScreenTracker {
     pub fn is_codex_startup_loading(&self) -> bool {
         let lines = self.get_screen_lines();
         is_codex_loading(&lines) && !lines.iter().any(|line| is_codex_modal_footer(line))
+    }
+
+    /// An open Codex modal dialog (`enter <action> · esc <action>` footer):
+    /// `Some(title)`, with an empty title when none is drawn.
+    pub fn codex_modal_dialog_title(&self) -> Option<String> {
+        let lines = self.get_screen_lines();
+        let footer = lines.iter().rposition(|line| is_codex_modal_footer(line))?;
+        Some(codex_dialog_title(&lines[..footer]))
     }
 
     /// Check if the latest complete OSC terminal title requires action.
@@ -2223,6 +2257,39 @@ mod tests {
         );
         assert!(!t.is_codex_startup_loading());
         assert_eq!(t.get_codex_input_text(), None);
+    }
+
+    /// Live capture (Codex 0.166.0): the rate-limit nudge after a turn end.
+    const CODEX_RATE_LIMIT_DIALOG: &str = "\u{2022} Worked for 1m 3s\r\n\r\n\
+         \x20 Approaching rate limits\r\n\
+         \x20 Switch to gpt-6-luna for lower credit usage?\r\n\r\n\
+         \u{203a} 1. Switch to gpt-6-luna                   Fast and affordable model for easier tasks.\r\n\
+         \x20 2. Keep current model\r\n\
+         \x20 3. Keep current model (never show again)  Hide future rate limit reminders about switching models\r\n\r\n\
+         \x20 enter select \u{b7} esc back\r\n";
+
+    #[test]
+    fn codex_modal_dialog_reports_its_title() {
+        let mut t = make_tracker(24, 120, "? for shortcuts");
+        t.process(CODEX_RATE_LIMIT_DIALOG.as_bytes());
+        assert!(!t.is_ready());
+        assert_eq!(
+            t.codex_modal_dialog_title().as_deref(),
+            Some("Approaching rate limits")
+        );
+
+        // The highlighted option may be any row; a dialog without a title
+        // text block still counts as open.
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process(
+            "  1. gpt-6\r\n\u{203a} 2. gpt-6-luna\r\n\r\n  enter select \u{b7} esc back\r\n"
+                .as_bytes(),
+        );
+        assert_eq!(t.codex_modal_dialog_title().as_deref(), Some(""));
+
+        let mut t = make_tracker(24, 80, "? for shortcuts");
+        t.process("\u{203a} Ask Codex to do anything\r\n\r\n  ? for shortcuts\r\n".as_bytes());
+        assert_eq!(t.codex_modal_dialog_title(), None);
     }
 
     #[test]

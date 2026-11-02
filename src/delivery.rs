@@ -1253,6 +1253,12 @@ pub struct ScreenState {
     /// `ScreenTracker::is_codex_startup_loading`); the launch-blocked heuristic
     /// waits it out rather than reading a quiet loading screen as settled.
     pub startup_loading: bool,
+    /// Open Codex modal dialog without an approval (e.g. a rate-limit model
+    /// switch or a picker), latched like `approval_scrape_latched`; holds the
+    /// dialog title. Reported as status only; the gate does not read it.
+    pub dialog: Option<String>,
+    /// When the dialog scrape last turned negative (`None` while positive).
+    pub dialog_scrape_negative_since: Option<Instant>,
 }
 
 impl Default for ScreenState {
@@ -1272,6 +1278,8 @@ impl Default for ScreenState {
             nav_overlay: false,
             leftover_wake: false,
             startup_loading: false,
+            dialog: None,
+            dialog_scrape_negative_since: None,
         }
     }
 }
@@ -3346,6 +3354,8 @@ mod tests {
             nav_overlay: false,
             leftover_wake: false,
             startup_loading: false,
+            dialog: None,
+            dialog_scrape_negative_since: None,
         }
     }
 

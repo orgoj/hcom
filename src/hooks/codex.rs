@@ -910,9 +910,13 @@ fn handle_pretooluse(db: &HcomDb, ctx: &HcomContext, payload: &HookPayload) -> H
     hook_noop()
 }
 
-/// Approval blocks set by the PTY's approval scrape.
+/// Blocks set by the PTY scrape (approval or modal dialog).
 fn is_approval_block(instance: &InstanceRow) -> bool {
-    instance.status == ST_BLOCKED && instance.status_context == "pty:approval"
+    instance.status == ST_BLOCKED
+        && matches!(
+            instance.status_context.as_str(),
+            "pty:approval" | "pty:dialog"
+        )
 }
 
 fn handle_posttooluse(db: &HcomDb, ctx: &HcomContext, payload: &HookPayload) -> HookResult {
@@ -2015,6 +2019,28 @@ mod tests {
             db.get_instance_full("luna").unwrap().unwrap().status,
             ST_LISTENING
         );
+    }
+
+    #[test]
+    fn posttooluse_releases_pty_approval_and_dialog_blocks() {
+        let (_dir, db, ctx) = db_with_listening_codex();
+        let payload = HookPayload::from_codex_native(
+            "PostToolUse",
+            serde_json::json!({
+                "session_id": "main-sid", "transcript_path": "/rollout-main.jsonl",
+                "cwd": "/work", "tool_name": "Bash", "tool_input": {"command": "ls"},
+            }),
+        );
+        for context in ["pty:approval", "pty:dialog"] {
+            db.set_status("luna", ST_BLOCKED, context).unwrap();
+            handle_posttooluse(&db, &ctx, &payload);
+            let row = db.get_instance_full("luna").unwrap().unwrap();
+            assert_eq!(
+                (row.status.as_str(), row.status_context.as_str()),
+                (ST_ACTIVE, "approved:Bash"),
+                "{context}"
+            );
+        }
     }
 
     fn assert_main_thread_untouched(db: &HcomDb, label: &str) {

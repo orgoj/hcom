@@ -609,6 +609,8 @@ pub fn get_status_description(status: &str, context: &str) -> String {
         ST_BLOCKED => {
             if context == "pty:approval" || context == "approval" {
                 "blocked: approval pending".to_string()
+            } else if context == "pty:dialog" {
+                "blocked: dialog open".to_string()
             } else if context.is_empty() {
                 "blocked: permission needed".to_string()
             } else {
@@ -1962,6 +1964,10 @@ WARNING: proceeding, even though we could not update PATH: Operation not permitt
         assert_eq!(
             get_status_description(ST_BLOCKED, ""),
             "blocked: permission needed"
+        );
+        assert_eq!(
+            get_status_description(ST_BLOCKED, "pty:dialog"),
+            "blocked: dialog open"
         );
         assert_eq!(
             get_status_description(ST_INACTIVE, "stale:listening"),
