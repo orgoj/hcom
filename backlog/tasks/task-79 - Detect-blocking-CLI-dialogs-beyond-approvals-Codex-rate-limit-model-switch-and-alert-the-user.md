@@ -6,7 +6,7 @@ title: >-
 status: Idea
 assignee: []
 created_date: '2026-11-02 14:41'
-updated_date: '2026-11-02 14:48'
+updated_date: '2026-11-02 15:08'
 labels: []
 dependencies: []
 priority: high
@@ -31,4 +31,6 @@ Suggested direction: (1) generic Codex modal detection (e.g. is_codex_modal_foot
 
 <!-- SECTION:NOTES:BEGIN -->
 User decision: scope is only the missing blocked status; once the row shows blocked, the user handles it (GUI highlight is enough). Alerting via reqwatch or notifications is out of scope. Next step when specified: capture the exact dialog text, then extend Codex PTY detection so this dialog (and similar modal dialogs) sets blocked.
+
+Live capture (agent_review_hcom_884, Codex 0.166.0): dialog 'Approaching rate limits / Switch to gpt-6-luna for lower credit usage?' with options 1-3 and footer 'enter select · esc back', shown after turn end. hcom showed listening / tui:not-ready ('prompt not visible'), unread 1: is_codex_modal_footer (src/pty/screen.rs:271) makes is_ready false, so the delivery gate only holds messages, while blocked comes only from the approval scrape (src/pty/shared.rs:193). Proposed: in update_delivery_state, post-launch Codex modal footer without approval -> blocked/pty:dialog (same latch), on release restore the pre-dialog status (listening here, not active). Details: tmp/task-79-blocked-analysis.md (move into the task when specifying).
 <!-- SECTION:NOTES:END -->
