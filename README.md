@@ -439,7 +439,7 @@ For temporary changes without touching a tracked file, put a sidecar `<stem>.loc
 
 `hcom send --project-dir <DIR> @reviewer` uses the Git/project root of `<DIR>` instead of the sender's, so the instance name and start directory are the same as for a sender inside that project. It affects only roaming targets; the catalog is still read from the sender's CWD, and a send that addresses no roaming agent ignores the flag.
 
-A send to the catalog name prints a stdout line such as `Note: @reviewer is a roaming agent; delivered to reviewer_hcom_807 in this project. Keep addressing @reviewer.` so the sender knows which instance it reached while keeping the role name as the address; `hcom agent reviewer` prints `Note: reviewer is a roaming agent; in this project it runs as reviewer_hcom_807.` Instances of the role in other projects are separate agents and never receive it. Sends to the exact instance name print no note.
+A send to the catalog name, and `hcom agent reviewer`, print a stdout line such as `Note: @reviewer is a roaming agent; in this project it is reviewer_hcom_807 (use that name).` so the sender knows which instance it reached. Instances of the role in other projects are separate agents and never receive it. Sends to the exact instance name print no note.
 
 `hcom list` marks each running roaming instance with its catalog agent (`reviewer_hcom_807 ↻reviewer`). In the `hcom agent list` table the roaming entry keeps `<project>` as DIR and shows its running instances in STATUS (`● 2 roaming: reviewer_hcom_807, reviewer_app_412`); `hcom agent list --json` lists them in `instances`.
 
