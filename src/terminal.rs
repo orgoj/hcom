@@ -1329,6 +1329,8 @@ fn launch_display_name(tool_id: Option<&str>) -> &'static str {
 /// Create a bash script for terminal launch.
 ///
 /// Scripts provide uniform execution across all platforms/terminals.
+/// `keep_shell` (config `keep_shell_on_exit`) applies only to new windows.
+#[allow(clippy::too_many_arguments)]
 pub fn create_bash_script(
     script_file: &Path,
     env: &HashMap<String, String>,
@@ -1337,6 +1339,7 @@ pub fn create_bash_script(
     background: bool,
     tool_id: Option<&str>,
     opens_new_window: bool,
+    keep_shell: bool,
 ) -> Result<()> {
     let tool_name = launch_display_name(tool_id);
 
@@ -1433,6 +1436,9 @@ pub fn create_bash_script(
     writeln!(f, "{}", final_command)?;
 
     if opens_new_window {
+        if !keep_shell {
+            writeln!(f, "hcom_status=$?")?;
+        }
         // Clear hcom state from the interactive shell left open after the tool
         // exits. Derive from HCOM_IDENTITY_VARS (so new identity/batch vars are
         // covered automatically) plus the non-identity per-launch vars exported
@@ -1441,6 +1447,10 @@ pub fn create_bash_script(
         leftover_vars.push("HCOM_TAG");
         writeln!(f, "unset {}", leftover_vars.join(" "))?;
         writeln!(f, "rm -f {}", shell_quote(&script_file.to_string_lossy()))?;
+        if !keep_shell {
+            // Close the window/pane on success; keep a shell so errors stay readable.
+            writeln!(f, "[ \"$hcom_status\" -eq 0 ] && exit 0")?;
+        }
         writeln!(f, "exec bash -l")?;
     } else if !background {
         writeln!(f, "hcom_status=$?")?;
@@ -2816,6 +2826,7 @@ pub fn launch_terminal(
             background,
             tool_id,
             opens_new_window,
+            crate::config::HcomConfig::load(Some(&final_env)).keep_shell_on_exit,
         )?;
     }
 
@@ -3832,7 +3843,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let env = HashMap::new();
         let bash = tmp.path().join("launch.sh");
-        create_bash_script(&bash, &env, None, "true", true, Some("claude"), false).unwrap();
+        create_bash_script(&bash, &env, None, "true", true, Some("claude"), false, true).unwrap();
         let ps = tmp.path().join("launch.ps1");
         create_powershell_script(&ps, &env, None, "true", true, Some("claude"), false).unwrap();
         for var in crate::integration_spec::CLAUDE.instance_state_env {
@@ -3861,7 +3872,7 @@ mod tests {
             "/tmp/p".to_string(),
         );
         let bash = tmp.path().join("launch.sh");
-        create_bash_script(&bash, &env, None, "agent-cmd", false, None, true).unwrap();
+        create_bash_script(&bash, &env, None, "agent-cmd", false, None, true, true).unwrap();
         let ps = tmp.path().join("launch.ps1");
         create_powershell_script(&ps, &env, None, "agent-cmd", false, None, true).unwrap();
         let after_command = |path: &Path| {
@@ -3876,6 +3887,87 @@ mod tests {
             assert!(ps_tail.lines().any(
                 |line| line.starts_with("Remove-Item ") && line.contains(&format!("Env:{var}"))
             ));
+        }
+    }
+
+    /// Script lines after the tool command line `agent-cmd`.
+    fn bash_tail_after_command(
+        dir: &Path,
+        background: bool,
+        opens_new_window: bool,
+        keep_shell: bool,
+    ) -> Vec<String> {
+        let bash = dir.join("launch.sh");
+        create_bash_script(
+            &bash,
+            &HashMap::new(),
+            None,
+            "agent-cmd",
+            background,
+            None,
+            opens_new_window,
+            keep_shell,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&bash).unwrap();
+        let lines: Vec<String> = text.lines().map(str::to_string).collect();
+        let cmd = lines.iter().position(|l| l == "agent-cmd").unwrap();
+        lines[cmd + 1..].to_vec()
+    }
+
+    #[test]
+    fn new_window_script_keeps_shell_when_keep_shell_on_exit_is_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tail = bash_tail_after_command(tmp.path(), false, true, true);
+        assert_eq!(tail.len(), 3, "{tail:?}");
+        assert!(tail[0].starts_with("unset ") && tail[0].contains("GEMINI_SYSTEM_MD"));
+        assert!(tail[1].starts_with("rm -f "));
+        assert_eq!(tail[2], "exec bash -l");
+    }
+
+    #[test]
+    fn new_window_script_closes_on_success_when_keep_shell_on_exit_is_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tail = bash_tail_after_command(tmp.path(), false, true, false);
+        assert_eq!(tail.len(), 5, "{tail:?}");
+        assert_eq!(tail[0], "hcom_status=$?");
+        assert!(tail[1].starts_with("unset ") && tail[1].contains("GEMINI_SYSTEM_MD"));
+        assert!(tail[2].starts_with("rm -f "));
+        assert_eq!(tail[3], "[ \"$hcom_status\" -eq 0 ] && exit 0");
+        assert_eq!(tail[4], "exec bash -l");
+    }
+
+    /// The shell is skipped only when the tool succeeds; a failure still
+    /// reaches `exec bash -l` after the unset.
+    #[test]
+    fn new_window_script_with_keep_shell_off_runs_shell_only_on_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tail = bash_tail_after_command(tmp.path(), false, true, false);
+        // Replace the shell with a marker so the script can run unattended.
+        let body = tail.join("\n").replace("exec bash -l", "echo SHELL_OPENED");
+        for (status, expect_shell) in [(0, false), (3, true)] {
+            let out = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("(exit {status})\n{body}"))
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(
+                stdout.contains("SHELL_OPENED"),
+                expect_shell,
+                "status {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn keep_shell_on_exit_does_not_change_background_or_run_here_scripts() {
+        let tmp = tempfile::tempdir().unwrap();
+        for background in [true, false] {
+            assert_eq!(
+                bash_tail_after_command(tmp.path(), background, false, true),
+                bash_tail_after_command(tmp.path(), background, false, false),
+            );
         }
     }
 
@@ -5242,7 +5334,7 @@ mod tests {
         let env = HashMap::from([("PATH".to_string(), "/only".to_string())]);
         let bash = tmp.path().join("launch.sh");
         // `true` resolves on every unix PATH, so an append line is emitted.
-        create_bash_script(&bash, &env, None, "true", true, None, false).unwrap();
+        create_bash_script(&bash, &env, None, "true", true, None, false, true).unwrap();
         let text = std::fs::read_to_string(&bash).unwrap();
         let export = text.find("export PATH=/only").unwrap();
         let append = text.find("case \":$PATH:\"").unwrap();

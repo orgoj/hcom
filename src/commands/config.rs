@@ -1546,6 +1546,33 @@ Notes:
   - The same setting can be provided with HCOM_HERDR_AUTOSTART in the environment.",
         ),
 
+        "HCOM_KEEP_SHELL_ON_EXIT" => Some(
+            "\
+HCOM_KEEP_SHELL_ON_EXIT - Keep a shell open after the agent exits
+
+Default: true
+
+Purpose:
+  Controls what a new terminal window, tab or pane (tmux, kitty, herdr, ...)
+  does after the agent exits (e.g. /exit).
+
+Values:
+  true  - Open `bash -l` in the window/pane after the agent exits (default)
+  false - Close the window/pane when the agent exits with code 0; on a
+          non-zero exit code still open `bash -l` so the error stays readable
+
+Usage:
+  hcom config keep_shell_on_exit false   # Close the pane on a clean exit
+  hcom config keep_shell_on_exit true    # Always keep a shell (default)
+  hcom config keep_shell_on_exit         # Show current value
+
+Notes:
+  - hcom identity variables and instruction transports are cleared before
+    any shell starts.
+  - Background (--headless) and run-here launches are not affected.
+  - The same setting can be provided with HCOM_KEEP_SHELL_ON_EXIT in the environment.",
+        ),
+
         "HCOM_NAME_EXPORT" => Some(
             "\
 HCOM_NAME_EXPORT - Export instance name to custom env var

@@ -185,6 +185,7 @@ pub(crate) const FIELDS: &[ConfigField] = &[
     f("terminal", "HCOM_TERMINAL", "terminal.active", Str, "Terminal preset for spawning agent panes"),
     f("title_mode", "HCOM_TITLE_MODE", "terminal.title_mode", Str, "Terminal title mode (combined | label | off)"),
     f("herdr_autostart", "HCOM_HERDR_AUTOSTART", "terminal.herdr_autostart", Bool, "Auto-start Herdr server when not running (true/false)"),
+    f("keep_shell_on_exit", "HCOM_KEEP_SHELL_ON_EXIT", "terminal.keep_shell_on_exit", Bool, "Keep a shell open in a new window/pane after the agent exits (true/false)"),
     f("tag", "HCOM_TAG", "launch.tag", Str, "Group tag for launched instances"),
     f("hints", "HCOM_HINTS", "launch.hints", Str, "Text injected with all messages"),
     f("notes", "HCOM_NOTES", "launch.notes", Str, "One-time notes appended at bootstrap"),
@@ -318,6 +319,9 @@ pub struct HcomConfig {
     pub title_mode: String,
     /// Auto-start Herdr server in the background if not running (default: true).
     pub herdr_autostart: bool,
+    /// Keep `bash -l` open in a new window/pane after the tool exits
+    /// (default: true). When false, the shell opens only on a non-zero exit.
+    pub keep_shell_on_exit: bool,
 }
 
 impl Default for HcomConfig {
@@ -359,6 +363,7 @@ impl Default for HcomConfig {
             copilot_delivery: DEFAULT_DELIVERY.to_string(),
             title_mode: "combined".to_string(),
             herdr_autostart: true,
+            keep_shell_on_exit: true,
         }
     }
 }
@@ -565,6 +570,7 @@ impl HcomConfig {
             "copilot_delivery" => Some(self.copilot_delivery.clone()),
             "title_mode" => Some(self.title_mode.clone()),
             "herdr_autostart" => Some(if self.herdr_autostart { "1" } else { "0" }.into()),
+            "keep_shell_on_exit" => Some(if self.keep_shell_on_exit { "1" } else { "0" }.into()),
             _ => None,
         }
     }
@@ -621,6 +627,7 @@ impl HcomConfig {
             // Validated in `collect_errors`, like the other enum-like fields.
             "title_mode" => self.title_mode = value.to_string(),
             "herdr_autostart" => self.herdr_autostart = !is_falsy(value),
+            "keep_shell_on_exit" => self.keep_shell_on_exit = !is_falsy(value),
             _ => return Err(format!("unknown field: {field}")),
         }
         Ok(())
@@ -2050,6 +2057,19 @@ mod tests {
             HcomConfig::load_from_sources(&file_config, Some(&env_override));
         assert!(errors.is_empty());
         assert!(!config_override.herdr_autostart);
+    }
+
+    #[test]
+    fn test_load_from_sources_keep_shell_on_exit_default_and_env_override() {
+        let file_config = HashMap::new();
+        let (config, errors) = HcomConfig::load_from_sources(&file_config, Some(&HashMap::new()));
+        assert!(errors.is_empty());
+        assert!(config.keep_shell_on_exit);
+
+        let env = HashMap::from([("HCOM_KEEP_SHELL_ON_EXIT".to_string(), "0".to_string())]);
+        let (config, errors) = HcomConfig::load_from_sources(&file_config, Some(&env));
+        assert!(errors.is_empty());
+        assert!(!config.keep_shell_on_exit);
     }
 
     #[test]

@@ -498,6 +498,7 @@ hcom config -i <name> <key> <value>   # per-agent override at runtime
 | `gemini_system_prompt` / `codex_system_prompt` | Default system prompt for that tool |
 | `auto_trust_workspace` | Trust the launch directory, skipping the tool's folder-trust prompt |
 | `herdr_autostart` | Start the Herdr server when it is not running |
+| `keep_shell_on_exit` | Keep a shell in a new window/pane after the agent exits (default `true`); `false` closes it on exit code 0 and keeps the shell only after a failure |
 | `continue_last` | Recent exchanges carried into a `--continue` handoff summary |
 
 #### Scope

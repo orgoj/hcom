@@ -81,6 +81,8 @@ tell any agent:
 
 **Spawn**, **fork**, **resume**, **kill** in any terminal emulator or headless. In Herdr, a catalog agent without `session` lands in the workspace named after its own `dir` (a roaming agent: the project it runs for; no `dir`: the caller's project); `hcom r` returns an agent to its recorded tab and `hcom f` opens a tab named after the fork; neither inherits your tab. `hcom kill` takes names, `@group`, `tag:<tag>`, `tool:<cli>` (e.g. `tool:agy`) or `SELF` (the calling agent ends itself). Add `--json` to a launch, `hcom r`, `hcom f` or `hcom kill` to get the outcome as one JSON object.
 
+**Shell after exit**: a new window/pane keeps `bash -l` open after the agent exits; `hcom config keep_shell_on_exit false` closes it on exit code 0 (a failure still leaves the shell).
+
 **Idle autokill**: `hcom config -i <name|self> idle_kill <seconds>` (or catalog `"idle_kill"`) kills a local agent (not a remote one or a subagent) that stays idle that long; `0` clears. An agent waiting for a reply to its own `--intent request` message, or with unread messages, is not killed.
 
 **Roaming catalog agent**: `"roaming": true` makes `@<name>` address `<name>_<project>_<hash>` for the sender's Git/project root (`<hash>` = 3-digit number from SHA-256 of the root path, so roots with the same basename get different instances) and start it there when missing. `hcom send --project-dir <DIR> @<name>` uses `<DIR>`'s project root instead (roaming targets only). Send and `hcom agent <name>` print a `Note:` line on stdout with that instance name; address it by that name. Instances of the role in other projects are separate agents. `hcom list` marks each instance `↻<name>`; `hcom agent list --json` gives a roaming entry's running `instances`.

@@ -2458,6 +2458,30 @@ fn herdr_autostart_config_and_env() {
 }
 
 #[test]
+fn keep_shell_on_exit_config_and_help() {
+    let h = Hcom::new();
+    let (code, stdout, _) = h.run(["config", "keep_shell_on_exit"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "true");
+
+    let (code, _, _) = h.run(["config", "keep_shell_on_exit", "false"]);
+    assert_eq!(code, 0);
+    let (code, stdout, _) = h.run(["config", "keep_shell_on_exit"]);
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "false");
+
+    let (code, stdout, _) = h.run(["config", "keep_shell_on_exit", "--info"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("HCOM_KEEP_SHELL_ON_EXIT"),
+        "stdout={stdout}"
+    );
+    let (code, stdout, _) = h.run(["config", "--help"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("keep_shell_on_exit"), "stdout={stdout}");
+}
+
+#[test]
 fn agent_help_lists_catalog_layers() {
     let h = Hcom::new();
     let (code, stdout, stderr) = h.run(["agent", "--help"]);

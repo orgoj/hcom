@@ -726,6 +726,10 @@ const CONFIG_KEYS_HELP: &[HelpEntry] = &[
         "Auto-start Herdr server if not running",
     ),
     (
+        "  keep_shell_on_exit",
+        "Keep a shell in the pane after the agent exits",
+    ),
+    (
         "  continue_last",
         "Recent exchanges in the --continue handoff",
     ),
