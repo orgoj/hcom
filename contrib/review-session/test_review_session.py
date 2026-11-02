@@ -22,14 +22,21 @@ AGENTS = [
      "directory": "/p/nova", "launch_context": {"pane_id": "w1:pB", "terminal_preset_effective": "herdr"}},
 ]
 
+CATALOG_KEYS = {"HCOM_AGENTS_FILE", "HCOM_AGENT_CATALOGS"}
+
 FAKE = """#!/usr/bin/env python3
 import json, os, sys
 log = os.path.join(os.environ["FAKE_LOG"], os.path.basename(sys.argv[0]) + ".jsonl")
 stdin = "" if sys.stdin.isatty() else sys.stdin.read()
 with open(log, "a") as f:
-    f.write(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ), "stdin": stdin}) + "\\n")
+    f.write(json.dumps({"argv": sys.argv[1:], "env": dict(os.environ), "stdin": stdin,
+                        "cwd": os.getcwd()}) + "\\n")
 if os.path.basename(sys.argv[0]) == "hcom" and sys.argv[1:3] == ["list", "--json"]:
     print(os.environ["FAKE_AGENTS"])
+elif os.path.basename(sys.argv[0]) == "hcom" and sys.argv[1:3] == ["agent", "show"]:
+    if os.environ.get("FAKE_SHOW_FAIL"):
+        sys.exit("Error: " + os.environ["FAKE_SHOW_FAIL"])
+    print(os.environ.get("FAKE_SHOW", ""))
 elif os.path.basename(sys.argv[0]) == "claude":
     print(os.environ.get("FAKE_CLAUDE_OUT", "# Session review: report body\\n\\nSTATUS: DONE\\nDone: review"))
 """
@@ -84,8 +91,90 @@ class ReviewSession(unittest.TestCase):
         send = self.calls("hcom")[-1]
         self.assertEqual(send["argv"][:2], ["send", "@agent_coach"])
         self.assertTrue(send["stdin"].startswith("Independent session review of agent luna"))
-        self.assertIn(report, send["stdin"])
-        self.assertTrue(send["stdin"].rstrip().endswith("# Session review: report body"))
+        self.assertIn("no findings.", send["stdin"])
+        self.assertTrue(send["stdin"].rstrip().endswith("Report: " + report))
+        self.assertNotIn("report body", send["stdin"])  # path only, never the report
+
+    def test_message_carries_count_and_top_finding_only(self):
+        body = ("# Session review: luna\n## Conclusion\nBad.\n## Problems\n"
+                "1. **[high] Premature DONE** details\n   evidence 2. not an item\n"
+                "2. **[low] Duplicate text**\n## Minor\n1. sed -i allowed\n## Uncertain\nnone")
+        r = self.run_script("luna", extra_env={"FAKE_CLAUDE_OUT": body})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        msg = self.calls("hcom")[-1]["stdin"]
+        self.assertIn(": 2 findings; top: [high] Premature DONE details\n", msg)
+        self.assertNotIn("Duplicate text", msg)
+        self.assertNotIn("Bad.", msg)
+
+    def catalog_agent(self, tool="claude"):
+        d = os.path.join(self.tmp.name, "proj")
+        bundle = os.path.join(self.tmp.name, "my bundle")  # space: the path is not cut
+        for path in (d, bundle, os.path.join(self.tmp.name, ".claude"),
+                     os.path.join(self.tmp.name, ".codex")):
+            os.makedirs(path, exist_ok=True)
+        for path in (os.path.join(d, "AGENTS.md"), os.path.join(bundle, "NOTES.md"),
+                     os.path.join(self.tmp.name, ".claude", "CLAUDE.md"),
+                     os.path.join(self.tmp.name, ".codex", "AGENTS.md")):
+            open(path, "w").close()
+        agent = {"name": "mira_x", "tool": tool, "directory": d,
+                 "launch_context": {"agent_name": "mira"}}
+        return agent, d, bundle
+
+    def test_prompt_names_effective_rules_of_a_catalog_agent(self):
+        agent, d, bundle = self.catalog_agent()
+        show = f"name: mira\nbundle:    {bundle}\ninstructions: {bundle}/SOUL.md\n"
+        r = self.run_script("mira_x", extra_env={
+            "FAKE_AGENTS": json.dumps([agent]), "FAKE_SHOW": show,
+            "HCOM_AGENTS_FILE": "/c/agents.json", "HCOM_AGENT_CATALOGS": "/c/x.json"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        (call,) = [c for c in self.calls("hcom") if c["argv"][:2] == ["agent", "show"]]
+        self.assertEqual(call["argv"], ["agent", "show", "mira"])
+        self.assertEqual(call["cwd"], d)
+        self.assertEqual({k for k in call["env"] if k.startswith("HCOM_")},
+                         {"HCOM_DIR", "HCOM_AGENTS_FILE", "HCOM_AGENT_CATALOGS"})
+        rules = r.stdout.strip()[:-len(".md")] + "-rules.txt"
+        with open(rules) as f:
+            self.assertEqual(f.read(), show + "\n")
+        self.assertEqual(os.stat(rules).st_mode & 0o777, 0o600)
+        prompt = self.calls("claude")[0]["argv"][3]
+        for path in (rules, os.path.join(bundle, "NOTES.md"), os.path.join(d, "AGENTS.md"),
+                     os.path.join(self.tmp.name, ".claude", "CLAUDE.md")):
+            self.assertIn(f"- {path}:", prompt)
+        self.assertNotIn(".codex", prompt)
+        claude_env = self.calls("claude")[0]["env"]
+        self.assertFalse(CATALOG_KEYS & claude_env.keys())
+
+    def test_codex_agent_gets_codex_global_instructions(self):
+        agent, _, _ = self.catalog_agent("codex")
+        r = self.run_script("mira_x", extra_env={"FAKE_AGENTS": json.dumps([agent])})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        prompt = self.calls("claude")[0]["argv"][3]
+        self.assertIn(os.path.join(self.tmp.name, ".codex", "AGENTS.md") + ": codex", prompt)
+        self.assertNotIn("CLAUDE.md", prompt)
+
+    def test_failed_catalog_lookup_is_not_no_catalog_entry(self):
+        agent, _, _ = self.catalog_agent()
+        r = self.run_script("mira_x", extra_env={"FAKE_AGENTS": json.dumps([agent]),
+                                                 "FAKE_SHOW_FAIL": "catalog broken"})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        prompt = self.calls("claude")[0]["argv"][3]
+        self.assertIn("Catalog rules could not be retrieved (Error: catalog broken)", prompt)
+        self.assertIn("uncertain", prompt)
+        self.assertNotIn("No catalog entry", prompt)
+        self.assertFalse(os.path.exists(r.stdout.strip()[:-len(".md")] + "-rules.txt"))
+
+    def test_missing_agent_directory_is_a_failed_lookup(self):
+        agent, _, _ = self.catalog_agent()
+        agent["directory"] = os.path.join(self.tmp.name, "gone")
+        r = self.run_script("mira_x", extra_env={"FAKE_AGENTS": json.dumps([agent])})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Catalog rules could not be retrieved", self.calls("claude")[0]["argv"][3])
+
+    def test_agent_without_catalog_name_skips_lookup(self):
+        r = self.run_script("luna")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse([c for c in self.calls("hcom") if c["argv"][:2] == ["agent", "show"]])
+        self.assertIn("No catalog entry (ad hoc agent)", self.calls("claude")[0]["argv"][3])
 
     def test_children_do_not_inherit_hcom_identity_or_caller_cli_markers(self):
         markers = {"CLAUDECODE": "1", "CLAUDE_ENV_FILE": "/e", "CLAUDE_CODE_SESSION_ID": "c",

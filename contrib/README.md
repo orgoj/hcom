@@ -20,10 +20,19 @@ with their names, and NAME wins over both. It runs
 `claude -p --model haiku` (default) with a fixed review prompt carrying the agent's name, CLI,
 session id, transcript path and directory; the model reads the session itself with
 `hcom transcript` and `hcom events` (which commands it may run is up to the permission hooks,
-e.g. Dippy). The report goes to `<hcom dir>/tmp/session-reviews/<name>-<time>.md`, and one
-message from `session-review` (intent inform) goes to the coach (default `agent_coach`): a
-fixed instruction on how to treat the findings, then the report. Child processes get no
-`HCOM_*` variable except `HCOM_DIR`, and none of the caller CLI's session markers
+e.g. Dippy). The prompt also lists the rules the agent had, so each problem is classified as a
+violation of an existing rule, a missing rule or missing knowledge, with a fix target: for a
+catalog agent (`launch_context.agent_name`) the output of `hcom agent show <catalog name>`, run
+in the agent's directory and saved as `<report stem>-rules.txt`, and the bundle's `NOTES.md`;
+then the project's `AGENTS.md` and the CLI's global instructions (`~/.claude/CLAUDE.md`,
+`$CODEX_HOME/AGENTS.md`), when present. A failed lookup is named as such and the model marks
+rule-dependent conclusions uncertain. The report starts with a Conclusion and ranks problems
+by severity, trivial ones one line each under Minor. It goes to
+`<hcom dir>/tmp/session-reviews/<name>-<time>.md`, and one short message from `session-review`
+(intent inform) goes to the coach (default `agent_coach`): the finding count, the top
+finding's title and the report path, never the report itself. Child processes get no
+`HCOM_*` variable except `HCOM_DIR` (the `hcom agent show` call also keeps the catalog
+selection `HCOM_AGENTS_FILE` and `HCOM_AGENT_CATALOGS`), and none of the caller CLI's session markers
 (`CLAUDECODE`, `CLAUDE_ENV_FILE`, `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`,
 `CODEX_SESSION_ID`), so they never act as the caller or the reviewed agent. The review times
 out after 30 minutes; the report file is owner-only (it quotes the transcript).
