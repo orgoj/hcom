@@ -7751,3 +7751,77 @@ fn transcript_path_reads_a_file_without_an_instance() {
         "stderr={stderr}"
     );
 }
+
+#[test]
+fn roaming_send_to_the_instance_name_autostarts_it_in_its_own_project() {
+    let h = Hcom::new();
+    let here = h.root_path().join("app");
+    let elsewhere = h.root_path().join("web");
+    std::fs::create_dir_all(here.join(".git")).expect("create first git marker");
+    std::fs::create_dir_all(elsewhere.join(".git")).expect("create second git marker");
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"roaming":true,"cli":"codex",
+            "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+    let instance = roaming_instance("reviewer_app", &here);
+    let send = |dir: &std::path::Path, target: &str| {
+        let output = h
+            .cmd()
+            .current_dir(dir)
+            .args([
+                "send",
+                "--from",
+                "bigboss",
+                &format!("@{target}"),
+                "--",
+                "inspect",
+            ])
+            .output()
+            .expect("send");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        (
+            output.status.success(),
+            format!("stdout={stdout} stderr={stderr}"),
+        )
+    };
+    let assert_last_delivery = || {
+        let (code, events, stderr) =
+            h.run(["events", "--type", "message", "--last", "1", "--full"]);
+        assert_eq!(code, 0, "events={events} stderr={stderr}");
+        let event: serde_json::Value =
+            serde_json::from_str(events.trim()).expect("message event JSON");
+        assert_eq!(event["data"]["delivered_to"], serde_json::json!([instance]));
+    };
+
+    // Never started: the instance name starts it like the role does.
+    let (ok, output) = send(&here, &instance);
+    assert!(ok, "{output}");
+    assert!(output.contains("Started the launch process"), "{output}");
+    assert_last_delivery();
+
+    // The role keeps working.
+    let (ok, output) = send(&here, "reviewer");
+    assert!(ok && output.contains(&instance), "{output}");
+    assert_last_delivery();
+
+    // Stopped by name: the next send to the name starts it again.
+    let (code, stdout, stderr) = h.run(["stop", &instance]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let (ok, output) = send(&here, &instance);
+    assert!(ok, "{output}");
+    assert!(output.contains("Started the launch process"), "{output}");
+    assert_last_delivery();
+
+    // From another project a stopped instance name stays unresolved.
+    let (code, stdout, stderr) = h.run(["stop", &instance]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let (ok, output) = send(&elsewhere, &instance);
+    assert!(!ok, "{output}");
+    assert!(
+        output.contains(&format!("No active agent for @{instance}")),
+        "{output}"
+    );
+}
