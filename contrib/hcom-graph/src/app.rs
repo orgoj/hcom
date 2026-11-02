@@ -791,10 +791,37 @@ impl HcomGraphApp {
                 row.agent.clone()
             }
         };
-        let selected_row = self
+        let mut selected_row = self
             .selected_row_id
             .as_deref()
             .and_then(|id| rows.iter().position(|r| target_of(r) == id));
+        // Up/Down move the selection in the shown order, unless a text field
+        // has the keyboard; the moved row is scrolled into view below.
+        let (down, up) = if ui.ctx().text_edit_focused() {
+            (false, false)
+        } else {
+            ui.input(|i| {
+                (
+                    i.key_pressed(egui::Key::ArrowDown),
+                    i.key_pressed(egui::Key::ArrowUp),
+                )
+            })
+        };
+        let last = rows.len().checked_sub(1);
+        let key_row = match (down, up, selected_row, last) {
+            (_, _, _, None) => None,
+            (true, false, Some(i), Some(l)) => Some((i + 1).min(l)),
+            (true, false, None, Some(_)) => Some(0),
+            (false, true, Some(i), Some(_)) => Some(i.saturating_sub(1)),
+            (false, true, None, Some(l)) => Some(l),
+            _ => None,
+        };
+        if let Some(k) = key_row {
+            if selected_row != Some(k) {
+                self.select_table_row(&rows[k]);
+            }
+            selected_row = Some(k);
+        }
         let hover_row = self.table_hover_row;
         // Grid row 0 is the header; data row i is grid row i + 1. The band
         // covers the full grid width, including spacing and empty cells.
@@ -880,6 +907,9 @@ impl HcomGraphApp {
                         }
                     });
                 grid_x = grid.response.rect.x_range();
+                if let Some(span) = key_row.and_then(|k| row_spans.get(k)) {
+                    ui.scroll_to_rect(egui::Rect::from_x_y_ranges(grid_x, *span), None);
+                }
             });
 
         self.table_row_bands = row_spans
@@ -891,20 +921,28 @@ impl HcomGraphApp {
             ui.ctx().request_repaint();
         }
         if let Some(i) = clicked_row {
-            let row = &rows[i];
-            self.selected_row_id = Some(target_of(row));
-            if !row.instance.is_empty() {
-                if let Some(idx) = self.graph.get_node_index(&row.instance) {
-                    self.canvas.selected_node = Some(idx);
-                    self.canvas.selected_edge = None;
-                } else {
-                    self.canvas.selected_node = None;
-                }
+            self.select_table_row(&rows[i]);
+        }
+    }
+
+    /// Selects a table row like a click: graph node, detail panel content.
+    fn select_table_row(&mut self, row: &TableRow) {
+        self.selected_row_id = Some(if !row.instance.is_empty() {
+            row.instance.clone()
+        } else {
+            row.agent.clone()
+        });
+        if !row.instance.is_empty() {
+            if let Some(idx) = self.graph.get_node_index(&row.instance) {
+                self.canvas.selected_node = Some(idx);
+                self.canvas.selected_edge = None;
             } else {
                 self.canvas.selected_node = None;
             }
-            self.on_selection_changed();
+        } else {
+            self.canvas.selected_node = None;
         }
+        self.on_selection_changed();
     }
 
     fn render_report_view(&self, ui: &mut egui::Ui, row: &TableRow) {

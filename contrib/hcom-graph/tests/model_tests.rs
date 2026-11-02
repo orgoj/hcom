@@ -5385,6 +5385,130 @@ fn test_table_row_selection_is_one_full_width_band() {
 }
 
 #[test]
+fn test_table_arrow_keys_select_rows_in_shown_order() {
+    use eframe::App;
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_graph::table_data::TableRow;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = GraphState {
+        columns: vec!["instance".into()],
+        sort_col: Some("instance".into()),
+        sort_reverse: true,
+        ..Default::default()
+    };
+    let mut app =
+        HcomGraphApp::new_for_test(GraphConfig::default(), state, dir.path().to_path_buf());
+    let mut names: Vec<String> = (0..60).map(|i| format!("w{i:02}_keep")).collect();
+    names.push("zz_other".into());
+    let snaps: Vec<_> = names.iter().map(|n| snap(n, None)).collect();
+    app.graph.apply_instance_snapshot(&snaps);
+    app.table_rows = names
+        .iter()
+        .map(|n| TableRow {
+            instance: n.clone(),
+            ..Default::default()
+        })
+        .collect();
+    app.search_query = "_keep".into();
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut time = 0.0;
+    let mut run = |app: &mut HcomGraphApp, events: Vec<egui::Event>| {
+        time += 0.1;
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        out.textures_delta.clear();
+        out
+    };
+    let key = |k| {
+        vec![egui::Event::Key {
+            key: k,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    };
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    let sel = |app: &HcomGraphApp| app.selected_row_id.clone();
+    let node = |app: &HcomGraphApp, n: &str| app.graph.get_node_index(n);
+
+    // Nothing selected: Up takes the last shown row, Down the first one
+    // (sorted descending, "zz_other" filtered out).
+    run(&mut app, key(egui::Key::ArrowUp));
+    assert_eq!(sel(&app).as_deref(), Some("w00_keep"));
+    app.selected_row_id = None;
+    run(&mut app, key(egui::Key::ArrowDown));
+    assert_eq!(sel(&app).as_deref(), Some("w59_keep"));
+    assert_eq!(app.canvas.selected_node, node(&app, "w59_keep"));
+    run(&mut app, key(egui::Key::ArrowDown));
+    assert_eq!(sel(&app).as_deref(), Some("w58_keep"));
+    assert_eq!(app.canvas.selected_node, node(&app, "w58_keep"));
+    run(&mut app, key(egui::Key::ArrowUp));
+    run(&mut app, key(egui::Key::ArrowUp));
+    assert_eq!(sel(&app).as_deref(), Some("w59_keep"), "clamped at the top");
+
+    // Down to the end: clamped, and the last row is scrolled into the window.
+    for _ in 0..70 {
+        run(&mut app, key(egui::Key::ArrowDown));
+    }
+    assert_eq!(
+        sel(&app).as_deref(),
+        Some("w00_keep"),
+        "clamped at the bottom"
+    );
+    for _ in 0..10 {
+        run(&mut app, vec![]);
+    }
+    let band = *app.table_row_bands.last().unwrap();
+    assert!(
+        band.bottom() <= screen.bottom() + 1.0 && band.top() >= 0.0,
+        "selected last row visible: {band:?}"
+    );
+
+    // A focused text field (the search filter) keeps the arrows.
+    let out = run(&mut app, vec![]);
+    let hint = out
+        .shapes
+        .iter()
+        .find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text().is_empty() || t.galley.text() == "_keep" => {
+                Some(Rect::from_min_size(t.pos, t.galley.size()))
+            }
+            _ => None,
+        })
+        .expect("search field text");
+    let p = hint.center();
+    let press = |pressed| egui::Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    run(&mut app, vec![egui::Event::PointerMoved(p)]);
+    run(&mut app, vec![press(true)]);
+    run(&mut app, vec![press(false)]);
+    assert!(ctx.text_edit_focused(), "search field has focus");
+    run(&mut app, key(egui::Key::ArrowUp));
+    assert_eq!(
+        sel(&app).as_deref(),
+        Some("w00_keep"),
+        "text field keeps keys"
+    );
+}
+
+#[test]
 fn test_idle_column_queues_listening_periods_only_while_shown() {
     use hcom_graph::app::HcomGraphApp;
     use hcom_graph::config::{GraphConfig, GraphState};
