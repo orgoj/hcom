@@ -91,6 +91,8 @@ tell any agent:
 
 **Catalog sidecar**: `<stem>.local.json` next to any catalog (`agents.json` → `agents.local.json`, usually gitignored) is merged into it for temporary changes: same fields, may add or disable agents, same scope as its catalog, no `imports`. `hcom agent show <name>` lists it under `sources`.
 
+**Clones for a side task**: a catalog agent that needs a side task done while it stays on its main task starts a visible clone of itself: `hcom agent <own name> --as <own name>__clone --hcom-prompt "<task>"` (a fresh catalog instance with the same SOUL/bundle; `hcom send @<own name> --as ...` still fails with the self-target error). It uses this instead of harness subagents or `hcom f` (a session fork under a random name). When another agent's role is needed while its instance is busy, `hcom send @<role> --as <role>__clone --intent request -- "<task>"` starts a clone of that role. A clone may edit any file (hcom and its harness report concurrent edits); it commits only the files it changed itself (path-limited commit), never everything.
+
 **Agent bundles**: `agents/<name>/SOUL.md` next to a catalog defines a persistent agent and is injected into its instructions on every clean start and named resume; `NOTES.md` and `MEMORY/` beside it are a file-based memory convention the agent's instructions must name.
 
 Read `references/named-agents.md` when defining or launching recurring agents with `hcom agent`: catalogs and precedence, imports and scope, bundles and memory, roaming, start modes, handoff, per-CLI `tools` profiles.
