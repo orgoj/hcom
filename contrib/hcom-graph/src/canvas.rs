@@ -801,6 +801,39 @@ pub fn show_edge_badge(count: usize, focus_edge: bool) -> bool {
     count >= 2 || focus_edge
 }
 
+/// Screen radius of a node with all its rings at `zoom`.
+pub fn node_extent(zoom: f32) -> f32 {
+    NODE_EXTENT * zoom
+}
+
+/// Top-left corner of a hover card of `size` for a node at `node` (screen)
+/// with `radius`: the first of right, left, below and above the node (8 px
+/// gap, centered on the node and shifted along the free axis to stay in
+/// `canvas`) that lies inside `canvas` without overlapping the node; none
+/// fits: the right position clamped into `canvas`.
+pub fn tooltip_placement(node: Pos2, radius: f32, size: Vec2, canvas: Rect) -> Pos2 {
+    let gap = 8.0;
+    let clamp_x = |x: f32| x.clamp(canvas.min.x, (canvas.max.x - size.x).max(canvas.min.x));
+    let clamp_y = |y: f32| y.clamp(canvas.min.y, (canvas.max.y - size.y).max(canvas.min.y));
+    let mid_x = clamp_x(node.x - size.x / 2.0);
+    let mid_y = clamp_y(node.y - size.y / 2.0);
+    let right = Pos2::new(node.x + radius + gap, mid_y);
+    let candidates = [
+        right,
+        Pos2::new(node.x - radius - gap - size.x, mid_y),
+        Pos2::new(mid_x, node.y + radius + gap),
+        Pos2::new(mid_x, node.y - radius - gap - size.y),
+    ];
+    let node_rect = Rect::from_center_size(node, Vec2::splat(radius * 2.0));
+    candidates
+        .into_iter()
+        .find(|p| {
+            let r = Rect::from_min_size(*p, size);
+            canvas.contains_rect(r) && !r.intersects(node_rect)
+        })
+        .unwrap_or(Pos2::new(clamp_x(right.x), right.y))
+}
+
 /// Gap between the outermost node decoration and the label, in world units.
 const LABEL_GAP: f32 = 2.0;
 /// Label background padding (x, y), in world units.

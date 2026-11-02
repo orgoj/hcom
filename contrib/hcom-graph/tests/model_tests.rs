@@ -5611,3 +5611,263 @@ fn test_idle_column_queues_listening_periods_only_while_shown() {
     let idle: Vec<&str> = app.table_rows.iter().map(|r| r.idle.as_str()).collect();
     assert_eq!(idle, vec!["…", "", ""]);
 }
+
+/// App with one agent `worker_1` (table row with `dir`), Manual layout,
+/// the node at the world origin.
+fn tooltip_app(dir: &str) -> (hcom_graph::app::HcomGraphApp, tempfile::TempDir) {
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_graph::table_data::TableRow;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        tmp.path().to_path_buf(),
+    );
+    app.graph.apply_instance_snapshot(&[snap("worker_1", None)]);
+    app.layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    app.layout.sync_nodes(&app.graph);
+    let idx = app.graph.get_node_index("worker_1").unwrap();
+    app.layout.set_node_pos(idx, Pos2::ZERO, false);
+    app.table_rows = vec![hcom_graph::table_data::TableRow {
+        instance: "worker_1".into(),
+        cli: "codex".into(),
+        status: "listening".into(),
+        directory: dir.into(),
+        ..TableRow::default()
+    }];
+    (app, tmp)
+}
+
+/// Hovers `worker_1` for enough frames to fade the tooltip in; returns the
+/// tooltip rect and the node's screen center.
+fn hover_tooltip_rect(app: &mut hcom_graph::app::HcomGraphApp) -> (Option<Rect>, Pos2) {
+    let ctx = egui::Context::default();
+    let size = Vec2::new(1200.0, 900.0);
+    run_app_events(&ctx, app, size, vec![vec![]; 2]);
+    let idx = app.graph.get_node_index("worker_1").unwrap();
+    let center = app
+        .canvas
+        .world_to_screen(app.layout.nodes[&idx].pos, app.canvas_rect);
+    run_app_events(
+        &ctx,
+        app,
+        size,
+        vec![vec![egui::Event::PointerMoved(center)]; 20],
+    );
+    let rect = ctx.memory(|m| m.area_rect(egui::Id::unique("node_hover_tooltip_area")));
+    (rect, center)
+}
+
+#[test]
+fn test_tooltip_width_follows_content() {
+    let (mut app, _t) = tooltip_app("/w");
+    let (short, _) = hover_tooltip_rect(&mut app);
+    let short = short.expect("tooltip shown");
+    let (mut app, _t) = tooltip_app(&"/very/long/path".repeat(20));
+    let (long, _) = hover_tooltip_rect(&mut app);
+    let long = long.expect("tooltip shown");
+    assert!(short.width() < 300.0, "short card {short:?}");
+    assert!(
+        long.width() > short.width(),
+        "long {long:?} short {short:?}"
+    );
+    assert!(long.width() <= 360.0 + 20.0, "long card {long:?}");
+}
+
+#[test]
+fn test_tooltip_placement_prefers_right_left_below_above() {
+    use hcom_graph::canvas::tooltip_placement;
+    let canvas = Rect::from_min_size(Pos2::new(0.0, 40.0), Vec2::new(800.0, 600.0));
+    let size = Vec2::new(220.0, 120.0);
+    let r = 37.0;
+    let card = |n: Pos2, c: Rect| Rect::from_min_size(tooltip_placement(n, r, size, c), size);
+
+    // Room everywhere: right of the node, vertically centered.
+    let n = Pos2::new(400.0, 340.0);
+    let c = card(n, canvas);
+    assert_eq!(c.min.x, n.x + r + 8.0);
+    assert_eq!(c.center().y, n.y);
+    // Near the right edge: left.
+    let n = Pos2::new(760.0, 340.0);
+    assert_eq!(card(n, canvas).max.x, n.x - r - 8.0);
+    // Narrow canvas: neither side fits, below; at the bottom: above.
+    let narrow = Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 600.0));
+    let n = Pos2::new(150.0, 100.0);
+    assert_eq!(card(n, narrow).min.y, n.y + r + 8.0);
+    let n = Pos2::new(150.0, 550.0);
+    assert_eq!(card(n, narrow).max.y, n.y - r - 8.0);
+    // Nothing fits: the right position clamped into the canvas.
+    let tiny = Rect::from_min_size(Pos2::ZERO, Vec2::new(200.0, 100.0));
+    assert!(tiny.contains(tooltip_placement(Pos2::new(100.0, 50.0), r, size, tiny)));
+}
+
+#[test]
+fn test_tooltip_never_covers_a_node_near_the_canvas_edge() {
+    use hcom_graph::canvas::tooltip_placement;
+    let canvas = Rect::from_min_size(Pos2::new(0.0, 40.0), Vec2::new(800.0, 600.0));
+    let size = Vec2::new(220.0, 120.0);
+    let r = 37.0;
+    for d in (0..=150).step_by(10) {
+        let d = d as f32;
+        for n in [
+            Pos2::new(canvas.min.x + d, canvas.center().y),
+            Pos2::new(canvas.max.x - d, canvas.center().y),
+            Pos2::new(canvas.center().x, canvas.min.y + d),
+            Pos2::new(canvas.center().x, canvas.max.y - d),
+            Pos2::new(canvas.min.x + d, canvas.min.y + d),
+            Pos2::new(canvas.max.x - d, canvas.max.y - d),
+        ] {
+            let c = Rect::from_min_size(tooltip_placement(n, r, size, canvas), size);
+            assert!(canvas.contains_rect(c), "{n:?} {c:?}");
+            assert!(
+                !c.intersects(Rect::from_center_size(n, Vec2::splat(2.0 * r))),
+                "{n:?} {c:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_shorten_path_home_and_middle_ellipsis() {
+    use hcom_graph::table_data::shorten_path;
+    let home = Some("/home/michael");
+    assert_eq!(shorten_path("/home/michael", home, 48), "~");
+    assert_eq!(shorten_path("/home/michael/x", home, 48), "~/x");
+    assert_eq!(
+        shorten_path("/home/michael/x", Some("/home/michael/"), 48),
+        "~/x"
+    );
+    assert_eq!(
+        shorten_path("/home/michael2/x", home, 48),
+        "/home/michael2/x"
+    );
+    assert_eq!(shorten_path("/home/michael/x", None, 48), "/home/michael/x");
+    let long = format!("/srv/{}/tail_dir", "a".repeat(60));
+    let s = shorten_path(&long, home, 20);
+    assert_eq!(s.chars().count(), 20);
+    assert!(
+        s.starts_with("/srv/aaaa") && s.ends_with("tail_dir") && s.contains('…'),
+        "{s}"
+    );
+}
+
+#[test]
+fn test_tooltip_dir_is_shortened_with_and_without_home() {
+    let (mut app, _t) = tooltip_app("/home/u/projects/x");
+    let idx = app.graph.get_node_index("worker_1").unwrap();
+    let dir = |app: &hcom_graph::app::HcomGraphApp| {
+        let (_, lines) = app.tooltip_content(idx).unwrap();
+        lines.into_iter().find(|(k, _)| k == "dir").unwrap().1
+    };
+    app.home_dir = Some("/home/u".into());
+    assert_eq!(dir(&app), "~/projects/x");
+    app.home_dir = None;
+    assert_eq!(dir(&app), "/home/u/projects/x");
+    app.table_rows[0].directory = format!("/home/u/{}", "d/".repeat(40));
+    app.home_dir = Some("/home/u".into());
+    assert_eq!(dir(&app).chars().count(), 48);
+    assert!(dir(&app).starts_with("~/d/"));
+}
+
+#[test]
+fn test_tooltip_sits_beside_the_hovered_node() {
+    let (mut app, _t) = tooltip_app("/w");
+    let (rect, center) = hover_tooltip_rect(&mut app);
+    let rect = rect.expect("tooltip shown");
+    let r = hcom_graph::canvas::node_extent(app.canvas.zoom);
+    assert!(
+        !rect.intersects(Rect::from_center_size(center, Vec2::splat(2.0 * r))),
+        "{rect:?} {center:?}"
+    );
+    assert!(rect.min.x > center.x, "right of the node: {rect:?}");
+}
+
+#[test]
+fn test_tooltip_switch_to_a_wider_card_near_the_edge_never_covers_the_node() {
+    // Regression: the measured size of the previous node's (narrow) card was
+    // reused for the next node, so a wider card placed right of a node near
+    // the right edge was pushed back over that node or out of the canvas.
+    let (mut app, _t) = tooltip_app("/w");
+    app.graph
+        .apply_instance_snapshot(&[snap("worker_1", None), snap("worker_2", None)]);
+    app.layout.sync_nodes(&app.graph);
+    let mut row = app.table_rows[0].clone();
+    row.instance = "worker_2".into();
+    row.directory = format!("/srv/{}", "long_dir/".repeat(10));
+    app.table_rows.push(row);
+
+    let ctx = egui::Context::default();
+    let size = Vec2::new(1200.0, 900.0);
+    run_app_events(&ctx, &mut app, size, vec![vec![]; 2]);
+    let canvas = app.canvas_rect;
+    let a = app.graph.get_node_index("worker_1").unwrap();
+    let b = app.graph.get_node_index("worker_2").unwrap();
+    let r = hcom_graph::canvas::node_extent(app.canvas.zoom);
+    // Room for a narrow card right of b, not for the wide one.
+    let b_screen = Pos2::new(canvas.max.x - r - 8.0 - 260.0, canvas.center().y);
+    let b_world = app.canvas.screen_to_world(b_screen, canvas);
+    app.layout.set_node_pos(b, b_world, false);
+    app.layout.set_node_pos(
+        a,
+        app.canvas
+            .screen_to_world(canvas.center() - Vec2::new(300.0, 0.0), canvas),
+        false,
+    );
+    let a_screen = app.canvas.world_to_screen(app.layout.nodes[&a].pos, canvas);
+
+    run_app_events(
+        &ctx,
+        &mut app,
+        size,
+        vec![vec![egui::Event::PointerMoved(a_screen)]; 20],
+    );
+    let area = egui::Id::unique("node_hover_tooltip_area");
+    let narrow = ctx.memory(|m| m.area_rect(area)).expect("card of a");
+    assert!(narrow.width() < 260.0, "{narrow:?}");
+    let b_square = Rect::from_center_size(b_screen, Vec2::splat(2.0 * r));
+    for frame in 0..5 {
+        run_app_events(
+            &ctx,
+            &mut app,
+            size,
+            vec![vec![egui::Event::PointerMoved(b_screen)]],
+        );
+        let card = ctx.memory(|m| m.area_rect(area)).unwrap();
+        assert!(
+            canvas.expand(0.5).contains_rect(card),
+            "frame {frame}: {card:?} {canvas:?}"
+        );
+        assert!(
+            !card.intersects(b_square),
+            "frame {frame}: {card:?} {b_square:?}"
+        );
+    }
+
+    // Same node, content refreshed from short to long while hovered.
+    let long_dir = app.table_rows[1].directory.clone();
+    app.table_rows[1].directory = "/w".into();
+    let hover_b = |app: &mut hcom_graph::app::HcomGraphApp, frames: usize| {
+        run_app_events(
+            &ctx,
+            app,
+            size,
+            vec![vec![egui::Event::PointerMoved(b_screen)]; frames],
+        );
+        ctx.memory(|m| m.area_rect(area)).unwrap()
+    };
+    let short = hover_b(&mut app, 5);
+    assert!(
+        short.min.x > b_square.max.x,
+        "short card right of b: {short:?}"
+    );
+    app.table_rows[1].directory = long_dir;
+    for frame in 0..5 {
+        let card = hover_b(&mut app, 1);
+        assert!(card.width() > short.width(), "frame {frame}: {card:?}");
+        assert!(
+            canvas.expand(0.5).contains_rect(card) && !card.intersects(b_square),
+            "refresh frame {frame}: {card:?} {b_square:?} {canvas:?}"
+        );
+    }
+}

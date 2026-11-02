@@ -122,9 +122,10 @@ pub struct HcomGraphApp {
     pub loaded_transcript: Option<(String, String)>,
     pub context_menu: Option<ContextMenuState>,
     pub context_menu_opened_this_frame: bool,
-    /// Node and pointer position of the hover tooltip (kept while it fades out).
+    /// Node of the hover tooltip (kept while it fades out).
     pub tooltip_node: Option<NodeIndex>,
-    pub tooltip_pos: egui::Pos2,
+    /// Home directory shown as `~` in the tooltip `dir` (from HOME at start).
+    pub home_dir: Option<String>,
     /// Time of the last unsaved zoom/pan/panel width change.
     pub view_dirty_since: Option<Instant>,
     /// Fit the view to the visible nodes every frame until the user changes it.
@@ -289,7 +290,7 @@ impl HcomGraphApp {
             context_menu: None,
             context_menu_opened_this_frame: false,
             tooltip_node: None,
-            tooltip_pos: egui::Pos2::ZERO,
+            home_dir: std::env::var("HOME").ok().filter(|h| !h.is_empty()),
             view_dirty_since: None,
             auto_fit: false,
             check_saved_view: false,
@@ -368,7 +369,7 @@ impl HcomGraphApp {
             context_menu: None,
             context_menu_opened_this_frame: false,
             tooltip_node: None,
-            tooltip_pos: egui::Pos2::ZERO,
+            home_dir: std::env::var("HOME").ok().filter(|h| !h.is_empty()),
             view_dirty_since: None,
             auto_fit: false,
             check_saved_view: false,
@@ -1609,10 +1610,11 @@ impl HcomGraphApp {
     }
 
     /// Tooltip header and lines for a node; a node without a table row
-    /// (e.g. a placeholder parent) gets its name only.
+    /// (e.g. a placeholder parent) gets its name only. `dir` is shortened
+    /// (see `shorten_path`).
     pub fn tooltip_content(&self, idx: NodeIndex) -> Option<(String, Vec<(String, String)>)> {
         let node = self.graph.graph.node_weight(idx)?;
-        let lines = if self.table_rows.is_empty() {
+        let mut lines = if self.table_rows.is_empty() {
             tooltip_lines(&TableRow::from_agent_node(node), &self.config.tooltip)
         } else {
             self.table_rows
@@ -1621,6 +1623,11 @@ impl HcomGraphApp {
                 .map(|r| tooltip_lines(r, &self.config.tooltip))
                 .unwrap_or_default()
         };
+        for (key, val) in &mut lines {
+            if key == "dir" {
+                *val = crate::table_data::shorten_path(val, self.home_dir.as_deref(), 48);
+            }
+        }
         Some((node.name.clone(), lines))
     }
 
@@ -1810,16 +1817,14 @@ impl HcomGraphApp {
         self.render_node_tooltip(ui.ctx(), response.rect);
     }
 
-    /// Hover card next to the pointer, kept inside the canvas; it switches
-    /// immediately between nodes and fades out when the hover ends.
+    /// Hover card beside the hovered node (see `tooltip_placement`), kept
+    /// inside the canvas; it switches immediately between nodes and fades
+    /// out when the hover ends.
     fn render_node_tooltip(&mut self, ctx: &egui::Context, canvas_rect: egui::Rect) {
         let pointer_down = ctx.input(|i| i.pointer.any_down());
         let shown = self.tooltip_target(egui::Popup::is_any_open(ctx), pointer_down);
         if let Some(idx) = shown {
             self.tooltip_node = Some(idx);
-            if let Some(pos) = ctx.pointer_hover_pos() {
-                self.tooltip_pos = pos;
-            }
         }
         let opacity = ctx.animate_bool_with_time(
             egui::Id::unique("node_hover_tooltip"),
@@ -1834,36 +1839,66 @@ impl HcomGraphApp {
         } else {
             None
         };
-        let Some((name, lines)) = content else {
+        let (Some((name, lines)), Some(phys)) = (content, self.layout.nodes.get(&idx)) else {
             self.tooltip_node = None;
             return;
         };
+        let card = |ui: &mut egui::Ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(360.0);
+                ui.label(RichText::new(&name).strong());
+                if lines.is_empty() {
+                    return;
+                }
+                // A separator would take the full max width; the line is
+                // drawn across the content width after the grid instead.
+                let line_y = ui.cursor().top() + 3.0;
+                ui.add_space(6.0);
+                egui::Grid::new("node_hover_tooltip_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 2.0])
+                    .max_col_width(280.0)
+                    .show(ui, |ui| {
+                        for (key, val) in &lines {
+                            ui.label(RichText::new(key).weak());
+                            ui.add(egui::Label::new(val).truncate());
+                            ui.end_row();
+                        }
+                    });
+                ui.painter().hline(
+                    ui.min_rect().x_range(),
+                    line_y,
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                );
+            });
+        };
+        // Measure this frame's card in an invisible area first, so the
+        // placement never uses a stale size (another node or older content).
+        let size = egui::Area::new(egui::Id::unique("node_hover_tooltip_measure"))
+            .order(egui::Order::Background)
+            .interactable(false)
+            .fixed_pos(canvas_rect.min)
+            .show(ctx, |ui| {
+                ui.set_invisible();
+                card(ui);
+            })
+            .response
+            .rect
+            .size();
+        let pos = crate::canvas::tooltip_placement(
+            self.canvas.world_to_screen(phys.pos, canvas_rect),
+            crate::canvas::node_extent(self.canvas.zoom),
+            size,
+            canvas_rect,
+        );
         egui::Area::new(egui::Id::unique("node_hover_tooltip_area"))
             .order(egui::Order::Tooltip)
             .interactable(false)
-            .fixed_pos(self.tooltip_pos + egui::vec2(16.0, 16.0))
+            .fixed_pos(pos)
             .constrain_to(canvas_rect)
             .show(ctx, |ui| {
                 ui.multiply_opacity(opacity);
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_max_width(360.0);
-                    ui.label(RichText::new(&name).strong());
-                    if lines.is_empty() {
-                        return;
-                    }
-                    ui.separator();
-                    egui::Grid::new("node_hover_tooltip_grid")
-                        .num_columns(2)
-                        .spacing([12.0, 2.0])
-                        .max_col_width(280.0)
-                        .show(ui, |ui| {
-                            for (key, val) in &lines {
-                                ui.label(RichText::new(key).weak());
-                                ui.add(egui::Label::new(val).truncate());
-                                ui.end_row();
-                            }
-                        });
-                });
+                card(ui);
             });
     }
 }

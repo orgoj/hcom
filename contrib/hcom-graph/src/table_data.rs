@@ -539,6 +539,30 @@ pub fn tooltip_lines(row: &TableRow, fields: &[String]) -> Vec<(String, String)>
         .collect()
 }
 
+/// `path` for display: the `home` directory (a whole path component) as
+/// `~`, then, when longer than `max_chars`, its start and end joined by `…`
+/// (`max_chars` characters in total).
+pub fn shorten_path(path: &str, home: Option<&str>, max_chars: usize) -> String {
+    let home = home
+        .map(|h| h.trim_end_matches('/'))
+        .filter(|h| !h.is_empty());
+    let path = match home.and_then(|h| path.strip_prefix(h)) {
+        Some("") => "~".to_string(),
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_string(),
+    };
+    let chars: Vec<char> = path.chars().collect();
+    if chars.len() <= max_chars || max_chars < 3 {
+        return path;
+    }
+    let tail = (max_chars - 1) / 2;
+    let head = max_chars - 1 - tail;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(&chars[chars.len() - tail..]);
+    out
+}
+
 pub fn sort_rows(rows: &mut [TableRow], col_key: &str, reverse: bool, empty_last: bool) {
     rows.sort_by(|a, b| {
         let val_a = a.get_cell_value(col_key);
