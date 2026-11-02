@@ -235,6 +235,9 @@ pub fn build_table_rows(
             idle: String::new(),
             context_fill: String::new(),
             quota_fill: String::new(),
+            transcript_path: live.transcript_path.clone(),
+            context_tokens: None,
+            quota_percent: None,
             detail,
             unread_count: live.unread_count.unwrap_or(0) as u32,
             directory: live.directory.clone().unwrap_or_default(),
@@ -285,6 +288,9 @@ pub fn build_table_rows(
                 idle: String::new(),
                 context_fill: String::new(),
                 quota_fill: String::new(),
+                transcript_path: None,
+                context_tokens: None,
+                quota_percent: None,
                 detail: cat.description.clone().unwrap_or_default(),
                 unread_count: 0,
                 directory: cat.dir.clone().unwrap_or_default(),
@@ -379,6 +385,11 @@ pub struct TableRow {
     pub idle: String,
     pub context_fill: String,
     pub quota_fill: String,
+    /// Not displayed: where `ReloadTableData` reads context and quota.
+    pub transcript_path: Option<String>,
+    /// Sort keys of the context and quota cells.
+    pub context_tokens: Option<u64>,
+    pub quota_percent: Option<u64>,
     pub detail: String,
     pub unread_count: u32,
     pub directory: String,
@@ -429,6 +440,9 @@ impl TableRow {
             idle: String::new(),
             context_fill: String::new(),
             quota_fill: String::new(),
+            transcript_path: None,
+            context_tokens: None,
+            quota_percent: None,
             detail: node.status_context.clone().unwrap_or_default(),
             unread_count: node.unread_count as u32,
             directory: node.directory.clone().unwrap_or_default(),
@@ -554,6 +568,9 @@ pub fn sort_rows(rows: &mut [TableRow], col_key: &str, reverse: bool, empty_last
             "handoffs" => a.handoffs_count.cmp(&b.handoffs_count),
             "msgs" => a.msgs_count.cmp(&b.msgs_count),
             "failed" => a.failed_count.cmp(&b.failed_count),
+            "context" => a.context_tokens.cmp(&b.context_tokens),
+            "quota" => a.quota_percent.cmp(&b.quota_percent),
+            "idle" => crate::idle::idle_rank(&a.idle).cmp(&crate::idle::idle_rank(&b.idle)),
             _ => {
                 // If both strings can be parsed as numbers, compare numerically
                 if let (Ok(num_a), Ok(num_b)) =

@@ -5116,3 +5116,38 @@ fn test_table_row_selection_is_one_full_width_band() {
     run(&mut app, vec![click(false)]);
     assert_eq!(app.state.sort_col.as_deref(), Some("instance"));
 }
+
+#[test]
+fn test_idle_column_queues_listening_periods_only_while_shown() {
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_graph::table_data::TableRow;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+    let row = |name: &str, status: &str, since: u64| TableRow {
+        instance: name.into(),
+        status: status.into(),
+        since_seconds: Some(since),
+        ..Default::default()
+    };
+    app.table_rows = vec![
+        row("long", "listening", 30),
+        row("short", "listening", 3),
+        row("busy", "active", 30),
+    ];
+    // Hidden Idle column: periods are followed, nothing is queued.
+    app.state.columns = vec!["agent".into()];
+    app.update_idle(1000);
+    assert_eq!(app.idle_periods.len(), 2);
+    assert!(app.table_rows.iter().all(|r| r.idle.is_empty()));
+    // Shown: the period past idle_seconds (10) is queued.
+    app.state.columns = vec!["idle".into()];
+    app.update_idle(1000);
+    let idle: Vec<&str> = app.table_rows.iter().map(|r| r.idle.as_str()).collect();
+    assert_eq!(idle, vec!["…", "", ""]);
+}

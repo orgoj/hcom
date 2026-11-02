@@ -154,6 +154,10 @@ pub struct HcomGraphApp {
     pub last_table_refresh: Instant,
     pub last_stats_refresh: Instant,
     pub table_reload_in_flight: bool,
+    /// Idle column: listening periods and the one running idle_check.
+    pub idle_periods: std::collections::HashMap<String, crate::idle::IdlePeriod>,
+    pub idle_job: Option<crate::idle::IdleJob>,
+    pub idle_error: Option<String>,
     pub stats_reload_in_flight: bool,
     pub cached_event_stats: std::collections::HashMap<String, crate::table_data::EventStatsEntry>,
 
@@ -304,6 +308,9 @@ impl HcomGraphApp {
             last_table_refresh: Instant::now() - Duration::from_secs(100), // trigger immediate load
             last_stats_refresh: Instant::now() - Duration::from_secs(100),
             table_reload_in_flight: true,
+            idle_periods: Default::default(),
+            idle_job: None,
+            idle_error: None,
             stats_reload_in_flight: true,
             cached_event_stats: std::collections::HashMap::new(),
             screen_content: None,
@@ -382,6 +389,9 @@ impl HcomGraphApp {
             last_table_refresh: Instant::now(),
             last_stats_refresh: Instant::now(),
             table_reload_in_flight: false,
+            idle_periods: Default::default(),
+            idle_job: None,
+            idle_error: None,
             stats_reload_in_flight: false,
             cached_event_stats: std::collections::HashMap::new(),
             screen_content: None,
@@ -693,6 +703,76 @@ impl HcomGraphApp {
                 ActionRequest::ReloadTableData => self.table_reload_in_flight = false,
                 ActionRequest::ReloadStats => self.stats_reload_in_flight = false,
                 _ => {}
+            }
+        }
+    }
+
+    fn idle_column_shown(&self) -> bool {
+        if self.state.columns.is_empty() {
+            DEFAULT_COLUMNS.contains(&"idle")
+        } else {
+            self.state.columns.iter().any(|c| c == "idle")
+        }
+    }
+
+    /// Follow the listening periods of the loaded rows; a period that lasted
+    /// `idle_seconds` without an attempt is queued, only while the Idle column
+    /// is shown.
+    pub fn update_idle(&mut self, now: u64) {
+        let listening: Vec<(String, u64)> = self
+            .table_rows
+            .iter()
+            .filter(|r| !r.instance.is_empty() && r.status == "listening")
+            .map(|r| (r.instance.clone(), r.since_seconds.unwrap_or(0)))
+            .collect();
+        self.idle_periods = crate::idle::update_periods(&self.idle_periods, &listening, now);
+        if self.idle_column_shown() {
+            crate::idle::queue_due(&mut self.idle_periods, now, self.config.idle_seconds);
+        }
+        self.fill_idle();
+    }
+
+    fn fill_idle(&mut self) {
+        for r in &mut self.table_rows {
+            r.idle = self
+                .idle_periods
+                .get(&r.instance)
+                .and_then(|p| p.value.clone())
+                .unwrap_or_default();
+        }
+    }
+
+    /// Collect a finished idle_check and start the next one for the queued
+    /// periods, at most one at a time.
+    fn poll_idle(&mut self) {
+        if let Some(job) = &self.idle_job
+            && let Some(result) = job.try_result()
+        {
+            let batch = self
+                .idle_job
+                .take()
+                .map(|mut j| std::mem::take(&mut j.batch))
+                .unwrap_or_default();
+            let classes = match result {
+                Ok(c) => {
+                    self.idle_error = None;
+                    c
+                }
+                Err(e) => {
+                    if self.idle_error.as_ref() != Some(&e) {
+                        self.command_logs.push(format!("[ERROR] {e}"));
+                    }
+                    self.idle_error = Some(e);
+                    Default::default()
+                }
+            };
+            crate::idle::apply_result(&mut self.idle_periods, &batch, &classes);
+            self.fill_idle();
+        }
+        if self.idle_job.is_none() && self.idle_column_shown() {
+            let batch = crate::idle::next_batch(&self.idle_periods);
+            if !batch.is_empty() {
+                self.idle_job = Some(crate::idle::IdleJob::start(batch));
             }
         }
     }
@@ -1765,6 +1845,8 @@ impl eframe::App for HcomGraphApp {
             ctx.request_repaint();
         }
 
+        self.poll_idle();
+
         // 2. Poll background action results
         let mut queued_actions = Vec::new();
         if let Some(ref worker) = self.action_worker {
@@ -1914,6 +1996,7 @@ impl eframe::App for HcomGraphApp {
                         crate::table_data::apply_event_stats(&mut rows, &self.cached_event_stats);
                         self.graph.node_styles = crate::table_data::node_styles_from_rows(&rows);
                         self.table_rows = rows;
+                        self.update_idle(chrono::Utc::now().timestamp() as u64);
                         self.catalog_groups = catalog_groups;
                         self.tool_groups = tool_groups;
                         self.on_selection_changed();

@@ -150,6 +150,7 @@ type GitStatusCache = Arc<Mutex<std::collections::HashMap<String, (Instant, Stri
 pub struct SystemActionRunner {
     active_child: Arc<Mutex<Option<Child>>>,
     git_cache: GitStatusCache,
+    usage_cache: Arc<Mutex<crate::usage::UsageCache>>,
 }
 
 impl SystemActionRunner {
@@ -157,6 +158,7 @@ impl SystemActionRunner {
         Self {
             active_child: Arc::new(Mutex::new(None)),
             git_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            usage_cache: Arc::default(),
         }
     }
 
@@ -453,6 +455,8 @@ impl ActionRunner for SystemActionRunner {
                         });
                     }
                 };
+
+                crate::usage::apply_usage(&mut rows, &mut self.usage_cache.lock().unwrap());
 
                 // Enrich Git status for unique directories with 10s TTL
                 let mut seen_dirs = std::collections::HashSet::new();
