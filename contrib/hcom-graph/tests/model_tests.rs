@@ -5871,3 +5871,191 @@ fn test_tooltip_switch_to_a_wider_card_near_the_edge_never_covers_the_node() {
         );
     }
 }
+
+fn legend_snap(
+    name: &str,
+    status: &str,
+    tool: Option<&str>,
+    parent: Option<&str>,
+) -> InstanceSnapshot {
+    InstanceSnapshot {
+        status: Some(status.into()),
+        tool: tool.map(|t| t.into()),
+        ..snap(name, parent)
+    }
+}
+
+fn legend_message(from: &str, to: &str, id: u64) -> MessageEvent {
+    MessageEvent {
+        id,
+        ts: Utc::now(),
+        instance: from.into(),
+        data: MessageData {
+            from: from.into(),
+            delivered_to: vec![to.into()],
+            mentions: vec![],
+            intent: None,
+            text: "hi".into(),
+        },
+    }
+}
+
+#[test]
+fn test_legend_lists_only_visible_encodings() {
+    use hcom_graph::canvas::{Legend, legend};
+    use hcom_graph::model::{NodeStyle, WindowedCount};
+    use std::collections::{HashMap, HashSet};
+
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[
+        legend_snap("agent_a", "blocked", Some("codex"), None),
+        legend_snap("agent_b", "active", Some("Gemini"), Some("agent_a")),
+        legend_snap("agent_c", "active", Some("agy"), None),
+        legend_snap("agent_d", "active", None, None),
+        legend_snap("agent_e", "listening", Some("claude"), None),
+    ]);
+    graph.apply_message_event(&legend_message("agent_a", "agent_b", 1));
+    graph.apply_message_event(&legend_message("agent_a", "agent_e", 2));
+    graph.node_styles.insert(
+        "agent_e".into(),
+        NodeStyle {
+            is_roaming: true,
+            context_percent: None,
+        },
+    );
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+    // In the visible set but not laid out: the canvas does not draw it.
+    graph.apply_instance_snapshot(&[
+        legend_snap("agent_a", "blocked", Some("codex"), None),
+        legend_snap("agent_b", "active", Some("Gemini"), Some("agent_a")),
+        legend_snap("agent_c", "active", Some("agy"), None),
+        legend_snap("agent_d", "active", None, None),
+        legend_snap("agent_e", "listening", Some("claude"), None),
+        legend_snap("agent_f", "stopped", Some("kimi"), None),
+    ]);
+    let idx = |n: &str| graph.get_node_index(n).unwrap();
+    assert!(!layout.nodes.contains_key(&idx("agent_f")));
+
+    let blue = CanvasView::cli_color(Some("agy"));
+    let codex = CanvasView::cli_color(Some("codex"));
+    let unknown = CanvasView::cli_color(None);
+
+    // agent_e (roaming, claude, listening) and its message edge are hidden.
+    let visible: HashSet<_> = ["agent_a", "agent_b", "agent_c", "agent_d", "agent_f"]
+        .iter()
+        .map(|n| idx(n))
+        .collect();
+    assert_eq!(
+        legend(&graph, &layout, &visible, None),
+        Legend {
+            statuses: vec![AgentStatus::Active, AgentStatus::Blocked],
+            cli: vec![
+                (blue, vec!["agy".into(), "gemini".into()]),
+                (codex, vec!["codex".into()]),
+                (unknown, vec!["unknown".into()]),
+            ],
+            roaming: false,
+            spawn: true,
+            message: true,
+            message_idle: false,
+        }
+    );
+
+    // Everything visible, a time window where a -> b has no messages.
+    let all: HashSet<_> = graph.graph.node_indices().collect();
+    let ab = graph.message_edges[&("agent_a".to_string(), "agent_b".to_string())];
+    let counts: HashMap<_, _> = [(ab, WindowedCount::default())].into();
+    let l = legend(&graph, &layout, &all, Some(&counts));
+    assert_eq!(
+        l.statuses,
+        vec![
+            AgentStatus::Active,
+            AgentStatus::Listening,
+            AgentStatus::Blocked
+        ]
+    );
+    assert!(l.cli.iter().any(|(_, n)| n == &vec!["claude".to_string()]));
+    assert!(!l.cli.iter().any(|(_, n)| n.contains(&"kimi".to_string())));
+    assert!(l.roaming);
+    assert!(l.spawn);
+    assert!(!l.message, "no edge has messages in the window");
+    assert!(l.message_idle);
+
+    // Nothing visible: an empty legend.
+    assert_eq!(
+        legend(&graph, &layout, &HashSet::new(), None),
+        Legend::default()
+    );
+}
+
+#[test]
+fn test_legend_tab_is_selected_saved_and_restored() {
+    use eframe::App;
+    use hcom_graph::config::{GraphState, load_state};
+
+    let (dir, mut app) = split_test_app(GraphState::default());
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut run =
+        |ctx: &egui::Context, app: &mut hcom_graph::app::HcomGraphApp, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+            out.textures_delta.clear();
+            out
+        };
+    run(&ctx, &mut app, vec![]);
+    let out = run(&ctx, &mut app, vec![]);
+    let tab = widget_rect(&out, "Legend").expect("Legend tab");
+    let pos = tab.center();
+    run(
+        &ctx,
+        &mut app,
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    run(
+        &ctx,
+        &mut app,
+        vec![egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    assert_eq!(app.state.detail_tab, "Legend");
+    let saved = load_state(dir.path());
+    assert_eq!(saved.detail_tab, "Legend");
+
+    // A restarted app opens on the Legend tab.
+    let (_dir2, mut restarted) = split_test_app(saved);
+    let ctx2 = egui::Context::default();
+    ctx2.enable_accesskit();
+    run(&ctx2, &mut restarted, vec![]);
+    let out = run(&ctx2, &mut restarted, vec![]);
+    // Plain labels carry their text as the accesskit value.
+    let shown = out
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|u| {
+            u.nodes
+                .iter()
+                .any(|(_, n)| n.value() == Some("Nothing visible in the graph"))
+        });
+    assert!(shown, "Legend content is shown after the restart");
+}

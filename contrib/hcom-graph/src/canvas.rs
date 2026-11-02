@@ -8,6 +8,97 @@ use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 pub const ZOOM_MIN: f32 = 0.15;
 pub const ZOOM_MAX: f32 = 4.0;
 
+/// Canvas colors also drawn by the legend (detail panel).
+pub const SPAWN_EDGE_COLOR: Color32 = Color32::from_rgb(110, 120, 140);
+pub const MESSAGE_EDGE_COLOR: Color32 = Color32::from_rgb(165, 105, 189);
+pub const MESSAGE_EDGE_IDLE_COLOR: Color32 =
+    Color32::from_rgba_unmultiplied_const(165, 105, 189, 50);
+pub const ROAMING_OUTLINE_COLOR: Color32 = Color32::from_rgb(200, 205, 220);
+
+/// The node and edge encodings visible in the current graph (see `legend`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Legend {
+    /// Status border ring colors, in `AgentStatus` order.
+    pub statuses: Vec<AgentStatus>,
+    /// CLI ring colors with the tool names drawn in that color.
+    pub cli: Vec<(Color32, Vec<String>)>,
+    /// Dashed outer outline of roaming agents.
+    pub roaming: bool,
+    /// Dashed spawn edges.
+    pub spawn: bool,
+    /// Solid message edges with messages in the window.
+    pub message: bool,
+    /// Dimmed message edges without messages in the window.
+    pub message_idle: bool,
+}
+
+/// Legend of what the canvas draws: nodes in `layout` and `visible`, and
+/// edges whose both endpoints are such nodes (the canvas visibility rule).
+/// `edge_counts` are the windowed counts as in `CanvasView::edge_counts`.
+pub fn legend(
+    graph: &AgentGraph,
+    layout: &GraphLayout,
+    visible: &std::collections::HashSet<NodeIndex>,
+    edge_counts: Option<&std::collections::HashMap<EdgeIndex, WindowedCount>>,
+) -> Legend {
+    let shown = |idx: &NodeIndex| layout.nodes.contains_key(idx) && visible.contains(idx);
+    let mut legend = Legend::default();
+    let mut tools: Vec<String> = Vec::new();
+    for idx in graph.graph.node_indices().filter(shown) {
+        let node = &graph.graph[idx];
+        if !legend.statuses.contains(&node.status) {
+            legend.statuses.push(node.status);
+        }
+        let tool = node
+            .tool
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "unknown".into());
+        if !tools.contains(&tool) {
+            tools.push(tool);
+        }
+        legend.roaming |= graph.node_style(&node.name).is_roaming;
+    }
+    let order = [
+        AgentStatus::Active,
+        AgentStatus::Listening,
+        AgentStatus::Blocked,
+        AgentStatus::Stopped,
+    ];
+    legend
+        .statuses
+        .sort_by_key(|s| order.iter().position(|o| o == s));
+    tools.sort();
+    for tool in tools {
+        let color = CanvasView::cli_color(Some(&tool));
+        match legend.cli.iter_mut().find(|(c, _)| *c == color) {
+            Some((_, names)) => names.push(tool),
+            None => legend.cli.push((color, vec![tool])),
+        }
+    }
+    for e in graph.graph.edge_references() {
+        if !shown(&e.source()) || !shown(&e.target()) {
+            continue;
+        }
+        match e.weight() {
+            EdgeKind::Spawn(_) => legend.spawn = true,
+            EdgeKind::Message(msg) => {
+                let count = match edge_counts {
+                    Some(map) => map.get(&e.id()).map_or(0, |c| c.count),
+                    None => msg.count,
+                };
+                if count > 0 {
+                    legend.message = true;
+                } else {
+                    legend.message_idle = true;
+                }
+            }
+        }
+    }
+    legend
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum CanvasAction {
     NodeClicked(NodeIndex),
@@ -453,7 +544,7 @@ impl CanvasView {
                     } else if is_hovered {
                         Color32::from_rgb(170, 185, 210)
                     } else {
-                        Color32::from_rgb(110, 120, 140)
+                        SPAWN_EDGE_COLOR
                     };
                     let stroke = Stroke::new(
                         (if is_selected { 2.5 } else { 1.5 }) * self.zoom.clamp(0.5, 2.0),
@@ -499,9 +590,9 @@ impl CanvasView {
                     } else if is_hovered {
                         Color32::from_rgb(210, 150, 235)
                     } else if inactive {
-                        Color32::from_rgba_unmultiplied(165, 105, 189, 50)
+                        MESSAGE_EDGE_IDLE_COLOR
                     } else {
-                        Color32::from_rgb(165, 105, 189)
+                        MESSAGE_EDGE_COLOR
                     };
                     let focus = [self.selected_node, self.hovered_node]
                         .iter()
@@ -639,7 +730,7 @@ impl CanvasView {
                 let ring = circle_points(center, node_radius + 7.5 * self.zoom, 48);
                 painter.extend(egui::Shape::dashed_line(
                     &ring,
-                    Stroke::new(1.5 * self.zoom, Color32::from_rgb(200, 205, 220)),
+                    Stroke::new(1.5 * self.zoom, ROAMING_OUTLINE_COLOR),
                     5.0 * self.zoom,
                     3.5 * self.zoom,
                 ));
@@ -868,7 +959,7 @@ pub fn visible_labels(items: &[(Rect, usize, bool)]) -> Vec<bool> {
 }
 
 /// Closed polyline around a circle (first point repeated at the end).
-fn circle_points(center: Pos2, radius: f32, steps: usize) -> Vec<Pos2> {
+pub(crate) fn circle_points(center: Pos2, radius: f32, steps: usize) -> Vec<Pos2> {
     (0..=steps)
         .map(|i| {
             let a = std::f32::consts::TAU * i as f32 / steps as f32;

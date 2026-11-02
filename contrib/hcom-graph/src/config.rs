@@ -352,7 +352,15 @@ fn default_sort_col() -> Option<String> {
 }
 
 /// Tabs of the right detail panel, in display order.
-pub const DETAIL_TABS: [&str; 6] = ["Summary", "Report", "Screen", "Transcript", "Events", "Log"];
+pub const DETAIL_TABS: [&str; 7] = [
+    "Summary",
+    "Report",
+    "Screen",
+    "Transcript",
+    "Events",
+    "Log",
+    "Legend",
+];
 
 pub const DEFAULT_DETAIL_TAB: &str = "Summary";
 

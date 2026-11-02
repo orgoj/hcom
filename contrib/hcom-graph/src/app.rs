@@ -94,6 +94,105 @@ fn split_handle(
         .inner
 }
 
+/// How a legend swatch is drawn: a ring as on the node, or an edge line.
+enum Swatch {
+    Ring(Color32, f32),
+    DashedRing(Color32),
+    Line(Color32, bool),
+}
+
+/// One legend row: a small swatch drawn like the canvas, then `text`.
+fn legend_row(ui: &mut egui::Ui, swatch: Swatch, text: &str) {
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 14.0), egui::Sense::hover());
+        let painter = ui.painter();
+        let c = rect.center();
+        match swatch {
+            Swatch::Ring(color, width) => {
+                painter.circle_stroke(c, 5.5, egui::Stroke::new(width, color));
+            }
+            Swatch::DashedRing(color) => {
+                painter.extend(egui::Shape::dashed_line(
+                    &crate::canvas::circle_points(c, 6.0, 24),
+                    egui::Stroke::new(1.5, color),
+                    3.0,
+                    2.0,
+                ));
+            }
+            Swatch::Line(color, dashed) => {
+                let ends = [rect.left_center(), rect.right_center()];
+                let stroke = egui::Stroke::new(2.0, color);
+                if dashed {
+                    painter.extend(egui::Shape::dashed_line(&ends, stroke, 6.0, 4.0));
+                } else {
+                    painter.line_segment(ends, stroke);
+                }
+            }
+        }
+        ui.label(text);
+    });
+}
+
+/// Legend tab: the encodings of `legend`, sections without entries omitted.
+fn render_legend(ui: &mut egui::Ui, legend: &crate::canvas::Legend) {
+    use crate::canvas::{
+        MESSAGE_EDGE_COLOR, MESSAGE_EDGE_IDLE_COLOR, ROAMING_OUTLINE_COLOR, SPAWN_EDGE_COLOR,
+    };
+    if legend.statuses.is_empty() {
+        ui.weak("Nothing visible in the graph");
+        return;
+    }
+    ui.strong("Status (node border)");
+    for status in &legend.statuses {
+        let name = match status {
+            AgentStatus::Active => "active",
+            AgentStatus::Listening => "listening",
+            AgentStatus::Blocked => "blocked",
+            AgentStatus::Stopped => "stopped",
+        };
+        legend_row(
+            ui,
+            Swatch::Ring(CanvasView::status_color(status), 2.2),
+            name,
+        );
+    }
+    ui.add_space(6.0);
+    ui.strong("CLI (outer ring)");
+    for (color, names) in &legend.cli {
+        legend_row(ui, Swatch::Ring(*color, 2.5), &names.join(", "));
+    }
+    if legend.roaming {
+        ui.add_space(6.0);
+        ui.strong("Outline");
+        legend_row(
+            ui,
+            Swatch::DashedRing(ROAMING_OUTLINE_COLOR),
+            "roaming agent",
+        );
+    }
+    if legend.spawn || legend.message || legend.message_idle {
+        ui.add_space(6.0);
+        ui.strong("Edges");
+        if legend.spawn {
+            legend_row(
+                ui,
+                Swatch::Line(SPAWN_EDGE_COLOR, true),
+                "spawn (parent → child)",
+            );
+        }
+        if legend.message {
+            legend_row(ui, Swatch::Line(MESSAGE_EDGE_COLOR, false), "messages");
+        }
+        if legend.message_idle {
+            legend_row(
+                ui,
+                Swatch::Line(MESSAGE_EDGE_IDLE_COLOR, false),
+                "no messages in the time window",
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ContextMenuTarget {
     Node(NodeIndex),
@@ -1442,7 +1541,11 @@ impl HcomGraphApp {
 
     /// Tab row and content of the right detail panel; returns true when the
     /// user closed the panel.
-    fn render_detail_tabs(&mut self, ui: &mut egui::Ui) -> bool {
+    fn render_detail_tabs(
+        &mut self,
+        ui: &mut egui::Ui,
+        visible: &std::collections::HashSet<NodeIndex>,
+    ) -> bool {
         let mut close_panel = false;
         ui.horizontal_wrapped(|ui| {
             for (tab, label) in DETAIL_TABS.iter().zip([
@@ -1452,6 +1555,7 @@ impl HcomGraphApp {
                 "Transcript (F6)",
                 "Events (F7)",
                 "Log (F8)",
+                "Legend",
             ]) {
                 if ui
                     .selectable_label(self.state.detail_tab == *tab, label)
@@ -1560,6 +1664,18 @@ impl HcomGraphApp {
                 } else {
                     ui.weak("No agent selected");
                 }
+            }
+            "Legend" => {
+                let legend = crate::canvas::legend(
+                    &self.graph,
+                    &self.layout,
+                    visible,
+                    self.canvas.edge_counts.as_ref(),
+                );
+                egui::ScrollArea::vertical()
+                    .id_salt("legend_scroll_tab")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| render_legend(ui, &legend));
             }
             _ => {
                 // Scroll, so long content never overflows into the table below.
@@ -2957,7 +3073,7 @@ impl eframe::App for HcomGraphApp {
                         self.action_error = None;
                     }
 
-                    close_panel = self.render_detail_tabs(ui);
+                    close_panel = self.render_detail_tabs(ui, &visible_node_indices);
                 });
             detail_rect = Some(side_resp.response.rect);
 
