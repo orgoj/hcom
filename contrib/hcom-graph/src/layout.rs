@@ -6,6 +6,9 @@ use std::hash::{Hash, Hasher};
 
 /// Golden angle in radians, used for deterministic spiral and offset placement.
 const GOLDEN_ANGLE: f32 = 2.399_963;
+/// Margin included in `collision_radius` beyond the node rings (body 26 +
+/// rings 13 + this margin).
+const COLLISION_MARGIN: f32 = 1.0;
 
 #[derive(Debug, Clone)]
 pub struct NodePhysics {
@@ -124,9 +127,9 @@ impl GraphLayout {
             k_att: 20.0,
             l_0: 120.0,
             k_center: 0.05,
-            damping: 0.85,
+            damping: 0.7,
             max_speed: 400.0,
-            epsilon_sleep: 0.5,
+            epsilon_sleep: 0.2,
             max_step_duration: std::time::Duration::from_millis(2),
             is_sleeping: false,
             calm_steps: 0,
@@ -396,7 +399,6 @@ impl GraphLayout {
         let clamped_dt = dt.clamp(0.001, 0.033);
         let sub_dt = clamped_dt * 0.5;
 
-        let mut total_motion = 0.0f32;
         let mut budget_exceeded = false;
 
         if self.sorted_indices.len() != self.nodes.len() {
@@ -420,6 +422,12 @@ impl GraphLayout {
         if self.integrate_cursor >= n {
             self.integrate_cursor = 0;
         }
+
+        let start_pos: Vec<egui::Pos2> = self
+            .sorted_indices
+            .iter()
+            .map(|idx| self.nodes[idx].pos)
+            .collect();
 
         let force_budget = self.max_step_duration.saturating_mul(55) / 100;
         let integrate_budget = self.max_step_duration.saturating_mul(80) / 100;
@@ -550,7 +558,6 @@ impl GraphLayout {
                     }
 
                     phys.pos += phys.vel * sub_dt;
-                    total_motion += speed * sub_dt;
                 }
             }
 
@@ -564,6 +571,17 @@ impl GraphLayout {
         if !self.collide(start_time, total_pairs) {
             budget_exceeded = true;
         }
+
+        // Motion is the largest real displacement of a node after collision:
+        // a node pressed into a contact keeps its velocity, but the collision
+        // cancels it. The maximum keeps the threshold independent of the node
+        // count and keeps a travelling node awake while the rest only creeps.
+        let total_motion = self
+            .sorted_indices
+            .iter()
+            .zip(&start_pos)
+            .map(|(idx, p0)| self.nodes[idx].pos.distance(*p0))
+            .fold(0.0f32, f32::max);
 
         if !budget_exceeded && total_motion < self.epsilon_sleep && self.last_collision_pass_clean {
             self.calm_steps += 1;
@@ -629,7 +647,11 @@ impl GraphLayout {
                 if let Some(p) = self.nodes.get_mut(&idx_j) {
                     p.pos += dir * move_j;
                 }
-                self.collision_pass_clean = false;
+                // Contact within the 1 px margin of both nodes leaves the rings
+                // apart; only a deeper overlap keeps the layout awake.
+                if delta > 2.0 * COLLISION_MARGIN {
+                    self.collision_pass_clean = false;
+                }
             }
 
             processed += 1;

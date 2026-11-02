@@ -4863,3 +4863,102 @@ fn test_context_menu_lifecycle_and_outside_clicks() {
         Some(ContextMenuTarget::Edge(edge_idx))
     );
 }
+
+/// A spawn tree with message springs must come to rest: contact pressure and
+/// sub-pixel collision corrections must not keep the layout awake (TASK-77.28).
+#[test]
+fn test_layout_realistic_graph_sleeps_in_cluster_and_hierarchy() {
+    use hcom_graph::layout::LayoutMode;
+    let nodes = [
+        ("boss", None),
+        ("m1", Some("boss")),
+        ("m2", Some("boss")),
+        ("m3", Some("boss")),
+        ("a1", Some("m1")),
+        ("a2", Some("m1")),
+        ("a3", Some("m1")),
+        ("b1", Some("m2")),
+        ("b2", Some("m2")),
+        ("c1", Some("m3")),
+        ("c2", Some("m3")),
+        ("c3", Some("m3")),
+        ("lone1", None),
+        ("lone2", None),
+    ];
+    let snap: Vec<InstanceSnapshot> = nodes
+        .iter()
+        .map(|(name, parent)| InstanceSnapshot {
+            name: (*name).into(),
+            status: Some("active".into()),
+            status_context: None,
+            status_age_seconds: None,
+            unread_count: None,
+            parent_name: parent.map(|p| p.into()),
+            directory: None,
+            tool: None,
+        })
+        .collect();
+    let messages = [
+        ("boss", "m1", 40),
+        ("boss", "m2", 30),
+        ("m1", "a1", 20),
+        ("m1", "b1", 15),
+        ("a1", "c1", 10),
+        ("m3", "lone1", 25),
+        ("lone1", "lone2", 8),
+        ("c2", "a2", 5),
+        ("boss", "c3", 3),
+    ];
+    for mode in [LayoutMode::Cluster, LayoutMode::Hierarchy] {
+        let mut graph = AgentGraph::new();
+        graph.apply_instance_snapshot(&snap);
+        let mut id = 0;
+        for (from, to, count) in messages {
+            for _ in 0..count {
+                id += 1;
+                graph.apply_message_event(&MessageEvent {
+                    id,
+                    ts: Utc::now(),
+                    instance: from.into(),
+                    data: MessageData {
+                        from: from.into(),
+                        delivered_to: vec![to.into()],
+                        mentions: vec![],
+                        intent: None,
+                        text: "x".into(),
+                    },
+                });
+            }
+        }
+        let mut layout = GraphLayout::new();
+        layout.mode = mode;
+        layout.sync_nodes(&graph);
+
+        let steps_to_sleep = |layout: &mut GraphLayout, max: usize| {
+            (1..=max).find(|_| {
+                layout.step(&graph, 1.0 / 60.0);
+                layout.is_sleeping
+            })
+        };
+        assert!(
+            steps_to_sleep(&mut layout, 600).is_some(),
+            "{mode:?}: layout must sleep within 600 steps"
+        );
+        layout.wake_up();
+        assert!(
+            steps_to_sleep(&mut layout, 30).is_some(),
+            "{mode:?}: layout must sleep again within 30 steps after a wake"
+        );
+
+        let pos: Vec<Pos2> = layout.nodes.values().map(|p| p.pos).collect();
+        for i in 0..pos.len() {
+            for j in i + 1..pos.len() {
+                assert!(
+                    pos[i].distance(pos[j]) >= 78.0,
+                    "{mode:?}: node rings overlap ({} px)",
+                    pos[i].distance(pos[j])
+                );
+            }
+        }
+    }
+}
