@@ -6984,3 +6984,112 @@ fn test_task_77_32_fast_drag_beyond_hit_radius_drags_candidate() {
         "Node must have moved towards the drag location"
     );
 }
+
+#[test]
+fn test_task_77_33_cell_text_and_empty_space_click_selects_row() {
+    use eframe::App;
+    use hcom_graph::config::GraphState;
+    use hcom_graph::table_data::TableRow;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = GraphState {
+        columns: vec!["instance".into(), "roaming".into(), "detail".into()],
+        ..Default::default()
+    };
+    let mut app = hcom_graph::app::HcomGraphApp::new_for_test(
+        hcom_graph::config::GraphConfig::default(),
+        state,
+        dir.path().to_path_buf(),
+    );
+    app.graph
+        .apply_instance_snapshot(&[snap("worker_1", None), snap("worker_2", None)]);
+    let w1 = app.graph.get_node_index("worker_1").unwrap();
+    let w2 = app.graph.get_node_index("worker_2").unwrap();
+    app.table_rows = vec![
+        TableRow {
+            instance: "worker_1".into(),
+            detail: "x".repeat(100),
+            ..Default::default()
+        },
+        TableRow {
+            instance: "worker_2".into(),
+            ..Default::default()
+        },
+    ];
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut time = 0.0;
+    let mut run = |app: &mut hcom_graph::app::HcomGraphApp, events: Vec<egui::Event>| {
+        time += 0.1;
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        out.textures_delta.clear();
+        out
+    };
+
+    // 1. Initial frames to lay out table
+    let mut out = run(&mut app, vec![]);
+    for _ in 0..2 {
+        out = run(&mut app, vec![]);
+    }
+
+    // 2. Click directly on the cell text of "worker_2"
+    let hint = out
+        .shapes
+        .iter()
+        .find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text() == "worker_2" => {
+                Some(Rect::from_min_size(t.pos, t.galley.size()))
+            }
+            _ => None,
+        })
+        .expect("worker_2 text shape found");
+    let text_center = hint.center();
+
+    let click = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+
+    run(&mut app, vec![egui::Event::PointerMoved(text_center)]);
+    run(&mut app, vec![click(text_center, true)]);
+    run(&mut app, vec![click(text_center, false)]);
+
+    assert_eq!(
+        app.selected_row_id.as_deref(),
+        Some("worker_2"),
+        "Click on cell text must select the row"
+    );
+    assert_eq!(
+        app.canvas.selected_node,
+        Some(w2),
+        "Click on cell text must highlight graph node"
+    );
+
+    // 3. Click on the empty space at the right end of worker_1's band
+    let b0 = app.table_row_bands[0];
+    let empty_space = Pos2::new(b0.right() - 5.0, b0.center().y);
+    run(&mut app, vec![egui::Event::PointerMoved(empty_space)]);
+    run(&mut app, vec![click(empty_space, true)]);
+    run(&mut app, vec![click(empty_space, false)]);
+
+    assert_eq!(
+        app.selected_row_id.as_deref(),
+        Some("worker_1"),
+        "Click on empty space of row band must select the row"
+    );
+    assert_eq!(
+        app.canvas.selected_node,
+        Some(w1),
+        "Click on empty space must highlight graph node"
+    );
+}

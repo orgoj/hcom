@@ -1012,7 +1012,17 @@ impl HcomGraphApp {
                                 if Some(i) == selected_row {
                                     text = text.color(selected_text);
                                 }
-                                let resp = ui.add(egui::Label::new(text).truncate());
+                                let resp = ui.add(
+                                    egui::Label::new(text)
+                                        .truncate()
+                                        .sense(egui::Sense::click()),
+                                );
+                                if resp.clicked() {
+                                    clicked_row = Some(i);
+                                }
+                                if resp.hovered() {
+                                    pointer_row = Some(i);
+                                }
                                 span = span.union(resp.rect.y_range());
                             }
                             ui.end_row();
