@@ -1,9 +1,11 @@
 ---
 id: TASK-77.34
 title: 'Detail panel: info o zastaveném agentovi podle agents.json a editace'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@hcom_dev__idea'
 created_date: '2026-11-03 13:04'
+updated_date: '2026-11-03 13:33'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
