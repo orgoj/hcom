@@ -535,7 +535,10 @@ const HANDOFF_HELP: &[HelpEntry] = &[
         "Restart yourself: same catalog agent and name, clean session, <prompt> as initial prompt",
     ),
     ("handoff < file", "Read the prompt from stdin"),
-    ("  --cli <tool>", "Restart on another AI CLI"),
+    (
+        "  --cli <tool>",
+        "Restart on another AI CLI (default: the CLI it runs on now)",
+    ),
     (
         "  --dry-run",
         "Print the relaunch without stopping anything",
@@ -1874,6 +1877,7 @@ mod tests {
     #[test]
     fn handoff_help_documents_the_life_event() {
         assert!(get_command_help("handoff").contains("Logs life action 'handoff'"));
+        assert!(get_command_help("handoff").contains("default: the CLI it runs on now"));
         assert!(get_command_help("events").contains("stopped | handoff |"));
     }
 

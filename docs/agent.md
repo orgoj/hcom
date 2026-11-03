@@ -674,9 +674,11 @@ hcom checks the relaunch first, then runs `hcom agent <HCOM_AGENT_NAME> --as <HC
 --restart --clean --hcom-prompt <prompt>` from the agent's recorded directory, detached from the
 agent it kills. The catalog name is the one recorded at launch, or the agent's own `HCOM_AGENT_NAME`
 when none is recorded. The successor is the same catalog agent under the same instance name, so `--as`
-aliases and roaming instances keep their names. The prompt is its initial prompt. Run it as the last
-action of a turn; its output is logged to `.tmp/logs/handoff-<name>.log` in the hcom data directory
-(`~/.hcom/.tmp/logs/` by default). Each handoff that passes validation logs a life event with
+aliases and roaming instances keep their names. Without `--cli`, it passes `--cli <tool>` with the CLI
+the agent runs on now, so an agent started with a non-default `--cli` keeps it. The prompt is its
+initial prompt. Run it as the last action of a turn; its output is logged to
+`.tmp/logs/handoff-<name>.log` in the hcom data directory (`~/.hcom/.tmp/logs/` by default). Each
+handoff that passes validation logs a life event with
 action `handoff` when the relaunch starts (`hcom events --action handoff`).
 Only agents started by `hcom agent` or send autostart (or resumed or forked from one) can hand off;
 others get an error and keep running. `--restart` stops the old agent through its tracked process,

@@ -459,7 +459,7 @@ Only the global catalog accepts `"cli_overrides": {"codex": "claude"}`. It maps 
 
 #### Environment and handoff
 
-Every launched agent gets `HCOM_INSTANCE_NAME` (its instance name) and `HCOM_AGENT_NAME` (the catalog entry it came from; they differ under `--as` and for roaming agents). An agent started by `hcom agent` or send autostart can restart itself in a clean session with `hcom handoff <prompt>`, keeping its name and catalog entry. Each handoff that passes validation logs a life event with action `handoff` when the relaunch starts (`hcom events --action handoff`); it counts attempts, and a successor that fails afterwards is reported in `~/.hcom/.tmp/logs/handoff-<name>.log`.
+Every launched agent gets `HCOM_INSTANCE_NAME` (its instance name) and `HCOM_AGENT_NAME` (the catalog entry it came from; they differ under `--as` and for roaming agents). An agent started by `hcom agent` or send autostart can restart itself in a clean session with `hcom handoff <prompt>`, keeping its name, catalog entry and current CLI (`--cli` switches it). Each handoff that passes validation logs a life event with action `handoff` when the relaunch starts (`hcom events --action handoff`); it counts attempts, and a successor that fails afterwards is reported in `~/.hcom/.tmp/logs/handoff-<name>.log`.
 
 </details>
 

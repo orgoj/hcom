@@ -20,7 +20,7 @@ use crate::shared::{CommandContext, SenderKind};
 pub struct HandoffArgs {
     /// Initial prompt for the successor session; read from stdin when omitted
     pub prompt: Vec<String>,
-    /// Restart on another AI CLI (claude, codex, ...)
+    /// Restart on another AI CLI (claude, codex, ...); default: the CLI it runs on now
     #[arg(long)]
     pub cli: Option<String>,
     /// Print the relaunch without stopping anything
@@ -74,8 +74,16 @@ fn run(db: &HcomDb, args: &HandoffArgs, ctx: Option<&CommandContext>) -> anyhow:
         "--hcom-prompt".to_string(),
         prompt,
     ];
-    if let Some(cli) = &args.cli {
-        argv.extend(["--cli".to_string(), cli.clone()]);
+    // Without --cli, keep the CLI the instance runs on: the catalog default
+    // may differ when it was started with an explicit --cli.
+    let cli = args.cli.clone().or_else(|| {
+        data.get("tool")
+            .and_then(|v| v.as_str())
+            .filter(|t| !t.is_empty() && *t != "adhoc")
+            .map(str::to_string)
+    });
+    if let Some(cli) = cli {
+        argv.extend(["--cli".to_string(), cli]);
     }
 
     // Validate synchronously: the detached relaunch has nobody to report to.
