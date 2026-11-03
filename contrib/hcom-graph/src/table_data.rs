@@ -114,6 +114,8 @@ pub struct LiveInstanceItem {
     #[serde(default)]
     pub unread_count: Option<u64>,
     #[serde(default)]
+    pub parent_name: Option<String>,
+    #[serde(default)]
     pub created_at: Option<f64>,
     #[serde(default)]
     pub transcript_path: Option<String>,
@@ -240,6 +242,7 @@ pub fn build_table_rows(
             quota_percent: None,
             detail,
             unread_count: live.unread_count.unwrap_or(0) as u32,
+            parent_name: live.parent_name.clone(),
             directory: live.directory.clone().unwrap_or_default(),
             branch,
             git_status: String::new(),
@@ -293,6 +296,7 @@ pub fn build_table_rows(
                 quota_percent: None,
                 detail: cat.description.clone().unwrap_or_default(),
                 unread_count: 0,
+                parent_name: None,
                 directory: cat.dir.clone().unwrap_or_default(),
                 branch: String::new(),
                 git_status: String::new(),
@@ -392,6 +396,7 @@ pub struct TableRow {
     pub quota_percent: Option<u64>,
     pub detail: String,
     pub unread_count: u32,
+    pub parent_name: Option<String>,
     pub directory: String,
     pub branch: String,
     pub git_status: String,
@@ -445,6 +450,7 @@ impl TableRow {
             quota_percent: None,
             detail: node.status_context.clone().unwrap_or_default(),
             unread_count: node.unread_count as u32,
+            parent_name: node.parent_name.clone(),
             directory: node.directory.clone().unwrap_or_default(),
             branch: String::new(),
             git_status: String::new(),

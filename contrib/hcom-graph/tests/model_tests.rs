@@ -6059,3 +6059,303 @@ fn test_legend_tab_is_selected_saved_and_restored() {
         });
     assert!(shown, "Legend content is shown after the restart");
 }
+
+#[test]
+fn test_task_77_29_hierarchy_and_spawn_edges_preserved_across_table_sync() {
+    use hcom_graph::model::InstanceSnapshot;
+    use hcom_graph::table_data::TableRow;
+
+    let (_dir, mut app) = split_test_app(hcom_graph::config::GraphState::default());
+
+    // 1. Live snapshots initialize parent and child with a spawn edge
+    let snapshots = vec![
+        InstanceSnapshot {
+            name: "parent_agent".into(),
+            status: Some("active".into()),
+            status_context: None,
+            status_age_seconds: Some(10),
+            unread_count: Some(0),
+            parent_name: None,
+            directory: None,
+            tool: Some("claude".into()),
+        },
+        InstanceSnapshot {
+            name: "child_agent".into(),
+            status: Some("listening".into()),
+            status_context: None,
+            status_age_seconds: Some(5),
+            unread_count: Some(2),
+            parent_name: Some("parent_agent".into()),
+            directory: None,
+            tool: Some("claude".into()),
+        },
+    ];
+    app.graph.apply_instance_snapshot(&snapshots);
+    app.layout.sync_nodes(&app.graph);
+
+    let _parent_idx = app.graph.get_node_index("parent_agent").unwrap();
+    let child_idx = app.graph.get_node_index("child_agent").unwrap();
+    assert!(
+        app.graph
+            .spawn_edges
+            .contains_key(&("parent_agent".into(), "child_agent".into())),
+        "Spawn edge must exist after live snapshot"
+    );
+    assert_eq!(
+        app.graph.graph[child_idx].parent_name.as_deref(),
+        Some("parent_agent")
+    );
+
+    // 2. Table rows load. Child table row has parent_name: None (e.g. from an incomplete table source).
+    // sync_graph_from_table_rows must preserve the parent relation and spawn edge.
+    app.table_rows = vec![
+        TableRow {
+            agent: "parent_agent".into(),
+            instance: "parent_agent".into(),
+            is_running: true,
+            status: "active".into(),
+            since_seconds: Some(15),
+            unread_count: 1,
+            parent_name: None,
+            ..Default::default()
+        },
+        TableRow {
+            agent: "child_agent".into(),
+            instance: "child_agent".into(),
+            is_running: true,
+            status: "listening".into(),
+            since_seconds: Some(8),
+            unread_count: 3,
+            parent_name: None,
+            ..Default::default()
+        },
+    ];
+    app.sync_graph_from_table_rows();
+
+    assert!(
+        app.graph
+            .spawn_edges
+            .contains_key(&("parent_agent".into(), "child_agent".into())),
+        "Spawn edge must be preserved after table sync"
+    );
+    assert_eq!(
+        app.graph.graph[child_idx].parent_name.as_deref(),
+        Some("parent_agent"),
+        "Child parent_name must be preserved after table sync"
+    );
+    assert_eq!(app.graph.graph[child_idx].status_age_seconds, 8);
+    assert_eq!(app.graph.graph[child_idx].unread_count, 3);
+}
+
+#[test]
+fn test_task_77_29_table_and_graph_node_parity_and_visible_projection() {
+    use eframe::App;
+    use hcom_graph::model::MessageData;
+    use hcom_graph::table_data::TableRow;
+
+    let (_dir, mut app) = split_test_app(hcom_graph::config::GraphState::default());
+
+    // 1. Table rows contain 2 running instances and 3 stopped catalog agents (5 total)
+    app.table_rows = vec![
+        TableRow {
+            agent: "agent_a".into(),
+            instance: "agent_a_inst1".into(),
+            is_running: true,
+            status: "active".into(),
+            since_seconds: Some(42),
+            unread_count: 2,
+            ..Default::default()
+        },
+        TableRow {
+            agent: "agent_b".into(),
+            instance: "agent_b_inst1".into(),
+            is_running: true,
+            status: "listening".into(),
+            since_seconds: Some(10),
+            unread_count: 0,
+            ..Default::default()
+        },
+        TableRow {
+            agent: "cat_agent_c".into(),
+            instance: String::new(),
+            is_running: false,
+            status: "stopped".into(),
+            ..Default::default()
+        },
+        TableRow {
+            agent: "cat_agent_d".into(),
+            instance: String::new(),
+            is_running: false,
+            status: "stopped".into(),
+            ..Default::default()
+        },
+        TableRow {
+            agent: "cat_agent_e".into(),
+            instance: String::new(),
+            is_running: false,
+            status: "stopped".into(),
+            ..Default::default()
+        },
+    ];
+
+    // 2. Add an orphan placeholder node for a message recipient that is NOT in the table
+    app.graph
+        .apply_message_event(&hcom_graph::model::MessageEvent {
+            id: 100,
+            ts: chrono::Utc::now(),
+            instance: "agent_a_inst1".into(),
+            data: MessageData {
+                from: "agent_a_inst1".into(),
+                delivered_to: vec!["orphan_message_target".into()],
+                mentions: vec![],
+                intent: None,
+                text: "hello".into(),
+            },
+        });
+
+    assert!(
+        app.graph.get_node_index("orphan_message_target").is_some(),
+        "Orphan message placeholder exists in graph"
+    );
+
+    // Sync table rows into graph
+    app.sync_graph_from_table_rows();
+
+    // Verify all 5 table agents now exist in app.graph
+    for name in &[
+        "agent_a_inst1",
+        "agent_b_inst1",
+        "cat_agent_c",
+        "cat_agent_d",
+        "cat_agent_e",
+    ] {
+        assert!(
+            app.graph.get_node_index(name).is_some(),
+            "Agent '{}' must exist in graph after sync",
+            name
+        );
+    }
+
+    // Verify projection parity: visible_nodes_for_rows matches table rows exactly,
+    // and excludes placeholder nodes like orphan_message_target.
+    let visible = app.visible_nodes_for_rows(&app.table_rows);
+    assert_eq!(
+        visible.len(),
+        5,
+        "Unfiltered visible count must equal table row count (5)"
+    );
+    let visible_names: std::collections::HashSet<&str> = visible
+        .iter()
+        .map(|idx| app.graph.graph[*idx].name.as_str())
+        .collect();
+    let expected_names: std::collections::HashSet<&str> = [
+        "agent_a_inst1",
+        "agent_b_inst1",
+        "cat_agent_c",
+        "cat_agent_d",
+        "cat_agent_e",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        visible_names, expected_names,
+        "Unfiltered visible nodes must match table rows"
+    );
+    assert!(
+        !visible_names.contains("orphan_message_target"),
+        "Orphan message placeholder must be excluded from visible projection"
+    );
+
+    // Verify field mapping: agent_a_inst1 has status_age_seconds=42, unread_count=2
+    let idx_a = app.graph.get_node_index("agent_a_inst1").unwrap();
+    assert_eq!(app.graph.graph[idx_a].status_age_seconds, 42);
+    assert_eq!(app.graph.graph[idx_a].unread_count, 2);
+
+    // 3. Run headless frame to verify projection and counters
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let input = egui::RawInput {
+        screen_rect: Some(screen),
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+    out.textures_delta.clear();
+
+    // Verify accesskit labels for counts
+    let has_agents_total = out
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|u| u.nodes.iter().any(|(_, n)| n.value() == Some("Agents: 5")));
+    assert!(
+        has_agents_total,
+        "Header must show 'Agents: 5' matching total table rows"
+    );
+
+    let has_zobrazeno = out
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|u| {
+            u.nodes.iter().any(|(_, n)| {
+                n.value().is_some_and(|v| {
+                    v.contains("Zobrazeno: 5 / Celkem: 5") || v.contains("Shown 5 / 5")
+                })
+            })
+        });
+    assert!(has_zobrazeno, "Counter must show 5 / 5 matching both views");
+
+    // Filter by running_only:
+    app.state.running_only = true;
+    let running_rows: Vec<TableRow> = app
+        .table_rows
+        .iter()
+        .filter(|r| r.is_running)
+        .cloned()
+        .collect();
+    let visible_running = app.visible_nodes_for_rows(&running_rows);
+    assert_eq!(
+        visible_running.len(),
+        2,
+        "Filtered visible count must equal running rows (2)"
+    );
+    let visible_running_names: std::collections::HashSet<&str> = visible_running
+        .iter()
+        .map(|idx| app.graph.graph[*idx].name.as_str())
+        .collect();
+    let expected_running: std::collections::HashSet<&str> =
+        ["agent_a_inst1", "agent_b_inst1"].into_iter().collect();
+    assert_eq!(
+        visible_running_names, expected_running,
+        "Filtered visible nodes must match running table rows"
+    );
+    assert!(
+        !visible_running_names.contains("orphan_message_target"),
+        "Orphan message placeholder must not be in filtered projection"
+    );
+
+    let input2 = egui::RawInput {
+        screen_rect: Some(screen),
+        ..Default::default()
+    };
+    let mut out2 = ctx.run_ui(input2, |ui| app.ui(ui, &mut frame));
+    out2.textures_delta.clear();
+
+    let has_filtered_count = out2
+        .platform_output
+        .accesskit_update
+        .as_ref()
+        .is_some_and(|u| {
+            u.nodes.iter().any(|(_, n)| {
+                n.value().is_some_and(|v| {
+                    v.contains("Zobrazeno: 2 / Celkem: 5") || v.contains("Shown 2 / 5")
+                })
+            })
+        });
+    assert!(
+        has_filtered_count,
+        "Counter must show 2 / 5 when running_only is active"
+    );
+}

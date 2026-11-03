@@ -6,7 +6,7 @@ use crate::config::{
     save_state, screen_bar_buttons,
 };
 use crate::layout::{GraphLayout, LayoutMode};
-use crate::model::{AgentGraph, AgentStatus, EdgeKind, MessageWindow};
+use crate::model::{AgentGraph, AgentNode, AgentStatus, EdgeKind, MessageWindow};
 use crate::sync::BackgroundSync;
 use crate::table_data::{
     DEFAULT_COLUMNS, REPORT_FIELDS, TableRow, filter_row, sort_rows, tooltip_lines,
@@ -1700,6 +1700,87 @@ impl HcomGraphApp {
         }
     }
 
+    /// Synchronizes nodes in `self.graph` from `self.table_rows` so catalog agents
+    /// and running instances are both present in the graph model, preserving existing
+    /// parent relations and spawn edges.
+    pub fn sync_graph_from_table_rows(&mut self) {
+        if self.table_rows.is_empty() {
+            return;
+        }
+        for r in &self.table_rows {
+            let name = if !r.instance.is_empty() {
+                &r.instance
+            } else {
+                &r.agent
+            };
+            if name.is_empty() {
+                continue;
+            }
+
+            let status = match r.status.to_lowercase().as_str() {
+                "active" => AgentStatus::Active,
+                "listening" => AgentStatus::Listening,
+                "blocked" => AgentStatus::Blocked,
+                _ => AgentStatus::Stopped,
+            };
+
+            // If node already exists and has a parent_name from live sync,
+            // do not overwrite it with None if the table row had None.
+            let parent_name = if let Some(ref p) = r.parent_name {
+                Some(p.clone())
+            } else if let Some(idx) = self.graph.get_node_index(name) {
+                self.graph
+                    .graph
+                    .node_weight(idx)
+                    .and_then(|n| n.parent_name.clone())
+            } else {
+                None
+            };
+
+            let node = AgentNode {
+                name: name.to_string(),
+                status,
+                status_context: if !r.detail.is_empty() {
+                    Some(r.detail.clone())
+                } else {
+                    None
+                },
+                status_age_seconds: r.since_seconds.unwrap_or(0),
+                unread_count: r.unread_count as u64,
+                parent_name,
+                directory: if !r.directory.is_empty() {
+                    Some(r.directory.clone())
+                } else {
+                    None
+                },
+                tool: if !r.cli.is_empty() {
+                    Some(r.cli.clone())
+                } else {
+                    None
+                },
+            };
+            self.graph.upsert_agent(node);
+        }
+        self.layout.sync_nodes(&self.graph);
+    }
+
+    /// Projects a slice of table rows to the visible node indices in `self.graph`.
+    pub fn visible_nodes_for_rows(
+        &self,
+        rows: &[TableRow],
+    ) -> std::collections::HashSet<NodeIndex> {
+        rows.iter()
+            .filter_map(|r| {
+                let name = if !r.instance.is_empty() {
+                    &r.instance
+                } else {
+                    &r.agent
+                };
+                self.graph.get_node_index(name)
+            })
+            .collect()
+    }
+
     /// True while a dialog, confirmation or the canvas context menu is open.
     pub fn overlay_open(&self) -> bool {
         self.context_menu.is_some()
@@ -2074,6 +2155,7 @@ impl eframe::App for HcomGraphApp {
             let styles = std::mem::take(&mut self.graph.node_styles);
             self.graph = updated;
             self.graph.node_styles = styles;
+            self.sync_graph_from_table_rows();
             // Edge indices may be reused in another order after a swap.
             self.window_cache_key = None;
             self.layout.invalidate_caches();
@@ -2233,6 +2315,7 @@ impl eframe::App for HcomGraphApp {
                         crate::table_data::apply_event_stats(&mut rows, &self.cached_event_stats);
                         self.graph.node_styles = crate::table_data::node_styles_from_rows(&rows);
                         self.table_rows = rows;
+                        self.sync_graph_from_table_rows();
                         self.update_idle(chrono::Utc::now().timestamp() as u64);
                         self.catalog_groups = catalog_groups;
                         self.tool_groups = tool_groups;
@@ -2295,17 +2378,7 @@ impl eframe::App for HcomGraphApp {
         );
         let shown_count = filtered_rows.len();
 
-        let visible_node_indices: std::collections::HashSet<NodeIndex> = filtered_rows
-            .iter()
-            .filter_map(|r| {
-                let name = if !r.instance.is_empty() {
-                    &r.instance
-                } else {
-                    &r.agent
-                };
-                self.graph.get_node_index(name)
-            })
-            .collect();
+        let visible_node_indices = self.visible_nodes_for_rows(&filtered_rows);
 
         // 4. Top Status & Toolbar Panel
         egui::Panel::top("top_status_bar").show(ui, |ui| {
@@ -2319,16 +2392,16 @@ impl eframe::App for HcomGraphApp {
                 let mut blocked_count = 0;
                 let mut stopped_count = 0;
 
-                for node in self.graph.graph.node_weights() {
-                    match node.status {
-                        AgentStatus::Active => active_count += 1,
-                        AgentStatus::Listening => listening_count += 1,
-                        AgentStatus::Blocked => blocked_count += 1,
-                        AgentStatus::Stopped => stopped_count += 1,
+                for r in &all_rows {
+                    match r.status.to_lowercase().as_str() {
+                        "active" => active_count += 1,
+                        "listening" => listening_count += 1,
+                        "blocked" => blocked_count += 1,
+                        _ => stopped_count += 1,
                     }
                 }
 
-                ui.label(format!("Agents: {}", self.graph.graph.node_count()));
+                ui.label(format!("Agents: {}", total_count));
                 ui.colored_label(
                     Color32::from_rgb(46, 204, 113),
                     format!("● {} active", active_count),
