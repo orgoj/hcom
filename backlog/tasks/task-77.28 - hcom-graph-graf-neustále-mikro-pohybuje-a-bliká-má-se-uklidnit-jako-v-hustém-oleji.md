@@ -3,11 +3,11 @@ id: TASK-77.28
 title: >-
   hcom-graph: graf neustále mikro-pohybuje a bliká, má se uklidnit jako v hustém
   oleji
-status: Done
+status: To Do
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-01 20:40'
-updated_date: '2026-11-02 18:14'
+updated_date: '2026-11-03 18:55'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -50,6 +50,12 @@ Mimo rozsah: auto-fit, nezávislost tlumení na snímkové frekvenci, změny sil
 4. Regresní test v tests/model_tests.rs (nahradí měřicí sondu).
 5. cargo fmt/clippy/test, review agent_review, commit, release build.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Reopened na žádost uživatele: graf se stále posunuje, někam utíká a nezastaví se. Příčina: periodické snímky ze synchronizace (sync.take_snapshot()) volají layout.wake_up() i bez strukturálních změn a auto-fit přepočítává pohled při každém subpixelovém pohybu.
+<!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
