@@ -1552,6 +1552,9 @@ impl HcomGraphApp {
                             "Agent '{}' is stopped. Screen is only available for running agents.",
                             selected
                         ));
+                        if ui.small_button("📋 View Config").clicked() {
+                            self.select_detail_tab("Config");
+                        }
                     } else if let Some((ref tr_agent, _, ref text)) = self.screen_content {
                         if tr_agent == selected {
                             ui.add(egui::Label::new(RichText::new(text).monospace()).extend());
@@ -1581,6 +1584,7 @@ impl HcomGraphApp {
                 "Transcript (F6)",
                 "Events (F7)",
                 "Log (F8)",
+                "Config",
                 "Legend",
             ]) {
                 if ui
@@ -1619,6 +1623,9 @@ impl HcomGraphApp {
                                     "Agent '{}' is stopped. Transcript is only available for running agents.",
                                     selected
                                 ));
+                                if ui.small_button("📋 View Config").clicked() {
+                                    self.select_detail_tab("Config");
+                                }
                             } else if let Some((ref tr_agent, _, ref text)) = self.transcript_content {
                                 if tr_agent == selected {
                                     ui.monospace(text);
@@ -1649,6 +1656,9 @@ impl HcomGraphApp {
                                     "Agent '{}' is stopped. Events are only available for running agents.",
                                     selected
                                 ));
+                                if ui.small_button("📋 View Config").clicked() {
+                                    self.select_detail_tab("Config");
+                                }
                             } else if let Some((ref ev_agent, _, ref text)) = self.events_content {
                                 if ev_agent == selected {
                                     ui.monospace(text);
@@ -1702,6 +1712,9 @@ impl HcomGraphApp {
                     ui.weak("No agent selected");
                 }
             }
+            "Config" => {
+                self.render_config_tab(ui);
+            }
             "Legend" => {
                 let legend = crate::canvas::legend(
                     &self.graph,
@@ -1722,6 +1735,214 @@ impl HcomGraphApp {
                     .show(ui, |ui| self.render_side_panel_summary(ui));
             }
         }
+    }
+
+    fn render_config_tab(&mut self, ui: &mut egui::Ui) {
+        let selected_row = self.selected_row();
+        let Some(row) = selected_row else {
+            ui.heading("Agent Configuration");
+            ui.separator();
+            ui.weak("No agent selected. Select an agent in the graph or table to view its catalog configuration.");
+            return;
+        };
+
+        let agent_name = if !row.instance.is_empty() {
+            &row.instance
+        } else {
+            &row.agent
+        };
+
+        let cat_opt = row.catalog.as_ref();
+
+        egui::ScrollArea::vertical()
+            .id_salt("config_tab_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.heading(RichText::new(agent_name).strong());
+                    if row.is_running {
+                        ui.colored_label(Color32::from_rgb(46, 204, 113), "● running");
+                    } else {
+                        ui.colored_label(Color32::from_rgb(127, 140, 141), "● stopped");
+                    }
+                    if let Some(cat) = cat_opt {
+                        if cat.roaming {
+                            ui.colored_label(Color32::from_rgb(155, 89, 182), "roaming");
+                        }
+                        if cat.disabled {
+                            ui.colored_label(Color32::from_rgb(231, 76, 60), "disabled");
+                        }
+                    }
+                });
+                ui.separator();
+
+                if let Some(cat) = cat_opt {
+                    if let Some(ref desc) = cat.description {
+                        ui.label(RichText::new(desc).italics());
+                        ui.add_space(4.0);
+                    }
+
+                    ui.label(RichText::new("Catalog Attributes (agents.json)").strong());
+                    egui::Grid::new("config_attr_grid")
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.weak("CLI Tool:");
+                            ui.label(cat.cli.as_deref().unwrap_or("claude"));
+                            ui.end_row();
+
+                            ui.weak("Model:");
+                            ui.label(cat.model.as_deref().unwrap_or("-"));
+                            ui.end_row();
+
+                            ui.weak("Reasoning Effort:");
+                            ui.label(cat.reasoning.as_deref().unwrap_or("-"));
+                            ui.end_row();
+
+                            ui.weak("Working Directory:");
+                            ui.label(cat.dir.as_deref().unwrap_or("-"));
+                            ui.end_row();
+
+                            ui.weak("Groups:");
+                            if cat.groups.is_empty() {
+                                ui.label("-");
+                            } else {
+                                ui.label(cat.groups.join(", "));
+                            }
+                            ui.end_row();
+
+                            ui.weak("Roaming:");
+                            ui.label(if cat.roaming { "yes" } else { "no" });
+                            ui.end_row();
+
+                            if !cat.roaming_dirs.is_empty() {
+                                ui.weak("Roaming Dirs:");
+                                ui.label(cat.roaming_dirs.join(", "));
+                                ui.end_row();
+                            }
+
+                            ui.weak("Instructions / SOUL:");
+                            ui.label(cat.instructions.as_deref().unwrap_or("-"));
+                            ui.end_row();
+
+                            if let Some(ref t) = cat.terminal {
+                                ui.weak("Terminal Preset:");
+                                ui.label(t);
+                                ui.end_row();
+                            }
+
+                            if cat.session.is_some() || cat.window.is_some() {
+                                ui.weak("Herdr Placement:");
+                                ui.label(format!(
+                                    "space: {}, tab: {}",
+                                    cat.session.as_deref().unwrap_or("-"),
+                                    cat.window.as_deref().unwrap_or("-")
+                                ));
+                                ui.end_row();
+                            }
+                        });
+
+                    if !cat.skills.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(format!("Skills ({})", cat.skills.len())).strong());
+                        for s in &cat.skills {
+                            ui.group(|ui| {
+                                ui.label(RichText::new(&s.name).strong());
+                                if let Some(ref desc) = s.description {
+                                    ui.weak(desc);
+                                }
+                            });
+                        }
+                    }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.label(
+                        RichText::new("Configuration Parameters (Future Editing Interface)")
+                            .strong(),
+                    );
+                    ui.weak(
+                        "Preview of parameter editing interface. Direct catalog modification will be supported in a future update.",
+                    );
+                    ui.add_space(4.0);
+
+                    egui::Grid::new("config_edit_grid")
+                        .num_columns(2)
+                        .spacing([12.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("CLI Tool:");
+                            let mut cli_val = cat.cli.clone().unwrap_or_else(|| "claude".into());
+                            ui.add_enabled(false, egui::TextEdit::singleline(&mut cli_val));
+                            ui.end_row();
+
+                            ui.label("Model:");
+                            let mut model_val = cat.model.clone().unwrap_or_default();
+                            ui.add_enabled(false, egui::TextEdit::singleline(&mut model_val));
+                            ui.end_row();
+
+                            ui.label("Reasoning:");
+                            let mut reasoning_val = cat.reasoning.clone().unwrap_or_default();
+                            ui.add_enabled(false, egui::TextEdit::singleline(&mut reasoning_val));
+                            ui.end_row();
+
+                            ui.label("Working Directory:");
+                            let mut dir_val = cat.dir.clone().unwrap_or_default();
+                            ui.add_enabled(false, egui::TextEdit::singleline(&mut dir_val));
+                            ui.end_row();
+
+                            ui.label("Description:");
+                            let mut desc_val = cat.description.clone().unwrap_or_default();
+                            ui.add_enabled(false, egui::TextEdit::singleline(&mut desc_val));
+                            ui.end_row();
+
+                            ui.label("Groups:");
+                            let mut groups_val = cat.groups.join(", ");
+                            ui.add_enabled(false, egui::TextEdit::singleline(&mut groups_val));
+                            ui.end_row();
+
+                            ui.label("Disabled:");
+                            let mut disabled_val = cat.disabled;
+                            ui.add_enabled(false, egui::Checkbox::new(&mut disabled_val, ""));
+                            ui.end_row();
+                        });
+
+                    ui.add_enabled(false, egui::Button::new("💾 Save Changes (Future Update)"));
+
+                    ui.add_space(6.0);
+                    ui.collapsing("Raw JSON (Sanitized)", |ui| {
+                        if let Ok(json_str) = serde_json::to_string_pretty(cat) {
+                            ui.monospace(json_str);
+                        }
+                    });
+                } else {
+                    ui.weak(format!(
+                        "No catalog entry (agents.json) found for agent '{}'.",
+                        agent_name
+                    ));
+                    ui.add_space(4.0);
+                    ui.label(
+                        "This instance was launched ad-hoc or without a corresponding catalog entry in scope.",
+                    );
+                    ui.add_space(6.0);
+                    egui::Grid::new("ad_hoc_meta_grid")
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.weak("CLI Tool:");
+                            ui.label(&row.cli);
+                            ui.end_row();
+
+                            ui.weak("Directory:");
+                            ui.label(&row.directory);
+                            ui.end_row();
+
+                            ui.weak("Status:");
+                            ui.label(&row.status);
+                            ui.end_row();
+                        });
+                }
+            });
     }
 
     fn get_all_rows(&self) -> Vec<TableRow> {

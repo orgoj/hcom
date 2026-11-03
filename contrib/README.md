@@ -251,6 +251,7 @@ skipped; a `screen_bar` that is not a list keeps the default bar.
   - Top status bar with agent counts by state, message stats, zoom reset and zoom percentage.
 - Layout and selection:
   - Toolbar layout selector: `Both (F4)` (graph + agent table), `Graph` (canvas only), and `Table` (table only). Persisted in GUI state (`view_mode`).
+  - Detail panel tabs: `Summary`, `Report (F9)`, `Screen (F5)`, `Transcript (F6)`, `Events (F7)`, `Log (F8)`, `Config`, and `Legend`. When an agent is stopped, `Screen`, `Transcript`, and `Events` link to `Config` to inspect catalog attributes from `agents.json`.
   - Unified selection: clicking a node or table row synchronizes selection across canvas, table, and detail panel. Double-clicking a node attaches to the agent. Clicking an edge selects the relationship and clears agent selection; clicking empty canvas clears selection.
 
 ### Running

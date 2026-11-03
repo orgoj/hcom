@@ -7295,3 +7295,171 @@ fn test_task_77_35_detail_panel_is_fixed_and_never_hidden_by_agent_status_or_sel
         "Stopped state message must be shown even if screen_content holds stale text"
     );
 }
+
+#[test]
+fn test_task_77_34_config_tab_displays_agents_json_info_for_stopped_agent() {
+    use eframe::App;
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState, load_state, save_state};
+    use hcom_graph::table_data::build_table_rows;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+
+    // Regression: AC #1 data-layer wiring from JSON through build_table_rows
+    let live_json = r#"[]"#;
+    let agent_json = r#"[
+        {
+            "name": "test_stopped_worker",
+            "cli": "codex",
+            "description": "Autonomous worker for background tasks",
+            "dir": "/home/michael/projects/test",
+            "disabled": false,
+            "groups": ["backend", "tasks"],
+            "roaming": true,
+            "roaming_dirs": ["/home/michael/projects"],
+            "instructions": "/home/michael/.hcom/agents/test_stopped_worker/SOUL.md",
+            "model": "gpt-5.6-terra",
+            "reasoning": "high",
+            "terminal": "herdr",
+            "session": "test_session",
+            "window": "test_window",
+            "agent_dir": "/home/michael/.hcom/agents/test_stopped_worker",
+            "skills": [
+                {
+                    "name": "test-skill",
+                    "description": "Skill for testing catalog display"
+                }
+            ]
+        }
+    ]"#;
+
+    let rows = build_table_rows(live_json, agent_json, 1700000000).expect("build table rows");
+    assert_eq!(rows.len(), 1);
+    assert!(
+        !rows[0].is_running,
+        "Catalog agent without live instance must be stopped"
+    );
+    assert!(
+        rows[0].catalog.is_some(),
+        "Catalog attributes must be parsed and attached to TableRow"
+    );
+
+    app.table_rows = rows;
+    app.sync_graph_from_table_rows();
+
+    let ctx = egui::Context::default();
+    // 1400 px height ensures full content in the scrollable config tab is laid out and tested
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 1400.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut time = 0.0;
+
+    let mut run = |app: &mut HcomGraphApp| {
+        time += 0.1;
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            app.ui(ui, &mut frame);
+        });
+        out.textures_delta.clear();
+        out
+    };
+
+    // 1. Select the stopped agent
+    app.select_table_row(&app.table_rows[0].clone());
+
+    // 2. In Screen tab, verify stopped message and presence of "View Config" button
+    app.select_detail_tab("Screen");
+    let out_screen = run(&mut app);
+    let has_view_config_btn = out_screen.shapes.iter().any(|c| match &c.shape {
+        egui::Shape::Text(t) => t.galley.text() == "📋 View Config",
+        _ => false,
+    });
+    assert!(
+        has_view_config_btn,
+        "Screen tab must have '📋 View Config' button for stopped agent"
+    );
+
+    // 3. Switch to "Config" tab
+    app.select_detail_tab("Config");
+    assert_eq!(app.state.detail_tab, "Config");
+    let out_config = run(&mut app);
+
+    // Collect all displayed text in the Config tab
+    let texts: Vec<String> = out_config
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+            _ => None,
+        })
+        .collect();
+    let combined = texts.join(" ");
+
+    // Verify key attributes from agents.json are rendered
+    assert!(
+        combined.contains("test_stopped_worker"),
+        "Config tab must show agent name"
+    );
+    assert!(
+        combined.contains("Autonomous worker for background tasks"),
+        "Config tab must show agent description"
+    );
+    assert!(combined.contains("codex"), "Config tab must show CLI tool");
+    assert!(
+        combined.contains("gpt-5.6-terra"),
+        "Config tab must show model"
+    );
+    assert!(
+        combined.contains("high"),
+        "Config tab must show reasoning effort"
+    );
+    assert!(
+        combined.contains("/home/michael/projects/test"),
+        "Config tab must show directory"
+    );
+    assert!(
+        combined.contains("backend, tasks"),
+        "Config tab must show groups"
+    );
+    assert!(
+        combined.contains("test-skill"),
+        "Config tab must show skill name"
+    );
+    assert!(
+        combined.contains("Skill for testing catalog display"),
+        "Config tab must show skill description"
+    );
+
+    // 4. Verify catalog isolation: NO source or catalog provenance path is rendered
+    assert!(
+        !combined.contains(".hcom/agents.json"),
+        "Catalog isolation: provenance path must not be displayed"
+    );
+    assert!(
+        !combined.contains(".hcom/agents.local.json"),
+        "Catalog isolation: local provenance path must not be displayed"
+    );
+
+    // 5. Verify future editing interface affordance (AC #3)
+    assert!(
+        combined.contains("Configuration Parameters (Future Editing Interface)"),
+        "Config tab must display the future editing interface section"
+    );
+    assert!(
+        combined.contains("Preview of parameter editing interface"),
+        "Config tab must indicate future edit preview"
+    );
+
+    // 6. Persistence: Config tab round-trips via save/load
+    let _ = save_state(dir.path(), &app.state);
+    let reloaded = load_state(dir.path());
+    assert_eq!(reloaded.detail_tab, "Config");
+}

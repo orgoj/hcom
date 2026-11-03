@@ -33,7 +33,14 @@ pub fn format_age(seconds: u64) -> String {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CatalogSkillItem {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CatalogStatusValue {
     pub name: String,
     #[serde(default)]
@@ -41,7 +48,7 @@ pub struct CatalogStatusValue {
     pub value: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CatalogStatusColumns {
     #[serde(default)]
     pub columns: Vec<String>,
@@ -51,7 +58,7 @@ pub struct CatalogStatusColumns {
     pub latest: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CatalogAgentItem {
     pub name: String,
     #[serde(default)]
@@ -67,6 +74,8 @@ pub struct CatalogAgentItem {
     #[serde(default)]
     pub roaming: bool,
     #[serde(default)]
+    pub roaming_dirs: Vec<String>,
+    #[serde(default)]
     pub instructions: Option<String>,
     #[serde(default)]
     pub model: Option<String>,
@@ -74,6 +83,14 @@ pub struct CatalogAgentItem {
     pub reasoning: Option<String>,
     #[serde(default)]
     pub terminal: Option<String>,
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub window: Option<String>,
+    #[serde(default)]
+    pub agent_dir: Option<String>,
+    #[serde(default)]
+    pub skills: Vec<CatalogSkillItem>,
     #[serde(default)]
     pub status_columns: Option<CatalogStatusColumns>,
     #[serde(default)]
@@ -223,7 +240,7 @@ pub fn build_table_rows(
             .unwrap_or_default();
 
         rows.push(TableRow {
-            agent: catalog_name,
+            agent: catalog_name.clone(),
             instance: live.name.clone(),
             is_roaming,
             is_disabled,
@@ -260,6 +277,7 @@ pub fn build_table_rows(
             launch_context: live.launch_context.clone(),
             model,
             reasoning,
+            catalog: catalog_map.get(&catalog_name).map(|c| (*c).clone()),
         });
     }
 
@@ -318,6 +336,7 @@ pub fn build_table_rows(
                 launch_context: None,
                 model: cat.model.clone().unwrap_or_default(),
                 reasoning: cat.reasoning.clone().unwrap_or_default(),
+                catalog: Some(cat.clone()),
             });
         }
     }
@@ -414,6 +433,7 @@ pub struct TableRow {
     pub launch_context: Option<LiveLaunchContext>,
     pub model: String,
     pub reasoning: String,
+    pub catalog: Option<CatalogAgentItem>,
 }
 
 impl TableRow {
@@ -468,6 +488,7 @@ impl TableRow {
             launch_context: None,
             model: String::new(),
             reasoning: String::new(),
+            catalog: None,
         }
     }
 
