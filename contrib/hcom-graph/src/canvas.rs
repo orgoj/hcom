@@ -1,3 +1,4 @@
+use crate::config::ResolvedTheme;
 use crate::layout::GraphLayout;
 use crate::model::{AgentGraph, AgentStatus, EdgeKind, WindowedCount};
 use egui::{Color32, FontId, Pos2, Rect, Stroke, Vec2};
@@ -14,6 +15,169 @@ pub const MESSAGE_EDGE_COLOR: Color32 = Color32::from_rgb(165, 105, 189);
 pub const MESSAGE_EDGE_IDLE_COLOR: Color32 =
     Color32::from_rgba_unmultiplied_const(165, 105, 189, 50);
 pub const ROAMING_OUTLINE_COLOR: Color32 = Color32::from_rgb(200, 205, 220);
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ThemePalette {
+    pub resolved: ResolvedTheme,
+    pub canvas_bg: Color32,
+    pub grid_dot: Color32,
+    pub node_fill: Color32,
+    pub node_stroke: Color32,
+    pub node_text_primary: Color32,
+    pub node_text_secondary: Color32,
+    // Edges
+    pub spawn_edge: Color32,
+    pub spawn_edge_hover: Color32,
+    pub message_edge: Color32,
+    pub message_edge_hover: Color32,
+    pub message_edge_idle: Color32,
+    pub edge_selected: Color32,
+    pub roaming_outline: Color32,
+    // Badges & labels
+    pub badge_fill: Color32,
+    pub badge_stroke: Color32,
+    pub badge_text: Color32,
+    pub message_label_text: Color32,
+    pub message_label_outline: Color32,
+    pub selected_ring: Color32,
+    // Node pins & context fills
+    pub pin_fill: Color32,
+    pub pin_stroke: Color32,
+    pub context_fill_low: Color32,
+    pub context_fill_mid: Color32,
+    pub context_fill_high: Color32,
+    // Sliders
+    pub slider_track: Color32,
+    pub slider_fill: Color32,
+    pub slider_knob: Color32,
+    pub slider_stroke: Color32,
+}
+
+impl ThemePalette {
+    pub fn for_theme(resolved: ResolvedTheme) -> Self {
+        match resolved {
+            ResolvedTheme::Dark => Self {
+                resolved,
+                canvas_bg: Color32::from_rgb(18, 19, 24),
+                grid_dot: Color32::from_rgba_premultiplied(40, 42, 54, 50),
+                node_fill: Color32::from_rgb(28, 30, 38),
+                node_stroke: Color32::from_rgb(40, 42, 54),
+                node_text_primary: Color32::from_rgb(236, 240, 241),
+                node_text_secondary: Color32::from_rgb(160, 165, 180),
+                spawn_edge: Color32::from_rgb(110, 120, 140),
+                spawn_edge_hover: Color32::from_rgb(170, 185, 210),
+                message_edge: Color32::from_rgb(165, 105, 189),
+                message_edge_hover: Color32::from_rgb(210, 150, 235),
+                message_edge_idle: Color32::from_rgba_unmultiplied(165, 105, 189, 50),
+                edge_selected: Color32::from_rgb(241, 196, 15),
+                roaming_outline: Color32::from_rgb(200, 205, 220),
+                badge_fill: Color32::from_rgb(35, 38, 50),
+                badge_stroke: Color32::from_rgb(70, 75, 95),
+                badge_text: Color32::from_rgb(220, 220, 230),
+                message_label_text: Color32::from_rgb(210, 150, 235),
+                message_label_outline: Color32::from_rgb(18, 19, 24),
+                selected_ring: Color32::from_rgb(241, 196, 15),
+                pin_fill: Color32::from_rgb(236, 240, 241),
+                pin_stroke: Color32::from_rgb(18, 19, 24),
+                context_fill_low: Color32::from_rgb(46, 204, 113),
+                context_fill_mid: Color32::from_rgb(243, 156, 18),
+                context_fill_high: Color32::from_rgb(231, 76, 60),
+                slider_track: Color32::from_rgb(55, 55, 60),
+                slider_fill: Color32::from_rgb(70, 70, 80),
+                slider_knob: Color32::WHITE,
+                slider_stroke: Color32::from_rgb(100, 100, 100),
+            },
+            ResolvedTheme::Light => Self {
+                resolved,
+                canvas_bg: Color32::from_rgb(245, 247, 250),
+                grid_dot: Color32::from_rgba_premultiplied(180, 188, 205, 60),
+                node_fill: Color32::from_rgb(255, 255, 255),
+                node_stroke: Color32::from_rgb(210, 215, 225),
+                node_text_primary: Color32::from_rgb(24, 28, 36),
+                node_text_secondary: Color32::from_rgb(85, 92, 105),
+                spawn_edge: Color32::from_rgb(100, 110, 130),
+                spawn_edge_hover: Color32::from_rgb(70, 85, 115),
+                message_edge: Color32::from_rgb(142, 68, 173),
+                message_edge_hover: Color32::from_rgb(125, 45, 155),
+                message_edge_idle: Color32::from_rgba_unmultiplied(142, 68, 173, 60),
+                edge_selected: Color32::from_rgb(217, 119, 6),
+                roaming_outline: Color32::from_rgb(85, 95, 115),
+                badge_fill: Color32::from_rgb(235, 238, 245),
+                badge_stroke: Color32::from_rgb(180, 188, 205),
+                badge_text: Color32::from_rgb(30, 35, 45),
+                message_label_text: Color32::from_rgb(125, 45, 155),
+                message_label_outline: Color32::from_rgb(245, 247, 250),
+                selected_ring: Color32::from_rgb(217, 119, 6),
+                pin_fill: Color32::from_rgb(30, 35, 45),
+                pin_stroke: Color32::from_rgb(245, 247, 250),
+                context_fill_low: Color32::from_rgb(21, 128, 61),
+                context_fill_mid: Color32::from_rgb(180, 83, 9),
+                context_fill_high: Color32::from_rgb(185, 28, 28),
+                slider_track: Color32::from_rgb(210, 215, 225),
+                slider_fill: Color32::from_rgb(160, 175, 195),
+                slider_knob: Color32::WHITE,
+                slider_stroke: Color32::from_rgb(140, 145, 160),
+            },
+        }
+    }
+
+    pub fn status_color(&self, status: &AgentStatus) -> Color32 {
+        match self.resolved {
+            ResolvedTheme::Dark => match status {
+                AgentStatus::Active => Color32::from_rgb(0x2E, 0xCC, 0x71),
+                AgentStatus::Listening => Color32::from_rgb(0x34, 0x98, 0xDB),
+                AgentStatus::Blocked => Color32::from_rgb(0xE7, 0x4C, 0x3C),
+                AgentStatus::Stopped => Color32::from_rgb(0x7F, 0x8C, 0x8D),
+            },
+            ResolvedTheme::Light => match status {
+                AgentStatus::Active => Color32::from_rgb(21, 128, 61),
+                AgentStatus::Listening => Color32::from_rgb(29, 78, 216),
+                AgentStatus::Blocked => Color32::from_rgb(185, 28, 28),
+                AgentStatus::Stopped => Color32::from_rgb(75, 85, 99),
+            },
+        }
+    }
+
+    pub fn cli_color(&self, tool: Option<&str>) -> Color32 {
+        let t = tool.map(|s| s.to_ascii_lowercase());
+        match self.resolved {
+            ResolvedTheme::Dark => match t.as_deref() {
+                Some("claude") => Color32::from_rgb(0xD9, 0x77, 0x06),
+                Some("codex") => Color32::from_rgb(0x10, 0xA3, 0x7F),
+                Some("agy" | "antigravity" | "gemini") => Color32::from_rgb(0x42, 0x85, 0xF4),
+                Some("hermes") => Color32::from_rgb(0xE8, 0x4A, 0x8A),
+                Some("kimi") => Color32::from_rgb(0x8B, 0x5C, 0xF6),
+                Some("grok") => Color32::from_rgb(0xE5, 0xE7, 0xEB),
+                Some("opencode" | "kilo") => Color32::from_rgb(0x06, 0xB6, 0xD4),
+                Some("pi" | "omp") => Color32::from_rgb(0xEA, 0xB3, 0x08),
+                Some("cursor" | "copilot" | "qoder") => Color32::from_rgb(0x84, 0xCC, 0x16),
+                _ => Color32::from_rgb(0x64, 0x74, 0x8B),
+            },
+            ResolvedTheme::Light => match t.as_deref() {
+                Some("claude") => Color32::from_rgb(180, 83, 9),
+                Some("codex") => Color32::from_rgb(4, 120, 87),
+                Some("agy" | "antigravity" | "gemini") => Color32::from_rgb(29, 78, 216),
+                Some("hermes") => Color32::from_rgb(190, 24, 93),
+                Some("kimi") => Color32::from_rgb(109, 40, 217),
+                Some("grok") => Color32::from_rgb(55, 65, 81),
+                Some("opencode" | "kilo") => Color32::from_rgb(14, 116, 144),
+                Some("pi" | "omp") => Color32::from_rgb(161, 98, 7),
+                Some("cursor" | "copilot" | "qoder") => Color32::from_rgb(77, 124, 15),
+                _ => Color32::from_rgb(71, 85, 105),
+            },
+        }
+    }
+
+    pub fn context_fill_color(&self, percent: f32) -> Color32 {
+        if percent > 85.0 {
+            self.context_fill_high
+        } else if percent >= 70.0 {
+            self.context_fill_mid
+        } else {
+            self.context_fill_low
+        }
+    }
+}
 
 /// The node and edge encodings visible in the current graph (see `legend`).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -40,6 +204,7 @@ pub fn legend(
     layout: &GraphLayout,
     visible: &std::collections::HashSet<NodeIndex>,
     edge_counts: Option<&std::collections::HashMap<EdgeIndex, WindowedCount>>,
+    palette: &ThemePalette,
 ) -> Legend {
     let shown = |idx: &NodeIndex| layout.nodes.contains_key(idx) && visible.contains(idx);
     let mut legend = Legend::default();
@@ -71,7 +236,7 @@ pub fn legend(
         .sort_by_key(|s| order.iter().position(|o| o == s));
     tools.sort();
     for tool in tools {
-        let color = CanvasView::cli_color(Some(&tool));
+        let color = palette.cli_color(Some(&tool));
         match legend.cli.iter_mut().find(|(c, _)| *c == color) {
             Some((_, names)) => names.push(tool),
             None => legend.cli.push((color, vec![tool])),
@@ -188,39 +353,17 @@ impl CanvasView {
     }
 
     pub fn status_color(status: &AgentStatus) -> Color32 {
-        match status {
-            AgentStatus::Active => Color32::from_rgb(46, 204, 113), // Green
-            AgentStatus::Listening => Color32::from_rgb(52, 152, 219), // Blue
-            AgentStatus::Blocked => Color32::from_rgb(231, 76, 60), // Red/Orange
-            AgentStatus::Stopped => Color32::from_rgb(127, 140, 141), // Gray
-        }
+        ThemePalette::for_theme(ResolvedTheme::Dark).status_color(status)
     }
 
     /// Accent ring color of a node by its CLI tool.
     pub fn cli_color(tool: Option<&str>) -> Color32 {
-        match tool.map(|t| t.to_ascii_lowercase()).as_deref() {
-            Some("claude") => Color32::from_rgb(0xD9, 0x77, 0x06),
-            Some("codex") => Color32::from_rgb(0x10, 0xA3, 0x7F),
-            Some("agy" | "antigravity" | "gemini") => Color32::from_rgb(0x42, 0x85, 0xF4),
-            Some("hermes") => Color32::from_rgb(0xE8, 0x4A, 0x8A),
-            Some("kimi") => Color32::from_rgb(0x8B, 0x5C, 0xF6),
-            Some("grok") => Color32::from_rgb(0xE5, 0xE7, 0xEB),
-            Some("opencode" | "kilo") => Color32::from_rgb(0x06, 0xB6, 0xD4),
-            Some("pi" | "omp") => Color32::from_rgb(0xEA, 0xB3, 0x08),
-            Some("cursor" | "copilot" | "qoder") => Color32::from_rgb(0x84, 0xCC, 0x16),
-            _ => Color32::from_rgb(0x64, 0x74, 0x8B),
-        }
+        ThemePalette::for_theme(ResolvedTheme::Dark).cli_color(tool)
     }
 
     /// Context fill color: green below 70 %, amber 70–85 %, red above 85 %.
     pub fn context_fill_color(percent: f32) -> Color32 {
-        if percent > 85.0 {
-            Color32::from_rgb(231, 76, 60)
-        } else if percent >= 70.0 {
-            Color32::from_rgb(243, 156, 18)
-        } else {
-            Color32::from_rgb(46, 204, 113)
-        }
+        ThemePalette::for_theme(ResolvedTheme::Dark).context_fill_color(percent)
     }
 
     /// Distance from a node center where edges start and end: outside the
@@ -319,6 +462,7 @@ impl CanvasView {
         graph: &AgentGraph,
         layout: &mut GraphLayout,
         visible_nodes: Option<&std::collections::HashSet<NodeIndex>>,
+        palette: &ThemePalette,
     ) -> (egui::Response, Option<CanvasAction>) {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -493,12 +637,12 @@ impl CanvasView {
         }
 
         // 3. Render Background Grid
-        let bg_color = Color32::from_rgb(18, 19, 24);
+        let bg_color = palette.canvas_bg;
         painter.rect_filled(rect, 0.0, bg_color);
 
         let grid_size = 50.0 * self.zoom;
         if grid_size > 15.0 {
-            let grid_color = Color32::from_rgba_premultiplied(40, 42, 54, 50);
+            let grid_color = palette.grid_dot;
             let start_x = (rect.center().x + self.pan.x) % grid_size + rect.min.x;
             let start_y = (rect.center().y + self.pan.y) % grid_size + rect.min.y;
 
@@ -565,11 +709,11 @@ impl CanvasView {
             match edge_ref.weight() {
                 EdgeKind::Spawn(_) => {
                     let color = if is_selected {
-                        Color32::from_rgb(241, 196, 15)
+                        palette.edge_selected
                     } else if is_hovered {
-                        Color32::from_rgb(170, 185, 210)
+                        palette.spawn_edge_hover
                     } else {
-                        SPAWN_EDGE_COLOR
+                        palette.spawn_edge
                     };
                     let stroke = Stroke::new(
                         (if is_selected { 2.5 } else { 1.5 }) * self.zoom.clamp(0.5, 2.0),
@@ -608,13 +752,13 @@ impl CanvasView {
                     };
 
                     let color = if is_selected {
-                        Color32::from_rgb(241, 196, 15)
+                        palette.edge_selected
                     } else if is_hovered {
-                        Color32::from_rgb(210, 150, 235)
+                        palette.message_edge_hover
                     } else if inactive {
-                        MESSAGE_EDGE_IDLE_COLOR
+                        palette.message_edge_idle
                     } else {
-                        MESSAGE_EDGE_COLOR
+                        palette.message_edge
                     };
                     let focus = [self.selected_node, self.hovered_node]
                         .iter()
@@ -632,7 +776,7 @@ impl CanvasView {
 
                         // Pill badge with message count
                         if let Some(ref text) = badge {
-                            draw_badge(&painter, ctrl_pt, text, self.zoom);
+                            draw_badge(&painter, ctrl_pt, text, self.zoom, palette);
                         }
                     } else {
                         painter.line_segment([start_pt, end_pt], stroke);
@@ -641,7 +785,7 @@ impl CanvasView {
                         // Pill badge with message count
                         let mid_pt = start_pt + (end_pt - start_pt) * 0.5;
                         if let Some(ref text) = badge {
-                            draw_badge(&painter, mid_pt, text, self.zoom);
+                            draw_badge(&painter, mid_pt, text, self.zoom, palette);
                         }
                     }
                 }
@@ -688,8 +832,8 @@ impl CanvasView {
             let is_dragged = self.dragged_node == Some(*idx);
             let is_selected = self.selected_node == Some(*idx);
 
-            let status_color = Self::status_color(&node_data.status);
-            let node_fill = Color32::from_rgb(28, 30, 38);
+            let status_color = palette.status_color(&node_data.status);
+            let node_fill = palette.node_fill;
 
             let border_width = if is_dragged || is_hovered || is_selected {
                 3.5 * self.zoom
@@ -704,7 +848,7 @@ impl CanvasView {
                 painter.circle_stroke(
                     center,
                     node_radius + 11.0 * self.zoom,
-                    Stroke::new(2.5 * self.zoom, Color32::from_rgb(241, 196, 15)),
+                    Stroke::new(2.5 * self.zoom, palette.selected_ring),
                 );
             }
 
@@ -729,7 +873,7 @@ impl CanvasView {
             if let Some(pct) = style.context_percent {
                 let fill_points = context_fill_polygon(center, node_radius, pct);
                 if fill_points.len() >= 3 {
-                    let c = Self::context_fill_color(pct);
+                    let c = palette.context_fill_color(pct);
                     painter.add(egui::Shape::convex_polygon(
                         fill_points,
                         Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 110),
@@ -744,7 +888,10 @@ impl CanvasView {
             painter.circle_stroke(
                 center,
                 node_radius + 3.5 * self.zoom,
-                Stroke::new(2.5 * self.zoom, Self::cli_color(node_data.tool.as_deref())),
+                Stroke::new(
+                    2.5 * self.zoom,
+                    palette.cli_color(node_data.tool.as_deref()),
+                ),
             );
 
             // Roaming agents: dashed outer outline
@@ -752,7 +899,7 @@ impl CanvasView {
                 let ring = circle_points(center, node_radius + 7.5 * self.zoom, 48);
                 painter.extend(egui::Shape::dashed_line(
                     &ring,
-                    Stroke::new(1.5 * self.zoom, ROAMING_OUTLINE_COLOR),
+                    Stroke::new(1.5 * self.zoom, palette.roaming_outline),
                     5.0 * self.zoom,
                     3.5 * self.zoom,
                 ));
@@ -763,8 +910,8 @@ impl CanvasView {
                 painter.circle(
                     center + Vec2::new(0.72, -0.72) * node_radius,
                     4.0 * self.zoom,
-                    Color32::from_rgb(236, 240, 241),
-                    Stroke::new(1.5 * self.zoom, Color32::from_rgb(18, 19, 24)),
+                    palette.pin_fill,
+                    Stroke::new(1.5 * self.zoom, palette.pin_stroke),
                 );
             }
 
@@ -772,7 +919,7 @@ impl CanvasView {
             let galley = painter.layout_no_wrap(
                 node_data.name.clone(),
                 FontId::proportional(label_font_size(self.zoom)),
-                Color32::WHITE,
+                palette.node_text_primary,
             );
             let label = label_rect(center, galley.size(), self.zoom);
             labels.push((
@@ -795,7 +942,11 @@ impl CanvasView {
         for ((item, galley), shown) in labels.into_iter().zip(visible_labels(&items)) {
             if shown {
                 painter.rect_filled(item.0, 3.0 * self.zoom, bg_color);
-                painter.galley(item.0.min + LABEL_PAD * self.zoom, galley, Color32::WHITE);
+                painter.galley(
+                    item.0.min + LABEL_PAD * self.zoom,
+                    galley,
+                    palette.node_text_primary,
+                );
             }
         }
 
@@ -806,7 +957,7 @@ impl CanvasView {
             painter.add(egui::Shape::convex_polygon(
                 vec![tip, base + normal * 6.0, base - normal * 6.0],
                 color,
-                Stroke::new(1.0, Color32::from_rgb(18, 19, 24)),
+                Stroke::new(1.0, palette.canvas_bg),
             ));
         }
 
@@ -1034,26 +1185,32 @@ fn draw_quadratic_bezier(painter: &egui::Painter, p0: Pos2, p1: Pos2, p2: Pos2, 
     }
 }
 
-fn draw_badge(painter: &egui::Painter, center: Pos2, text: &str, zoom: f32) {
+fn draw_badge(
+    painter: &egui::Painter,
+    center: Pos2,
+    text: &str,
+    zoom: f32,
+    palette: &ThemePalette,
+) {
     let font_size = (10.0 * zoom).clamp(7.0, 14.0);
     let galley = painter.layout_no_wrap(
         text.to_string(),
         FontId::proportional(font_size),
-        Color32::from_rgb(220, 220, 230),
+        palette.badge_text,
     );
     let badge_rect =
         Rect::from_center_size(center, galley.size() + Vec2::new(8.0 * zoom, 4.0 * zoom));
 
-    painter.rect_filled(badge_rect, 4.0 * zoom, Color32::from_rgb(35, 38, 50));
+    painter.rect_filled(badge_rect, 4.0 * zoom, palette.badge_fill);
     painter.rect_stroke(
         badge_rect,
         4.0 * zoom,
-        Stroke::new(1.0, Color32::from_rgb(70, 75, 95)),
+        Stroke::new(1.0, palette.badge_stroke),
         egui::StrokeKind::Outside,
     );
     painter.galley(
         badge_rect.min + Vec2::new(4.0 * zoom, 2.0 * zoom),
         galley,
-        Color32::from_rgb(220, 220, 230),
+        palette.badge_text,
     );
 }

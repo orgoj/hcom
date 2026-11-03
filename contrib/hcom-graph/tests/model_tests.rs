@@ -4050,7 +4050,15 @@ fn test_canvas_drag_release_keeps_only_user_pins() {
             },
             |ui| {
                 center = canvas.world_to_screen(Pos2::ZERO, ui.max_rect());
-                canvas.show(ui, &graph, &mut layout, None);
+                canvas.show(
+                    ui,
+                    &graph,
+                    &mut layout,
+                    None,
+                    &hcom_graph::canvas::ThemePalette::for_theme(
+                        hcom_graph::config::ResolvedTheme::Dark,
+                    ),
+                );
             },
         )
         .textures_delta
@@ -4071,7 +4079,15 @@ fn test_canvas_drag_release_keeps_only_user_pins() {
                 ..Default::default()
             };
             ctx.run_ui(input, |ui| {
-                canvas.show(ui, &graph, &mut layout, None);
+                canvas.show(
+                    ui,
+                    &graph,
+                    &mut layout,
+                    None,
+                    &hcom_graph::canvas::ThemePalette::for_theme(
+                        hcom_graph::config::ResolvedTheme::Dark,
+                    ),
+                );
             })
             .textures_delta
             .clear();
@@ -4347,7 +4363,15 @@ fn test_canvas_plain_hover_sets_hovered_node() {
             input.events.push(egui::Event::PointerMoved(center));
         }
         ctx.run_ui(input, |ui| {
-            let (resp, _) = canvas.show(ui, &graph, &mut layout, None);
+            let (resp, _) = canvas.show(
+                ui,
+                &graph,
+                &mut layout,
+                None,
+                &hcom_graph::canvas::ThemePalette::for_theme(
+                    hcom_graph::config::ResolvedTheme::Dark,
+                ),
+            );
             center = resp.rect.center();
         })
         .textures_delta
@@ -6257,7 +6281,8 @@ fn legend_message(from: &str, to: &str, id: u64) -> MessageEvent {
 
 #[test]
 fn test_legend_lists_only_visible_encodings() {
-    use hcom_graph::canvas::{Legend, legend};
+    use hcom_graph::canvas::{Legend, ThemePalette, legend};
+    use hcom_graph::config::ResolvedTheme;
     use hcom_graph::model::{NodeStyle, WindowedCount};
     use std::collections::{HashMap, HashSet};
 
@@ -6292,6 +6317,8 @@ fn test_legend_lists_only_visible_encodings() {
     let idx = |n: &str| graph.get_node_index(n).unwrap();
     assert!(!layout.nodes.contains_key(&idx("agent_f")));
 
+    let dark_palette = ThemePalette::for_theme(ResolvedTheme::Dark);
+
     let blue = CanvasView::cli_color(Some("agy"));
     let codex = CanvasView::cli_color(Some("codex"));
     let unknown = CanvasView::cli_color(None);
@@ -6302,7 +6329,7 @@ fn test_legend_lists_only_visible_encodings() {
         .map(|n| idx(n))
         .collect();
     assert_eq!(
-        legend(&graph, &layout, &visible, None),
+        legend(&graph, &layout, &visible, None, &dark_palette),
         Legend {
             statuses: vec![AgentStatus::Active, AgentStatus::Blocked],
             cli: vec![
@@ -6321,7 +6348,7 @@ fn test_legend_lists_only_visible_encodings() {
     let all: HashSet<_> = graph.graph.node_indices().collect();
     let ab = graph.message_edges[&("agent_a".to_string(), "agent_b".to_string())];
     let counts: HashMap<_, _> = [(ab, WindowedCount::default())].into();
-    let l = legend(&graph, &layout, &all, Some(&counts));
+    let l = legend(&graph, &layout, &all, Some(&counts), &dark_palette);
     assert_eq!(
         l.statuses,
         vec![
@@ -6339,7 +6366,7 @@ fn test_legend_lists_only_visible_encodings() {
 
     // Nothing visible: an empty legend.
     assert_eq!(
-        legend(&graph, &layout, &HashSet::new(), None),
+        legend(&graph, &layout, &HashSet::new(), None, &dark_palette),
         Legend::default()
     );
 }
@@ -6882,7 +6909,15 @@ fn test_task_77_30_unified_selection_and_action_dispatch() {
             ..Default::default()
         },
         |ui| {
-            let (resp, action) = app.canvas.show(ui, &app.graph, &mut app.layout, None);
+            let (resp, action) = app.canvas.show(
+                ui,
+                &app.graph,
+                &mut app.layout,
+                None,
+                &hcom_graph::canvas::ThemePalette::for_theme(
+                    hcom_graph::config::ResolvedTheme::Dark,
+                ),
+            );
             center_alpha = app
                 .canvas
                 .world_to_screen(Pos2::new(100.0, 100.0), resp.rect);
@@ -6913,7 +6948,15 @@ fn test_task_77_30_unified_selection_and_action_dispatch() {
             ..Default::default()
         };
         ctx.run_ui(input, |ui| {
-            let (_resp, action) = app.canvas.show(ui, &app.graph, &mut app.layout, None);
+            let (_resp, action) = app.canvas.show(
+                ui,
+                &app.graph,
+                &mut app.layout,
+                None,
+                &hcom_graph::canvas::ThemePalette::for_theme(
+                    hcom_graph::config::ResolvedTheme::Dark,
+                ),
+            );
             app.handle_canvas_action(action);
         })
         .textures_delta
@@ -6957,7 +7000,15 @@ fn test_task_77_30_unified_selection_and_action_dispatch() {
             ..Default::default()
         };
         ctx.run_ui(input, |ui| {
-            let (_resp, action) = app.canvas.show(ui, &app.graph, &mut app.layout, None);
+            let (_resp, action) = app.canvas.show(
+                ui,
+                &app.graph,
+                &mut app.layout,
+                None,
+                &hcom_graph::canvas::ThemePalette::for_theme(
+                    hcom_graph::config::ResolvedTheme::Dark,
+                ),
+            );
             app.handle_canvas_action(action);
         })
         .textures_delta
@@ -8413,4 +8464,471 @@ fn test_task_77_31_apply_message_range_rejects_overflow_and_preserves_prior_wind
     );
     assert_eq!(app.msg_window.span_secs, Some(3600));
     assert_eq!(app.state.window_span_secs, Some(3600));
+}
+
+// ---------------------------------------------------------------------------
+// TASK-77.37: Light theme & default theme according to OS
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_task_77_37_theme_deserialization_and_forward_compatibility() {
+    use hcom_graph::config::{GraphState, ThemePreference};
+
+    // 1. Explicit theme preferences
+    let json_light = r#"{"theme": "light"}"#;
+    let state_light: GraphState = serde_json::from_str(json_light).unwrap();
+    assert_eq!(state_light.theme, Some(ThemePreference::Light));
+
+    let json_dark = r#"{"theme": "dark"}"#;
+    let state_dark: GraphState = serde_json::from_str(json_dark).unwrap();
+    assert_eq!(state_dark.theme, Some(ThemePreference::Dark));
+
+    let json_auto = r#"{"theme": "auto"}"#;
+    let state_auto: GraphState = serde_json::from_str(json_auto).unwrap();
+    assert_eq!(state_auto.theme, Some(ThemePreference::Auto));
+
+    // 2. Missing theme defaults to None (which acts as Auto)
+    let json_empty = r#"{}"#;
+    let state_empty: GraphState = serde_json::from_str(json_empty).unwrap();
+    assert_eq!(state_empty.theme, None);
+
+    // 3. Forward-compatibility: unknown theme names must not reject state
+    let json_unknown = r#"{
+        "theme": "solarized_high_contrast",
+        "detail_width_px": 420.0,
+        "sort_col": "status"
+    }"#;
+    let state_unknown: GraphState = serde_json::from_str(json_unknown).unwrap();
+    assert_eq!(
+        state_unknown.theme, None,
+        "Unknown theme must deserialize to None without error"
+    );
+    assert_eq!(state_unknown.detail_width_px, Some(420.0));
+    assert_eq!(state_unknown.sort_col, Some("status".into()));
+
+    // 4. Round-trip serialization
+    let state = GraphState {
+        theme: Some(ThemePreference::Light),
+        ..Default::default()
+    };
+    let serialized = serde_json::to_string(&state).unwrap();
+    assert!(serialized.contains(r#""theme":"light""#));
+    let restored: GraphState = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(restored.theme, Some(ThemePreference::Light));
+}
+
+#[test]
+fn test_task_77_37_system_theme_resolution() {
+    use hcom_graph::config::{ResolvedTheme, ThemePreference};
+
+    // Auto theme resolution
+    assert_eq!(
+        ThemePreference::Auto.resolve(None),
+        ResolvedTheme::Dark,
+        "Auto with None system_theme must fall back deterministically to Dark"
+    );
+    assert_eq!(
+        ThemePreference::Auto.resolve(Some(egui::Theme::Light)),
+        ResolvedTheme::Light
+    );
+    assert_eq!(
+        ThemePreference::Auto.resolve(Some(egui::Theme::Dark)),
+        ResolvedTheme::Dark
+    );
+
+    // Explicit Light theme resolution
+    assert_eq!(ThemePreference::Light.resolve(None), ResolvedTheme::Light);
+    assert_eq!(
+        ThemePreference::Light.resolve(Some(egui::Theme::Dark)),
+        ResolvedTheme::Light
+    );
+    assert_eq!(
+        ThemePreference::Light.resolve(Some(egui::Theme::Light)),
+        ResolvedTheme::Light
+    );
+
+    // Explicit Dark theme resolution
+    assert_eq!(ThemePreference::Dark.resolve(None), ResolvedTheme::Dark);
+    assert_eq!(
+        ThemePreference::Dark.resolve(Some(egui::Theme::Light)),
+        ResolvedTheme::Dark
+    );
+    assert_eq!(
+        ThemePreference::Dark.resolve(Some(egui::Theme::Dark)),
+        ResolvedTheme::Dark
+    );
+}
+
+fn wcag_relative_luminance(c: egui::Color32) -> f64 {
+    fn channel(v: u8) -> f64 {
+        let val = v as f64 / 255.0;
+        if val <= 0.04045 {
+            val / 12.92
+        } else {
+            ((val + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * channel(c.r()) + 0.7152 * channel(c.g()) + 0.0722 * channel(c.b())
+}
+
+fn wcag_contrast_ratio(c1: egui::Color32, c2: egui::Color32) -> f64 {
+    let l1 = wcag_relative_luminance(c1);
+    let l2 = wcag_relative_luminance(c2);
+    let (lighter, darker) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
+    (lighter + 0.05) / (darker + 0.05)
+}
+
+#[test]
+fn test_task_77_37_palette_contrast_all_entries() {
+    use hcom_graph::canvas::ThemePalette;
+    use hcom_graph::config::ResolvedTheme;
+    use hcom_graph::model::AgentStatus;
+
+    for resolved in [ResolvedTheme::Dark, ResolvedTheme::Light] {
+        let palette = ThemePalette::for_theme(resolved);
+
+        // 1. Text contrast (WCAG AA >= 4.5:1 for primary text, >= 3.0:1 for secondary)
+        let primary_contrast = wcag_contrast_ratio(palette.node_text_primary, palette.node_fill);
+        assert!(
+            primary_contrast >= 4.5,
+            "{:?} primary text contrast {:.2} must be >= 4.5",
+            resolved,
+            primary_contrast
+        );
+        let secondary_contrast =
+            wcag_contrast_ratio(palette.node_text_secondary, palette.node_fill);
+        assert!(
+            secondary_contrast >= 3.0,
+            "{:?} secondary text contrast {:.2} must be >= 3.0",
+            resolved,
+            secondary_contrast
+        );
+
+        // 2. All AgentStatus colors meet non-text contrast >= 3.0:1 against node_fill
+        for status in [
+            AgentStatus::Active,
+            AgentStatus::Listening,
+            AgentStatus::Blocked,
+            AgentStatus::Stopped,
+        ] {
+            let sc = palette.status_color(&status);
+            let ratio = wcag_contrast_ratio(sc, palette.node_fill);
+            assert!(
+                ratio >= 3.0,
+                "{:?} status {:?} contrast {:.2} must be >= 3.0 against node_fill",
+                resolved,
+                status,
+                ratio
+            );
+        }
+
+        // 3. All CLI ring colors meet non-text contrast >= 3.0:1 against node_fill
+        let tools = [
+            "claude",
+            "codex",
+            "gemini",
+            "agy",
+            "antigravity",
+            "hermes",
+            "kimi",
+            "grok",
+            "opencode",
+            "kilo",
+            "pi",
+            "omp",
+            "cursor",
+            "copilot",
+            "unknown",
+        ];
+        for tool in tools {
+            let cc = palette.cli_color(Some(tool));
+            let ratio = wcag_contrast_ratio(cc, palette.node_fill);
+            assert!(
+                ratio >= 3.0,
+                "{:?} CLI tool {:?} contrast {:.2} must be >= 3.0 against node_fill",
+                resolved,
+                tool,
+                ratio
+            );
+        }
+
+        // 4. Pin marker contrast against node_fill >= 3.0:1
+        let pin_ratio = wcag_contrast_ratio(palette.pin_fill, palette.node_fill);
+        assert!(
+            pin_ratio >= 3.0,
+            "{:?} pin_fill contrast {:.2} must be >= 3.0 against node_fill",
+            resolved,
+            pin_ratio
+        );
+
+        // 5. Context fill polygons against node_fill >= 3.0:1
+        for (name, fill) in [
+            ("low", palette.context_fill_low),
+            ("mid", palette.context_fill_mid),
+            ("high", palette.context_fill_high),
+        ] {
+            let ratio = wcag_contrast_ratio(fill, palette.node_fill);
+            assert!(
+                ratio >= 3.0,
+                "{:?} context fill {} contrast {:.2} must be >= 3.0 against node_fill",
+                resolved,
+                name,
+                ratio
+            );
+        }
+
+        // 6. Badge text contrast on badge fill >= 3.0:1
+        let badge_ratio = wcag_contrast_ratio(palette.badge_text, palette.badge_fill);
+        assert!(
+            badge_ratio >= 3.0,
+            "{:?} badge text contrast {:.2} must be >= 3.0 on badge_fill",
+            resolved,
+            badge_ratio
+        );
+    }
+}
+
+#[test]
+fn test_task_77_37_legend_matches_active_palette() {
+    use hcom_graph::canvas::{ThemePalette, legend};
+    use hcom_graph::config::ResolvedTheme;
+    use hcom_graph::layout::GraphLayout;
+    use hcom_graph::model::AgentGraph;
+    use std::collections::HashSet;
+
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[
+        legend_snap("agent_claude", "active", Some("claude"), None),
+        legend_snap("agent_grok", "blocked", Some("grok"), None),
+        legend_snap("agent_pi", "listening", Some("pi"), None),
+    ]);
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+    let visible: HashSet<_> = graph.graph.node_indices().collect();
+
+    let light_palette = ThemePalette::for_theme(ResolvedTheme::Light);
+    let dark_palette = ThemePalette::for_theme(ResolvedTheme::Dark);
+
+    let l_light = legend(&graph, &layout, &visible, None, &light_palette);
+    let l_dark = legend(&graph, &layout, &visible, None, &dark_palette);
+
+    // Grok color in dark palette is light (#E5E7EB), in light palette is dark (#374151)
+    let light_grok_color = light_palette.cli_color(Some("grok"));
+    let dark_grok_color = dark_palette.cli_color(Some("grok"));
+    assert_ne!(light_grok_color, dark_grok_color);
+
+    assert!(
+        l_light
+            .cli
+            .iter()
+            .any(|(c, tools)| *c == light_grok_color && tools.contains(&"grok".into())),
+        "Light legend must use light palette color for grok"
+    );
+    assert!(
+        l_dark
+            .cli
+            .iter()
+            .any(|(c, tools)| *c == dark_grok_color && tools.contains(&"grok".into())),
+        "Dark legend must use dark palette color for grok"
+    );
+
+    // Status colors in active palette
+    assert_ne!(
+        light_palette.status_color(&hcom_graph::model::AgentStatus::Active),
+        dark_palette.status_color(&hcom_graph::model::AgentStatus::Active)
+    );
+    assert_ne!(
+        light_palette.status_color(&hcom_graph::model::AgentStatus::Listening),
+        dark_palette.status_color(&hcom_graph::model::AgentStatus::Listening)
+    );
+}
+
+#[test]
+fn test_task_77_37_top_bar_theme_toggle_cycles_and_persists() {
+    use eframe::App;
+    use egui::{Pos2, Rect, Vec2};
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState, ThemePreference, load_state};
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = GraphState {
+        theme: Some(ThemePreference::Auto),
+        ..Default::default()
+    };
+    let mut app =
+        HcomGraphApp::new_for_test(GraphConfig::default(), state, dir.path().to_path_buf());
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let run = |ctx: &egui::Context,
+               app: &mut HcomGraphApp,
+               frame: &mut eframe::Frame,
+               events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            app.ui(ui, frame);
+        });
+        out.textures_delta.clear();
+        out
+    };
+
+    let click_widget = |ctx: &egui::Context,
+                        app: &mut HcomGraphApp,
+                        frame: &mut eframe::Frame,
+                        out: &egui::FullOutput,
+                        substr: &str| {
+        let update = out
+            .platform_output
+            .accesskit_update
+            .as_ref()
+            .expect("accesskit update");
+        let rect = update
+            .nodes
+            .iter()
+            .find_map(|(_, node)| {
+                let label = node.label()?;
+                if !label.contains(substr) {
+                    return None;
+                }
+                let b = node.bounds()?;
+                Some(Rect::from_min_max(
+                    Pos2::new(b.x0 as f32, b.y0 as f32),
+                    Pos2::new(b.x1 as f32, b.y1 as f32),
+                ))
+            })
+            .unwrap_or_else(|| panic!("Widget with label containing '{substr}' not found"));
+        let pos = rect.center();
+        run(
+            ctx,
+            app,
+            frame,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        run(
+            ctx,
+            app,
+            frame,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    };
+
+    // 1. Initial state is Auto
+    assert_eq!(app.state.theme, Some(ThemePreference::Auto));
+    let out = run(&ctx, &mut app, &mut frame, vec![]);
+
+    // 2. Click button "💻 Auto" -> cycles to Light
+    click_widget(&ctx, &mut app, &mut frame, &out, "Auto");
+    assert_eq!(app.state.theme, Some(ThemePreference::Light));
+    let reloaded = load_state(dir.path());
+    assert_eq!(reloaded.theme, Some(ThemePreference::Light));
+
+    // 3. Frame with Light theme applies light visuals
+    let out = run(&ctx, &mut app, &mut frame, vec![]);
+    assert_eq!(ctx.theme(), egui::Theme::Light);
+
+    // 4. Click button "☀ Light" -> cycles to Dark
+    click_widget(&ctx, &mut app, &mut frame, &out, "Light");
+    assert_eq!(app.state.theme, Some(ThemePreference::Dark));
+    let reloaded = load_state(dir.path());
+    assert_eq!(reloaded.theme, Some(ThemePreference::Dark));
+
+    let out = run(&ctx, &mut app, &mut frame, vec![]);
+    assert_eq!(ctx.theme(), egui::Theme::Dark);
+
+    // 5. Click button "🌙 Dark" -> cycles to Auto
+    click_widget(&ctx, &mut app, &mut frame, &out, "Dark");
+    assert_eq!(app.state.theme, Some(ThemePreference::Auto));
+    let reloaded = load_state(dir.path());
+    assert_eq!(reloaded.theme, Some(ThemePreference::Auto));
+}
+
+#[test]
+fn test_task_77_37_detail_tabs_palette_contrast_light_mode() {
+    use hcom_graph::canvas::ThemePalette;
+    use hcom_graph::config::ResolvedTheme;
+    use hcom_graph::model::AgentStatus;
+
+    let palette = ThemePalette::for_theme(ResolvedTheme::Light);
+    let panel_bg = egui::Color32::from_rgb(255, 255, 255);
+
+    // All status colors in detail tabs (Summary, Config) must meet WCAG >= 3.0:1 on panel bg
+    for status in [
+        AgentStatus::Active,
+        AgentStatus::Listening,
+        AgentStatus::Blocked,
+        AgentStatus::Stopped,
+    ] {
+        let sc = palette.status_color(&status);
+        let ratio = wcag_contrast_ratio(sc, panel_bg);
+        assert!(
+            ratio >= 3.0,
+            "Light mode status {:?} contrast {:.2} must be >= 3.0 against panel bg",
+            status,
+            ratio
+        );
+    }
+
+    // Config roaming and disabled labels
+    let roaming_ratio = wcag_contrast_ratio(palette.message_edge, panel_bg);
+    assert!(
+        roaming_ratio >= 3.0,
+        "Light mode roaming badge contrast {:.2} must be >= 3.0 against panel bg",
+        roaming_ratio
+    );
+    let disabled_ratio = wcag_contrast_ratio(palette.status_color(&AgentStatus::Blocked), panel_bg);
+    assert!(
+        disabled_ratio >= 3.0,
+        "Light mode disabled badge contrast {:.2} must be >= 3.0 against panel bg",
+        disabled_ratio
+    );
+}
+
+#[test]
+fn test_task_77_37_auto_restores_light_visuals_when_light_system_had_dark_visuals() {
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState, ResolvedTheme, ThemePreference};
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = GraphState {
+        theme: Some(ThemePreference::Auto),
+        ..Default::default()
+    };
+    let mut app =
+        HcomGraphApp::new_for_test(GraphConfig::default(), state, dir.path().to_path_buf());
+
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        system_theme: Some(egui::Theme::Light),
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(input, |_ui| {});
+    out.textures_delta.clear();
+    assert_eq!(ctx.system_theme(), Some(egui::Theme::Light));
+
+    ctx.set_visuals(egui::Visuals::dark());
+    assert!(ctx.global_style().visuals.dark_mode);
+
+    let palette = app.apply_theme(&ctx);
+    assert_eq!(palette.resolved, ResolvedTheme::Light);
+    assert!(!ctx.global_style().visuals.dark_mode);
+    assert_eq!(ctx.theme(), egui::Theme::Light);
 }

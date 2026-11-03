@@ -210,6 +210,62 @@ where
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePreference {
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedTheme {
+    Dark,
+    Light,
+}
+
+impl ThemePreference {
+    /// Resolves user preference against the OS theme.
+    /// If Auto and system_theme is None (e.g. headless or unsupported OS),
+    /// deterministically falls back to `ResolvedTheme::Dark`.
+    pub fn resolve(&self, system_theme: Option<egui::Theme>) -> ResolvedTheme {
+        match self {
+            Self::Light => ResolvedTheme::Light,
+            Self::Dark => ResolvedTheme::Dark,
+            Self::Auto => match system_theme {
+                Some(egui::Theme::Light) => ResolvedTheme::Light,
+                Some(egui::Theme::Dark) | None => ResolvedTheme::Dark,
+            },
+        }
+    }
+}
+
+pub fn deserialize_theme_preference<'de, D>(
+    deserializer: D,
+) -> Result<Option<ThemePreference>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    enum RawTheme {
+        Auto,
+        Light,
+        Dark,
+        #[serde(other)]
+        Other,
+    }
+
+    let raw = Option::<RawTheme>::deserialize(deserializer)?;
+    Ok(match raw {
+        Some(RawTheme::Auto) => Some(ThemePreference::Auto),
+        Some(RawTheme::Light) => Some(ThemePreference::Light),
+        Some(RawTheme::Dark) => Some(ThemePreference::Dark),
+        Some(RawTheme::Other) | None => None,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphState {
     #[serde(default)]
@@ -230,6 +286,9 @@ pub struct GraphState {
     /// Active panel layout mode: both graph and table, graph only, or table only.
     #[serde(default, deserialize_with = "deserialize_view_mode")]
     pub view_mode: Option<ViewMode>,
+    /// Visual theme preference (auto, light, dark).
+    #[serde(default, deserialize_with = "deserialize_theme_preference")]
+    pub theme: Option<ThemePreference>,
     #[serde(default = "default_true")]
     pub show_table: bool,
     #[serde(default)]
@@ -434,6 +493,7 @@ impl Default for GraphState {
             detail_width_px: None,
             detail_width_frac: None,
             view_mode: Some(ViewMode::Both),
+            theme: None,
             show_table: true,
             running_only: false,
             blocked_only: false,

@@ -1,9 +1,10 @@
 use crate::action::{ActionRequest, ActionResult, ActionWorkerHandle, SystemActionRunner};
-use crate::canvas::{CanvasAction, CanvasView};
+use crate::canvas::{CanvasAction, CanvasView, ThemePalette};
 use crate::config::{
     DEFAULT_DETAIL_WIDTH_PX, DETAIL_TABS, GraphConfig, GraphState, PlaceholderContext,
-    SIDE_PANEL_MIN_WIDTH, SPLIT_FRAC_MAX, SPLIT_FRAC_MIN, ViewMode, load_config, load_state,
-    replace_placeholders_str, replace_placeholders_vec, save_state, screen_bar_buttons,
+    ResolvedTheme, SIDE_PANEL_MIN_WIDTH, SPLIT_FRAC_MAX, SPLIT_FRAC_MIN, ThemePreference, ViewMode,
+    load_config, load_state, replace_placeholders_str, replace_placeholders_vec, save_state,
+    screen_bar_buttons,
 };
 use crate::layout::{GraphLayout, LayoutMode};
 use crate::model::{
@@ -137,10 +138,7 @@ fn legend_row(ui: &mut egui::Ui, swatch: Swatch, text: &str) {
 }
 
 /// Legend tab: the encodings of `legend`, sections without entries omitted.
-fn render_legend(ui: &mut egui::Ui, legend: &crate::canvas::Legend) {
-    use crate::canvas::{
-        MESSAGE_EDGE_COLOR, MESSAGE_EDGE_IDLE_COLOR, ROAMING_OUTLINE_COLOR, SPAWN_EDGE_COLOR,
-    };
+fn render_legend(ui: &mut egui::Ui, legend: &crate::canvas::Legend, palette: &ThemePalette) {
     if legend.statuses.is_empty() {
         ui.weak("Nothing visible in the graph");
         return;
@@ -153,11 +151,7 @@ fn render_legend(ui: &mut egui::Ui, legend: &crate::canvas::Legend) {
             AgentStatus::Blocked => "blocked",
             AgentStatus::Stopped => "stopped",
         };
-        legend_row(
-            ui,
-            Swatch::Ring(CanvasView::status_color(status), 2.2),
-            name,
-        );
+        legend_row(ui, Swatch::Ring(palette.status_color(status), 2.2), name);
     }
     ui.add_space(6.0);
     ui.strong("CLI (outer ring)");
@@ -169,7 +163,7 @@ fn render_legend(ui: &mut egui::Ui, legend: &crate::canvas::Legend) {
         ui.strong("Outline");
         legend_row(
             ui,
-            Swatch::DashedRing(ROAMING_OUTLINE_COLOR),
+            Swatch::DashedRing(palette.roaming_outline),
             "roaming agent",
         );
     }
@@ -179,17 +173,17 @@ fn render_legend(ui: &mut egui::Ui, legend: &crate::canvas::Legend) {
         if legend.spawn {
             legend_row(
                 ui,
-                Swatch::Line(SPAWN_EDGE_COLOR, true),
+                Swatch::Line(palette.spawn_edge, true),
                 "spawn (parent → child)",
             );
         }
         if legend.message {
-            legend_row(ui, Swatch::Line(MESSAGE_EDGE_COLOR, false), "messages");
+            legend_row(ui, Swatch::Line(palette.message_edge, false), "messages");
         }
         if legend.message_idle {
             legend_row(
                 ui,
-                Swatch::Line(MESSAGE_EDGE_IDLE_COLOR, false),
+                Swatch::Line(palette.message_edge_idle, false),
                 "no messages in the time window",
             );
         }
@@ -249,6 +243,7 @@ pub struct HcomGraphApp {
     window_cache_key: Option<WindowCacheKey>,
     pub selection_generation: u64,
     pub search_query: String,
+    pub last_resolved_theme: Option<ResolvedTheme>,
 
     // Message time range text input & two-handle slider state
     pub time_range_text: String,
@@ -354,9 +349,7 @@ pub fn accept_generation_result(current_generation: u64, result_generation: u64)
 }
 
 impl HcomGraphApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, sync: Option<BackgroundSync>) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
-
+    pub fn new(_cc: &eframe::CreationContext<'_>, sync: Option<BackgroundSync>) -> Self {
         let hcom_dir = std::env::var("HCOM_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
@@ -459,6 +452,7 @@ impl HcomGraphApp {
             send_target: String::new(),
             send_text: String::new(),
             inject_input_has_focus: false,
+            last_resolved_theme: None,
         };
         app.apply_persisted_view();
 
@@ -551,6 +545,7 @@ impl HcomGraphApp {
             send_target: String::new(),
             send_text: String::new(),
             inject_input_has_focus: false,
+            last_resolved_theme: None,
         }
     }
 
@@ -558,6 +553,31 @@ impl HcomGraphApp {
         if let Err(e) = save_state(&self.hcom_dir, &self.state) {
             eprintln!("Warning: failed to save graph state: {}", e);
         }
+    }
+
+    /// Resolves theme preference against the OS and synchronizes egui Visuals.
+    pub fn apply_theme(&mut self, ctx: &egui::Context) -> ThemePalette {
+        let preference = self.state.theme.unwrap_or_default();
+        let resolved = preference.resolve(ctx.system_theme());
+        let dark_mode = resolved == ResolvedTheme::Dark;
+        let expected_theme = if dark_mode {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        };
+        if self.last_resolved_theme != Some(resolved)
+            || ctx.theme() != expected_theme
+            || ctx.global_style().visuals.dark_mode != dark_mode
+        {
+            self.last_resolved_theme = Some(resolved);
+            ctx.set_theme(expected_theme);
+            ctx.set_visuals(if dark_mode {
+                egui::Visuals::dark()
+            } else {
+                egui::Visuals::light()
+            });
+        }
+        ThemePalette::for_theme(resolved)
     }
 
     /// Sets span and limit of the message window, keeps the scrubber end,
@@ -1222,6 +1242,7 @@ impl HcomGraphApp {
         max_ts: f64,
         start_ts: &mut f64,
         end_ts: &mut f64,
+        palette: &ThemePalette,
     ) -> (egui::Response, bool, bool) {
         let size = egui::vec2(160.0, 18.0);
         let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
@@ -1232,7 +1253,7 @@ impl HcomGraphApp {
                 egui::pos2(rect.max.x - 6.0, rect.center().y + 2.0),
             );
             ui.painter()
-                .rect_filled(track_rect, 2.0, egui::Color32::from_rgb(60, 60, 65));
+                .rect_filled(track_rect, 2.0, palette.slider_track);
             return (response, false, false);
         }
 
@@ -1344,7 +1365,7 @@ impl HcomGraphApp {
 
         // 1. Background rail
         ui.painter()
-            .rect_filled(track_rect, 2.0, egui::Color32::from_rgb(55, 55, 60));
+            .rect_filled(track_rect, 2.0, palette.slider_track);
 
         // 2. Highlighted active range between thumbs
         let active_rail = egui::Rect::from_min_max(
@@ -1352,7 +1373,7 @@ impl HcomGraphApp {
             egui::pos2(end_x, track_rect.max.y),
         );
         ui.painter()
-            .rect_filled(active_rail, 2.0, ui.visuals().selection.bg_fill);
+            .rect_filled(active_rail, 2.0, palette.slider_fill);
 
         // 3. Start thumb circle
         let start_pos = egui::pos2(start_x, rect.center().y);
@@ -1360,15 +1381,15 @@ impl HcomGraphApp {
             .hover_pos()
             .is_some_and(|p| p.distance(start_pos) <= handle_radius + 2.0);
         let start_fill = if hovered_start {
-            egui::Color32::from_rgb(255, 255, 255)
+            palette.slider_knob
         } else {
-            egui::Color32::from_rgb(220, 220, 220)
+            palette.slider_knob.gamma_multiply(0.85)
         };
         ui.painter().circle(
             start_pos,
             handle_radius,
             start_fill,
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(100, 100, 100)),
+            egui::Stroke::new(1.5, palette.slider_stroke),
         );
 
         // 4. End thumb circle
@@ -1377,15 +1398,15 @@ impl HcomGraphApp {
             .hover_pos()
             .is_some_and(|p| p.distance(end_pos) <= handle_radius + 2.0);
         let end_fill = if hovered_end {
-            egui::Color32::from_rgb(255, 255, 255)
+            palette.slider_knob
         } else {
-            egui::Color32::from_rgb(220, 220, 220)
+            palette.slider_knob.gamma_multiply(0.85)
         };
         ui.painter().circle(
             end_pos,
             handle_radius,
             end_fill,
-            egui::Stroke::new(1.5, egui::Color32::from_rgb(100, 100, 100)),
+            egui::Stroke::new(1.5, palette.slider_stroke),
         );
 
         let start_dt =
@@ -1405,7 +1426,7 @@ impl HcomGraphApp {
         (response, changed, drag_stopped)
     }
 
-    fn render_window_bar(&mut self, ui: &mut egui::Ui) {
+    fn render_window_bar(&mut self, ui: &mut egui::Ui, palette: &ThemePalette) {
         let now = chrono::Utc::now();
         ui.label("Window:");
 
@@ -1449,7 +1470,7 @@ impl HcomGraphApp {
         };
 
         let (_slider_resp, slider_changed, slider_drag_stopped) =
-            self.render_range_slider(ui, min_ts, max_ts, &mut start_ts, &mut end_ts);
+            self.render_range_slider(ui, min_ts, max_ts, &mut start_ts, &mut end_ts, palette);
 
         if slider_changed {
             let new_span = if start_ts <= min_ts + 2.0 {
@@ -1582,7 +1603,7 @@ impl HcomGraphApp {
         ui.label(RichText::new(text).strong());
     }
 
-    fn render_side_panel_summary(&mut self, ui: &mut egui::Ui) {
+    fn render_side_panel_summary(&mut self, ui: &mut egui::Ui, palette: &ThemePalette) {
         // Priority 1: Selected message edge
         if let Some(edge_idx) = self.canvas.selected_edge
             && let Some(edge_weight) = self.graph.graph.edge_weight(edge_idx)
@@ -1713,19 +1734,17 @@ impl HcomGraphApp {
         };
 
         let status_col = if let Some(ref n) = selected_node {
-            CanvasView::status_color(&n.status)
+            palette.status_color(&n.status)
         } else if let Some(ref r) = selected_row {
-            if r.status == "active" {
-                Color32::from_rgb(46, 204, 113)
-            } else if r.status == "listening" {
-                Color32::from_rgb(52, 152, 219)
-            } else if r.status == "blocked" {
-                Color32::from_rgb(231, 76, 60)
-            } else {
-                Color32::from_rgb(127, 140, 141)
-            }
+            let st = match r.status.to_ascii_lowercase().as_str() {
+                "active" => AgentStatus::Active,
+                "listening" => AgentStatus::Listening,
+                "blocked" => AgentStatus::Blocked,
+                _ => AgentStatus::Stopped,
+            };
+            palette.status_color(&st)
         } else {
-            Color32::GRAY
+            palette.node_text_secondary
         };
 
         ui.horizontal(|ui| {
@@ -1962,6 +1981,7 @@ impl HcomGraphApp {
         &mut self,
         ui: &mut egui::Ui,
         visible: &std::collections::HashSet<NodeIndex>,
+        palette: &ThemePalette,
     ) {
         ui.horizontal_wrapped(|ui| {
             for (tab, label) in DETAIL_TABS.iter().zip([
@@ -2100,7 +2120,7 @@ impl HcomGraphApp {
                 }
             }
             "Config" => {
-                self.render_config_tab(ui);
+                self.render_config_tab(ui, palette);
             }
             "Legend" => {
                 let legend = crate::canvas::legend(
@@ -2108,11 +2128,12 @@ impl HcomGraphApp {
                     &self.layout,
                     visible,
                     self.canvas.edge_counts.as_ref(),
+                    palette,
                 );
                 egui::ScrollArea::vertical()
                     .id_salt("legend_scroll_tab")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| render_legend(ui, &legend));
+                    .show(ui, |ui| render_legend(ui, &legend, palette));
             }
             _ => {
                 // Scroll, so long content never overflows into the table below.
@@ -2120,13 +2141,13 @@ impl HcomGraphApp {
                     egui::ScrollArea::both()
                         .id_salt("summary_scroll_tab")
                         .auto_shrink([false, false])
-                        .show(ui, |ui| self.render_side_panel_summary(ui));
+                        .show(ui, |ui| self.render_side_panel_summary(ui, palette));
                 });
             }
         });
     }
 
-    fn render_config_tab(&mut self, ui: &mut egui::Ui) {
+    fn render_config_tab(&mut self, ui: &mut egui::Ui, palette: &ThemePalette) {
         let selected_row = self.selected_row();
         let Some(row) = selected_row else {
             ui.heading("Agent Configuration");
@@ -2150,16 +2171,19 @@ impl HcomGraphApp {
                 ui.horizontal(|ui| {
                     ui.heading(RichText::new(agent_name).strong());
                     if row.is_running {
-                        ui.colored_label(Color32::from_rgb(46, 204, 113), "● running");
+                        ui.colored_label(palette.status_color(&AgentStatus::Active), "● running");
                     } else {
-                        ui.colored_label(Color32::from_rgb(127, 140, 141), "● stopped");
+                        ui.colored_label(palette.status_color(&AgentStatus::Stopped), "● stopped");
                     }
                     if let Some(cat) = cat_opt {
                         if cat.roaming {
-                            ui.colored_label(Color32::from_rgb(155, 89, 182), "roaming");
+                            ui.colored_label(palette.message_edge, "roaming");
                         }
                         if cat.disabled {
-                            ui.colored_label(Color32::from_rgb(231, 76, 60), "disabled");
+                            ui.colored_label(
+                                palette.status_color(&AgentStatus::Blocked),
+                                "disabled",
+                            );
                         }
                     }
                 });
@@ -2636,7 +2660,12 @@ impl HcomGraphApp {
         }
     }
 
-    fn show_canvas(&mut self, ui: &mut egui::Ui, visible: &std::collections::HashSet<NodeIndex>) {
+    fn show_canvas(
+        &mut self,
+        ui: &mut egui::Ui,
+        visible: &std::collections::HashSet<NodeIndex>,
+        palette: &ThemePalette,
+    ) {
         let rect = ui.available_rect_before_wrap();
         self.canvas_rect = rect;
 
@@ -2655,9 +2684,9 @@ impl HcomGraphApp {
         self.fit_canvas(ui, rect, visible);
         let dragged_before = self.canvas.dragged_node;
         let view_before = (self.canvas.zoom, self.canvas.pan);
-        let (response, action) = self
-            .canvas
-            .show(ui, &self.graph, &mut self.layout, Some(visible));
+        let (response, action) =
+            self.canvas
+                .show(ui, &self.graph, &mut self.layout, Some(visible), palette);
         // The first user zoom, pan, node press or drag ends auto-fit.
         if view_before != (self.canvas.zoom, self.canvas.pan)
             || self.canvas.dragged_node.is_some()
@@ -2764,6 +2793,7 @@ impl HcomGraphApp {
 impl eframe::App for HcomGraphApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        let palette = self.apply_theme(&ctx);
         let window = ui.max_rect();
         self.adopt_legacy_split_sizes(window.size());
 
@@ -3064,19 +3094,19 @@ impl eframe::App for HcomGraphApp {
 
                 ui.label(format!("Agents: {}", total_count));
                 ui.colored_label(
-                    Color32::from_rgb(46, 204, 113),
+                    palette.status_color(&AgentStatus::Active),
                     format!("● {} active", active_count),
                 );
                 ui.colored_label(
-                    Color32::from_rgb(52, 152, 219),
+                    palette.status_color(&AgentStatus::Listening),
                     format!("● {} listening", listening_count),
                 );
                 ui.colored_label(
-                    Color32::from_rgb(231, 76, 60),
+                    palette.status_color(&AgentStatus::Blocked),
                     format!("● {} blocked", blocked_count),
                 );
                 ui.colored_label(
-                    Color32::from_rgb(127, 140, 141),
+                    palette.status_color(&AgentStatus::Stopped),
                     format!("● {} stopped", stopped_count),
                 );
 
@@ -3085,7 +3115,7 @@ impl eframe::App for HcomGraphApp {
 
                 if let Some(ref pending) = self.pending_action {
                     ui.separator();
-                    ui.colored_label(Color32::from_rgb(241, 196, 15), format!("⏳ {}", pending));
+                    ui.colored_label(palette.edge_selected, format!("⏳ {}", pending));
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -3157,6 +3187,29 @@ impl eframe::App for HcomGraphApp {
 
                 ui.separator();
 
+                // Theme toggle (Auto / Light / Dark)
+                let current_pref = self.state.theme.unwrap_or_default();
+                let (theme_icon, theme_label) = match current_pref {
+                    ThemePreference::Auto => ("💻", "Auto"),
+                    ThemePreference::Light => ("☀", "Light"),
+                    ThemePreference::Dark => ("🌙", "Dark"),
+                };
+                if ui
+                    .button(format!("{theme_icon} {theme_label}"))
+                    .on_hover_text("Toggle theme: Auto (system) -> Light -> Dark")
+                    .clicked()
+                {
+                    let next = match current_pref {
+                        ThemePreference::Auto => ThemePreference::Light,
+                        ThemePreference::Light => ThemePreference::Dark,
+                        ThemePreference::Dark => ThemePreference::Auto,
+                    };
+                    self.state.theme = Some(next);
+                    self.save_state();
+                }
+
+                ui.separator();
+
                 // Search query
                 ui.label("Filter:");
                 ui.add(
@@ -3207,7 +3260,7 @@ impl eframe::App for HcomGraphApp {
 
             // Row 2b: Message time window (presets, custom span/limit, scrubber, range)
             ui.horizontal_wrapped(|ui| {
-                self.render_window_bar(ui);
+                self.render_window_bar(ui, &palette);
             });
 
             // Row 3: Action Toolbar (Start, Send, Open With, Commands, Attach, Restart, Kill, Kill Group)
@@ -3825,7 +3878,7 @@ impl eframe::App for HcomGraphApp {
                         self.action_error = None;
                     }
 
-                    self.render_detail_tabs(ui, &visible_node_indices);
+                    self.render_detail_tabs(ui, &visible_node_indices, &palette);
                 });
             detail_rect = Some(side_resp.response.rect);
         }
@@ -3833,7 +3886,7 @@ impl eframe::App for HcomGraphApp {
         // 8. Central panel: graph canvas or full table
         egui::CentralPanel::default().show(ui, |ui| match mode {
             ViewMode::Both | ViewMode::GraphOnly => {
-                self.show_canvas(ui, &visible_node_indices);
+                self.show_canvas(ui, &visible_node_indices, &palette);
             }
             ViewMode::TableOnly => {
                 self.render_table(ui, &filtered_rows);
