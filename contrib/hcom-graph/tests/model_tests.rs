@@ -10,8 +10,7 @@ use hcom_graph::model::{
 };
 use hcom_graph::source::{
     CommandExecutor, HcomSyncWorker, StreamHandle, StreamKillHandle, StreamReader,
-    build_messages_snapshot_cmd, parse_instances, parse_messages_snapshot, read_line_capped,
-    split_system_stream,
+    build_messages_follow_cmd, parse_instances, read_line_capped, split_system_stream,
 };
 use hcom_graph::sync::BackgroundSync;
 use std::collections::VecDeque;
@@ -260,7 +259,7 @@ fn test_non_blocking_backoff_timing() {
         }
     }
 
-    let worker = HcomSyncWorker::new(MockSpawnFailExecutor, 100);
+    let worker = HcomSyncWorker::new(MockSpawnFailExecutor);
     let mut graph = AgentGraph::new();
     let mut follower: Option<Box<dyn StreamHandle>> = Some(Box::new(FailingStream));
 
@@ -552,34 +551,15 @@ fn test_watermark_deduplication() {
 }
 
 #[test]
-fn test_initial_load_sorting() {
-    let json_lines = r#"
-{"id":30,"instance":"a","ts":"2026-11-01T10:00:03Z","type":"message","data":{"from":"a","delivered_to":["b"],"text":"msg 30"}}
-{"id":20,"instance":"a","ts":"2026-11-01T10:00:02Z","type":"message","data":{"from":"a","delivered_to":["b"],"text":"msg 20"}}
-{"id":10,"instance":"a","ts":"2026-11-01T10:00:01Z","type":"message","data":{"from":"a","delivered_to":["b"],"text":"msg 10"}}
-"#;
-
-    let sorted_events = parse_messages_snapshot(json_lines).expect("parse ok");
-    assert_eq!(sorted_events.len(), 3);
-    assert_eq!(sorted_events[0].id, 10);
-    assert_eq!(sorted_events[1].id, 20);
-    assert_eq!(sorted_events[2].id, 30);
-
-    let mut graph = AgentGraph::new();
-    for event in &sorted_events {
-        assert!(graph.apply_message_event(event));
-    }
-
-    assert_eq!(graph.get_message_edge("a", "b").unwrap().count, 3);
-    assert_eq!(graph.last_event_id, 30);
-}
-
-#[test]
 fn test_current_db_id_monotonicity() {
-    let snapshot_cmd = build_messages_snapshot_cmd(500);
+    let follow_cmd = build_messages_follow_cmd(0);
     assert!(
-        !snapshot_cmd.contains(&"--all".to_string()),
-        "Snapshot must not query archived databases"
+        !follow_cmd.contains(&"--all".to_string()),
+        "History replay must not query archived databases"
+    );
+    assert!(
+        !follow_cmd.contains(&"--last".to_string()),
+        "History replay must not limit the message count"
     );
 
     let mut graph = AgentGraph::new();
@@ -604,10 +584,10 @@ fn test_current_db_id_monotonicity() {
 }
 
 #[test]
-fn test_message_edge_bounded_history_and_sanitization() {
+fn test_message_edge_keeps_full_history_and_sanitizes() {
     let mut graph = AgentGraph::new();
-    // Send 60 messages to exceed the 50 limit
-    for id in 1..=60 {
+    // 600 messages: more than the former 500 snapshot and 50 per-edge limits.
+    for id in 1..=600 {
         let event = MessageEvent {
             id,
             ts: Utc::now(),
@@ -624,20 +604,14 @@ fn test_message_edge_bounded_history_and_sanitization() {
     }
 
     let edge = graph.get_message_edge("alice", "bob").unwrap();
-    assert_eq!(edge.count, 60);
-    assert_eq!(
-        edge.history.len(),
-        50,
-        "History must be bounded to MAX_EDGE_HISTORY (50)"
-    );
-
-    // Oldest messages (1..=10) should have been popped
-    assert_eq!(edge.history.front().unwrap().id, 11);
-    assert_eq!(edge.history.back().unwrap().id, 60);
+    assert_eq!(edge.count, 600);
+    assert_eq!(edge.history.len(), 600, "History must keep every message");
+    assert_eq!(edge.history.front().unwrap().id, 1);
+    assert_eq!(edge.history.back().unwrap().id, 600);
 
     // Sanitization must have cleaned the text and intent
     let last = edge.history.back().unwrap();
-    assert_eq!(last.text, "msg_60");
+    assert_eq!(last.text, "msg_600");
     assert_eq!(last.intent.as_deref(), Some("chat"));
 }
 
@@ -741,25 +715,24 @@ impl StreamHandle for MockStreamHandle {
 
 struct MockExecutor {
     list_responses: Mutex<VecDeque<String>>,
-    snapshot_responses: Mutex<VecDeque<String>>,
     stream_queues: Mutex<VecDeque<Vec<String>>>,
     last_spawned_killed_flag: Mutex<Option<Arc<AtomicBool>>>,
+    /// Every argv passed to `run_command` and `spawn_stream`, in order.
+    commands: Mutex<Vec<Vec<String>>>,
 }
 
 impl CommandExecutor for MockExecutor {
     fn run_command(&self, argv: &[String]) -> Result<String> {
+        self.commands.lock().unwrap().push(argv.to_vec());
         if argv.contains(&"list".to_string()) {
             let mut q = self.list_responses.lock().unwrap();
             return Ok(q.pop_front().unwrap_or_else(|| "[]".to_string()));
         }
-        if argv.contains(&"events".to_string()) {
-            let mut q = self.snapshot_responses.lock().unwrap();
-            return Ok(q.pop_front().unwrap_or_default());
-        }
         Ok(String::new())
     }
 
-    fn spawn_stream(&self, _argv: &[String]) -> Result<Box<dyn StreamHandle>> {
+    fn spawn_stream(&self, argv: &[String]) -> Result<Box<dyn StreamHandle>> {
+        self.commands.lock().unwrap().push(argv.to_vec());
         let mut q = self.stream_queues.lock().unwrap();
         let lines: VecDeque<String> = q.pop_front().unwrap_or_default().into();
         let killed = Arc::new(AtomicBool::new(false));
@@ -801,17 +774,17 @@ impl CommandExecutor for MockExecutor {
 #[test]
 fn test_sync_worker_lifecycle_and_db_reset() {
     let list_epoch1 = r#"[{"name":"m1","status":"active","parent_name":null}]"#;
-    let snap_epoch1 = r#"{"id":1,"instance":"m1","ts":"2026-11-01T10:00:00Z","type":"message","data":{"from":"m1","delivered_to":["m2"],"text":"snap1"}}"#;
-
+    // The follower replays the whole history (id 1 on) before new events.
     let stream_epoch1 = vec![
+        r#"{"id":1,"instance":"m1","ts":"2026-11-01T10:00:00Z","type":"message","data":{"from":"m1","delivered_to":["m2"],"text":"snap1"}}"#.into(),
         r#"{"id":2,"instance":"m1","ts":"2026-11-01T10:00:01Z","type":"message","data":{"from":"m1","delivered_to":["m2"],"text":"msg2"}}"#.into(),
         r#"{"db_reset":true}"#.into(),
     ];
 
     let list_epoch2 = r#"[{"name":"m3","status":"listening","parent_name":null}]"#;
-    let snap_epoch2 = r#"{"id":1,"instance":"m3","ts":"2026-11-01T11:00:00Z","type":"message","data":{"from":"m3","delivered_to":["m4"],"text":"new-snap1"}}"#;
 
     let stream_epoch2 = vec![
+        r#"{"id":1,"instance":"m3","ts":"2026-11-01T11:00:00Z","type":"message","data":{"from":"m3","delivered_to":["m4"],"text":"new-snap1"}}"#.into(),
         r#"{"id":2,"instance":"m3","ts":"2026-11-01T11:00:01Z","type":"message","data":{"from":"m3","delivered_to":["m4"],"text":"new-msg2"}}"#.into(),
     ];
 
@@ -820,23 +793,22 @@ fn test_sync_worker_lifecycle_and_db_reset() {
             list_epoch1.to_string(),
             list_epoch2.to_string(),
         ])),
-        snapshot_responses: Mutex::new(VecDeque::from(vec![
-            snap_epoch1.to_string(),
-            snap_epoch2.to_string(),
-        ])),
         stream_queues: Mutex::new(VecDeque::from(vec![stream_epoch1, stream_epoch2])),
         last_spawned_killed_flag: Mutex::new(None),
+        commands: Mutex::new(Vec::new()),
     };
 
-    let worker = HcomSyncWorker::new(executor, 100);
+    let worker = HcomSyncWorker::new(executor);
     let mut graph = AgentGraph::new();
 
     worker.initial_sync(&mut graph).unwrap();
-    assert_eq!(graph.node_count(), 2);
-    assert_eq!(graph.get_message_edge("m1", "m2").unwrap().count, 1);
-    assert_eq!(graph.last_event_id, 1);
+    assert_eq!(graph.node_count(), 1);
+    assert_eq!(graph.last_event_id, 0);
 
     let mut follower = Some(worker.spawn_follower(&graph).unwrap());
+    assert!(worker.step_stream(&mut graph, &mut follower).unwrap());
+    assert_eq!(graph.get_message_edge("m1", "m2").unwrap().count, 1);
+    assert_eq!(graph.last_event_id, 1);
     let killed_ref1 = worker
         .executor
         .last_spawned_killed_flag
@@ -862,17 +834,25 @@ fn test_sync_worker_lifecycle_and_db_reset() {
         graph.get_message_edge("m1", "m2").is_none(),
         "Old epoch messages must be cleared"
     );
-    assert_eq!(
-        graph.get_message_edge("m3", "m4").unwrap().count,
-        1,
-        "New snapshot message must be present"
-    );
-    assert_eq!(graph.last_event_id, 1);
+    assert_eq!(graph.last_event_id, 0, "Reset restarts the replay at id 0");
 
-    let new_msg_processed = worker.step_stream(&mut graph, &mut follower).unwrap();
-    assert!(new_msg_processed);
+    for _ in 0..2 {
+        assert!(worker.step_stream(&mut graph, &mut follower).unwrap());
+    }
     assert_eq!(graph.get_message_edge("m3", "m4").unwrap().count, 2);
     assert_eq!(graph.last_event_id, 2);
+
+    // Messages are loaded only by the follower replay from id 0: no
+    // count-limited one-shot `hcom events` snapshot is ever run.
+    let commands = worker.executor.commands.lock().unwrap();
+    let follow_0 = build_messages_follow_cmd(0);
+    assert_eq!(
+        commands.iter().filter(|c| **c == follow_0).count(),
+        2,
+        "Start and db_reset must both replay from --after-id 0"
+    );
+    assert!(commands.iter().all(|c| !c.contains(&"--last".to_string())
+        && (c.contains(&"list".to_string()) || c.contains(&"--follow".to_string()))));
 }
 
 #[test]
@@ -930,20 +910,6 @@ fn test_system_command_executor_no_stderr_deadlock() {
         "Must not deadlock when child produces large stderr"
     );
     assert_eq!(res.unwrap().trim(), "ok");
-}
-
-#[test]
-fn test_parse_messages_snapshot_drops_oversized_lines() {
-    let normal_line = r#"{"id":1,"instance":"a","ts":"2026-11-01T10:00:01Z","type":"message","data":{"from":"a","delivered_to":["b"],"text":"ok"}}"#;
-    let oversized_line = format!(
-        r#"{{"id":2,"instance":"a","ts":"2026-11-01T10:00:02Z","type":"message","data":{{"from":"a","delivered_to":["b"],"text":"{}"}}}}"#,
-        "x".repeat(1024 * 1024 + 10)
-    );
-
-    let payload = format!("{}\n{}\n", normal_line, oversized_line);
-    let parsed = parse_messages_snapshot(&payload).expect("parse ok");
-    assert_eq!(parsed.len(), 1, "Oversized line must be dropped");
-    assert_eq!(parsed[0].id, 1);
 }
 
 // =========================================================================
@@ -1181,7 +1147,7 @@ fn test_overload_10k_events_throttled_coalescing() {
     let executor = MockOverloadExecutor {
         events_jsonl: lines,
     };
-    let worker = HcomSyncWorker::new(executor, 0);
+    let worker = HcomSyncWorker::new(executor);
 
     // Batch limit 200, cadence 16ms
     let sync = BackgroundSync::new(worker, 200, Duration::from_millis(16)).expect("sync start");
@@ -1254,7 +1220,7 @@ fn test_drop_quiet_follower_kills_and_joins_cleanly() {
         }
     }
 
-    let worker = HcomSyncWorker::new(QuietStreamExecutor, 0);
+    let worker = HcomSyncWorker::new(QuietStreamExecutor);
     let sync = BackgroundSync::new(worker, 200, Duration::from_millis(16)).expect("start sync");
 
     // Allow worker to spawn child and block in read_line
@@ -3108,13 +3074,7 @@ fn test_windowed_edge_counts_window_last_n_and_unfiltered_totals() {
     };
     let cl = graph.windowed_edge_counts(&w_last, now);
     assert_eq!(cl.len(), 1);
-    assert_eq!(
-        cl[&ac],
-        WindowedCount {
-            count: 1,
-            lower_bound: false
-        }
-    );
+    assert_eq!(cl[&ac], WindowedCount { count: 1 });
 
     // Detail history uses the same selection.
     let hist = graph.windowed_conversation_history("a", "b", &w5, now);
@@ -3134,12 +3094,14 @@ fn test_windowed_edge_counts_window_last_n_and_unfiltered_totals() {
 }
 
 #[test]
-fn test_windowed_count_is_lower_bound_when_edge_history_is_full() {
+fn test_windowed_counts_are_exact_without_implicit_limit() {
     use chrono::Duration;
-    use hcom_graph::model::{MAX_EDGE_HISTORY, MessageWindow, WindowedCount};
+    use hcom_graph::model::{MessageWindow, WindowedCount};
     let now = Utc::now();
     let mut graph = AgentGraph::new();
-    let total = MAX_EDGE_HISTORY as u64 + 10;
+    // 600 messages one second apart: more than the former 500 snapshot and
+    // 50 per-edge limits.
+    let total = 600u64;
     for i in 1..=total {
         graph.apply_message_event(&window_msg(
             i,
@@ -3149,39 +3111,52 @@ fn test_windowed_count_is_lower_bound_when_edge_history_is_full() {
         ));
     }
     let ab = graph.message_edges[&("a".to_string(), "b".to_string())];
-    let w = MessageWindow {
+    let count = |w: &MessageWindow| graph.windowed_edge_counts(w, now)[&ab].count;
+
+    // Live + all (default) and Live + span: no implicit count limit.
+    assert_eq!(count(&MessageWindow::default()), 600);
+    let live_hour = MessageWindow {
         span_secs: Some(3600),
         ..Default::default()
     };
-    let c = graph.windowed_edge_counts(&w, now);
-    assert_eq!(c[&ab].count, MAX_EDGE_HISTORY);
-    assert!(c[&ab].lower_bound);
-    assert_eq!(
-        hcom_graph::canvas::edge_badge_label(c[&ab]).as_deref(),
-        Some("50+ msgs")
-    );
+    assert_eq!(count(&live_hour), 600);
+    assert_eq!(graph.messages_in_window(&live_hour, now).len(), 600);
 
-    // Oldest retained message outside the window: the count is exact.
-    let narrow = MessageWindow {
-        span_secs: Some(5),
+    // Fixed range: exactly the in-range messages (ts now-399 ..= now-100).
+    let fixed = MessageWindow {
+        span_secs: Some(299),
+        end: Some(now - Duration::seconds(100)),
+        last_n: None,
+    };
+    assert_eq!(count(&fixed), 300);
+    let fixed_all = MessageWindow {
+        end: Some(now - Duration::seconds(100)),
         ..Default::default()
     };
-    let cn = graph.windowed_edge_counts(&narrow, now);
-    assert!(!cn[&ab].lower_bound);
+    assert_eq!(count(&fixed_all), 500);
+
+    // Only an explicit Last N limits, in Live and in a fixed range.
+    let live_last = MessageWindow {
+        last_n: Some(42),
+        ..Default::default()
+    };
+    assert_eq!(count(&live_last), 42);
+    let fixed_last = MessageWindow {
+        last_n: Some(7),
+        ..fixed
+    };
+    assert_eq!(count(&fixed_last), 7);
+
     assert_eq!(
-        hcom_graph::canvas::edge_badge_label(cn[&ab]).as_deref(),
-        Some("6 msgs")
+        hcom_graph::canvas::edge_badge_label(WindowedCount { count: 600 }).as_deref(),
+        Some("600 msgs")
     );
     assert_eq!(
         hcom_graph::canvas::edge_badge_label(Default::default()),
         None
     );
     assert_eq!(
-        hcom_graph::canvas::edge_badge_label(WindowedCount {
-            count: 1,
-            lower_bound: false
-        })
-        .as_deref(),
+        hcom_graph::canvas::edge_badge_label(WindowedCount { count: 1 }).as_deref(),
         Some("1 msg")
     );
 }

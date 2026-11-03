@@ -20,20 +20,11 @@ pub fn build_instances_cmd() -> Vec<String> {
     vec!["hcom".into(), "list".into(), "--json".into()]
 }
 
-/// Builds command for initial snapshot. Strictly avoids `--all` to prevent
-/// querying archived databases with disparate event ID sequences.
-pub fn build_messages_snapshot_cmd(last_n: usize) -> Vec<String> {
-    vec![
-        "hcom".into(),
-        "events".into(),
-        "--type".into(),
-        "message".into(),
-        "--full".into(),
-        "--last".into(),
-        last_n.to_string(),
-    ]
-}
-
+/// Follows message events after `after_id`, oldest first. With `after_id = 0`
+/// it replays every message of the current database before streaming, which
+/// is how the whole history is loaded (no count limit, no total output cap).
+/// Strictly avoids `--all` to prevent querying archived databases with
+/// disparate event ID sequences.
 pub fn build_messages_follow_cmd(after_id: u64) -> Vec<String> {
     vec![
         "hcom".into(),
@@ -49,29 +40,6 @@ pub fn build_messages_follow_cmd(after_id: u64) -> Vec<String> {
 
 pub fn parse_instances(json_str: &str) -> Result<Vec<InstanceSnapshot>> {
     serde_json::from_str(json_str).context("failed to parse instance snapshots from hcom list")
-}
-
-/// Parses message events from `hcom events` JSON Lines output and sorts them
-/// ascending by `event.id`. This is required because `hcom events` returns
-/// newest-first by default, which would otherwise advance the watermark
-/// immediately and discard older events.
-pub fn parse_messages_snapshot(json_lines: &str) -> Result<Vec<MessageEvent>> {
-    let mut events = Vec::new();
-    for line in json_lines.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.len() > DEFAULT_MAX_LINE_BYTES {
-            // Drop lines exceeding line limit
-            continue;
-        }
-        if let Ok(event) = serde_json::from_str::<MessageEvent>(trimmed) {
-            events.push(event);
-        }
-    }
-    events.sort_by_key(|e| e.id);
-    Ok(events)
 }
 
 pub fn parse_stream_line(line: &str) -> StreamItem {
@@ -361,9 +329,11 @@ impl Drop for SystemStreamHandle {
 }
 
 /// Orchestrates synchronization between hcom CLI and AgentGraph.
+/// Messages come only from the follower stream, which starts at
+/// `last_event_id` (0 at start and after a db reset) and so replays the
+/// whole current database: the graph retains every message.
 pub struct HcomSyncWorker<E: CommandExecutor> {
     pub executor: E,
-    pub history_last_n: usize,
     pub initial_backoff: Duration,
     pub max_backoff: Duration,
     pub current_backoff: Mutex<Duration>,
@@ -371,23 +341,15 @@ pub struct HcomSyncWorker<E: CommandExecutor> {
 }
 
 impl HcomSyncWorker<SystemCommandExecutor> {
-    pub fn new_system(history_last_n: usize) -> Self {
-        Self {
-            executor: SystemCommandExecutor,
-            history_last_n,
-            initial_backoff: Duration::from_millis(500),
-            max_backoff: Duration::from_secs(30),
-            current_backoff: Mutex::new(Duration::from_millis(500)),
-            reconnect_deadline: Mutex::new(None),
-        }
+    pub fn new_system() -> Self {
+        Self::new(SystemCommandExecutor)
     }
 }
 
 impl<E: CommandExecutor> HcomSyncWorker<E> {
-    pub fn new(executor: E, history_last_n: usize) -> Self {
+    pub fn new(executor: E) -> Self {
         Self {
             executor,
-            history_last_n,
             initial_backoff: Duration::from_millis(500),
             max_backoff: Duration::from_secs(30),
             current_backoff: Mutex::new(Duration::from_millis(500)),
@@ -403,20 +365,9 @@ impl<E: CommandExecutor> HcomSyncWorker<E> {
         Ok(())
     }
 
-    pub fn refresh_messages_snapshot(&self, graph: &mut AgentGraph) -> Result<()> {
-        let argv = build_messages_snapshot_cmd(self.history_last_n);
-        let lines_out = self.executor.run_command(&argv)?;
-        let events = parse_messages_snapshot(&lines_out)?;
-        for event in events {
-            graph.apply_message_event(&event);
-        }
-        Ok(())
-    }
-
+    /// Loads instances; messages follow from the follower replay.
     pub fn initial_sync(&self, graph: &mut AgentGraph) -> Result<()> {
-        self.refresh_instances(graph)?;
-        self.refresh_messages_snapshot(graph)?;
-        Ok(())
+        self.refresh_instances(graph)
     }
 
     pub fn spawn_follower(&self, graph: &AgentGraph) -> Result<Box<dyn StreamHandle>> {

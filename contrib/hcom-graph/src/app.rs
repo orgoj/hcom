@@ -1569,16 +1569,8 @@ impl HcomGraphApp {
             Some(m) => m.values().map(|c| c.count).sum(),
             None => self.graph.iter_message_edges().map(|m| m.count).sum(),
         };
-        let lower_bound = self
-            .canvas
-            .edge_counts
-            .as_ref()
-            .is_some_and(|m| m.values().any(|c| c.lower_bound));
         ui.separator();
-        let mut text = format_window_range(&self.msg_window, now, msg_count);
-        if lower_bound {
-            text.push_str(" (retained history, N+ = more may exist)");
-        }
+        let text = format_window_range(&self.msg_window, now, msg_count);
         ui.label(RichText::new(text).strong());
     }
 
@@ -1604,8 +1596,7 @@ impl HcomGraphApp {
                             .as_ref()
                             .and_then(|m| m.get(&edge_idx).copied())
                             .unwrap_or_default();
-                        let plus = if wc.lower_bound { "+" } else { "" };
-                        ui.label(format!("Messages in window (directed): {}{plus}", wc.count));
+                        ui.label(format!("Messages in window (directed): {}", wc.count));
                     }
                     ui.label(format!("Total Messages (directed): {}", msg.count));
                     ui.label(format!(

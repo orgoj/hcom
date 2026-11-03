@@ -3,8 +3,6 @@ use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 
-pub const MAX_EDGE_HISTORY: usize = 50;
-
 /// Scans UTF-8 bytes and strips ECMA-48 CSI and OSC escape sequences
 /// (both 7-bit and UTF-8 2-byte C1 encodings). Discards unterminated
 /// sequences fail-closed.
@@ -502,9 +500,6 @@ pub fn format_canonical_range(range: &MessageRange, _now: DateTime<Utc>) -> Stri
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WindowedCount {
     pub count: usize,
-    /// The edge history is full (MAX_EDGE_HISTORY) and its oldest retained
-    /// message is inside the window, so older in-window messages may be lost.
-    pub lower_bound: bool,
 }
 
 /// Visual enrichment of a node that `hcom list` snapshots do not carry
@@ -718,14 +713,10 @@ impl AgentGraph {
                     msg_edge.last_timestamp = event.ts;
                     msg_edge.last_intent = intent.clone();
                     msg_edge.last_preview = preview.clone();
-                    if msg_edge.history.len() >= MAX_EDGE_HISTORY {
-                        msg_edge.history.pop_front();
-                    }
                     msg_edge.history.push_back(stored_msg);
                 }
             } else {
-                let mut history = VecDeque::with_capacity(MAX_EDGE_HISTORY);
-                history.push_back(stored_msg);
+                let history = VecDeque::from([stored_msg]);
                 let msg_edge = MessageEdge {
                     from: sender.clone(),
                     to: recipient,
@@ -802,32 +793,13 @@ impl AgentGraph {
         if window.is_unfiltered() {
             for &idx in self.message_edges.values() {
                 if let Some(EdgeKind::Message(m)) = self.graph.edge_weight(idx) {
-                    counts.insert(
-                        idx,
-                        WindowedCount {
-                            count: m.count,
-                            lower_bound: false,
-                        },
-                    );
+                    counts.insert(idx, WindowedCount { count: m.count });
                 }
             }
             return counts;
         }
-        let msgs = self.messages_in_window(window, now);
-        let limited = window.last_n.is_some_and(|n| msgs.len() >= n);
-        for (idx, _) in &msgs {
-            counts.entry(*idx).or_default().count += 1;
-        }
-        if !limited {
-            for (idx, wc) in counts.iter_mut() {
-                if let Some(EdgeKind::Message(m)) = self.graph.edge_weight(*idx) {
-                    wc.lower_bound = m.history.len() >= MAX_EDGE_HISTORY
-                        && m.count > m.history.len()
-                        && m.history
-                            .front()
-                            .is_some_and(|f| window.contains(f.ts, now));
-                }
-            }
+        for (idx, _) in self.messages_in_window(window, now) {
+            counts.entry(idx).or_default().count += 1;
         }
         counts
     }

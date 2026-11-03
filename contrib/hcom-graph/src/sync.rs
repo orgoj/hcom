@@ -178,17 +178,20 @@ impl BackgroundSync {
     }
 
     /// Checks if a new graph state is available without blocking.
-    /// If dirty, returns a clone of the latest graph.
+    /// If dirty, moves the latest graph out instead of cloning it: the graph
+    /// holds the whole message history, so a clone here would stall the UI
+    /// thread (~12 ms per publish at ~14k messages).
     pub fn try_get_latest(&self) -> Option<AgentGraph> {
         if self.dirty.swap(false, Ordering::AcqRel) {
-            let guard = self.shared_graph.lock().unwrap();
-            guard.clone()
+            let mut guard = self.shared_graph.lock().unwrap();
+            guard.take()
         } else {
             None
         }
     }
 
-    /// Returns the current graph unconditionally (if any snapshot has been produced).
+    /// Returns the current graph unconditionally (if any snapshot has been
+    /// produced and not yet taken by `try_get_latest`).
     pub fn current_graph(&self) -> Option<AgentGraph> {
         let guard = self.shared_graph.lock().unwrap();
         guard.clone()

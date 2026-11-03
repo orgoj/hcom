@@ -14,7 +14,7 @@ fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let worker = HcomSyncWorker::new_system(500);
+    let worker = HcomSyncWorker::new_system();
     let sync = BackgroundSync::new(worker, 200, Duration::from_millis(16)).ok();
 
     eframe::run_native(

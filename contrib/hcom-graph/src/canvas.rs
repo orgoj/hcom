@@ -589,10 +589,7 @@ impl CanvasView {
                 EdgeKind::Message(msg) => {
                     let wc = match &self.edge_counts {
                         Some(map) => map.get(&edge_id).copied().unwrap_or_default(),
-                        None => WindowedCount {
-                            count: msg.count,
-                            lower_bound: false,
-                        },
+                        None => WindowedCount { count: msg.count },
                     };
                     // Edges without messages in the window are dimmed, not hidden,
                     // and stay clickable (hit test is unchanged).
@@ -899,14 +896,12 @@ pub fn edge_marker(rect: Rect, screen_pos: Pos2) -> Option<(Pos2, Vec2)> {
     Some((c + d * t.min(1.0), d.normalized()))
 }
 
-/// Badge text of a message edge: `None` when the window holds no message,
-/// `N+ msgs` when the count is a lower bound of the retained history.
+/// Badge text of a message edge: `None` when the window holds no message.
 pub fn edge_badge_label(wc: WindowedCount) -> Option<String> {
-    match (wc.count, wc.lower_bound) {
-        (0, _) => None,
-        (n, true) => Some(format!("{n}+ msgs")),
-        (1, false) => Some("1 msg".to_string()),
-        (n, false) => Some(format!("{n} msgs")),
+    match wc.count {
+        0 => None,
+        1 => Some("1 msg".to_string()),
+        n => Some(format!("{n} msgs")),
     }
 }
 
