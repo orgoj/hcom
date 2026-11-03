@@ -7463,3 +7463,599 @@ fn test_task_77_34_config_tab_displays_agents_json_info_for_stopped_agent() {
     let reloaded = load_state(dir.path());
     assert_eq!(reloaded.detail_tab, "Config");
 }
+
+#[test]
+fn test_task_77_31_canonical_round_trip() {
+    use chrono::DateTime;
+    use hcom_graph::model::{MessageRange, format_canonical_range, parse_time_range};
+
+    let now = DateTime::from_timestamp(1700000000, 0).unwrap();
+
+    let cases = vec![
+        MessageRange::Live { span_secs: None },
+        MessageRange::Live {
+            span_secs: Some(30),
+        },
+        MessageRange::Live {
+            span_secs: Some(900),
+        },
+        MessageRange::Live {
+            span_secs: Some(7200),
+        },
+        MessageRange::Live {
+            span_secs: Some(86400 * 7),
+        },
+        MessageRange::Fixed {
+            start: None,
+            end: DateTime::from_timestamp(1699990000, 0).unwrap(),
+        },
+        MessageRange::Fixed {
+            start: Some(DateTime::from_timestamp(1699980000, 0).unwrap()),
+            end: DateTime::from_timestamp(1699990000, 0).unwrap(),
+        },
+    ];
+
+    for expected in cases {
+        let text = format_canonical_range(&expected, now);
+        let parsed = parse_time_range(&text, now)
+            .unwrap_or_else(|e| panic!("parse failed for '{}': {}", text, e));
+        assert_eq!(
+            parsed, expected,
+            "Round-trip failed for canonical text '{}'",
+            text
+        );
+    }
+}
+
+#[test]
+fn test_task_77_31_fractional_seconds_normalized_to_second_precision() {
+    use chrono::{DateTime, Utc};
+    use hcom_graph::model::{MessageRange, format_canonical_range, parse_time_range};
+
+    let now = DateTime::from_timestamp(1700000000, 0).unwrap();
+    let text = "2026-11-03T12:00:00.123Z - 2026-11-03T13:00:00.789Z";
+    let parsed = parse_time_range(text, now).expect("RFC3339 with fractional seconds should parse");
+
+    let expected_start = DateTime::parse_from_rfc3339("2026-11-03T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let expected_end = DateTime::parse_from_rfc3339("2026-11-03T13:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
+
+    assert_eq!(
+        parsed,
+        MessageRange::Fixed {
+            start: Some(expected_start),
+            end: expected_end,
+        },
+        "Fractional seconds must be normalized to whole seconds"
+    );
+
+    let canonical = format_canonical_range(&parsed, now);
+    let roundtrip = parse_time_range(&canonical, now).unwrap();
+    assert_eq!(roundtrip, parsed);
+}
+
+#[test]
+fn test_task_77_31_delimiters_and_syntax() {
+    use chrono::DateTime;
+    use hcom_graph::model::parse_time_range;
+
+    let now = DateTime::from_timestamp(1700000000, 0).unwrap();
+
+    // Accepted delimiters: " - ", "..", " to "
+    let r1 = parse_time_range("10:00 - 11:00", now).expect("space-hyphen-space");
+    let r2 = parse_time_range("10:00..11:00", now).expect("double-dot");
+    let r3 = parse_time_range("10:00 to 11:00", now).expect("to delimiter");
+    assert_eq!(r1, r2);
+    assert_eq!(r2, r3);
+
+    // Bare hyphen without spaces must be rejected to prevent ISO date conflicts
+    assert!(
+        parse_time_range("10:00-11:00", now).is_err(),
+        "Bare hyphen without spaces must be rejected"
+    );
+
+    // Case-insensitivity
+    let all1 = parse_time_range("all", now).unwrap();
+    let all2 = parse_time_range("ALL", now).unwrap();
+    assert_eq!(all1, all2);
+}
+
+#[test]
+fn test_task_77_31_strict_start_before_end_and_equality_rejected() {
+    use chrono::DateTime;
+    use hcom_graph::model::parse_time_range;
+
+    let now = DateTime::from_timestamp(1700000000, 0).unwrap();
+
+    // Equality: start == end
+    let eq_res = parse_time_range("12:00 - 12:00", now);
+    assert!(
+        eq_res.is_err(),
+        "Equal start and end (zero width) must be rejected"
+    );
+
+    // Reverse: start > end
+    let rev_res = parse_time_range("14:00 - 12:00", now);
+    assert!(
+        rev_res.is_err(),
+        "start > end must be rejected without wrap"
+    );
+}
+
+#[test]
+fn test_task_77_31_relative_overflow_and_invalid_numbers_rejected() {
+    use chrono::DateTime;
+    use hcom_graph::model::parse_time_range;
+
+    let now = DateTime::from_timestamp(1700000000, 0).unwrap();
+
+    // Huge overflow number
+    assert!(
+        parse_time_range("99999999999999999999h", now).is_err(),
+        "Numeric overflow must return Err without panic"
+    );
+
+    // Zero duration
+    assert!(
+        parse_time_range("0m", now).is_err(),
+        "Zero duration must be rejected"
+    );
+
+    // Negative duration
+    assert!(
+        parse_time_range("-5m", now).is_err(),
+        "Negative duration must be rejected"
+    );
+}
+
+#[test]
+fn test_task_77_31_enter_with_focus_clears_invalid_formats_canonical_and_persists() {
+    use eframe::App;
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState, load_state};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+
+    // 1. Initial frame: render UI and set focus to TextEdit
+    ctx.memory_mut(|m| m.request_focus(egui::Id::unique("time_range_text_edit")));
+    let mut out = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        },
+        |ui| {
+            app.ui(ui, &mut frame);
+        },
+    );
+    out.textures_delta.clear();
+
+    // 2. Set invalid text and mark invalid
+    app.time_range_text = "bad-input-xyz".into();
+    app.time_range_invalid = true;
+
+    // 3. Type valid "60m" and commit with Enter while focused
+    app.time_range_text = "60m".into();
+    let events = vec![egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+        repeat: false,
+    }];
+
+    let input = egui::RawInput {
+        screen_rect: Some(screen),
+        events,
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(input, |ui| {
+        app.ui(ui, &mut frame);
+    });
+    out.textures_delta.clear();
+
+    // Verify invalid flag is cleared, text is formatted canonically to "1h", and span is 3600
+    assert!(
+        !app.time_range_invalid,
+        "Enter commit must clear invalid state even while focused"
+    );
+    assert_eq!(
+        app.time_range_text, "1h",
+        "Canonical text '1h' must replace typed '60m'"
+    );
+    assert_eq!(
+        app.msg_window.span_secs,
+        Some(3600),
+        "Window span must be 3600s"
+    );
+
+    // Verify persistence to graph-state.json
+    let reloaded = load_state(dir.path());
+    assert_eq!(
+        reloaded.window_span_secs,
+        Some(3600),
+        "graph-state.json must persist window_span_secs on Enter commit"
+    );
+}
+
+#[test]
+fn test_task_77_31_clamping_outside_retained_bounds() {
+    use chrono::DateTime;
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_graph::model::{MessageData, MessageEvent, MessageRange};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+
+    let now = DateTime::from_timestamp(1700004000, 0).unwrap();
+
+    // Ingest a message event to define oldest_message_ts (1700002000)
+    app.graph.apply_message_event(&MessageEvent {
+        id: 1,
+        ts: DateTime::from_timestamp(1700002000, 0).unwrap(),
+        instance: "inst1".into(),
+        data: MessageData {
+            from: "inst1".into(),
+            delivered_to: vec!["inst2".into()],
+            mentions: vec![],
+            intent: None,
+            text: "hello".into(),
+        },
+    });
+
+    // Apply fixed range where end is in the future (> now)
+    let future_end = DateTime::from_timestamp(1700009000, 0).unwrap();
+    let start = DateTime::from_timestamp(1700000000, 0).unwrap();
+
+    let _ = app.apply_message_range(
+        MessageRange::Fixed {
+            start: Some(start),
+            end: future_end,
+        },
+        now,
+    );
+
+    // refresh_window_counts clamps end to now
+    assert!(app.msg_window.end.unwrap() <= now);
+    let cur = app.current_message_range(now);
+    match cur {
+        MessageRange::Fixed { end, .. } => {
+            assert!(end <= now, "End must be clamped to now");
+        }
+        _ => panic!("Expected Fixed range"),
+    }
+}
+
+#[test]
+fn test_task_77_31_slider_left_boundary_all_and_right_boundary_live() {
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_graph::model::MessageRange;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+
+    let now = chrono::Utc::now();
+    // Start in 1h live window
+    let _ = app.apply_message_range(
+        MessageRange::Live {
+            span_secs: Some(3600),
+        },
+        now,
+    );
+    assert_eq!(app.msg_window.span_secs, Some(3600));
+    assert!(app.msg_window.end.is_none());
+
+    // Switch to All
+    let _ = app.apply_message_range(MessageRange::Live { span_secs: None }, now);
+    assert!(app.msg_window.span_secs.is_none());
+    assert!(app.msg_window.end.is_none());
+    assert_eq!(app.time_range_text, "all");
+}
+
+#[test]
+fn test_task_77_31_invalid_text_leaves_window_intact_and_marks_invalid() {
+    use eframe::App;
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState, load_state};
+    use hcom_graph::model::MessageRange;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+
+    let now = chrono::Utc::now();
+    let _ = app.apply_message_range(
+        MessageRange::Live {
+            span_secs: Some(1800),
+        },
+        now,
+    );
+    app.save_state();
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+
+    // 1. Initial frame: render UI and set focus to TextEdit
+    ctx.memory_mut(|m| m.request_focus(egui::Id::unique("time_range_text_edit")));
+    let mut out = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        },
+        |ui| {
+            app.ui(ui, &mut frame);
+        },
+    );
+    out.textures_delta.clear();
+
+    // 2. Type invalid gibberish and commit with Enter
+    app.time_range_text = "invalid-gibberish-123".into();
+    let events = vec![egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+        repeat: false,
+    }];
+
+    let input = egui::RawInput {
+        screen_rect: Some(screen),
+        events,
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(input, |ui| {
+        app.ui(ui, &mut frame);
+    });
+    out.textures_delta.clear();
+
+    assert!(
+        app.time_range_invalid,
+        "time_range_invalid must be true for invalid text"
+    );
+    assert_eq!(
+        app.msg_window.span_secs,
+        Some(1800),
+        "Window span must be unchanged"
+    );
+
+    // Verify persisted state is also unchanged
+    let reloaded = load_state(dir.path());
+    assert_eq!(reloaded.window_span_secs, Some(1800));
+}
+
+#[test]
+fn test_task_77_31_slider_thumbs_coincide_at_min_no_panic_and_drags_safely() {
+    use chrono::DateTime;
+    use eframe::App;
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_graph::model::{MessageData, MessageEvent, MessageRange};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+
+    let oldest_ts = DateTime::from_timestamp(1700000000, 0).unwrap();
+    let now = DateTime::from_timestamp(1700005000, 0).unwrap();
+
+    // 1. Ingest message at oldest_ts so oldest_message_ts() == 1700000000
+    app.graph.apply_message_event(&MessageEvent {
+        id: 1,
+        ts: oldest_ts,
+        instance: "inst1".into(),
+        data: MessageData {
+            from: "inst1".into(),
+            delivered_to: vec!["inst2".into()],
+            mentions: vec![],
+            intent: None,
+            text: "hello".into(),
+        },
+    });
+
+    // 2. Apply unbounded-start range ending at oldest_ts: "all - 1700000000"
+    let _ = app.apply_message_range(
+        MessageRange::Fixed {
+            start: None,
+            end: oldest_ts,
+        },
+        now,
+    );
+
+    let cur = app.current_message_range(now);
+    assert_eq!(
+        cur,
+        MessageRange::Fixed {
+            start: None,
+            end: oldest_ts,
+        }
+    );
+
+    // 3. Render UI and locate the coincident thumbs position
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+
+    let mut initial_out = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        },
+        |ui| {
+            app.ui(ui, &mut frame);
+        },
+    );
+    initial_out.textures_delta.clear();
+
+    let thumb_center = initial_out
+        .shapes
+        .iter()
+        .find_map(|s| match &s.shape {
+            egui::Shape::Circle(c) if c.radius == 6.0 => Some(c.center),
+            _ => None,
+        })
+        .expect("slider thumb must be rendered");
+
+    // 4. Simulate rightward drag from the exact thumb position across frames:
+    // Frame 1: Pointer pressed exactly on the shared thumb center
+    // Frame 2: Drag moved to the right (+60 px)
+    // Frame 3: Pointer released
+    let drag_target = thumb_center + egui::vec2(60.0, 0.0);
+
+    for events in [
+        vec![
+            egui::Event::PointerMoved(thumb_center),
+            egui::Event::PointerButton {
+                pos: thumb_center,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+        vec![egui::Event::PointerMoved(drag_target)],
+        vec![egui::Event::PointerButton {
+            pos: drag_target,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    ] {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                app.ui(ui, &mut frame);
+            },
+        );
+        out.textures_delta.clear();
+    }
+
+    // Verify:
+    // 1. Did not panic with min > max.
+    // 2. Rightward drag from min resolved to End thumb and expanded end timestamp.
+    assert!(
+        app.msg_window.end.unwrap() > oldest_ts,
+        "Rightward drag from coincident thumbs at min must expand end beyond oldest timestamp"
+    );
+}
+
+#[test]
+fn test_task_77_31_apply_message_range_rejects_overflow_and_preserves_prior_window() {
+    use chrono::DateTime;
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_graph::model::{MAX_DURATION_SECS, MessageData, MessageEvent, MessageRange};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+
+    let oldest_ts = DateTime::from_timestamp(1700000000, 0).unwrap();
+    let now = DateTime::from_timestamp(1700005000, 0).unwrap();
+
+    // Ingest message so oldest_message_ts() is Some
+    app.graph.apply_message_event(&MessageEvent {
+        id: 1,
+        ts: oldest_ts,
+        instance: "inst1".into(),
+        data: MessageData {
+            from: "inst1".into(),
+            delivered_to: vec!["inst2".into()],
+            mentions: vec![],
+            intent: None,
+            text: "hello".into(),
+        },
+    });
+
+    // Establish prior valid window (e.g. 1h span = 3600s)
+    let prior_range = MessageRange::Live {
+        span_secs: Some(3600),
+    };
+    assert!(app.apply_message_range(prior_range, now).is_ok());
+    assert_eq!(app.msg_window.span_secs, Some(3600));
+    assert_eq!(app.msg_window.end, None);
+
+    // 1. Live with span_secs = i64::MAX must return Err and not panic or mutate
+    let res_max = app.apply_message_range(
+        MessageRange::Live {
+            span_secs: Some(i64::MAX),
+        },
+        now,
+    );
+    assert!(res_max.is_err(), "i64::MAX span must return Err");
+    assert_eq!(
+        app.msg_window.span_secs,
+        Some(3600),
+        "Prior span must be preserved on error"
+    );
+    assert_eq!(
+        app.state.window_span_secs,
+        Some(3600),
+        "Prior state span must be preserved on error"
+    );
+    assert_eq!(
+        app.msg_window.end, None,
+        "Prior end must be preserved on error"
+    );
+
+    // 2. Live with span_secs > MAX_DURATION_SECS must return Err
+    let res_exceed = app.apply_message_range(
+        MessageRange::Live {
+            span_secs: Some((MAX_DURATION_SECS + 1) as i64),
+        },
+        now,
+    );
+    assert!(res_exceed.is_err(), ">100y span must return Err");
+    assert_eq!(app.msg_window.span_secs, Some(3600));
+    assert_eq!(app.state.window_span_secs, Some(3600));
+
+    // 3. Fixed with span > 100 years must return Err and preserve prior window
+    let huge_start = DateTime::from_timestamp(0, 0).unwrap();
+    let far_future = DateTime::from_timestamp(MAX_DURATION_SECS as i64 + 86400, 0).unwrap();
+    let res_fixed_exceed = app.apply_message_range(
+        MessageRange::Fixed {
+            start: Some(huge_start),
+            end: far_future,
+        },
+        now,
+    );
+    assert!(
+        res_fixed_exceed.is_err(),
+        ">100y fixed span must return Err"
+    );
+    assert_eq!(app.msg_window.span_secs, Some(3600));
+    assert_eq!(app.state.window_span_secs, Some(3600));
+}

@@ -6,7 +6,10 @@ use crate::config::{
     replace_placeholders_vec, save_state, screen_bar_buttons,
 };
 use crate::layout::{GraphLayout, LayoutMode};
-use crate::model::{AgentGraph, AgentNode, AgentStatus, EdgeKind, MessageWindow};
+use crate::model::{
+    AgentGraph, AgentNode, AgentStatus, EdgeKind, MAX_DURATION_SECS, MessageRange, MessageWindow,
+    format_canonical_range, parse_time_range,
+};
 use crate::sync::BackgroundSync;
 use crate::table_data::{
     DEFAULT_COLUMNS, REPORT_FIELDS, TableRow, filter_row, sort_rows, tooltip_lines,
@@ -247,6 +250,12 @@ pub struct HcomGraphApp {
     pub selection_generation: u64,
     pub search_query: String,
 
+    // Message time range text input & two-handle slider state
+    pub time_range_text: String,
+    pub time_range_invalid: bool,
+    pub time_range_focused: bool,
+    pub time_range_slider_dragging: bool,
+
     // Real table data & groups
     pub table_rows: Vec<TableRow>,
     pub catalog_groups: Vec<String>,
@@ -358,6 +367,7 @@ impl HcomGraphApp {
 
         let config = load_config(&hcom_dir);
         let state = load_state(&hcom_dir);
+        let window_span = state.window_span_secs;
 
         let mut graph = AgentGraph::new();
         if let Some(ref s) = sync
@@ -402,6 +412,16 @@ impl HcomGraphApp {
             state,
             selection_generation: 0,
             search_query: String::new(),
+            time_range_text: format_canonical_range(
+                &match window_span {
+                    None => MessageRange::Live { span_secs: None },
+                    Some(s) => MessageRange::Live { span_secs: Some(s) },
+                },
+                chrono::Utc::now(),
+            ),
+            time_range_invalid: false,
+            time_range_focused: false,
+            time_range_slider_dragging: false,
             table_rows: Vec::new(),
             catalog_groups: Vec::new(),
             tool_groups: Vec::new(),
@@ -449,6 +469,7 @@ impl HcomGraphApp {
     }
 
     pub fn new_for_test(config: GraphConfig, state: GraphState, hcom_dir: PathBuf) -> Self {
+        let window_span = state.window_span_secs;
         Self {
             graph: AgentGraph::new(),
             layout: {
@@ -483,6 +504,16 @@ impl HcomGraphApp {
             state,
             selection_generation: 0,
             search_query: String::new(),
+            time_range_text: format_canonical_range(
+                &match window_span {
+                    None => MessageRange::Live { span_secs: None },
+                    Some(s) => MessageRange::Live { span_secs: Some(s) },
+                },
+                chrono::Utc::now(),
+            ),
+            time_range_invalid: false,
+            time_range_focused: false,
+            time_range_slider_dragging: false,
             table_rows: Vec::new(),
             catalog_groups: Vec::new(),
             tool_groups: Vec::new(),
@@ -536,6 +567,86 @@ impl HcomGraphApp {
         self.msg_window.last_n = last_n.filter(|n| *n > 0);
         self.state.window_span_secs = self.msg_window.span_secs;
         self.state.window_last_n = self.msg_window.last_n;
+    }
+
+    /// Returns the effective message range derived from `msg_window` and `now`.
+    pub fn current_message_range(&self, _now: chrono::DateTime<chrono::Utc>) -> MessageRange {
+        match self.msg_window.end {
+            None => MessageRange::Live {
+                span_secs: self.msg_window.span_secs,
+            },
+            Some(end) => match self.msg_window.span_secs {
+                None => MessageRange::Fixed { start: None, end },
+                Some(span) => {
+                    let start = end - chrono::Duration::seconds(span);
+                    MessageRange::Fixed {
+                        start: Some(start),
+                        end,
+                    }
+                }
+            },
+        }
+    }
+
+    /// Synchronizes `time_range_text` from the current window.
+    /// - `force = false`: preserves in-progress user typing while the text input
+    ///   has focus (`time_range_focused == true`).
+    /// - `force = true`: called on successful commit (Enter, lost-focus, slider drag,
+    ///   or preset selection); always overwrites text with the canonical representation
+    ///   and clears `time_range_invalid = false`, even if focus is retained.
+    pub fn sync_time_range_text_from_window(
+        &mut self,
+        now: chrono::DateTime<chrono::Utc>,
+        force: bool,
+    ) {
+        if force || !self.time_range_focused {
+            let range = self.current_message_range(now);
+            self.time_range_text = format_canonical_range(&range, now);
+            self.time_range_invalid = false;
+        }
+    }
+
+    /// Atomic apply helper: validates range without panic, returns Err if invalid
+    /// (leaving state untouched), clamps against retained history via
+    /// refresh_window_counts, and force-syncs canonical text and clears invalid state.
+    pub fn apply_message_range(
+        &mut self,
+        range: MessageRange,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), &'static str> {
+        match range {
+            MessageRange::Live { span_secs } => {
+                if let Some(s) = span_secs {
+                    if s <= 0 {
+                        return Err("span must be positive");
+                    }
+                    if (s as u64) > MAX_DURATION_SECS {
+                        return Err("span exceeds maximum allowed range of 100 years");
+                    }
+                }
+                self.msg_window.span_secs = span_secs.filter(|s| *s > 0);
+                self.msg_window.end = None;
+            }
+            MessageRange::Fixed { start, end } => {
+                if let Some(s) = start {
+                    if s >= end {
+                        return Err("start must be strictly before end");
+                    }
+                    let span_diff = (end.timestamp() as i128) - (s.timestamp() as i128);
+                    if span_diff > MAX_DURATION_SECS as i128 {
+                        return Err("span exceeds maximum allowed range of 100 years");
+                    }
+                    self.msg_window.span_secs = Some(span_diff as i64);
+                } else {
+                    self.msg_window.span_secs = None;
+                }
+                self.msg_window.end = Some(end);
+            }
+        }
+        self.state.window_span_secs = self.msg_window.span_secs;
+        self.refresh_window_counts(now);
+        self.sync_time_range_text_from_window(now, true);
+        Ok(())
     }
 
     /// Clamps the scrubber end to [oldest retained message, now] (live when
@@ -1096,37 +1207,342 @@ impl HcomGraphApp {
             });
     }
 
-    fn render_window_bar(&mut self, ui: &mut egui::Ui) {
-        let now = chrono::Utc::now();
-        ui.label("Window:");
-        let mut span = self.msg_window.span_secs;
-        let mut last_n = self.msg_window.last_n;
+    fn render_range_slider(
+        &mut self,
+        ui: &mut egui::Ui,
+        min_ts: f64,
+        max_ts: f64,
+        start_ts: &mut f64,
+        end_ts: &mut f64,
+    ) -> (egui::Response, bool, bool) {
+        let size = egui::vec2(160.0, 18.0);
+        let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+
+        if max_ts <= min_ts {
+            let track_rect = egui::Rect::from_min_max(
+                egui::pos2(rect.min.x + 6.0, rect.center().y - 2.0),
+                egui::pos2(rect.max.x - 6.0, rect.center().y + 2.0),
+            );
+            ui.painter()
+                .rect_filled(track_rect, 2.0, egui::Color32::from_rgb(60, 60, 65));
+            return (response, false, false);
+        }
+
+        let handle_radius = 6.0;
+        let track_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.min.x + handle_radius, rect.center().y - 2.0),
+            egui::pos2(rect.max.x - handle_radius, rect.center().y + 2.0),
+        );
+
+        let ts_to_x = |ts: f64| -> f32 {
+            let t = ((ts - min_ts) / (max_ts - min_ts)).clamp(0.0, 1.0) as f32;
+            track_rect.min.x + t * track_rect.width()
+        };
+
+        let x_to_ts = |x: f32| -> f64 {
+            let t = ((x - track_rect.min.x) / track_rect.width()).clamp(0.0, 1.0) as f64;
+            min_ts + t * (max_ts - min_ts)
+        };
+
+        let slider_id = ui.scope_id().with("range_slider_active_thumb");
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum ActiveThumb {
+            Start,
+            End,
+            Coincident,
+        }
+
         let mut changed = false;
-        // Presets persist at once; drag values only when the drag or edit ends.
-        let mut persist = false;
-        for (label, preset) in WINDOW_PRESETS {
-            if ui.selectable_label(span == *preset, *label).clicked() {
-                span = *preset;
-                changed = true;
-                persist = true;
+        let mut drag_stopped = false;
+
+        if response.drag_started()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let start_x = ts_to_x(*start_ts);
+            let end_x = ts_to_x(*end_ts);
+            let dist_start = (pos.x - start_x).abs();
+            let dist_end = (pos.x - end_x).abs();
+            let active = if (start_x - end_x).abs() < 1.0 || (dist_start - dist_end).abs() < 0.5 {
+                ActiveThumb::Coincident
+            } else if dist_start < dist_end {
+                ActiveThumb::Start
+            } else {
+                ActiveThumb::End
+            };
+            ui.data_mut(|d| d.insert_temp(slider_id, active));
+            self.time_range_slider_dragging = true;
+        }
+
+        if response.dragged()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let start_x = ts_to_x(*start_ts);
+            let end_x = ts_to_x(*end_ts);
+            let mut active = ui
+                .data(|d| d.get_temp::<ActiveThumb>(slider_id))
+                .unwrap_or_else(|| {
+                    if (start_x - end_x).abs() < 1.0 {
+                        ActiveThumb::Coincident
+                    } else if (pos.x - start_x).abs() < (pos.x - end_x).abs() {
+                        ActiveThumb::Start
+                    } else {
+                        ActiveThumb::End
+                    }
+                });
+
+            if active == ActiveThumb::Coincident {
+                let delta_x = response.drag_delta().x;
+                if delta_x > 0.0 {
+                    active = ActiveThumb::End;
+                } else if delta_x < 0.0 {
+                    active = ActiveThumb::Start;
+                } else {
+                    active = ActiveThumb::End;
+                }
+                ui.data_mut(|d| d.insert_temp(slider_id, active));
+            }
+
+            let ts = x_to_ts(pos.x);
+            match active {
+                ActiveThumb::Start => {
+                    let max_start = (*end_ts - 1.0).max(min_ts);
+                    let new_start = ts.clamp(min_ts, max_start);
+                    if (new_start - *start_ts).abs() >= 0.5 {
+                        *start_ts = new_start;
+                        changed = true;
+                    }
+                }
+                ActiveThumb::End => {
+                    let min_end = (*start_ts + 1.0).min(max_ts);
+                    let new_end = ts.clamp(min_end, max_ts);
+                    if (new_end - *end_ts).abs() >= 0.5 {
+                        *end_ts = new_end;
+                        changed = true;
+                    }
+                }
+                ActiveThumb::Coincident => {}
             }
         }
 
-        let mut minutes = span.map(|s| s / 60).unwrap_or(0);
-        let resp = ui
-            .add(
-                egui::DragValue::new(&mut minutes)
-                    .range(0..=525_600)
-                    .suffix(" min"),
-            )
-            .on_hover_text("Custom window span in minutes (0 = All)");
-        if resp.changed() {
-            span = (minutes > 0).then_some(minutes * 60);
-            changed = true;
+        if response.drag_stopped() {
+            self.time_range_slider_dragging = false;
+            ui.data_mut(|d| d.remove::<ActiveThumb>(slider_id));
+            drag_stopped = true;
         }
-        persist |= resp.drag_stopped() || resp.lost_focus();
 
-        let mut limit = last_n.unwrap_or(0);
+        // Painting
+        let start_x = ts_to_x(*start_ts);
+        let end_x = ts_to_x(*end_ts);
+
+        // 1. Background rail
+        ui.painter()
+            .rect_filled(track_rect, 2.0, egui::Color32::from_rgb(55, 55, 60));
+
+        // 2. Highlighted active range between thumbs
+        let active_rail = egui::Rect::from_min_max(
+            egui::pos2(start_x, track_rect.min.y),
+            egui::pos2(end_x, track_rect.max.y),
+        );
+        ui.painter()
+            .rect_filled(active_rail, 2.0, ui.visuals().selection.bg_fill);
+
+        // 3. Start thumb circle
+        let start_pos = egui::pos2(start_x, rect.center().y);
+        let hovered_start = response
+            .hover_pos()
+            .is_some_and(|p| p.distance(start_pos) <= handle_radius + 2.0);
+        let start_fill = if hovered_start {
+            egui::Color32::from_rgb(255, 255, 255)
+        } else {
+            egui::Color32::from_rgb(220, 220, 220)
+        };
+        ui.painter().circle(
+            start_pos,
+            handle_radius,
+            start_fill,
+            egui::Stroke::new(1.5, egui::Color32::from_rgb(100, 100, 100)),
+        );
+
+        // 4. End thumb circle
+        let end_pos = egui::pos2(end_x, rect.center().y);
+        let hovered_end = response
+            .hover_pos()
+            .is_some_and(|p| p.distance(end_pos) <= handle_radius + 2.0);
+        let end_fill = if hovered_end {
+            egui::Color32::from_rgb(255, 255, 255)
+        } else {
+            egui::Color32::from_rgb(220, 220, 220)
+        };
+        ui.painter().circle(
+            end_pos,
+            handle_radius,
+            end_fill,
+            egui::Stroke::new(1.5, egui::Color32::from_rgb(100, 100, 100)),
+        );
+
+        let start_dt =
+            chrono::DateTime::from_timestamp(*start_ts as i64, 0).unwrap_or(chrono::Utc::now());
+        let end_dt =
+            chrono::DateTime::from_timestamp(*end_ts as i64, 0).unwrap_or(chrono::Utc::now());
+        response = response.on_hover_text(format!(
+            "Range: {} to {}\nDrag left thumb: start time (drag to min for all)\nDrag right thumb: end time (drag to max for live)",
+            start_dt.format("%Y-%m-%d %H:%M:%S UTC"),
+            if *end_ts >= max_ts - 2.0 {
+                "now (live)".into()
+            } else {
+                format!("{}", end_dt.format("%Y-%m-%d %H:%M:%S UTC"))
+            }
+        ));
+
+        (response, changed, drag_stopped)
+    }
+
+    fn render_window_bar(&mut self, ui: &mut egui::Ui) {
+        let now = chrono::Utc::now();
+        ui.label("Window:");
+
+        // 1. Presets
+        for (label, preset) in WINDOW_PRESETS {
+            let is_sel = if let Some(p) = preset {
+                self.msg_window.end.is_none() && self.msg_window.span_secs == Some(*p)
+            } else {
+                self.msg_window.is_unfiltered()
+            };
+            if ui.selectable_label(is_sel, *label).clicked() {
+                let _ = self.apply_message_range(MessageRange::Live { span_secs: *preset }, now);
+                self.save_state();
+            }
+        }
+
+        ui.separator();
+
+        // 2. Two-handle Range Slider
+        let oldest = self.graph.oldest_message_ts();
+        let min_ts = oldest
+            .map(|o| o.timestamp() as f64)
+            .unwrap_or(now.timestamp() as f64);
+        let max_ts = now.timestamp() as f64;
+
+        let cur_range = self.current_message_range(now);
+        let (mut start_ts, mut end_ts) = match cur_range {
+            MessageRange::Live { span_secs } => {
+                let end = max_ts;
+                let start = match span_secs {
+                    None => min_ts,
+                    Some(s) => (end - s as f64).max(min_ts),
+                };
+                (start, end)
+            }
+            MessageRange::Fixed { start, end } => {
+                let e = end.timestamp() as f64;
+                let s = start.map(|st| st.timestamp() as f64).unwrap_or(min_ts);
+                (s, e)
+            }
+        };
+
+        let (_slider_resp, slider_changed, slider_drag_stopped) =
+            self.render_range_slider(ui, min_ts, max_ts, &mut start_ts, &mut end_ts);
+
+        if slider_changed {
+            let new_span = if start_ts <= min_ts + 2.0 {
+                None
+            } else {
+                Some(((end_ts - start_ts).round() as i64).max(1))
+            };
+
+            let new_range = if end_ts >= max_ts - 2.0 {
+                MessageRange::Live {
+                    span_secs: new_span,
+                }
+            } else {
+                let end_dt =
+                    chrono::DateTime::from_timestamp(end_ts.round() as i64, 0).unwrap_or(now);
+                let start_dt = new_span.map(|s| end_dt - chrono::Duration::seconds(s));
+                MessageRange::Fixed {
+                    start: start_dt,
+                    end: end_dt,
+                }
+            };
+
+            let _ = self.apply_message_range(new_range, now);
+        }
+        if slider_drag_stopped {
+            self.save_state();
+        }
+
+        // 3. Live checkbox
+        let mut live = self.msg_window.end.is_none();
+        if ui
+            .checkbox(&mut live, "Live")
+            .on_hover_text("Window end follows the current time")
+            .changed()
+        {
+            if live {
+                let _ = self.apply_message_range(
+                    MessageRange::Live {
+                        span_secs: self.msg_window.span_secs,
+                    },
+                    now,
+                );
+            } else {
+                let end = now;
+                let start = self
+                    .msg_window
+                    .span_secs
+                    .map(|s| end - chrono::Duration::seconds(s));
+                let _ = self.apply_message_range(MessageRange::Fixed { start, end }, now);
+            }
+            self.save_state();
+        }
+
+        ui.separator();
+
+        // 4. Text Input field for interval
+        let text_edit_id = egui::Id::unique("time_range_text_edit");
+        let text_edit = egui::TextEdit::singleline(&mut self.time_range_text)
+            .id(text_edit_id)
+            .desired_width(140.0)
+            .hint_text("e.g. 1h, 12:00 - 13:00, all");
+
+        let prev_invalid = self.time_range_invalid;
+        if prev_invalid {
+            ui.visuals_mut().widgets.hovered.bg_stroke =
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(231, 76, 60));
+            ui.visuals_mut().widgets.inactive.bg_stroke =
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(231, 76, 60));
+        }
+
+        let resp = ui.add(text_edit);
+
+        if prev_invalid {
+            resp.clone().on_hover_text("Invalid time range format. Examples: '1h', '15m', 'all', '12:00 - 13:00', '2026-11-03 12:00 - 2026-11-03 13:00'");
+        }
+
+        // Commit on Enter or loss of focus
+        let had_focus = self.time_range_focused || resp.has_focus();
+        let commit = (resp.lost_focus() && ui.input(|i| !i.key_pressed(egui::Key::Escape)))
+            || (had_focus && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+
+        if commit {
+            match parse_time_range(&self.time_range_text, now) {
+                Ok(range) => {
+                    let _ = self.apply_message_range(range, now);
+                    self.save_state();
+                }
+                Err(_) => {
+                    self.time_range_invalid = true;
+                }
+            }
+        } else if !resp.has_focus() && !self.time_range_invalid {
+            self.sync_time_range_text_from_window(now, false);
+        }
+
+        self.time_range_focused = resp.has_focus();
+
+        ui.separator();
+
+        // 5. Last N limit
+        let mut limit = self.msg_window.last_n.unwrap_or(0);
         ui.label("Last:");
         let resp = ui
             .add(
@@ -1136,49 +1552,17 @@ impl HcomGraphApp {
             )
             .on_hover_text("Keep only the newest N messages in the window (0 = off)");
         if resp.changed() {
-            last_n = (limit > 0).then_some(limit);
-            changed = true;
+            self.msg_window.last_n = (limit > 0).then_some(limit);
+            self.state.window_last_n = self.msg_window.last_n;
+            self.refresh_window_counts(now);
         }
-        persist |= resp.drag_stopped() || resp.lost_focus();
-        if changed {
-            self.set_message_window(span, last_n);
-        }
-        if persist {
+        if resp.drag_stopped() || resp.lost_focus() {
             self.save_state();
         }
 
-        ui.separator();
-
-        // Timeline scrubber: moves the window end through retained history.
-        let oldest = self.graph.oldest_message_ts();
-        let mut live = self.msg_window.end.is_none();
-        ui.add_enabled_ui(oldest.is_some(), |ui| {
-            if ui
-                .checkbox(&mut live, "Live")
-                .on_hover_text("Window end follows the current time")
-                .changed()
-            {
-                self.msg_window.end = if live { None } else { Some(now) };
-            }
-            let min_ts = oldest.map(|o| o.timestamp()).unwrap_or(now.timestamp());
-            let max_ts = now.timestamp().max(min_ts);
-            let mut end_ts = self.msg_window.end.unwrap_or(now).timestamp();
-            if ui
-                .add(
-                    egui::Slider::new(&mut end_ts, min_ts..=max_ts)
-                        .show_value(false)
-                        .text("end"),
-                )
-                .on_hover_text("Scrub the window end through message history")
-                .changed()
-            {
-                self.msg_window.end = chrono::DateTime::from_timestamp(end_ts, 0);
-            }
-        });
-
+        // 6. Range readout
         self.refresh_window_counts(now);
         if self.msg_window.end.is_none() && !self.msg_window.is_unfiltered() {
-            // Live window: messages age out without any input event.
             ui.ctx().request_repaint_after(Duration::from_secs(1));
         }
         let msg_count: usize = match &self.canvas.edge_counts {

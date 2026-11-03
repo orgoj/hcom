@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, NaiveTime, Utc};
 use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -282,6 +282,219 @@ impl MessageWindow {
         // A live window has no upper bound, so messages stamped slightly
         // ahead (clock skew, relayed remotes) still count.
         (self.end.is_none() || ts <= end) && start.is_none_or(|s| ts >= s)
+    }
+}
+
+/// Normalizes any parsed timestamp to whole-second precision (truncating fractional seconds)
+/// to ensure deterministic round-trips with canonical formatters.
+pub fn normalize_second_precision(dt: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::from_timestamp(dt.timestamp(), 0).unwrap_or(dt)
+}
+
+/// Typed representation of a message time interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageRange {
+    /// Live window following `now`.
+    /// `span_secs = None` means all retained history up to now ("all").
+    /// `span_secs = Some(s)` means `(now - s)..=now` (e.g. "1h").
+    Live { span_secs: Option<i64> },
+
+    /// Fixed time window with explicit UTC timestamps (normalized to second precision).
+    /// `start` can be None if unbounded from below (all history up to `end`).
+    /// Invariant: when `start` is Some(s), strictly `s < end`.
+    Fixed {
+        start: Option<DateTime<Utc>>,
+        end: DateTime<Utc>,
+    },
+}
+
+/// Parses an absolute timestamp string, supporting RFC3339, YYYY-MM-DD HH:MM:SS,
+/// YYYY-MM-DD HH:MM, and time-only HH:MM:SS / HH:MM (evaluated against `now` date in UTC).
+/// Result is normalized to whole seconds.
+fn parse_timestamp(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
+    let s = s.trim();
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Ok(normalize_second_precision(dt.with_timezone(&Utc)));
+    }
+    for fmt in &[
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+    ] {
+        if let Ok(ndt) = NaiveDateTime::parse_from_str(s, fmt) {
+            return Ok(normalize_second_precision(ndt.and_utc()));
+        }
+    }
+    for fmt in &["%H:%M:%S", "%H:%M"] {
+        if let Ok(nt) = NaiveTime::parse_from_str(s, fmt) {
+            let ndt = now.date_naive().and_time(nt);
+            return Ok(normalize_second_precision(ndt.and_utc()));
+        }
+    }
+    Err(format!(
+        "Invalid timestamp format '{}' (expected YYYY-MM-DD HH:MM:SS, HH:MM, or RFC3339)",
+        s
+    ))
+}
+
+pub const MAX_DURATION_SECS: u64 = 100 * 365 * 86400; // 100 years
+
+/// Parses a time range string into a `MessageRange`.
+/// Supports:
+/// - Unfiltered: `"all"`
+/// - Relative: `"<N>s"`, `"<N>m"`, `"<N>h"`, `"<N>d"`, `"<N>w"` (with checked overflow handling)
+/// - Absolute with strict delimiters (`" - "`, `".."` or `" to "`):
+///   - `"<start> - <end>"` (start must be strictly before end)
+///   - `"<start> - now"` (start strictly before now, switches to live with span)
+///   - `"all - <end>"` (unbounded start up to fixed end)
+pub fn parse_time_range(input: &str, now: DateTime<Utc>) -> Result<MessageRange, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("Empty time range input".into());
+    }
+
+    if s.eq_ignore_ascii_case("all") {
+        return Ok(MessageRange::Live { span_secs: None });
+    }
+
+    // Delimiter search (strict: " - ", "..", " to ")
+    let split = if let Some(pos) = s.find(" - ") {
+        Some((&s[..pos], &s[pos + 3..]))
+    } else if let Some(pos) = s.find("..") {
+        Some((&s[..pos], &s[pos + 2..]))
+    } else {
+        s.to_lowercase()
+            .find(" to ")
+            .map(|pos| (&s[..pos], &s[pos + 4..]))
+    };
+
+    if let Some((left, right)) = split {
+        let left = left.trim();
+        let right = right.trim();
+
+        let start = if left.eq_ignore_ascii_case("all") {
+            None
+        } else {
+            Some(parse_timestamp(left, now)?)
+        };
+
+        if right.eq_ignore_ascii_case("now") {
+            let now_norm = normalize_second_precision(now);
+            if let Some(st) = start {
+                if st >= now_norm {
+                    return Err("start must be strictly before now".into());
+                }
+                return Ok(MessageRange::Live {
+                    span_secs: Some(now_norm.timestamp() - st.timestamp()),
+                });
+            } else {
+                return Ok(MessageRange::Live { span_secs: None });
+            }
+        }
+
+        let end = parse_timestamp(right, now)?;
+        if let Some(st) = start
+            && st >= end
+        {
+            return Err(
+                "start must be strictly before end; zero-width ranges are not allowed".into(),
+            );
+        }
+        return Ok(MessageRange::Fixed { start, end });
+    }
+
+    // Relative duration parsing: number followed by unit suffix
+    let lower = s.to_lowercase();
+    let (num_str, multiplier): (&str, u64) = if let Some(rest) = lower.strip_suffix("secs") {
+        (rest, 1)
+    } else if let Some(rest) = lower.strip_suffix("sec") {
+        (rest, 1)
+    } else if let Some(rest) = lower.strip_suffix('s') {
+        (rest, 1)
+    } else if let Some(rest) = lower.strip_suffix("mins") {
+        (rest, 60)
+    } else if let Some(rest) = lower.strip_suffix("min") {
+        (rest, 60)
+    } else if let Some(rest) = lower.strip_suffix('m') {
+        (rest, 60)
+    } else if let Some(rest) = lower.strip_suffix("hrs") {
+        (rest, 3600)
+    } else if let Some(rest) = lower.strip_suffix("hr") {
+        (rest, 3600)
+    } else if let Some(rest) = lower.strip_suffix('h') {
+        (rest, 3600)
+    } else if let Some(rest) = lower.strip_suffix("days") {
+        (rest, 86400)
+    } else if let Some(rest) = lower.strip_suffix("day") {
+        (rest, 86400)
+    } else if let Some(rest) = lower.strip_suffix('d') {
+        (rest, 86400)
+    } else if let Some(rest) = lower.strip_suffix("weeks") {
+        (rest, 604800)
+    } else if let Some(rest) = lower.strip_suffix("week") {
+        (rest, 604800)
+    } else if let Some(rest) = lower.strip_suffix('w') {
+        (rest, 604800)
+    } else {
+        return Err(
+            "Unrecognized time range format (e.g. '1h', '15m', 'all', '12:00 - 13:00')".into(),
+        );
+    };
+
+    let n: u64 = num_str
+        .trim()
+        .parse()
+        .map_err(|_| "Duration must be a positive integer")?;
+    if n == 0 {
+        return Err("Duration must be a positive integer greater than zero".into());
+    }
+
+    let seconds = n
+        .checked_mul(multiplier)
+        .ok_or("Duration overflowed valid range")?;
+
+    if seconds > MAX_DURATION_SECS {
+        return Err("Duration exceeds maximum allowed range of 100 years".into());
+    }
+
+    let span_i64 = i64::try_from(seconds).map_err(|_| "Duration exceeds maximum range")?;
+    Ok(MessageRange::Live {
+        span_secs: Some(span_i64),
+    })
+}
+
+/// Formats a `MessageRange` into its canonical string representation.
+pub fn format_canonical_range(range: &MessageRange, _now: DateTime<Utc>) -> String {
+    match range {
+        MessageRange::Live { span_secs: None } => "all".to_string(),
+        MessageRange::Live { span_secs: Some(s) } => {
+            let s = *s;
+            if s > 0 && s % 604800 == 0 {
+                format!("{}w", s / 604800)
+            } else if s > 0 && s % 86400 == 0 {
+                format!("{}d", s / 86400)
+            } else if s > 0 && s % 3600 == 0 {
+                format!("{}h", s / 3600)
+            } else if s > 0 && s % 60 == 0 {
+                format!("{}m", s / 60)
+            } else {
+                format!("{}s", s)
+            }
+        }
+        MessageRange::Fixed { start: None, end } => {
+            format!("all - {}", end.format("%Y-%m-%d %H:%M:%S"))
+        }
+        MessageRange::Fixed {
+            start: Some(s),
+            end,
+        } => {
+            format!(
+                "{} - {}",
+                s.format("%Y-%m-%d %H:%M:%S"),
+                end.format("%Y-%m-%d %H:%M:%S")
+            )
+        }
     }
 }
 
