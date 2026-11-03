@@ -1,9 +1,11 @@
 ---
 id: TASK-77.30
 title: Jeden společný výběr agenta v grafu a v tabulce
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@hcom_dev'
 created_date: '2026-11-02 21:01'
+updated_date: '2026-11-03 11:22'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -24,3 +26,9 @@ Uživatel: klik na uzel v grafu nevybere uzel. Graf a tabulka jsou rovnocenná z
 - [ ] #2 Výběr řádku v tabulce (klik i šipky) zvýrazní stejného agenta v grafu
 - [ ] #3 Výběr zůstane stejný při skrytí a znovuzobrazení tabulky nebo grafu
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Unify table row selection in app.rs to resolve node in self.graph for all rows (instances and catalog). 2. Single click on graph node purely selects node/row without attaching; double-click attaches. 3. Clearing selection clears both views. 4. Add regression tests.
+<!-- SECTION:PLAN:END -->
