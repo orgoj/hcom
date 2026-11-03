@@ -1040,6 +1040,7 @@ impl HcomGraphApp {
 
     /// Selects a table row like a click: graph node, detail panel content.
     pub fn select_table_row(&mut self, row: &TableRow) {
+        self.auto_fit = false;
         let name = if !row.instance.is_empty() {
             &row.instance
         } else {
@@ -1999,14 +2000,29 @@ impl HcomGraphApp {
     fn show_canvas(&mut self, ui: &mut egui::Ui, visible: &std::collections::HashSet<NodeIndex>) {
         let rect = ui.available_rect_before_wrap();
         self.canvas_rect = rect;
+
+        // If pointer is down on canvas or user is interacting, disable auto-fit before fit_canvas runs
+        let pointer_down_on_canvas = ui.input(|i| i.pointer.any_down())
+            && ui
+                .input(|i| i.pointer.latest_pos())
+                .is_some_and(|p| rect.contains(p));
+        if pointer_down_on_canvas
+            || self.canvas.pending_drag_node.is_some()
+            || self.canvas.dragged_node.is_some()
+        {
+            self.auto_fit = false;
+        }
+
         self.fit_canvas(ui, rect, visible);
         let dragged_before = self.canvas.dragged_node;
         let view_before = (self.canvas.zoom, self.canvas.pan);
         let (response, action) = self
             .canvas
             .show(ui, &self.graph, &mut self.layout, Some(visible));
-        // The first user zoom, pan or node drag ends auto-fit.
-        if view_before != (self.canvas.zoom, self.canvas.pan) || self.canvas.dragged_node.is_some()
+        // The first user zoom, pan, node press or drag ends auto-fit.
+        if view_before != (self.canvas.zoom, self.canvas.pan)
+            || self.canvas.dragged_node.is_some()
+            || self.canvas.pending_drag_node.is_some()
         {
             self.auto_fit = false;
         }
@@ -3347,6 +3363,7 @@ impl eframe::App for HcomGraphApp {
 impl HcomGraphApp {
     pub fn handle_canvas_action(&mut self, action: Option<CanvasAction>) {
         if let Some(act) = action {
+            self.auto_fit = false;
             match act {
                 CanvasAction::NodeClicked(idx) => {
                     if let Some(node) = self.graph.graph.node_weight(idx) {

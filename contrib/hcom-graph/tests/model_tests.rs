@@ -6711,3 +6711,276 @@ fn test_task_77_30_unified_selection_and_action_dispatch() {
     assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
     assert_eq!(app.canvas.selected_node, Some(idx_beta));
 }
+
+#[test]
+fn test_task_77_32_click_on_node_does_not_pan_zoom_or_move_graph() {
+    use eframe::App;
+    use hcom_graph::config::{GraphState, ViewMode};
+    use hcom_graph::table_data::TableRow;
+
+    let (_dir, mut app) = split_test_app(GraphState::default());
+    app.set_view_mode(ViewMode::GraphOnly);
+    app.auto_fit = true;
+
+    app.table_rows = vec![TableRow {
+        agent: "agent_fixed".into(),
+        instance: "inst_fixed_1".into(),
+        is_running: true,
+        status: "active".into(),
+        ..Default::default()
+    }];
+    app.sync_graph_from_table_rows();
+
+    let idx = app.graph.get_node_index("inst_fixed_1").unwrap();
+    let initial_pos = Pos2::ZERO;
+    app.layout.set_mode(hcom_graph::layout::LayoutMode::Cluster);
+    app.layout.sync_nodes(&app.graph);
+    app.layout.set_node_pos(idx, initial_pos, false);
+    app.layout.is_sleeping = true;
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let mut frame = eframe::Frame::_new_kittest();
+
+    // Initial frame to establish canvas rect and layout
+    let mut out = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        },
+        |ui| app.ui(ui, &mut frame),
+    );
+    out.textures_delta.clear();
+
+    let initial_pan = app.canvas.pan;
+    let initial_zoom = app.canvas.zoom;
+    let center = app.canvas.world_to_screen(initial_pos, app.canvas_rect);
+
+    let click = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+
+    // Click on node with 10px offset from center (within node radius of 20px)
+    let click_pos = center + Vec2::new(10.0, 10.0);
+
+    // 1. Move to position
+    let mut out_move = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(screen),
+            events: vec![egui::Event::PointerMoved(click_pos)],
+            ..Default::default()
+        },
+        |ui| app.ui(ui, &mut frame),
+    );
+    out_move.textures_delta.clear();
+
+    // 2. Press frame
+    let mut out_press = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(screen),
+            events: vec![click(click_pos, true)],
+            ..Default::default()
+        },
+        |ui| app.ui(ui, &mut frame),
+    );
+    out_press.textures_delta.clear();
+
+    assert!(
+        !app.auto_fit,
+        "auto_fit must be disabled on pointer press on canvas"
+    );
+
+    // 3. Release frame
+    let mut out_release = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(screen),
+            events: vec![click(click_pos, false), egui::Event::PointerGone],
+            ..Default::default()
+        },
+        |ui| app.ui(ui, &mut frame),
+    );
+    out_release.textures_delta.clear();
+
+    // Verify AC #1 and AC #2
+    assert_eq!(
+        app.canvas.pan, initial_pan,
+        "Click on node must not change canvas pan"
+    );
+    assert_eq!(
+        app.canvas.zoom, initial_zoom,
+        "Click on node must not change canvas zoom"
+    );
+    let current_pos = app.layout.nodes[&idx].pos;
+    assert!(
+        (current_pos - initial_pos).length() < 0.001,
+        "Click on node must not displace node position in layout"
+    );
+    assert!(
+        app.layout.is_sleeping,
+        "Layout must remain sleeping after a click without waking physics"
+    );
+    assert_eq!(app.selected_row_id.as_deref(), Some("inst_fixed_1"));
+    assert_eq!(app.canvas.selected_node, Some(idx));
+}
+
+#[test]
+fn test_task_77_32_sub_threshold_motion_does_not_pan_or_drag() {
+    use eframe::App;
+    use hcom_graph::config::{GraphState, ViewMode};
+    use hcom_graph::table_data::TableRow;
+
+    let (_dir, mut app) = split_test_app(GraphState::default());
+    app.set_view_mode(ViewMode::GraphOnly);
+
+    app.table_rows = vec![TableRow {
+        agent: "agent_sub".into(),
+        instance: "inst_sub_1".into(),
+        is_running: true,
+        status: "active".into(),
+        ..Default::default()
+    }];
+    app.sync_graph_from_table_rows();
+
+    let idx = app.graph.get_node_index("inst_sub_1").unwrap();
+    let initial_pos = Pos2::ZERO;
+    app.layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    app.layout.sync_nodes(&app.graph);
+    app.layout.set_node_pos(idx, initial_pos, false);
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let mut frame = eframe::Frame::_new_kittest();
+
+    let mut out = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        },
+        |ui| app.ui(ui, &mut frame),
+    );
+    out.textures_delta.clear();
+
+    let initial_pan = app.canvas.pan;
+    let center = app.canvas.world_to_screen(initial_pos, app.canvas_rect);
+
+    let click = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+
+    // Press on center, move 2px (< 3px threshold), release
+    let move_pos = center + Vec2::new(2.0, 0.0);
+    for events in [
+        vec![egui::Event::PointerMoved(center)],
+        vec![click(center, true)],
+        vec![egui::Event::PointerMoved(move_pos)],
+        vec![click(move_pos, false)],
+    ] {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ui| app.ui(ui, &mut frame),
+        );
+        out.textures_delta.clear();
+    }
+
+    assert_eq!(
+        app.canvas.pan, initial_pan,
+        "Sub-threshold motion must not pan canvas"
+    );
+    let current_pos = app.layout.nodes[&idx].pos;
+    assert!(
+        (current_pos - initial_pos).length() < 0.001,
+        "Sub-threshold motion must not drag node"
+    );
+    assert!(app.canvas.dragged_node.is_none());
+}
+
+#[test]
+fn test_task_77_32_fast_drag_beyond_hit_radius_drags_candidate() {
+    use eframe::App;
+    use hcom_graph::config::{GraphState, ViewMode};
+    use hcom_graph::table_data::TableRow;
+
+    let (_dir, mut app) = split_test_app(GraphState::default());
+    app.set_view_mode(ViewMode::GraphOnly);
+
+    app.table_rows = vec![TableRow {
+        agent: "agent_fast".into(),
+        instance: "inst_fast_1".into(),
+        is_running: true,
+        status: "active".into(),
+        ..Default::default()
+    }];
+    app.sync_graph_from_table_rows();
+
+    let idx = app.graph.get_node_index("inst_fast_1").unwrap();
+    let initial_pos = Pos2::ZERO;
+    app.layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    app.layout.sync_nodes(&app.graph);
+    app.layout.set_node_pos(idx, initial_pos, false);
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let mut frame = eframe::Frame::_new_kittest();
+
+    let mut out = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        },
+        |ui| app.ui(ui, &mut frame),
+    );
+    out.textures_delta.clear();
+
+    let initial_pan = app.canvas.pan;
+    let center = app.canvas.world_to_screen(initial_pos, app.canvas_rect);
+
+    let click = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+
+    // Press on center, jump 60px away (far beyond 20px hit radius)
+    let jump_pos = center + Vec2::new(60.0, 0.0);
+    for events in [
+        vec![egui::Event::PointerMoved(center)],
+        vec![click(center, true)],
+        vec![egui::Event::PointerMoved(jump_pos)],
+    ] {
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ui| app.ui(ui, &mut frame),
+        );
+        out.textures_delta.clear();
+    }
+
+    assert_eq!(
+        app.canvas.dragged_node,
+        Some(idx),
+        "Candidate node must be dragged even after leaving hit radius"
+    );
+    assert_eq!(
+        app.canvas.pan, initial_pan,
+        "Node drag must not pan the canvas"
+    );
+    let dragged_pos = app.layout.nodes[&idx].pos;
+    assert!(
+        dragged_pos.x > initial_pos.x + 30.0,
+        "Node must have moved towards the drag location"
+    );
+}

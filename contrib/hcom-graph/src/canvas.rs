@@ -113,6 +113,7 @@ pub struct CanvasView {
     pub pan: Vec2,
     pub zoom: f32,
     pub dragged_node: Option<NodeIndex>,
+    pub pending_drag_node: Option<NodeIndex>,
     pub hovered_node: Option<NodeIndex>,
     pub hovered_edge: Option<EdgeIndex>,
     pub selected_node: Option<NodeIndex>,
@@ -166,6 +167,7 @@ impl CanvasView {
             pan: Vec2::ZERO,
             zoom: 1.0,
             dragged_node: None,
+            pending_drag_node: None,
             hovered_node: None,
             hovered_edge: None,
             selected_node: None,
@@ -386,21 +388,25 @@ impl CanvasView {
             }
 
             // Track mouse down pos to distinguish small click from drag
-            if response.drag_started_by(egui::PointerButton::Primary) {
+            if (response.drag_started_by(egui::PointerButton::Primary)
+                || (ui.input(|i| i.pointer.primary_pressed()) && response.contains_pointer()))
+                && self.mouse_down_pos.is_none()
+            {
                 self.mouse_down_pos = Some(mouse_pos);
                 self.is_dragging = false;
-
-                if let Some(hit) = self.hovered_node {
-                    self.dragged_node = Some(hit);
-                    layout.set_node_pos(hit, world_mouse, true);
-                }
+                self.pending_drag_node = self.hovered_node;
             }
 
-            if response.dragged_by(egui::PointerButton::Primary)
+            if ui.input(|i| i.pointer.primary_down())
                 && let Some(down) = self.mouse_down_pos
                 && (mouse_pos - down).length() > 3.0
             {
                 self.is_dragging = true;
+                if self.dragged_node.is_none()
+                    && let Some(cand) = self.pending_drag_node
+                {
+                    self.dragged_node = Some(cand);
+                }
             }
         } else {
             self.hovered_node = None;
@@ -426,10 +432,22 @@ impl CanvasView {
                     layout.set_node_pos(dragged, phys.pos, keep_pinned);
                 }
                 self.dragged_node = None;
+                self.pending_drag_node = None;
+                self.mouse_down_pos = None;
             }
         } else if response.dragged() {
-            // Pan when dragging empty canvas or using middle/secondary buttons
-            self.pan += response.drag_delta();
+            // Pan when dragging empty canvas (no pending node candidate) or using middle/secondary buttons
+            if self.pending_drag_node.is_none()
+                || response.dragged_by(egui::PointerButton::Middle)
+                || response.dragged_by(egui::PointerButton::Secondary)
+            {
+                self.pan += response.drag_delta();
+            }
+        }
+
+        if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+            self.pending_drag_node = None;
+            self.mouse_down_pos = None;
         }
 
         // Handle Clicks (when not dragging)
