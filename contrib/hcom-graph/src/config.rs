@@ -221,8 +221,11 @@ pub struct GraphState {
     /// Table height as a fraction of the window height.
     #[serde(default)]
     pub table_height_frac: Option<f32>,
-    /// Detail panel width as a fraction of the window width.
+    /// Detail panel width in pixels.
     #[serde(default)]
+    pub detail_width_px: Option<f32>,
+    /// Legacy detail panel width as a fraction of the window width; read-only.
+    #[serde(default, skip_serializing)]
     pub detail_width_frac: Option<f32>,
     /// Active panel layout mode: both graph and table, graph only, or table only.
     #[serde(default, deserialize_with = "deserialize_view_mode")]
@@ -294,8 +297,10 @@ pub struct SavedNodePos {
 
 /// Most saved node positions kept; the oldest are dropped first.
 pub const MAX_NODE_POSITIONS: usize = 500;
-/// Minimum width of the detail side panel.
-pub const SIDE_PANEL_MIN_WIDTH: f32 = 240.0;
+/// Default width of the detail side panel in pixels.
+pub const DEFAULT_DETAIL_WIDTH_PX: f32 = 380.0;
+/// Minimum width of the detail side panel in pixels.
+pub const SIDE_PANEL_MIN_WIDTH: f32 = 260.0;
 /// Range a saved split fraction is clamped to.
 pub const SPLIT_FRAC_MIN: f32 = 0.05;
 pub const SPLIT_FRAC_MAX: f32 = 0.95;
@@ -349,6 +354,10 @@ impl GraphState {
         let usable_px = |v: Option<f32>| v.filter(|v| v.is_finite() && *v > 0.0);
         self.sash_pos = usable_px(self.sash_pos);
         self.side_panel_width = usable_px(self.side_panel_width);
+        self.detail_width_px = self
+            .detail_width_px
+            .filter(|w| w.is_finite() && *w > 0.0)
+            .map(|w| w.max(SIDE_PANEL_MIN_WIDTH));
         let usable_frac = |v: Option<f32>| {
             v.filter(|f| f.is_finite() && *f > 0.0 && *f < 1.0)
                 .map(|f| f.clamp(SPLIT_FRAC_MIN, SPLIT_FRAC_MAX))
@@ -422,6 +431,7 @@ impl Default for GraphState {
             geometry: None,
             sash_pos: None,
             table_height_frac: None,
+            detail_width_px: None,
             detail_width_frac: None,
             view_mode: Some(ViewMode::Both),
             show_table: true,

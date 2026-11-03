@@ -1,9 +1,9 @@
 use crate::action::{ActionRequest, ActionResult, ActionWorkerHandle, SystemActionRunner};
 use crate::canvas::{CanvasAction, CanvasView};
 use crate::config::{
-    DETAIL_TABS, GraphConfig, GraphState, PlaceholderContext, SIDE_PANEL_MIN_WIDTH, SPLIT_FRAC_MAX,
-    SPLIT_FRAC_MIN, ViewMode, load_config, load_state, replace_placeholders_str,
-    replace_placeholders_vec, save_state, screen_bar_buttons,
+    DEFAULT_DETAIL_WIDTH_PX, DETAIL_TABS, GraphConfig, GraphState, PlaceholderContext,
+    SIDE_PANEL_MIN_WIDTH, SPLIT_FRAC_MAX, SPLIT_FRAC_MIN, ViewMode, load_config, load_state,
+    replace_placeholders_str, replace_placeholders_vec, save_state, screen_bar_buttons,
 };
 use crate::layout::{GraphLayout, LayoutMode};
 use crate::model::{
@@ -790,13 +790,16 @@ impl HcomGraphApp {
                 Some((px / window.y).clamp(SPLIT_FRAC_MIN, SPLIT_FRAC_MAX));
             self.mark_view_dirty();
         }
-        if window.x >= 1.0
-            && let Some(px) = self.state.side_panel_width.take()
-            && self.state.detail_width_frac.is_none()
-        {
-            self.state.detail_width_frac =
-                Some((px / window.x).clamp(SPLIT_FRAC_MIN, SPLIT_FRAC_MAX));
-            self.mark_view_dirty();
+        if window.x >= 1.0 && self.state.detail_width_px.is_none() {
+            if let Some(f) = self.state.detail_width_frac.take() {
+                self.state.detail_width_px = Some((f * window.x).max(SIDE_PANEL_MIN_WIDTH));
+                self.state.side_panel_width = None;
+                self.mark_view_dirty();
+            } else if let Some(px) = self.state.side_panel_width.take() {
+                self.state.detail_width_px = Some(px.max(SIDE_PANEL_MIN_WIDTH));
+                self.state.detail_width_frac = None;
+                self.mark_view_dirty();
+            }
         }
     }
 
@@ -1170,6 +1173,8 @@ impl HcomGraphApp {
             &row.agent
         };
         self.selected_row_id = Some(name.to_string());
+        self.state.show_side_panel = true;
+        self.save_state();
         self.canvas.selected_node = self.graph.get_node_index(name);
         self.canvas.selected_edge = None;
         self.on_selection_changed();
@@ -1183,28 +1188,31 @@ impl HcomGraphApp {
             REPORT_FIELDS.to_vec()
         };
 
-        egui::ScrollArea::vertical()
-            .id_salt("report_scroll_view")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                egui::Grid::new("report_view_grid")
-                    .num_columns(2)
-                    .striped(true)
-                    .spacing([16.0, 4.0])
-                    .show(ui, |ui| {
-                        for key in fields {
-                            let val = row.get_cell_value(key);
-                            ui.label(RichText::new(key).strong());
-                            ui.horizontal(|ui| {
-                                ui.label(&val);
-                                if !val.is_empty() && ui.small_button("📋").clicked() {
-                                    ui.ctx().copy_text(val);
-                                }
-                            });
-                            ui.end_row();
-                        }
-                    });
-            });
+        ui.push_id("report_scroll_container", |ui| {
+            egui::ScrollArea::both()
+                .id_salt("report_scroll_view")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    egui::Grid::new("report_view_grid")
+                        .num_columns(2)
+                        .min_col_width(110.0)
+                        .striped(true)
+                        .spacing([16.0, 4.0])
+                        .show(ui, |ui| {
+                            for key in fields {
+                                let val = row.get_cell_value(key);
+                                ui.label(RichText::new(key).strong());
+                                ui.horizontal(|ui| {
+                                    ui.label(&val);
+                                    if !val.is_empty() && ui.small_button("📋").clicked() {
+                                        ui.ctx().copy_text(val);
+                                    }
+                                });
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
     }
 
     fn render_range_slider(
@@ -1728,6 +1736,7 @@ impl HcomGraphApp {
 
         egui::Grid::new("agent_meta_grid")
             .num_columns(2)
+            .min_col_width(100.0)
             .spacing([10.0, 6.0])
             .show(ui, |ui| {
                 ui.label(RichText::new("Status Detail:").weak());
@@ -1913,36 +1922,39 @@ impl HcomGraphApp {
         });
 
         // Terminal lines are 80-200 columns: scroll, never wrap.
-        egui::ScrollArea::both()
-            .id_salt("screen_terminal_scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                if let Some(ref selected) = agent {
-                    let is_running = self
-                        .selected_row()
-                        .map(|r| r.is_running && !r.instance.is_empty())
-                        .unwrap_or(false);
-                    if !is_running {
-                        ui.weak(format!(
-                            "Agent '{}' is stopped. Screen is only available for running agents.",
-                            selected
-                        ));
-                        if ui.small_button("📋 View Config").clicked() {
-                            self.select_detail_tab("Config");
-                        }
-                    } else if let Some((ref tr_agent, _, ref text)) = self.screen_content {
-                        if tr_agent == selected {
-                            ui.add(egui::Label::new(RichText::new(text).monospace()).extend());
+        ui.push_id("screen_scroll_container", |ui| {
+            egui::ScrollArea::both()
+                .id_salt("screen_terminal_scroll")
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    if let Some(ref selected) = agent {
+                        let is_running = self
+                            .selected_row()
+                            .map(|r| r.is_running && !r.instance.is_empty())
+                            .unwrap_or(false);
+                        if !is_running {
+                            ui.weak(format!(
+                                "Agent '{}' is stopped. Screen is only available for running agents.",
+                                selected
+                            ));
+                            if ui.small_button("📋 View Config").clicked() {
+                                self.select_detail_tab("Config");
+                            }
+                        } else if let Some((ref tr_agent, _, ref text)) = self.screen_content {
+                            if tr_agent == selected {
+                                ui.add(egui::Label::new(RichText::new(text).monospace()).extend());
+                            } else {
+                                ui.weak(format!("Loading screen for {}...", selected));
+                            }
                         } else {
                             ui.weak(format!("Loading screen for {}...", selected));
                         }
                     } else {
-                        ui.weak(format!("Loading screen for {}...", selected));
+                        ui.weak("No running agent selected");
                     }
-                } else {
-                    ui.weak("No running agent selected");
-                }
-            });
+                });
+        });
     }
 
     /// Tab row and content of the right detail panel.
@@ -1978,7 +1990,7 @@ impl HcomGraphApp {
 
         ui.separator();
 
-        match self.state.detail_tab.as_str() {
+        ui.push_id("detail_tab_content", |ui| match self.state.detail_tab.as_str() {
             "Screen" => {
                 self.render_screen_tab(ui);
             }
@@ -2104,12 +2116,14 @@ impl HcomGraphApp {
             }
             _ => {
                 // Scroll, so long content never overflows into the table below.
-                egui::ScrollArea::vertical()
-                    .id_salt("summary_scroll_tab")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| self.render_side_panel_summary(ui));
+                ui.push_id("summary_scroll_container", |ui| {
+                    egui::ScrollArea::both()
+                        .id_salt("summary_scroll_tab")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.render_side_panel_summary(ui));
+                });
             }
-        }
+        });
     }
 
     fn render_config_tab(&mut self, ui: &mut egui::Ui) {
@@ -2129,7 +2143,7 @@ impl HcomGraphApp {
 
         let cat_opt = row.catalog.as_ref();
 
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .id_salt("config_tab_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -3784,13 +3798,12 @@ impl eframe::App for HcomGraphApp {
         let mut detail_rect = None;
         let detail_avail = ui.available_width();
         if self.state.show_side_panel {
-            let detail_w = split_px(
-                self.state.detail_width_frac.unwrap_or(DEFAULT_SPLIT_FRAC),
-                window.width(),
-                SIDE_PANEL_MIN_WIDTH,
-                detail_avail,
-                CANVAS_MIN_WIDTH,
-            );
+            let stored_w = self
+                .state
+                .detail_width_px
+                .unwrap_or(DEFAULT_DETAIL_WIDTH_PX);
+            let eff_max = (detail_avail - CANVAS_MIN_WIDTH).max(SIDE_PANEL_MIN_WIDTH);
+            let detail_w = stored_w.clamp(SIDE_PANEL_MIN_WIDTH, eff_max);
             let side_resp = egui::Panel::right("detail_side_panel")
                 .exact_size(detail_w)
                 .show(ui, |ui| {
@@ -3852,19 +3865,53 @@ impl eframe::App for HcomGraphApp {
             && let Some(change) =
                 split_handle(ui, "detail_split", rect, egui::Direction::RightToLeft)
         {
-            self.state.detail_width_frac = match change {
-                SplitChange::Moved(x) => Some(
-                    split_px(
-                        (window.right() - x) / window.width(),
-                        window.width(),
-                        SIDE_PANEL_MIN_WIDTH,
-                        detail_avail,
-                        CANVAS_MIN_WIDTH,
-                    ) / window.width(),
-                ),
+            let eff_max = (detail_avail - CANVAS_MIN_WIDTH).max(SIDE_PANEL_MIN_WIDTH);
+            self.state.detail_width_px = match change {
+                SplitChange::Moved(x) => {
+                    Some((window.right() - x).clamp(SIDE_PANEL_MIN_WIDTH, eff_max))
+                }
                 SplitChange::Reset => None,
             };
             self.mark_view_dirty();
+        }
+        if !self.state.show_side_panel {
+            let edge_strip_w = 6.0;
+            let edge_rect = egui::Rect::from_x_y_ranges(
+                (window.right() - edge_strip_w)..=window.right(),
+                window.top()..=window.bottom(),
+            );
+            egui::Area::new(ui.scope_id().with("detail_edge_dock"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(edge_rect.min)
+                .show(ui.ctx(), |ui| {
+                    let (rect, resp) =
+                        ui.allocate_exact_size(edge_rect.size(), egui::Sense::click_and_drag());
+                    // Unconditional idle strip so the handle is discoverable even when closed.
+                    let (fill_color, stroke_color) = if resp.hovered() || resp.dragged() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        (
+                            Color32::from_rgb(100, 150, 200),
+                            Color32::from_rgb(140, 190, 240),
+                        )
+                    } else {
+                        (
+                            Color32::from_rgba_unmultiplied(80, 120, 160, 90),
+                            Color32::from_rgba_unmultiplied(100, 150, 200, 130),
+                        )
+                    };
+                    ui.painter().rect_filled(rect, 0.0, fill_color);
+                    ui.painter().rect_stroke(
+                        rect,
+                        0.0,
+                        egui::Stroke::new(1.0, stroke_color),
+                        egui::StrokeKind::Inside,
+                    );
+                    if resp.clicked() || resp.dragged() {
+                        self.state.show_side_panel = true;
+                        self.save_state();
+                        self.on_selection_changed();
+                    }
+                });
         }
 
         // 9. Context Menu Popup
@@ -3990,6 +4037,8 @@ impl HcomGraphApp {
                         self.selected_row_id = Some(node.name.clone());
                         self.canvas.selected_node = Some(idx);
                         self.canvas.selected_edge = None;
+                        self.state.show_side_panel = true;
+                        self.save_state();
                         self.on_selection_changed();
                     }
                 }
@@ -3999,6 +4048,8 @@ impl HcomGraphApp {
                         self.selected_row_id = Some(name.clone());
                         self.canvas.selected_node = Some(idx);
                         self.canvas.selected_edge = None;
+                        self.state.show_side_panel = true;
+                        self.save_state();
                         self.on_selection_changed();
                         let custom_cmd =
                             self.resolve_attach_cmd(self.selected_row().as_ref(), &name);
@@ -4019,6 +4070,8 @@ impl HcomGraphApp {
                         self.selected_row_id = Some(node.name.clone());
                         self.canvas.selected_node = Some(idx);
                         self.canvas.selected_edge = None;
+                        self.state.show_side_panel = true;
+                        self.save_state();
                         self.on_selection_changed();
                     }
                     self.context_menu = Some(ContextMenuState {
