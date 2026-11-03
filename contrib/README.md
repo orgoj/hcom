@@ -249,6 +249,9 @@ skipped; a `screen_bar` that is not a list keeps the default bar.
   - Drag & drop agents to manually position them (pinned while held, smoothly relax on release).
   - `Pin Position` / `Unpin Position` in a node's right-click menu keeps a node in place across layout modes and restarts.
   - Top status bar with agent counts by state, message stats, zoom reset and zoom percentage.
+- Layout and selection:
+  - Toolbar layout selector: `Both (F4)` (graph + agent table), `Graph` (canvas only), and `Table` (table only). Persisted in GUI state (`view_mode`).
+  - Unified selection: clicking a node or table row synchronizes selection across canvas, table, and detail panel. Double-clicking a node attaches to the agent. Clicking an edge selects the relationship and clears agent selection; clicking empty canvas clears selection.
 
 ### Running
 

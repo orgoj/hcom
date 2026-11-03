@@ -178,6 +178,38 @@ impl Default for GraphConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewMode {
+    #[default]
+    Both,
+    GraphOnly,
+    TableOnly,
+}
+
+fn deserialize_view_mode<'de, D>(deserializer: D) -> Result<Option<ViewMode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum RawViewMode {
+        Both,
+        GraphOnly,
+        TableOnly,
+        #[serde(other)]
+        Other,
+    }
+
+    let raw = Option::<RawViewMode>::deserialize(deserializer)?;
+    Ok(match raw {
+        Some(RawViewMode::Both) => Some(ViewMode::Both),
+        Some(RawViewMode::GraphOnly) => Some(ViewMode::GraphOnly),
+        Some(RawViewMode::TableOnly) => Some(ViewMode::TableOnly),
+        Some(RawViewMode::Other) | None => None,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphState {
     #[serde(default)]
@@ -192,6 +224,9 @@ pub struct GraphState {
     /// Detail panel width as a fraction of the window width.
     #[serde(default)]
     pub detail_width_frac: Option<f32>,
+    /// Active panel layout mode: both graph and table, graph only, or table only.
+    #[serde(default, deserialize_with = "deserialize_view_mode")]
+    pub view_mode: Option<ViewMode>,
     #[serde(default = "default_true")]
     pub show_table: bool,
     #[serde(default)]
@@ -337,6 +372,22 @@ impl GraphState {
             last_n: self.window_last_n.filter(|n| *n > 0),
         }
     }
+
+    pub fn effective_view_mode(&self) -> ViewMode {
+        if !self.show_table {
+            return ViewMode::GraphOnly;
+        }
+        match self.view_mode {
+            Some(ViewMode::TableOnly) => ViewMode::TableOnly,
+            Some(ViewMode::GraphOnly) => ViewMode::GraphOnly,
+            Some(ViewMode::Both) | None => ViewMode::Both,
+        }
+    }
+
+    pub fn set_view_mode(&mut self, mode: ViewMode) {
+        self.view_mode = Some(mode);
+        self.show_table = mode != ViewMode::GraphOnly;
+    }
 }
 
 fn default_layout_mode() -> String {
@@ -371,6 +422,7 @@ impl Default for GraphState {
             sash_pos: None,
             table_height_frac: None,
             detail_width_frac: None,
+            view_mode: Some(ViewMode::Both),
             show_table: true,
             running_only: false,
             blocked_only: false,

@@ -2,8 +2,8 @@ use crate::action::{ActionRequest, ActionResult, ActionWorkerHandle, SystemActio
 use crate::canvas::{CanvasAction, CanvasView};
 use crate::config::{
     DETAIL_TABS, GraphConfig, GraphState, PlaceholderContext, SIDE_PANEL_MIN_WIDTH, SPLIT_FRAC_MAX,
-    SPLIT_FRAC_MIN, load_config, load_state, replace_placeholders_str, replace_placeholders_vec,
-    save_state, screen_bar_buttons,
+    SPLIT_FRAC_MIN, ViewMode, load_config, load_state, replace_placeholders_str,
+    replace_placeholders_vec, save_state, screen_bar_buttons,
 };
 use crate::layout::{GraphLayout, LayoutMode};
 use crate::model::{AgentGraph, AgentNode, AgentStatus, EdgeKind, MessageWindow};
@@ -687,9 +687,22 @@ impl HcomGraphApp {
         }
     }
 
-    pub fn toggle_table(&mut self) {
-        self.state.show_table = !self.state.show_table;
+    pub fn set_view_mode(&mut self, mode: ViewMode) {
+        self.state.set_view_mode(mode);
         self.save_state();
+    }
+
+    pub fn toggle_view_mode_f4(&mut self) {
+        let next = match self.state.effective_view_mode() {
+            ViewMode::Both => ViewMode::GraphOnly,
+            ViewMode::GraphOnly => ViewMode::Both,
+            ViewMode::TableOnly => ViewMode::Both,
+        };
+        self.set_view_mode(next);
+    }
+
+    pub fn toggle_table(&mut self) {
+        self.toggle_view_mode_f4();
     }
 
     pub fn toggle_detail_panel(&mut self) {
@@ -1026,22 +1039,15 @@ impl HcomGraphApp {
     }
 
     /// Selects a table row like a click: graph node, detail panel content.
-    fn select_table_row(&mut self, row: &TableRow) {
-        self.selected_row_id = Some(if !row.instance.is_empty() {
-            row.instance.clone()
+    pub fn select_table_row(&mut self, row: &TableRow) {
+        let name = if !row.instance.is_empty() {
+            &row.instance
         } else {
-            row.agent.clone()
-        });
-        if !row.instance.is_empty() {
-            if let Some(idx) = self.graph.get_node_index(&row.instance) {
-                self.canvas.selected_node = Some(idx);
-                self.canvas.selected_edge = None;
-            } else {
-                self.canvas.selected_node = None;
-            }
-        } else {
-            self.canvas.selected_node = None;
-        }
+            &row.agent
+        };
+        self.selected_row_id = Some(name.to_string());
+        self.canvas.selected_node = self.graph.get_node_index(name);
+        self.canvas.selected_edge = None;
         self.on_selection_changed();
     }
 
@@ -2443,12 +2449,28 @@ impl eframe::App for HcomGraphApp {
 
             // Row 2: Panel toggles + Search Filter + Checkboxes + Count
             ui.horizontal(|ui| {
+                ui.label("View:");
+                let current_view = self.state.effective_view_mode();
                 if ui
-                    .selectable_label(self.state.show_table, "Table (F4)")
-                    .on_hover_text("Show or hide the agent table")
+                    .selectable_label(current_view == ViewMode::Both, "Both (F4)")
+                    .on_hover_text("Show both graph canvas and agent table")
                     .clicked()
                 {
-                    self.toggle_table();
+                    self.set_view_mode(ViewMode::Both);
+                }
+                if ui
+                    .selectable_label(current_view == ViewMode::GraphOnly, "Graph")
+                    .on_hover_text("Show graph canvas only (hide table)")
+                    .clicked()
+                {
+                    self.set_view_mode(ViewMode::GraphOnly);
+                }
+                if ui
+                    .selectable_label(current_view == ViewMode::TableOnly, "Table")
+                    .on_hover_text("Show agent table only (hide graph canvas)")
+                    .clicked()
+                {
+                    self.set_view_mode(ViewMode::TableOnly);
                 }
                 if ui
                     .selectable_label(self.state.show_side_panel, "Detail")
@@ -3095,9 +3117,13 @@ impl eframe::App for HcomGraphApp {
         // the right panel, so the detail panel and the canvas sit above it.
         // Both panels have an exact size from their window fraction (content
         // never resizes them); only the split handles below change a fraction.
+        let mode = self.state.effective_view_mode();
+
+        // 6. Bottom agent table across the full window width.
+        // Rendered only when mode == ViewMode::Both.
         let mut table_rect = None;
         let table_avail = ui.available_height();
-        if self.state.show_table {
+        if mode == ViewMode::Both {
             let table_h = split_px(
                 self.state.table_height_frac.unwrap_or(DEFAULT_SPLIT_FRAC),
                 window.height(),
@@ -3155,9 +3181,14 @@ impl eframe::App for HcomGraphApp {
             }
         }
 
-        // 8. Central panel: the graph canvas
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.show_canvas(ui, &visible_node_indices);
+        // 8. Central panel: graph canvas or full table
+        egui::CentralPanel::default().show(ui, |ui| match mode {
+            ViewMode::Both | ViewMode::GraphOnly => {
+                self.show_canvas(ui, &visible_node_indices);
+            }
+            ViewMode::TableOnly => {
+                self.render_table(ui, &filtered_rows);
+            }
         });
 
         // Split handles on the drawn panel edges, above every panel (the canvas
@@ -3314,24 +3345,45 @@ impl eframe::App for HcomGraphApp {
 }
 
 impl HcomGraphApp {
-    fn handle_canvas_action(&mut self, action: Option<CanvasAction>) {
+    pub fn handle_canvas_action(&mut self, action: Option<CanvasAction>) {
         if let Some(act) = action {
             match act {
                 CanvasAction::NodeClicked(idx) => {
                     if let Some(node) = self.graph.graph.node_weight(idx) {
+                        self.selected_row_id = Some(node.name.clone());
+                        self.canvas.selected_node = Some(idx);
+                        self.canvas.selected_edge = None;
+                        self.on_selection_changed();
+                    }
+                }
+                CanvasAction::NodeDoubleClicked(idx) => {
+                    if let Some(node) = self.graph.graph.node_weight(idx) {
                         let name = node.name.clone();
                         self.selected_row_id = Some(name.clone());
+                        self.canvas.selected_node = Some(idx);
+                        self.canvas.selected_edge = None;
+                        self.on_selection_changed();
                         let custom_cmd =
                             self.resolve_attach_cmd(self.selected_row().as_ref(), &name);
                         self.dispatch_action(ActionRequest::Attach {
                             agent: name,
                             custom_cmd,
                         });
-                        self.on_selection_changed();
                     }
                 }
-                CanvasAction::EdgeClicked(_) => {}
+                CanvasAction::EdgeClicked(idx) => {
+                    self.selected_row_id = None;
+                    self.canvas.selected_node = None;
+                    self.canvas.selected_edge = Some(idx);
+                    self.on_selection_changed();
+                }
                 CanvasAction::NodeSecondaryClicked(idx, pos) => {
+                    if let Some(node) = self.graph.graph.node_weight(idx) {
+                        self.selected_row_id = Some(node.name.clone());
+                        self.canvas.selected_node = Some(idx);
+                        self.canvas.selected_edge = None;
+                        self.on_selection_changed();
+                    }
                     self.context_menu = Some(ContextMenuState {
                         target: ContextMenuTarget::Node(idx),
                         screen_pos: pos,
@@ -3339,6 +3391,10 @@ impl HcomGraphApp {
                     self.context_menu_opened_this_frame = true;
                 }
                 CanvasAction::EdgeSecondaryClicked(idx, pos) => {
+                    self.selected_row_id = None;
+                    self.canvas.selected_node = None;
+                    self.canvas.selected_edge = Some(idx);
+                    self.on_selection_changed();
                     self.context_menu = Some(ContextMenuState {
                         target: ContextMenuTarget::Edge(idx),
                         screen_pos: pos,
@@ -3346,7 +3402,11 @@ impl HcomGraphApp {
                     self.context_menu_opened_this_frame = true;
                 }
                 CanvasAction::SelectionCleared => {
+                    self.selected_row_id = None;
+                    self.canvas.selected_node = None;
+                    self.canvas.selected_edge = None;
                     self.context_menu = None;
+                    self.on_selection_changed();
                 }
             }
         }

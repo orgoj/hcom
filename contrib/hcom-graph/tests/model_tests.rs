@@ -6359,3 +6359,355 @@ fn test_task_77_29_table_and_graph_node_parity_and_visible_projection() {
         "Counter must show 2 / 5 when running_only is active"
     );
 }
+
+#[test]
+fn test_task_77_30_view_mode_migration_persistence_and_f4_toggle() {
+    use hcom_graph::config::{GraphState, ViewMode, load_state, save_state};
+
+    // 1. Legacy migration: JSON without view_mode, show_table = false
+    let legacy_graph_only: GraphState = serde_json::from_str(r#"{"show_table": false}"#).unwrap();
+    assert_eq!(legacy_graph_only.view_mode, None);
+    assert_eq!(legacy_graph_only.effective_view_mode(), ViewMode::GraphOnly);
+
+    // 2. Legacy migration: JSON without view_mode, show_table = true
+    let legacy_both: GraphState = serde_json::from_str(r#"{"show_table": true}"#).unwrap();
+    assert_eq!(legacy_both.view_mode, None);
+    assert_eq!(legacy_both.effective_view_mode(), ViewMode::Both);
+
+    // 3. Default state
+    let def = GraphState::default();
+    assert_eq!(def.view_mode, Some(ViewMode::Both));
+    assert_eq!(def.effective_view_mode(), ViewMode::Both);
+    assert!(def.show_table);
+
+    // 4. Persistence round-trip with set_view_mode
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = GraphState::default();
+    state.set_view_mode(ViewMode::TableOnly);
+    assert_eq!(state.view_mode, Some(ViewMode::TableOnly));
+    assert!(state.show_table);
+    let _ = save_state(dir.path(), &state);
+
+    let reloaded = load_state(dir.path());
+    assert_eq!(reloaded.view_mode, Some(ViewMode::TableOnly));
+    assert_eq!(reloaded.effective_view_mode(), ViewMode::TableOnly);
+    assert!(reloaded.show_table);
+
+    // GraphOnly persistence
+    state.set_view_mode(ViewMode::GraphOnly);
+    assert_eq!(state.view_mode, Some(ViewMode::GraphOnly));
+    assert!(!state.show_table);
+    let _ = save_state(dir.path(), &state);
+
+    let reloaded2 = load_state(dir.path());
+    assert_eq!(reloaded2.view_mode, Some(ViewMode::GraphOnly));
+    assert_eq!(reloaded2.effective_view_mode(), ViewMode::GraphOnly);
+    assert!(!reloaded2.show_table);
+
+    // 5. F4 toggle on App
+    let (_td, mut app) = split_test_app(GraphState::default());
+    assert_eq!(app.state.effective_view_mode(), ViewMode::Both);
+
+    // Both -> GraphOnly
+    app.toggle_view_mode_f4();
+    assert_eq!(app.state.effective_view_mode(), ViewMode::GraphOnly);
+
+    // GraphOnly -> Both
+    app.toggle_view_mode_f4();
+    assert_eq!(app.state.effective_view_mode(), ViewMode::Both);
+
+    // TableOnly -> Both
+    app.set_view_mode(ViewMode::TableOnly);
+    assert_eq!(app.state.effective_view_mode(), ViewMode::TableOnly);
+    app.toggle_view_mode_f4();
+    assert_eq!(app.state.effective_view_mode(), ViewMode::Both);
+}
+
+#[test]
+fn test_task_77_30_view_modes_render_expected_panels() {
+    use hcom_graph::config::{GraphState, ViewMode};
+
+    let (_dir, mut app) = split_test_app(GraphState::default());
+
+    // In ViewMode::Both: agent_table_panel bottom panel exists
+    app.set_view_mode(ViewMode::Both);
+    let ctx1 = egui::Context::default();
+    let (table_panel, _) = run_app_frames(&ctx1, &mut app, 2);
+    assert!(
+        table_panel.is_some(),
+        "ViewMode::Both must render agent_table_panel"
+    );
+
+    // In ViewMode::GraphOnly: agent_table_panel does not exist
+    app.set_view_mode(ViewMode::GraphOnly);
+    let ctx2 = egui::Context::default();
+    let (table_panel, _) = run_app_frames(&ctx2, &mut app, 2);
+    assert!(
+        table_panel.is_none(),
+        "ViewMode::GraphOnly must not render bottom agent_table_panel"
+    );
+
+    // In ViewMode::TableOnly: bottom agent_table_panel does not exist (table is in CentralPanel)
+    app.set_view_mode(ViewMode::TableOnly);
+    let ctx3 = egui::Context::default();
+    let (table_panel, _) = run_app_frames(&ctx3, &mut app, 2);
+    assert!(
+        table_panel.is_none(),
+        "ViewMode::TableOnly renders table in CentralPanel, not bottom panel"
+    );
+
+    // Detail panel remains available in all view modes
+    app.state.show_side_panel = true;
+    let ctx4 = egui::Context::default();
+    let (_, detail_panel) = run_app_frames(&ctx4, &mut app, 2);
+    assert!(
+        detail_panel.is_some(),
+        "Detail panel renders in ViewMode::TableOnly when enabled"
+    );
+}
+
+#[test]
+fn test_task_77_30_unified_selection_and_action_dispatch() {
+    use hcom_graph::action::{ActionRequest, ActionWorkerHandle};
+    use hcom_graph::canvas::CanvasAction;
+    use hcom_graph::config::{GraphState, ViewMode};
+    use hcom_graph::model::MessageData;
+    use hcom_graph::table_data::TableRow;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let (_dir, mut app) = split_test_app(GraphState::default());
+
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let runner = MockActionRunner {
+        recorded: recorded.clone(),
+        fail_attach: false,
+        transcript_result: "test transcript".into(),
+    };
+    app.action_worker = Some(ActionWorkerHandle::new(runner));
+
+    // Populate rows and sync to graph:
+    app.table_rows = vec![
+        TableRow {
+            agent: "agent_alpha".into(),
+            instance: "inst_alpha_1".into(),
+            is_running: true,
+            status: "active".into(),
+            ..Default::default()
+        },
+        TableRow {
+            agent: "cat_beta".into(),
+            instance: String::new(),
+            is_running: false,
+            status: "stopped".into(),
+            ..Default::default()
+        },
+    ];
+    app.sync_graph_from_table_rows();
+
+    let idx_alpha = app.graph.get_node_index("inst_alpha_1").unwrap();
+    let idx_beta = app.graph.get_node_index("cat_beta").unwrap();
+
+    // Fix node positions in manual mode so screen coordinates are stable
+    app.layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    app.layout.sync_nodes(&app.graph);
+    app.layout
+        .set_node_pos(idx_alpha, Pos2::new(100.0, 100.0), false);
+    app.layout
+        .set_node_pos(idx_beta, Pos2::new(200.0, 200.0), false);
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let mut center_alpha = Pos2::ZERO;
+
+    // Initial frame to establish canvas rect and resolve node screen coordinates
+    ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        },
+        |ui| {
+            let (resp, action) = app.canvas.show(ui, &app.graph, &mut app.layout, None);
+            center_alpha = app
+                .canvas
+                .world_to_screen(Pos2::new(100.0, 100.0), resp.rect);
+            app.handle_canvas_action(action);
+        },
+    )
+    .textures_delta
+    .clear();
+
+    let click = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+
+    // 1. Single click sequence through CanvasView::show:
+    // exercises response.clicked() and the else-if routing in CanvasView::show
+    for events in [
+        vec![egui::Event::PointerMoved(center_alpha)],
+        vec![click(center_alpha, true)],
+        vec![click(center_alpha, false)],
+        vec![],
+    ] {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            let (_resp, action) = app.canvas.show(ui, &app.graph, &mut app.layout, None);
+            app.handle_canvas_action(action);
+        })
+        .textures_delta
+        .clear();
+    }
+
+    assert_eq!(app.selected_row_id.as_deref(), Some("inst_alpha_1"));
+    assert_eq!(app.canvas.selected_node, Some(idx_alpha));
+    assert_eq!(app.canvas.selected_edge, None);
+    assert_eq!(
+        app.selected_row().map(|r| r.instance),
+        Some("inst_alpha_1".into())
+    );
+
+    // Bounded check: confirm single-click produced 0 Attach requests to the worker
+    std::thread::sleep(Duration::from_millis(50));
+    {
+        let rec = recorded.lock().unwrap();
+        let attach_count = rec
+            .iter()
+            .filter(|r| matches!(r, ActionRequest::Attach { .. }))
+            .count();
+        assert_eq!(
+            attach_count, 0,
+            "Single-click on node via CanvasView::show must NOT dispatch Attach"
+        );
+    }
+
+    // 2. Headless pointer double-click sequence through CanvasView::show:
+    // exercises response.double_clicked() routing and confirms mutual exclusion
+    for events in [
+        vec![click(center_alpha, true)],
+        vec![click(center_alpha, false)],
+        vec![click(center_alpha, true)],
+        vec![click(center_alpha, false)],
+        vec![],
+    ] {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| {
+            let (_resp, action) = app.canvas.show(ui, &app.graph, &mut app.layout, None);
+            app.handle_canvas_action(action);
+        })
+        .textures_delta
+        .clear();
+    }
+
+    assert_eq!(app.selected_row_id.as_deref(), Some("inst_alpha_1"));
+    assert_eq!(app.canvas.selected_node, Some(idx_alpha));
+
+    // Bounded poll for Attach request: assert exactly one Attach was dispatched
+    let mut attach_count = 0;
+    for _ in 0..50 {
+        {
+            let rec = recorded.lock().unwrap();
+            attach_count = rec
+                .iter()
+                .filter(
+                    |r| matches!(r, ActionRequest::Attach { agent, .. } if agent == "inst_alpha_1"),
+                )
+                .count();
+            if attach_count >= 1 {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        attach_count, 1,
+        "Double-click on node via CanvasView::show must produce exactly one Attach"
+    );
+
+    // 3. Right-click on node: selects node and opens context menu
+    app.handle_canvas_action(Some(CanvasAction::NodeSecondaryClicked(
+        idx_beta,
+        Pos2::new(100.0, 200.0),
+    )));
+    assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+    assert_eq!(app.canvas.selected_node, Some(idx_beta));
+    assert_eq!(app.selected_row().map(|r| r.agent), Some("cat_beta".into()));
+    assert!(app.context_menu.is_some());
+    assert!(app.context_menu_opened_this_frame);
+
+    // 4. Edge click: selects edge, clears node and row selection
+    // Add a message edge between the nodes
+    app.graph
+        .apply_message_event(&hcom_graph::model::MessageEvent {
+            id: 1,
+            ts: chrono::Utc::now(),
+            instance: "inst_alpha_1".into(),
+            data: MessageData {
+                from: "inst_alpha_1".into(),
+                delivered_to: vec!["cat_beta".into()],
+                mentions: vec![],
+                intent: None,
+                text: "ping".into(),
+            },
+        });
+    let edge_idx = app.graph.graph.edge_indices().next().unwrap();
+    app.handle_canvas_action(Some(CanvasAction::EdgeClicked(edge_idx)));
+    assert_eq!(app.selected_row_id, None);
+    assert_eq!(app.canvas.selected_node, None);
+    assert_eq!(app.canvas.selected_edge, Some(edge_idx));
+    assert_eq!(app.selected_row(), None);
+
+    // 5. Edge secondary click: selects edge, clears node/row, opens context menu
+    app.handle_canvas_action(Some(CanvasAction::EdgeSecondaryClicked(
+        edge_idx,
+        Pos2::new(150.0, 250.0),
+    )));
+    assert_eq!(app.selected_row_id, None);
+    assert_eq!(app.canvas.selected_node, None);
+    assert_eq!(app.canvas.selected_edge, Some(edge_idx));
+    assert_eq!(app.selected_row(), None);
+    assert!(app.context_menu.is_some());
+
+    // 6. Selection cleared (empty canvas click)
+    app.handle_canvas_action(Some(CanvasAction::SelectionCleared));
+    assert_eq!(app.selected_row_id, None);
+    assert_eq!(app.canvas.selected_node, None);
+    assert_eq!(app.canvas.selected_edge, None);
+    assert_eq!(app.context_menu, None);
+
+    // 7. Table row selection synchronizes node in graph:
+    // 7a. For instance:
+    app.select_table_row(&app.table_rows[0].clone());
+    assert_eq!(app.selected_row_id.as_deref(), Some("inst_alpha_1"));
+    assert_eq!(app.canvas.selected_node, Some(idx_alpha));
+    assert_eq!(app.canvas.selected_edge, None);
+
+    // 7b. For catalog agent:
+    app.select_table_row(&app.table_rows[1].clone());
+    assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+    assert_eq!(app.canvas.selected_node, Some(idx_beta));
+    assert_eq!(app.canvas.selected_edge, None);
+
+    // 8. Switching view mode preserves selection across all views
+    app.set_view_mode(ViewMode::GraphOnly);
+    assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+    assert_eq!(app.canvas.selected_node, Some(idx_beta));
+
+    app.set_view_mode(ViewMode::TableOnly);
+    assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+    assert_eq!(app.canvas.selected_node, Some(idx_beta));
+
+    app.set_view_mode(ViewMode::Both);
+    assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+    assert_eq!(app.canvas.selected_node, Some(idx_beta));
+}

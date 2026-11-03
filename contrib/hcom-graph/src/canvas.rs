@@ -102,6 +102,7 @@ pub fn legend(
 #[derive(Debug, Clone, PartialEq)]
 pub enum CanvasAction {
     NodeClicked(NodeIndex),
+    NodeDoubleClicked(NodeIndex),
     EdgeClicked(EdgeIndex),
     NodeSecondaryClicked(NodeIndex, Pos2),
     EdgeSecondaryClicked(EdgeIndex, Pos2),
@@ -432,7 +433,13 @@ impl CanvasView {
         }
 
         // Handle Clicks (when not dragging)
-        if response.clicked() && !self.is_dragging {
+        if response.double_clicked() && !self.is_dragging {
+            if let Some(node_idx) = self.hovered_node {
+                self.selected_node = Some(node_idx);
+                self.selected_edge = None;
+                triggered_action = Some(CanvasAction::NodeDoubleClicked(node_idx));
+            }
+        } else if response.clicked() && !self.is_dragging {
             if let Some(node_idx) = self.hovered_node {
                 self.selected_node = Some(node_idx);
                 self.selected_edge = None;
