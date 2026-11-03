@@ -595,6 +595,10 @@ impl HcomGraphApp {
     }
 
     pub fn on_selection_changed(&mut self) {
+        // Invalidate any in-flight async results immediately on selection change
+        self.selection_generation += 1;
+        let gen_id = self.selection_generation;
+
         // A hidden detail panel loads nothing; showing it calls this again.
         if !self.state.show_side_panel {
             return;
@@ -611,8 +615,6 @@ impl HcomGraphApp {
             return;
         }
         let agent = row_opt.unwrap().instance;
-        self.selection_generation += 1;
-        let gen_id = self.selection_generation;
         match self.state.detail_tab.as_str() {
             "Screen" => {
                 self.dispatch_action(ActionRequest::Screen {
@@ -1541,7 +1543,16 @@ impl HcomGraphApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if let Some(ref selected) = agent {
-                    if let Some((ref tr_agent, _, ref text)) = self.screen_content {
+                    let is_running = self
+                        .selected_row()
+                        .map(|r| r.is_running && !r.instance.is_empty())
+                        .unwrap_or(false);
+                    if !is_running {
+                        ui.weak(format!(
+                            "Agent '{}' is stopped. Screen is only available for running agents.",
+                            selected
+                        ));
+                    } else if let Some((ref tr_agent, _, ref text)) = self.screen_content {
                         if tr_agent == selected {
                             ui.add(egui::Label::new(RichText::new(text).monospace()).extend());
                         } else {
@@ -1556,14 +1567,12 @@ impl HcomGraphApp {
             });
     }
 
-    /// Tab row and content of the right detail panel; returns true when the
-    /// user closed the panel.
+    /// Tab row and content of the right detail panel.
     fn render_detail_tabs(
         &mut self,
         ui: &mut egui::Ui,
         visible: &std::collections::HashSet<NodeIndex>,
-    ) -> bool {
-        let mut close_panel = false;
+    ) {
         ui.horizontal_wrapped(|ui| {
             for (tab, label) in DETAIL_TABS.iter().zip([
                 "Summary",
@@ -1586,13 +1595,6 @@ impl HcomGraphApp {
                 self.dispatch_action(ActionRequest::ReloadTableData);
                 self.on_selection_changed();
             }
-            if ui
-                .small_button("✖")
-                .on_hover_text("Close Detail Panel")
-                .clicked()
-            {
-                close_panel = true;
-            }
         });
 
         ui.separator();
@@ -1603,12 +1605,21 @@ impl HcomGraphApp {
             }
             "Transcript" => {
                 let agent = self.selected_agent_name();
+                let is_running = self
+                    .selected_row()
+                    .map(|r| r.is_running && !r.instance.is_empty())
+                    .unwrap_or(false);
                 egui::ScrollArea::both()
                     .id_salt("transcript_scroll_tab")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if let Some(ref selected) = agent {
-                            if let Some((ref tr_agent, _, ref text)) = self.transcript_content {
+                            if !is_running {
+                                ui.weak(format!(
+                                    "Agent '{}' is stopped. Transcript is only available for running agents.",
+                                    selected
+                                ));
+                            } else if let Some((ref tr_agent, _, ref text)) = self.transcript_content {
                                 if tr_agent == selected {
                                     ui.monospace(text);
                                 } else {
@@ -1624,12 +1635,21 @@ impl HcomGraphApp {
             }
             "Events" => {
                 let agent = self.selected_agent_name();
+                let is_running = self
+                    .selected_row()
+                    .map(|r| r.is_running && !r.instance.is_empty())
+                    .unwrap_or(false);
                 egui::ScrollArea::both()
                     .id_salt("events_scroll_tab")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if let Some(ref selected) = agent {
-                            if let Some((ref ev_agent, _, ref text)) = self.events_content {
+                            if !is_running {
+                                ui.weak(format!(
+                                    "Agent '{}' is stopped. Events are only available for running agents.",
+                                    selected
+                                ));
+                            } else if let Some((ref ev_agent, _, ref text)) = self.events_content {
                                 if ev_agent == selected {
                                     ui.monospace(text);
                                 } else {
@@ -1702,7 +1722,6 @@ impl HcomGraphApp {
                     .show(ui, |ui| self.render_side_panel_summary(ui));
             }
         }
-        close_panel
     }
 
     fn get_all_rows(&self) -> Vec<TableRow> {
@@ -3169,7 +3188,6 @@ impl eframe::App for HcomGraphApp {
         let mut detail_rect = None;
         let detail_avail = ui.available_width();
         if self.state.show_side_panel {
-            let mut close_panel = false;
             let detail_w = split_px(
                 self.state.detail_width_frac.unwrap_or(DEFAULT_SPLIT_FRAC),
                 window.width(),
@@ -3198,13 +3216,9 @@ impl eframe::App for HcomGraphApp {
                         self.action_error = None;
                     }
 
-                    close_panel = self.render_detail_tabs(ui, &visible_node_indices);
+                    self.render_detail_tabs(ui, &visible_node_indices);
                 });
             detail_rect = Some(side_resp.response.rect);
-
-            if close_panel {
-                self.toggle_detail_panel();
-            }
         }
 
         // 8. Central panel: graph canvas or full table

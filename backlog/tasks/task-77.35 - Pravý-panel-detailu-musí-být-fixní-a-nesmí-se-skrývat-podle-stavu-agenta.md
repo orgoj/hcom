@@ -1,11 +1,11 @@
 ---
 id: TASK-77.35
 title: Pravý panel detailu musí být fixní a nesmí se skrývat podle stavu agenta
-status: In Progress
+status: Done
 assignee:
   - '@hcom_dev__idea'
 created_date: '2026-11-03 13:05'
-updated_date: '2026-11-03 13:05'
+updated_date: '2026-11-03 13:25'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -21,7 +21,13 @@ Uživatel zjistil, že posun plátna při označení agenta je způsoben tím, �
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Pravý detail panel se zobrazuje vždy, pokud není explicitně vypnut tlačítkem v toolbaru (show_side_panel)
-- [ ] #2 Při výběru neaktivního agenta nebo zrušení výběru zůstává pravý panel otevřený a zobrazuje příslušný obsah (např. Legendu / info)
-- [ ] #3 Přepínání výběru agentů nezpůsobuje otevírání/zavírání pravého panelu ani posun plátna
+- [x] #1 Pravý detail panel se zobrazuje vždy, pokud není explicitně vypnut tlačítkem v toolbaru (show_side_panel)
+- [x] #2 Při výběru neaktivního agenta nebo zrušení výběru zůstává pravý panel otevřený a zobrazuje příslušný obsah (např. Legendu / info)
+- [x] #3 Přepínání výběru agentů nezpůsobuje otevírání/zavírání pravého panelu ani posun plátna
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Right detail panel is now fixed and persistent: removed in-panel close button, toggling is strictly via toolbar Detail switch, selection generation invalidated on selection change, stopped agent states explicitly reported without infinite loading, regression test added.
+<!-- SECTION:FINAL_SUMMARY:END -->

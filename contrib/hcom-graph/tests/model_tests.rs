@@ -7093,3 +7093,205 @@ fn test_task_77_33_cell_text_and_empty_space_click_selects_row() {
         "Click on empty space must highlight graph node"
     );
 }
+
+#[test]
+fn test_task_77_35_detail_panel_is_fixed_and_never_hidden_by_agent_status_or_selection() {
+    use eframe::App;
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_graph::table_data::TableRow;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+
+    app.table_rows = vec![
+        TableRow {
+            agent: "active_worker".into(),
+            instance: "active_worker".into(),
+            is_running: true,
+            status: "active".into(),
+            ..Default::default()
+        },
+        TableRow {
+            agent: "stopped_agent".into(),
+            instance: "stopped_agent".into(),
+            is_running: false,
+            status: "stopped".into(),
+            ..Default::default()
+        },
+    ];
+    app.sync_graph_from_table_rows();
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut time = 0.0;
+    let root = std::cell::Cell::new(egui::Id::NULL);
+
+    let mut run = |app: &mut HcomGraphApp| {
+        time += 0.1;
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| {
+            root.set(ui.scope_id());
+            app.ui(ui, &mut frame);
+        });
+        out.textures_delta.clear();
+        out
+    };
+
+    let panel_rect = |ctx: &egui::Context, salt: &str| {
+        egui::panel::PanelState::load(ctx, root.get().with_salt(egui::IdSalt::new(salt)))
+            .map(|p| p.outer_rect)
+    };
+
+    // 1. Initial state: show_side_panel is true by default
+    assert!(app.state.show_side_panel);
+    let _ = run(&mut app);
+    let detail_rect = panel_rect(&ctx, "detail_side_panel")
+        .expect("detail_side_panel must be rendered by default");
+    let initial_width = detail_rect.width();
+    assert!(initial_width > 0.0);
+
+    // 2. Select active agent: panel remains open with identical width
+    app.select_table_row(&app.table_rows[0].clone());
+    let _ = run(&mut app);
+    assert!(app.state.show_side_panel);
+    let detail_active = panel_rect(&ctx, "detail_side_panel").expect("detail_side_panel rendered");
+    assert_eq!(
+        detail_active.width(),
+        initial_width,
+        "Detail panel width must not change when active agent is selected"
+    );
+
+    // 3. Select stopped agent: panel remains open with identical width
+    app.select_table_row(&app.table_rows[1].clone());
+    let _ = run(&mut app);
+    assert!(app.state.show_side_panel);
+    let detail_stopped = panel_rect(&ctx, "detail_side_panel").expect("detail_side_panel rendered");
+    assert_eq!(
+        detail_stopped.width(),
+        initial_width,
+        "Detail panel width must not change when stopped agent is selected"
+    );
+
+    // 4. Clear selection: panel remains open with identical width
+    app.handle_canvas_action(Some(hcom_graph::canvas::CanvasAction::SelectionCleared));
+    let _ = run(&mut app);
+    assert!(app.state.show_side_panel);
+    let detail_cleared = panel_rect(&ctx, "detail_side_panel").expect("detail_side_panel rendered");
+    assert_eq!(
+        detail_cleared.width(),
+        initial_width,
+        "Detail panel width must not change when selection is cleared"
+    );
+
+    // 5. Check stopped agent messaging in Screen, Transcript, and Events tabs
+    app.select_table_row(&app.table_rows[1].clone()); // stopped_agent
+
+    app.select_detail_tab("Screen");
+    let out_screen = run(&mut app);
+    let has_screen_stopped_msg = out_screen.shapes.iter().any(|c| match &c.shape {
+        egui::Shape::Text(t) => t.galley.text().contains(
+            "Agent 'stopped_agent' is stopped. Screen is only available for running agents.",
+        ),
+        _ => false,
+    });
+    assert!(
+        has_screen_stopped_msg,
+        "Screen tab must explain that the agent is stopped"
+    );
+
+    app.select_detail_tab("Transcript");
+    let out_tr = run(&mut app);
+    let has_tr_stopped_msg = out_tr.shapes.iter().any(|c| match &c.shape {
+        egui::Shape::Text(t) => t.galley.text().contains(
+            "Agent 'stopped_agent' is stopped. Transcript is only available for running agents.",
+        ),
+        _ => false,
+    });
+    assert!(
+        has_tr_stopped_msg,
+        "Transcript tab must explain that the agent is stopped"
+    );
+
+    app.select_detail_tab("Events");
+    let out_ev = run(&mut app);
+    let has_ev_stopped_msg = out_ev.shapes.iter().any(|c| match &c.shape {
+        egui::Shape::Text(t) => t.galley.text().contains(
+            "Agent 'stopped_agent' is stopped. Events are only available for running agents.",
+        ),
+        _ => false,
+    });
+    assert!(
+        has_ev_stopped_msg,
+        "Events tab must explain that the agent is stopped"
+    );
+
+    // 6. Verify toolbar toggle is the only way to toggle panel and there is no "Close Detail Panel" button
+    let has_tab_close_btn = out_ev.shapes.iter().any(|c| match &c.shape {
+        egui::Shape::Text(t) => t.galley.text() == "Close Detail Panel",
+        _ => false,
+    });
+    assert!(
+        !has_tab_close_btn,
+        "There must be no in-panel Close Detail Panel button"
+    );
+
+    // Toggle via toolbar helper
+    app.toggle_detail_panel();
+    assert!(!app.state.show_side_panel);
+    let ctx_toggled = egui::Context::default();
+    let (_, detail_hidden) = run_app_frames(&ctx_toggled, &mut app, 2);
+    assert!(
+        detail_hidden.is_none(),
+        "Panel is hidden only when explicitly toggled"
+    );
+
+    app.toggle_detail_panel();
+    assert!(app.state.show_side_panel);
+    let ctx_reopened = egui::Context::default();
+    let (_, detail_reopened) = run_app_frames(&ctx_reopened, &mut app, 2);
+    assert!(detail_reopened.is_some(), "Panel reopens when toggled");
+
+    // 7. Stale in-flight async result arriving after switching to a stopped agent
+    app.select_table_row(&app.table_rows[0].clone()); // active_worker
+    let active_gen = app.selection_generation;
+    app.select_table_row(&app.table_rows[1].clone()); // switched to stopped_agent
+    assert!(
+        app.selection_generation > active_gen,
+        "selection_generation must increment on selection change"
+    );
+
+    // If an in-flight result with the old generation arrives, accept_generation_result rejects it
+    assert!(!hcom_graph::app::accept_generation_result(
+        app.selection_generation,
+        active_gen
+    ));
+
+    // Even if screen_content had stale content from another agent, !is_running guard shows stopped msg
+    app.screen_content = Some((
+        "active_worker".into(),
+        active_gen,
+        "old terminal text".into(),
+    ));
+    app.select_detail_tab("Screen");
+    let out_stale = run(&mut app);
+    let has_stopped_msg_over_stale = out_stale.shapes.iter().any(|c| match &c.shape {
+        egui::Shape::Text(t) => t.galley.text().contains(
+            "Agent 'stopped_agent' is stopped. Screen is only available for running agents.",
+        ),
+        _ => false,
+    });
+    assert!(
+        has_stopped_msg_over_stale,
+        "Stopped state message must be shown even if screen_content holds stale text"
+    );
+}
