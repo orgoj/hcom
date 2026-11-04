@@ -38,6 +38,23 @@ selection `HCOM_AGENTS_FILE` and `HCOM_AGENT_CATALOGS`), and none of the caller 
 out after 30 minutes; the report file is owner-only (it quotes the transcript).
 Tests: `python3 -I contrib/review-session/test_review_session.py`.
 
+## approval-review
+
+`approval-review/approval_review.py` sends the screen of an agent waiting on a permission
+dialog to the agent that maintains the Dippy rules. Install it with
+`ln -s <repo>/contrib/approval-review/approval_review.py ~/.hcom/scripts/approval-review.py`,
+then `hcom run approval-review [NAME] [--pane ID] [--lines N] [--to NAME]`. The agent is
+chosen as in review-session (NAME, else the one Herdr agent in `--pane` or `$HERDR_PANE_ID`)
+and must have status `blocked`; otherwise nothing is sent. After the blank rows at the
+screen's bottom are dropped, its last N lines (default 60, from `hcom term NAME --json`) go to the owner-only file
+`<hcom dir>/tmp/approval-reviews/<name>-<time>.txt`, whose path is printed. One request from
+`approval-review` goes to the recipient (default `dippy_dev`) with the agent's name, CLI,
+directory and the snapshot path: allow the command by a Dippy rule only when it is safe,
+never touch the agent's terminal (the user approves the dialog), and ask the user when unsure.
+The sender label is not authentication; the recipient judges each case on its merit. Child
+processes get the same environment cleanup as review-session.
+Tests: `python3 -I contrib/approval-review/test_approval_review.py`.
+
 ## hcom-gui
 
 Tk window listing every catalog agent (`hcom agent list --all --json`) and every live
