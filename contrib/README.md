@@ -47,10 +47,15 @@ then `hcom run approval-review [NAME] [--pane ID] [--lines N] [--to NAME]`. The 
 chosen as in review-session (NAME, else the one Herdr agent in `--pane` or `$HERDR_PANE_ID`)
 and must have status `blocked`; otherwise nothing is sent. After the blank rows at the
 screen's bottom are dropped, its last N lines (default 60, from `hcom term NAME --json`) go to the owner-only file
-`<hcom dir>/tmp/approval-reviews/<name>-<time>.txt`, whose path is printed. One request from
-`approval-review` goes to the recipient (default `dippy_dev`) with the agent's name, CLI,
-directory and the snapshot path: allow the command by a Dippy rule only when it is safe,
-never touch the agent's terminal (the user approves the dialog), and ask the user when unsure.
+`<hcom dir>/tmp/approval-reviews/<name>-<time>.txt`, whose path is printed. The file ends with
+the agent's latest Dippy `ask` audit line as printed by `dippy audit --decision ask`: first
+the newest of the last 20 entries matching `--context-flag =<name>` whose flag value is exactly
+the name, else the latest entry for `--cwd <agent dir> --agent <CLI>`, else "no audit match"
+(or the `dippy audit` error). One request from `approval-review` goes to the recipient
+(default `dippy_dev`) with the agent's name, CLI, directory, which audit line was found and the
+snapshot path: allow the command by a Dippy rule only when it is safe, read the agent's screen
+with `hcom term` if the snapshot is unclear but never inject into or touch its terminal (the
+user approves the dialog), and ask the user when unsure.
 The sender label is not authentication; the recipient judges each case on its merit. Child
 processes get the same environment cleanup as review-session.
 Tests: `python3 -I contrib/approval-review/test_approval_review.py`.
