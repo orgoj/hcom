@@ -2850,8 +2850,8 @@ impl eframe::App for HcomGraphApp {
             // Edge indices may be reused in another order after a swap.
             self.window_cache_key = None;
             self.layout.invalidate_caches();
+            // sync_nodes wakes the layout only on a structural change.
             self.layout.sync_nodes(&self.graph);
-            self.layout.wake_up();
             ctx.request_repaint();
         }
 

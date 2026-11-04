@@ -78,6 +78,18 @@ pub struct GraphLayout {
     /// accelerate does not fall asleep.
     calm_steps: u32,
     pub sleep_after_calm_steps: u32,
+    /// Cooling factor (d3-force alpha): scales every force and decays each
+    /// step; below `alpha_min` the layout sleeps after its next clean
+    /// collision pass, even if the motion threshold was never met.
+    pub alpha: f32,
+    pub alpha_min: f32,
+    /// Per-step decay; 1 - 0.001^(1/300) cools from 1 to `alpha_min` in 300 steps.
+    pub alpha_decay: f32,
+    /// Alpha after a wake by pin or drag; a structural change reheats to 1.
+    pub alpha_reheat: f32,
+    /// Node set, spawn structure and communicating pairs at the last sync;
+    /// only a change wakes the layout.
+    wake_key: Option<u64>,
 
     pub mode: LayoutMode,
     /// Collision radius of a node (body 26 + rings 13 + 1).
@@ -135,6 +147,11 @@ impl GraphLayout {
             is_sleeping: false,
             calm_steps: 0,
             sleep_after_calm_steps: 20,
+            alpha: 1.0,
+            alpha_min: 0.001,
+            alpha_decay: 1.0 - 0.001f32.powf(1.0 / 300.0),
+            alpha_reheat: 0.3,
+            wake_key: None,
             mode: LayoutMode::default(),
             collision_radius: 40.0,
             h_layer: 130.0,
@@ -165,6 +182,7 @@ impl GraphLayout {
         self.tree_key = None;
         self.is_sleeping = false;
         self.calm_steps = 0;
+        self.alpha = 1.0;
     }
 
     fn reset_cursors(&mut self) {
@@ -211,8 +229,15 @@ impl GraphLayout {
                     },
                 );
             }
-            self.is_sleeping = false;
-            self.calm_steps = 0;
+        }
+
+        // Only a structural change wakes the layout; a periodic snapshot of
+        // the same graph or a message between known partners does not.
+        let key = wake_key(graph);
+        if self.wake_key != Some(key) {
+            self.wake_key = Some(key);
+            self.wake_up();
+            self.alpha = 1.0;
         }
 
         self.sorted_indices = self.nodes.keys().copied().collect();
@@ -350,9 +375,11 @@ impl GraphLayout {
         self.springs_key = None;
     }
 
+    /// Wakes the simulation and reheats it to at least `alpha_reheat`.
     pub fn wake_up(&mut self) {
         self.is_sleeping = false;
         self.calm_steps = 0;
+        self.alpha = self.alpha.max(self.alpha_reheat);
     }
 
     pub fn hit_test(&self, world_pos: egui::Pos2, radius: f32) -> Option<NodeIndex> {
@@ -375,8 +402,7 @@ impl GraphLayout {
             phys.pos = pos;
             phys.vel = egui::Vec2::ZERO;
             phys.pinned = pinned;
-            self.is_sleeping = false;
-            self.calm_steps = 0;
+            self.wake_up();
         }
     }
 
@@ -386,10 +412,9 @@ impl GraphLayout {
         let phys = self.nodes.get_mut(&idx)?;
         phys.pinned = pin;
         phys.vel = egui::Vec2::ZERO;
-        self.is_sleeping = false;
-        self.calm_steps = 0;
+        let pos = phys.pos;
+        self.wake_up();
         if pin {
-            let pos = phys.pos;
             self.pinned_positions.insert(name.to_string(), pos);
             Some(pos)
         } else {
@@ -406,16 +431,19 @@ impl GraphLayout {
     /// 4. Collision separation (collision_i, collision_j)
     ///
     /// Cumulative budget shares: forces 55 %, integration 80 %, collision 100 %.
-    /// Manual mode does not simulate. The layout sleeps only when motion is
-    /// below the threshold and the last complete collision pass was clean.
+    /// Manual mode does not simulate. The layout sleeps when the last complete
+    /// collision pass was clean and either motion stayed below the threshold
+    /// or alpha cooled below `alpha_min`.
     pub fn step(&mut self, graph: &AgentGraph, dt: f32) -> f32 {
         if self.is_sleeping || self.mode == LayoutMode::Manual {
             return 0.0;
         }
-
         let start_time = std::time::Instant::now();
         let clamped_dt = dt.clamp(0.001, 0.033);
-        let sub_dt = clamped_dt * 0.5;
+        // Integration time scale: fast enough that a node finishes its travel
+        // while alpha cools (~300 steps); the damped map stays stable far
+        // beyond the stiffest spring.
+        let sub_dt = clamped_dt * 2.0;
 
         let mut budget_exceeded = false;
 
@@ -427,6 +455,18 @@ impl GraphLayout {
         let n = self.sorted_indices.len();
         if n < 2 {
             return 0.0;
+        }
+
+        // Cooled down: no forces and no integration, only collision. The pass
+        // restarted when alpha crossed `alpha_min`, so a clean result covers
+        // every pair after the last integration.
+        if self.alpha < self.alpha_min {
+            self.collide(start_time, n * (n - 1) / 2);
+            if self.last_collision_pass_clean {
+                self.is_sleeping = true;
+                return 0.0;
+            }
+            return self.epsilon_sleep + 0.1;
         }
 
         // Validate cursors
@@ -568,7 +608,7 @@ impl GraphLayout {
                         }
                         None => pair_f - self.k_center * phys.pos.to_vec2(),
                     };
-                    phys.vel = (phys.vel + f * sub_dt) * self.damping;
+                    phys.vel = (phys.vel + f * (self.alpha * sub_dt)) * self.damping;
 
                     let speed = phys.vel.length();
                     if speed > self.max_speed {
@@ -608,6 +648,16 @@ impl GraphLayout {
             }
         } else {
             self.calm_steps = 0;
+        }
+        // Cooling counts steps, not time, so the layout stops even when the
+        // frame budget cuts passes short.
+        self.alpha *= 1.0 - self.alpha_decay;
+        if self.alpha < self.alpha_min {
+            // Start a fresh collision pass; the previous result predates the
+            // last integration.
+            self.collision_done = 0;
+            self.collision_pass_clean = true;
+            self.last_collision_pass_clean = false;
         }
 
         if budget_exceeded || !self.last_collision_pass_clean {
@@ -703,6 +753,27 @@ fn structure_key(graph: &AgentGraph) -> u64 {
     }
     for idx in graph.graph.node_indices() {
         sum = sum.wrapping_add((idx.index() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    }
+    sum
+}
+
+/// Order-independent key of the structure plus the set of communicating
+/// pairs; message counts are left out.
+fn wake_key(graph: &AgentGraph) -> u64 {
+    let pairs: HashSet<(NodeIndex, NodeIndex)> = graph
+        .graph
+        .edge_references()
+        .filter(|e| matches!(e.weight(), EdgeKind::Message(_)) && e.source() != e.target())
+        .map(|e| {
+            let (s, t) = (e.source(), e.target());
+            if s < t { (s, t) } else { (t, s) }
+        })
+        .collect();
+    let mut sum = structure_key(graph);
+    for pair in pairs {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        pair.hash(&mut h);
+        sum = sum.wrapping_add(h.finish());
     }
     sum
 }

@@ -3426,7 +3426,8 @@ fn test_hierarchy_mode_converges_to_layers_and_reparent_moves_subtree() {
 
     // Re-parent kid under other: its target follows the new parent.
     graph.apply_instance_snapshot(&[layout_snap("kid", Some("other"))]);
-    layout.wake_up();
+    // The app path: the sync detects the structural change and wakes the layout.
+    layout.sync_nodes(&graph);
     for _ in 0..2000 {
         layout.step(&graph, 0.016);
     }
@@ -3665,7 +3666,8 @@ fn test_cluster_springs_follow_reparent_without_new_event() {
     }
     // Re-parent: the edge count stays the same, no message event.
     graph.apply_instance_snapshot(&[layout_snap("kid", Some("p2"))]);
-    layout.wake_up();
+    // The app path: the sync detects the structural change and wakes the layout.
+    layout.sync_nodes(&graph);
     for _ in 0..3000 {
         layout.step(&graph, 0.016);
     }
@@ -5661,8 +5663,8 @@ fn test_layout_realistic_graph_sleeps_in_cluster_and_hierarchy() {
         );
         layout.wake_up();
         assert!(
-            steps_to_sleep(&mut layout, 30).is_some(),
-            "{mode:?}: layout must sleep again within 30 steps after a wake"
+            steps_to_sleep(&mut layout, 300).is_some(),
+            "{mode:?}: layout must sleep again within 300 steps after a wake"
         );
 
         let pos: Vec<Pos2> = layout.nodes.values().map(|p| p.pos).collect();
@@ -5676,6 +5678,137 @@ fn test_layout_realistic_graph_sleeps_in_cluster_and_hierarchy() {
             }
         }
     }
+}
+
+/// Cooling stops the layout after a bounded number of steps even when the
+/// frame budget cuts every pass short, so the motion threshold never applies
+/// (TASK-77.28 AC #6).
+#[test]
+fn test_layout_alpha_cooling_sleeps_with_exhausted_budget() {
+    let mut graph = AgentGraph::new();
+    let snap: Vec<InstanceSnapshot> = (0..40)
+        .map(|i| layout_snap(&format!("n{i}"), None))
+        .collect();
+    graph.apply_instance_snapshot(&snap);
+    let mut layout = GraphLayout::new();
+    layout.max_step_duration = std::time::Duration::ZERO;
+    layout.sync_nodes(&graph);
+    let steps = (1..=400).find(|_| {
+        layout.step(&graph, 1.0 / 60.0);
+        layout.is_sleeping
+    });
+    assert!(
+        matches!(steps, Some(s) if s > 250),
+        "cooling must stop the layout after ~300 steps, got {steps:?}"
+    );
+    assert!(layout.alpha < layout.alpha_min);
+
+    layout.wake_up();
+    assert!((layout.alpha - layout.alpha_reheat).abs() < 1e-6);
+    layout.set_mode(hcom_graph::layout::LayoutMode::Hierarchy);
+    assert_eq!(layout.alpha, 1.0, "mode switch reheats fully");
+}
+
+/// When alpha crosses its minimum while a time-sliced collision pass is
+/// unfinished, a stale clean result of the previous pass must not put the
+/// layout to sleep with an overlap left (TASK-77.28 review).
+#[test]
+fn test_layout_alpha_stop_waits_for_a_full_collision_pass() {
+    let mut graph = AgentGraph::new();
+    let snap: Vec<InstanceSnapshot> = (0..400)
+        .map(|i| layout_snap(&format!("n{i:03}"), None))
+        .collect();
+    graph.apply_instance_snapshot(&snap);
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+    let mut idxs: Vec<_> = layout.nodes.keys().copied().collect();
+    idxs.sort();
+    for (k, idx) in idxs.iter().enumerate() {
+        layout.set_node_pos(*idx, Pos2::new(k as f32 * 1000.0, 0.0), false);
+    }
+    let last = idxs[idxs.len() - 1];
+    let prev = idxs[idxs.len() - 2];
+    layout.set_node_pos(last, Pos2::new(5_000_000.0, 0.0), false);
+    layout.set_node_pos(prev, Pos2::new(5_000_000.0, 0.0), false);
+    layout.max_step_duration = Duration::from_micros(300);
+    // Stale clean result and alpha one step above the threshold.
+    layout.last_collision_pass_clean = true;
+    layout.alpha = layout.alpha_min * 1.001;
+    for _ in 0..3000 {
+        layout.step(&graph, 0.016);
+        if layout.is_sleeping {
+            break;
+        }
+    }
+    assert!(layout.is_sleeping);
+    let d = layout.nodes[&last].pos.distance(layout.nodes[&prev].pos);
+    assert!(
+        d >= 2.0 * layout.collision_radius - 2.0,
+        "layout slept with an unresolved overlap ({d} px)"
+    );
+}
+
+/// Only a structural change wakes the layout: a repeated snapshot or a new
+/// message between known partners does not; a new pair or node does
+/// (TASK-77.28 AC #7, #8).
+#[test]
+fn test_layout_wakes_only_on_structural_change() {
+    let now = Utc::now();
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[
+        layout_snap("a", None),
+        layout_snap("b", None),
+        layout_snap("c", None),
+    ]);
+    graph.apply_message_event(&window_msg(1, now, "a", "b"));
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+    let settle = |layout: &mut GraphLayout, graph: &AgentGraph| {
+        for _ in 0..400 {
+            layout.step(graph, 1.0 / 60.0);
+        }
+        assert!(layout.is_sleeping);
+    };
+    settle(&mut layout, &graph);
+
+    graph.apply_instance_snapshot(&[layout_snap("a", None)]);
+    layout.sync_nodes(&graph);
+    assert!(layout.is_sleeping, "unchanged snapshot must not wake");
+
+    graph.apply_message_event(&window_msg(2, now, "b", "a"));
+    graph.apply_message_event(&window_msg(3, now, "a", "b"));
+    layout.sync_nodes(&graph);
+    assert!(layout.is_sleeping, "message on a known pair must not wake");
+
+    graph.apply_message_event(&window_msg(4, now, "a", "c"));
+    layout.sync_nodes(&graph);
+    assert!(!layout.is_sleeping, "new communicating pair must wake");
+    assert_eq!(layout.alpha, 1.0, "structural change reheats fully");
+    settle(&mut layout, &graph);
+
+    let a = graph.get_node_index("a").unwrap();
+    layout.set_node_pos(a, Pos2::new(10.0, 10.0), true);
+    assert!(!layout.is_sleeping, "pin must wake");
+    assert!(layout.alpha >= layout.alpha_reheat);
+    settle(&mut layout, &graph);
+
+    graph.apply_instance_snapshot(&[layout_snap("d", Some("a"))]);
+    layout.sync_nodes(&graph);
+    assert!(!layout.is_sleeping, "new node must wake");
+    settle(&mut layout, &graph);
+
+    graph.apply_instance_snapshot(&[layout_snap("d", Some("b"))]);
+    layout.sync_nodes(&graph);
+    assert!(!layout.is_sleeping, "re-parent must wake");
+    settle(&mut layout, &graph);
+
+    // A replaced graph without some nodes removes them and wakes.
+    let mut smaller = AgentGraph::new();
+    smaller.apply_instance_snapshot(&[layout_snap("a", None), layout_snap("b", None)]);
+    layout.sync_nodes(&smaller);
+    assert_eq!(layout.nodes.len(), 2);
+    assert!(!layout.is_sleeping, "removed node must wake");
+    assert_eq!(layout.alpha, 1.0);
 }
 
 /// Filled rects of a frame's output (screen rect, fill color).
