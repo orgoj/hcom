@@ -5693,13 +5693,13 @@ fn test_layout_alpha_cooling_sleeps_with_exhausted_budget() {
     let mut layout = GraphLayout::new();
     layout.max_step_duration = std::time::Duration::ZERO;
     layout.sync_nodes(&graph);
-    let steps = (1..=400).find(|_| {
+    let steps = (1..=1000).find(|_| {
         layout.step(&graph, 1.0 / 60.0);
         layout.is_sleeping
     });
     assert!(
-        matches!(steps, Some(s) if s > 250),
-        "cooling must stop the layout after ~300 steps, got {steps:?}"
+        matches!(steps, Some(s) if s > 850),
+        "cooling must stop the layout after ~900 steps, got {steps:?}"
     );
     assert!(layout.alpha < layout.alpha_min);
 
@@ -5707,6 +5707,112 @@ fn test_layout_alpha_cooling_sleeps_with_exhausted_budget() {
     assert!((layout.alpha - layout.alpha_reheat).abs() < 1e-6);
     layout.set_mode(hcom_graph::layout::LayoutMode::Hierarchy);
     assert_eq!(layout.alpha, 1.0, "mode switch reheats fully");
+}
+
+/// Spawn tree with message springs, as in the realistic sleep test.
+fn realistic_layout_graph() -> AgentGraph {
+    let nodes = [
+        ("boss", None),
+        ("m1", Some("boss")),
+        ("m2", Some("boss")),
+        ("m3", Some("boss")),
+        ("a1", Some("m1")),
+        ("a2", Some("m1")),
+        ("a3", Some("m1")),
+        ("b1", Some("m2")),
+        ("b2", Some("m2")),
+        ("c1", Some("m3")),
+        ("c2", Some("m3")),
+        ("c3", Some("m3")),
+        ("lone1", None),
+        ("lone2", None),
+    ];
+    let mut graph = AgentGraph::new();
+    let snap: Vec<InstanceSnapshot> = nodes.iter().map(|(n, p)| layout_snap(n, *p)).collect();
+    graph.apply_instance_snapshot(&snap);
+    let now = Utc::now();
+    let mut id = 0;
+    for (from, to, count) in [
+        ("boss", "m1", 40),
+        ("boss", "m2", 30),
+        ("m1", "a1", 20),
+        ("m3", "lone1", 25),
+        ("c2", "a2", 5),
+    ] {
+        for _ in 0..count {
+            id += 1;
+            graph.apply_message_event(&window_msg(id, now, from, to));
+        }
+    }
+    graph
+}
+
+/// Per-node visible back-and-forth: consecutive steps of more than 1 px in
+/// opposing directions. Returns (reversals, largest single step).
+fn jitter(frames: &[Vec<Pos2>]) -> (usize, f32) {
+    let mut reversals = 0;
+    let mut max_step = 0.0f32;
+    for w in frames.windows(3) {
+        for ((p0, p1), p2) in w[0].iter().zip(&w[1]).zip(&w[2]) {
+            let d1 = *p1 - *p0;
+            let d2 = *p2 - *p1;
+            max_step = max_step.max(d2.length());
+            if d1.length() > 1.0 && d2.length() > 1.0 && d1.dot(d2) < 0.0 {
+                reversals += 1;
+            }
+        }
+    }
+    (reversals, max_step)
+}
+
+/// Nodes move smoothly at startup and while one node is dragged through the
+/// graph: no visible back-and-forth (TASK-77.28 regression).
+#[test]
+fn test_layout_moves_smoothly_at_start_and_while_dragging() {
+    use hcom_graph::layout::LayoutMode;
+    for mode in [LayoutMode::Cluster, LayoutMode::Hierarchy] {
+        let graph = realistic_layout_graph();
+        let mut layout = GraphLayout::new();
+        layout.mode = mode;
+        // Measure the physics alone: a debug build under parallel test load
+        // can exceed the 2 ms budget and cut passes short at random.
+        layout.max_step_duration = Duration::from_secs(1);
+        layout.sync_nodes(&graph);
+        let mut order: Vec<_> = layout.nodes.keys().copied().collect();
+        order.sort();
+        let snap = |l: &GraphLayout| order.iter().map(|i| l.nodes[i].pos).collect::<Vec<_>>();
+
+        let mut frames = vec![snap(&layout)];
+        for _ in 0..400 {
+            layout.step(&graph, 1.0 / 60.0);
+            frames.push(snap(&layout));
+        }
+        let start = jitter(&frames);
+
+        // Drag boss in a straight line through the graph, 4 px per frame.
+        let boss = graph.get_node_index("boss").unwrap();
+        let from = layout.nodes[&boss].pos;
+        let mut frames = vec![snap(&layout)];
+        for f in 0..150 {
+            let p = from + Vec2::new(4.0 * f as f32, 0.0);
+            layout.set_node_pos(boss, p, true);
+            layout.step(&graph, 1.0 / 60.0);
+            frames.push(snap(&layout));
+        }
+        let drag = jitter(&frames);
+        eprintln!("{mode:?}: start {start:?}, drag {drag:?}");
+        assert!(
+            start.0 == 0 && drag.0 == 0,
+            "{mode:?}: visible back-and-forth, start {start:?}, drag {drag:?}"
+        );
+        // The original physics stepped up to ~5.2 px; 4x integration made it 13 px.
+        assert!(
+            start.1 <= 6.0 && drag.1 <= 6.0,
+            "{mode:?}: nodes jump, largest step start {} px, drag {} px",
+            start.1,
+            drag.1
+        );
+    }
 }
 
 /// When alpha crosses its minimum while a time-sliced collision pass is

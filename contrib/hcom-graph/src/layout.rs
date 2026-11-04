@@ -83,7 +83,8 @@ pub struct GraphLayout {
     /// collision pass, even if the motion threshold was never met.
     pub alpha: f32,
     pub alpha_min: f32,
-    /// Per-step decay; 1 - 0.001^(1/300) cools from 1 to `alpha_min` in 300 steps.
+    /// Per-step decay; 1 - 0.001^(1/900) cools from 1 to `alpha_min` in 900
+    /// steps (15 s at 60 fps); a calm graph sleeps earlier on the motion threshold.
     pub alpha_decay: f32,
     /// Alpha after a wake by pin or drag; a structural change reheats to 1.
     pub alpha_reheat: f32,
@@ -141,7 +142,7 @@ impl GraphLayout {
             l_0: 120.0,
             k_center: 0.05,
             damping: 0.7,
-            max_speed: 400.0,
+            max_speed: 270.0,
             epsilon_sleep: 0.2,
             max_step_duration: std::time::Duration::from_millis(2),
             is_sleeping: false,
@@ -149,7 +150,7 @@ impl GraphLayout {
             sleep_after_calm_steps: 20,
             alpha: 1.0,
             alpha_min: 0.001,
-            alpha_decay: 1.0 - 0.001f32.powf(1.0 / 300.0),
+            alpha_decay: 1.0 - 0.001f32.powf(1.0 / 900.0),
             alpha_reheat: 0.3,
             wake_key: None,
             mode: LayoutMode::default(),
@@ -440,10 +441,11 @@ impl GraphLayout {
         }
         let start_time = std::time::Instant::now();
         let clamped_dt = dt.clamp(0.001, 0.033);
-        // Integration time scale: fast enough that a node finishes its travel
-        // while alpha cools (~300 steps); the damped map stays stable far
-        // beyond the stiffest spring.
-        let sub_dt = clamped_dt * 2.0;
+        // Integration time scale (1.5x the original dt/2): fast enough that a
+        // node finishes its travel while alpha cools, slow enough that pushed
+        // and anchored nodes do not visibly bounce; with `max_speed` 270 a node
+        // moves at most ~3.4 px per frame at 60 fps (TASK-77.28).
+        let sub_dt = clamped_dt * 0.75;
 
         let mut budget_exceeded = false;
 
