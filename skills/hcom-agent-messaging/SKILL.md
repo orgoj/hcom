@@ -19,6 +19,10 @@ hcom send @<sender> --intent ack --reply-to <id> --name <your-name> -- 'reply te
 hcom send @<name> --intent request --name <your-name> -- 'message text'
 # text with backticks, code or markdown
 hcom send @<name> --intent inform --name <your-name> --file /abs/path/msg.md
+# text with an apostrophe (user's, don't) or backticks never goes in '...': use a quoted heredoc
+hcom send @<name> --intent inform --name <your-name> <<'EOF'
+the user's text
+EOF
 ```
 
 All flags go before `--`; everything after `--` is the message. `@<group>` reaches every catalog agent of that group in your scope and starts stopped ones. Intents: `request` (want reply), `inform` (no reply needed), `ack` (answer, requires `--reply-to`). No need to run `hcom status`, `hcom list` or `--help` before sending; use them only if the send fails.
