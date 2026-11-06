@@ -3,8 +3,8 @@ use crate::canvas::{CanvasAction, CanvasView, ThemePalette};
 use crate::config::{
     DEFAULT_DETAIL_WIDTH_PX, DETAIL_TABS, GraphConfig, GraphState, PlaceholderContext,
     ResolvedTheme, SIDE_PANEL_MIN_WIDTH, SPLIT_FRAC_MAX, SPLIT_FRAC_MIN, ThemePreference, ViewMode,
-    load_config, load_state, replace_placeholders_str, replace_placeholders_vec, save_state,
-    screen_bar_buttons,
+    desktop_config_dir, desktop_theme, load_config, load_state, replace_placeholders_str,
+    replace_placeholders_vec, save_state, screen_bar_buttons,
 };
 use crate::layout::{GraphLayout, LayoutMode};
 use crate::model::{
@@ -244,6 +244,8 @@ pub struct HcomGraphApp {
     pub selection_generation: u64,
     pub search_query: String,
     pub last_resolved_theme: Option<ResolvedTheme>,
+    /// Theme from the desktop config files, used when eframe reports none.
+    pub desktop_theme: Option<egui::Theme>,
 
     // Message time range text input & two-handle slider state
     pub time_range_text: String,
@@ -453,6 +455,7 @@ impl HcomGraphApp {
             send_text: String::new(),
             inject_input_has_focus: false,
             last_resolved_theme: None,
+            desktop_theme: desktop_config_dir().and_then(|dir| desktop_theme(&dir)),
         };
         app.apply_persisted_view();
 
@@ -546,6 +549,7 @@ impl HcomGraphApp {
             send_text: String::new(),
             inject_input_has_focus: false,
             last_resolved_theme: None,
+            desktop_theme: None,
         }
     }
 
@@ -558,7 +562,7 @@ impl HcomGraphApp {
     /// Resolves theme preference against the OS and synchronizes egui Visuals.
     pub fn apply_theme(&mut self, ctx: &egui::Context) -> ThemePalette {
         let preference = self.state.theme.unwrap_or_default();
-        let resolved = preference.resolve(ctx.system_theme());
+        let resolved = preference.resolve(ctx.system_theme().or(self.desktop_theme));
         let dark_mode = resolved == ResolvedTheme::Dark;
         let expected_theme = if dark_mode {
             egui::Theme::Dark
@@ -3119,6 +3123,27 @@ impl eframe::App for HcomGraphApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Theme toggle (Auto / Light / Dark)
+                    let current_pref = self.state.theme.unwrap_or_default();
+                    let (theme_icon, theme_label) = match current_pref {
+                        ThemePreference::Auto => ("💻", "Auto"),
+                        ThemePreference::Light => ("☀", "Light"),
+                        ThemePreference::Dark => ("🌙", "Dark"),
+                    };
+                    if ui
+                        .button(format!("{theme_icon} {theme_label}"))
+                        .on_hover_text("Toggle theme: Auto (system) -> Light -> Dark")
+                        .clicked()
+                    {
+                        let next = match current_pref {
+                            ThemePreference::Auto => ThemePreference::Light,
+                            ThemePreference::Light => ThemePreference::Dark,
+                            ThemePreference::Dark => ThemePreference::Auto,
+                        };
+                        self.state.theme = Some(next);
+                        self.save_state();
+                    }
+                    ui.separator();
                     if ui
                         .button("Fit")
                         .on_hover_text("Zoom and pan so all shown agents fit the graph")
@@ -3183,29 +3208,6 @@ impl eframe::App for HcomGraphApp {
                         self.state.layout_mode = mode.as_str().to_string();
                         self.save_state();
                     }
-                }
-
-                ui.separator();
-
-                // Theme toggle (Auto / Light / Dark)
-                let current_pref = self.state.theme.unwrap_or_default();
-                let (theme_icon, theme_label) = match current_pref {
-                    ThemePreference::Auto => ("💻", "Auto"),
-                    ThemePreference::Light => ("☀", "Light"),
-                    ThemePreference::Dark => ("🌙", "Dark"),
-                };
-                if ui
-                    .button(format!("{theme_icon} {theme_label}"))
-                    .on_hover_text("Toggle theme: Auto (system) -> Light -> Dark")
-                    .clicked()
-                {
-                    let next = match current_pref {
-                        ThemePreference::Auto => ThemePreference::Light,
-                        ThemePreference::Light => ThemePreference::Dark,
-                        ThemePreference::Dark => ThemePreference::Auto,
-                    };
-                    self.state.theme = Some(next);
-                    self.save_state();
                 }
 
                 ui.separator();

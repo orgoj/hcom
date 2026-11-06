@@ -9171,3 +9171,127 @@ fn test_task_77_37_auto_restores_light_visuals_when_light_system_had_dark_visual
     assert!(!ctx.global_style().visuals.dark_mode);
     assert_eq!(ctx.theme(), egui::Theme::Light);
 }
+
+#[test]
+fn test_task_77_40_lxqt_palette_theme() {
+    use hcom_graph::config::lxqt_palette_theme;
+
+    let light =
+        "[General]\ntheme=Clearlooks\n\n[Palette]\nbase_color=#ffffff\nwindow_color=#efefef\n";
+    assert_eq!(lxqt_palette_theme(light), Some(egui::Theme::Light));
+    let dark = "[Palette]\nwindow_color=#2b2b2b\n";
+    assert_eq!(lxqt_palette_theme(dark), Some(egui::Theme::Dark));
+    let argb = "[Palette]\nwindow_color=#ff2b2b2b\n";
+    assert_eq!(lxqt_palette_theme(argb), Some(egui::Theme::Dark));
+    let other_section = "[General]\nwindow_color=#ffffff\n";
+    assert_eq!(lxqt_palette_theme(other_section), None);
+    assert_eq!(lxqt_palette_theme("[Palette]\nwindow_color=bad\n"), None);
+    assert_eq!(lxqt_palette_theme(""), None);
+}
+
+#[test]
+fn test_task_77_40_gtk_settings_theme() {
+    use hcom_graph::config::gtk_settings_theme;
+
+    let light = "[Settings]\ngtk-theme-name = Arc-Lighter\n";
+    assert_eq!(gtk_settings_theme(light), Some(egui::Theme::Light));
+    let dark_name = "[Settings]\ngtk-theme-name = Arc-Dark\n";
+    assert_eq!(gtk_settings_theme(dark_name), Some(egui::Theme::Dark));
+    let prefer_dark =
+        "[Settings]\ngtk-theme-name = Adwaita\ngtk-application-prefer-dark-theme = true\n";
+    assert_eq!(gtk_settings_theme(prefer_dark), Some(egui::Theme::Dark));
+    let prefer_dark_num = "[Settings]\ngtk-application-prefer-dark-theme=1\n";
+    assert_eq!(gtk_settings_theme(prefer_dark_num), Some(egui::Theme::Dark));
+    assert_eq!(
+        gtk_settings_theme("[Settings]\ngtk-font-name = Ubuntu 9\n"),
+        None
+    );
+}
+
+#[test]
+fn test_task_77_40_desktop_theme_sources_in_order() {
+    use hcom_graph::config::desktop_theme;
+
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(desktop_theme(dir.path()), None, "no files: no theme");
+
+    std::fs::create_dir_all(dir.path().join("gtk-3.0")).unwrap();
+    std::fs::write(
+        dir.path().join("gtk-3.0/settings.ini"),
+        "[Settings]\ngtk-theme-name = Arc-Dark\n",
+    )
+    .unwrap();
+    assert_eq!(desktop_theme(dir.path()), Some(egui::Theme::Dark), "GTK");
+
+    std::fs::create_dir_all(dir.path().join("lxqt")).unwrap();
+    std::fs::write(
+        dir.path().join("lxqt/lxqt.conf"),
+        "[Palette]\nwindow_color=#efefef\n",
+    )
+    .unwrap();
+    assert_eq!(
+        desktop_theme(dir.path()),
+        Some(egui::Theme::Light),
+        "LXQt palette wins over GTK"
+    );
+}
+
+#[test]
+fn test_task_77_40_auto_uses_desktop_theme_when_system_reports_none() {
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState, ResolvedTheme};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+    let ctx = egui::Context::default();
+    let mut out = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+    out.textures_delta.clear();
+    assert_eq!(ctx.system_theme(), None);
+
+    assert_eq!(app.apply_theme(&ctx).resolved, ResolvedTheme::Dark);
+    app.desktop_theme = Some(egui::Theme::Light);
+    assert_eq!(app.apply_theme(&ctx).resolved, ResolvedTheme::Light);
+    assert!(!ctx.global_style().visuals.dark_mode);
+}
+
+#[test]
+fn test_task_77_41_theme_toggle_sits_right_of_fit() {
+    use eframe::App;
+    use hcom_graph::app::HcomGraphApp;
+    use hcom_graph::config::{GraphConfig, GraphState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomGraphApp::new_for_test(
+        GraphConfig::default(),
+        GraphState::default(),
+        dir.path().to_path_buf(),
+    );
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 800.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut out = None;
+    for _ in 0..3 {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let mut o = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        o.textures_delta.clear();
+        out = Some(o);
+    }
+    let out = out.unwrap();
+    let fit = widget_rect(&out, "Fit").expect("Fit button");
+    let toggle = widget_rect(&out, "💻 Auto").expect("theme toggle");
+    let layout = widget_rect(&out, "Hierarchy").expect("Hierarchy layout button");
+    assert!(
+        (toggle.center().y - fit.center().y).abs() < 2.0,
+        "same row as Fit"
+    );
+    assert!(toggle.left() > fit.right(), "right of Fit");
+    assert!(toggle.bottom() < layout.top(), "above the Layout row");
+}

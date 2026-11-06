@@ -241,6 +241,74 @@ impl ThemePreference {
     }
 }
 
+/// Desktop config directory: `$XDG_CONFIG_HOME` (absolute), else `~/.config`.
+pub fn desktop_config_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".config"))
+        })
+}
+
+/// Light/dark theme read from the desktop's config files, for desktops whose
+/// theme eframe does not report (e.g. LXQt on X11): the LXQt palette (used by
+/// Qt apps), then the GTK 3 settings (used by GTK apps).
+pub fn desktop_theme(config_dir: &Path) -> Option<egui::Theme> {
+    let read = |rel: &str| fs::read_to_string(config_dir.join(rel)).ok();
+    read("lxqt/lxqt.conf")
+        .and_then(|s| lxqt_palette_theme(&s))
+        .or_else(|| read("gtk-3.0/settings.ini").and_then(|s| gtk_settings_theme(&s)))
+}
+
+/// Value of `key` in `[section]` of an INI text, trimmed and unquoted.
+fn ini_value<'a>(text: &'a str, section: &str, key: &str) -> Option<&'a str> {
+    let mut in_section = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_section = line == format!("[{section}]");
+        } else if in_section
+            && let Some((k, v)) = line.split_once('=')
+            && k.trim() == key
+        {
+            return Some(v.trim().trim_matches('"'));
+        }
+    }
+    None
+}
+
+/// Theme from the luminance of `window_color` in the LXQt `[Palette]`.
+pub fn lxqt_palette_theme(text: &str) -> Option<egui::Theme> {
+    let hex = ini_value(text, "Palette", "window_color")?.strip_prefix('#')?;
+    // Qt writes #rrggbb or #aarrggbb.
+    let rgb = hex.get(hex.len().checked_sub(6)?..)?;
+    let channel = |i: usize| u8::from_str_radix(rgb.get(i..i + 2)?, 16).ok();
+    let (r, g, b) = (channel(0)?, channel(2)?, channel(4)?);
+    let luminance = 0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b);
+    Some(if luminance < 128.0 {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    })
+}
+
+/// Theme from GTK 3 `settings.ini`: `gtk-application-prefer-dark-theme` or a
+/// theme name containing "dark" means dark, any other named theme light.
+pub fn gtk_settings_theme(text: &str) -> Option<egui::Theme> {
+    let prefer_dark = ini_value(text, "Settings", "gtk-application-prefer-dark-theme");
+    if matches!(prefer_dark, Some("true" | "1")) {
+        return Some(egui::Theme::Dark);
+    }
+    let name = ini_value(text, "Settings", "gtk-theme-name").filter(|n| !n.is_empty())?;
+    Some(if name.to_lowercase().contains("dark") {
+        egui::Theme::Dark
+    } else {
+        egui::Theme::Light
+    })
+}
+
 pub fn deserialize_theme_preference<'de, D>(
     deserializer: D,
 ) -> Result<Option<ThemePreference>, D::Error>
