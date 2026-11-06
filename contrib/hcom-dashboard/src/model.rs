@@ -211,6 +211,9 @@ pub struct MessageEdge {
     pub from: String,
     pub to: String,
     pub count: usize,
+    /// Text bytes of all messages on this edge.
+    #[serde(default)]
+    pub bytes: usize,
     pub last_timestamp: DateTime<Utc>,
     pub last_intent: Option<String>,
     pub last_preview: String,
@@ -509,10 +512,11 @@ pub fn format_canonical_range(range: &MessageRange, _now: DateTime<Utc>) -> Stri
     }
 }
 
-/// Message count of one edge inside a window.
+/// Message count and text bytes of one edge inside a window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WindowedCount {
     pub count: usize,
+    pub bytes: usize,
 }
 
 /// Visual enrichment of a node that `hcom list` snapshots do not carry
@@ -739,6 +743,7 @@ impl AgentGraph {
             if let Some(&edge_idx) = self.message_edges.get(&edge_key) {
                 if let Some(EdgeKind::Message(msg_edge)) = self.graph.edge_weight_mut(edge_idx) {
                     msg_edge.count += 1;
+                    msg_edge.bytes += sanitized_text.len();
                     msg_edge.last_timestamp = event.ts;
                     msg_edge.last_intent = intent.clone();
                     msg_edge.last_preview = preview.clone();
@@ -750,6 +755,7 @@ impl AgentGraph {
                     from: sender.clone(),
                     to: recipient,
                     count: 1,
+                    bytes: sanitized_text.len(),
                     last_timestamp: event.ts,
                     last_intent: intent.clone(),
                     last_preview: preview.clone(),
@@ -902,13 +908,21 @@ impl AgentGraph {
         if window.is_unfiltered() {
             for &idx in self.message_edges.values() {
                 if let Some(EdgeKind::Message(m)) = self.graph.edge_weight(idx) {
-                    counts.insert(idx, WindowedCount { count: m.count });
+                    counts.insert(
+                        idx,
+                        WindowedCount {
+                            count: m.count,
+                            bytes: m.bytes,
+                        },
+                    );
                 }
             }
             return counts;
         }
-        for (idx, _) in self.messages_in_window(window, now) {
-            counts.entry(idx).or_default().count += 1;
+        for (idx, s) in self.messages_in_window(window, now) {
+            let c = counts.entry(idx).or_default();
+            c.count += 1;
+            c.bytes += s.text.len();
         }
         counts
     }

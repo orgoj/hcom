@@ -2109,13 +2109,14 @@ impl HcomDashboardApp {
                 self.render_config_tab(ui, palette);
             }
             "Legend" => {
-                let legend = crate::canvas::legend(
+                let mut legend = crate::canvas::legend(
                     &self.graph,
                     &self.layout,
                     visible,
                     self.canvas.edge_counts.as_ref(),
                     palette,
                 );
+                legend.apply_layers(self.canvas.layers);
                 egui::ScrollArea::vertical()
                     .id_salt("legend_scroll_tab")
                     .auto_shrink([false, false])
@@ -3061,6 +3062,12 @@ impl eframe::App for HcomDashboardApp {
         }
 
         self.graph.refresh_initiators();
+        self.canvas.layers = crate::canvas::EdgeLayers {
+            initiator: self.state.show_initiator_edges,
+            message: self.state.show_message_edges,
+            spawn: self.state.show_spawn_edges,
+        };
+        self.canvas.width_by_bytes = self.state.edge_width_bytes;
 
         // 3. Physics simulation step
         let dt = ctx.input(|i| i.stable_dt);
@@ -3229,6 +3236,56 @@ impl eframe::App for HcomDashboardApp {
                         self.state.layout_mode = mode.as_str().to_string();
                         self.save_state();
                     }
+                }
+
+                ui.separator();
+
+                // Edge layers and the message arrow width metric
+                ui.label("Edges:");
+                let mut edges_changed = false;
+                for (flag, label, hint) in [
+                    (
+                        &mut self.state.show_initiator_edges,
+                        "Start",
+                        "Arrows from the side that started each conversation",
+                    ),
+                    (
+                        &mut self.state.show_message_edges,
+                        "Msgs",
+                        "Message arrows, width by flow",
+                    ),
+                    (
+                        &mut self.state.show_spawn_edges,
+                        "Spawn",
+                        "Dashed spawn edges",
+                    ),
+                ] {
+                    if ui
+                        .selectable_label(*flag, label)
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        *flag = !*flag;
+                        edges_changed = true;
+                    }
+                }
+                ui.label("Width:");
+                for (bytes, label, hint) in [
+                    (false, "Count", "Message arrow width by message count"),
+                    (true, "Bytes", "Message arrow width by message text bytes"),
+                ] {
+                    if ui
+                        .selectable_label(self.state.edge_width_bytes == bytes, label)
+                        .on_hover_text(hint)
+                        .clicked()
+                        && self.state.edge_width_bytes != bytes
+                    {
+                        self.state.edge_width_bytes = bytes;
+                        edges_changed = true;
+                    }
+                }
+                if edges_changed {
+                    self.save_state();
                 }
 
                 ui.separator();

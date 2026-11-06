@@ -396,6 +396,16 @@ pub struct DashboardState {
     pub canvas_pan_x: Option<f32>,
     #[serde(default)]
     pub canvas_pan_y: Option<f32>,
+    /// Edge layers drawn on the canvas: initiator arrows, messages, spawn.
+    #[serde(default = "default_true")]
+    pub show_initiator_edges: bool,
+    #[serde(default = "default_true")]
+    pub show_message_edges: bool,
+    #[serde(default = "default_true")]
+    pub show_spawn_edges: bool,
+    /// Message arrow width by text bytes instead of message count.
+    #[serde(default)]
+    pub edge_width_bytes: bool,
 }
 
 /// A saved node position and when it was last stored (unix seconds).
@@ -557,6 +567,10 @@ impl Default for DashboardState {
             canvas_zoom: None,
             canvas_pan_x: None,
             canvas_pan_y: None,
+            show_initiator_edges: true,
+            show_message_edges: true,
+            show_spawn_edges: true,
+            edge_width_bytes: false,
         }
     }
 }

@@ -3042,7 +3042,7 @@ fn test_message_window_bounds_presets_live_and_fixed_end() {
 #[test]
 fn test_windowed_edge_counts_window_last_n_and_unfiltered_totals() {
     use chrono::Duration;
-    use hcom_dashboard::model::{MessageWindow, WindowedCount};
+    use hcom_dashboard::model::MessageWindow;
     let now = Utc::now();
     let mut graph = AgentGraph::new();
     graph.apply_message_event(&window_msg(1, now - Duration::hours(3), "a", "b"));
@@ -3077,7 +3077,7 @@ fn test_windowed_edge_counts_window_last_n_and_unfiltered_totals() {
     };
     let cl = graph.windowed_edge_counts(&w_last, now);
     assert_eq!(cl.len(), 1);
-    assert_eq!(cl[&ac], WindowedCount { count: 1 });
+    assert_eq!(cl[&ac].count, 1);
 
     // Detail history uses the same selection.
     let hist = graph.windowed_conversation_history("a", "b", &w5, now);
@@ -3151,7 +3151,11 @@ fn test_windowed_counts_are_exact_without_implicit_limit() {
     assert_eq!(count(&fixed_last), 7);
 
     assert_eq!(
-        hcom_dashboard::canvas::edge_badge_label(WindowedCount { count: 600 }).as_deref(),
+        hcom_dashboard::canvas::edge_badge_label(WindowedCount {
+            count: 600,
+            bytes: 0
+        })
+        .as_deref(),
         Some("600 msgs")
     );
     assert_eq!(
@@ -3159,7 +3163,7 @@ fn test_windowed_counts_are_exact_without_implicit_limit() {
         None
     );
     assert_eq!(
-        hcom_dashboard::canvas::edge_badge_label(WindowedCount { count: 1 }).as_deref(),
+        hcom_dashboard::canvas::edge_badge_label(WindowedCount { count: 1, bytes: 0 }).as_deref(),
         Some("1 msg")
     );
 }
@@ -9621,4 +9625,275 @@ fn test_task_77_44_edge_detail_and_tooltip_name_the_initiators() {
         texts.iter().any(|t| t == "Started by: alice (1), bob (1)"),
         "edge detail lists the initiators: {texts:?}"
     );
+}
+
+#[test]
+fn test_task_77_45_flow_width_follows_sqrt_share_of_the_largest_flow() {
+    use hcom_dashboard::canvas::flow_width;
+    assert_eq!(flow_width(0, 0), 1.0);
+    assert_eq!(flow_width(0, 10), 1.0);
+    assert_eq!(flow_width(10, 10), 10.0, "largest flow: full width");
+    assert_eq!(flow_width(1, 4), 5.5, "1 + 9 * sqrt(1/4)");
+    assert!(flow_width(1, 100) > 1.0, "small flows stay visible");
+}
+
+#[test]
+fn test_task_77_45_edge_counts_carry_bytes_and_the_metric_picks_them() {
+    use hcom_dashboard::model::{MessageWindow, WindowedCount};
+    let mut g = AgentGraph::new();
+    let mut m1 = pair_msg(1, "alice", "bob", None, false);
+    m1.data.text = "abcd".into();
+    let mut m2 = pair_msg(2, "alice", "bob", None, false);
+    m2.data.text = "xyzxyzxyz1".into();
+    g.apply_message_event(&m1);
+    g.apply_message_event(&m2);
+    let ab = g.message_edges[&("alice".to_string(), "bob".to_string())];
+    let now = Utc::now();
+
+    let all = g.windowed_edge_counts(&MessageWindow::default(), now);
+    assert_eq!(
+        all[&ab],
+        WindowedCount {
+            count: 2,
+            bytes: 14
+        }
+    );
+    let last = MessageWindow {
+        last_n: Some(1),
+        ..Default::default()
+    };
+    assert_eq!(
+        g.windowed_edge_counts(&last, now)[&ab],
+        WindowedCount {
+            count: 1,
+            bytes: 10
+        }
+    );
+
+    let mut canvas = CanvasView::new();
+    let wc = WindowedCount {
+        count: 2,
+        bytes: 14,
+    };
+    assert_eq!(canvas.flow_value(wc), 2, "default metric: count");
+    canvas.width_by_bytes = true;
+    assert_eq!(canvas.flow_value(wc), 14);
+}
+
+/// Shapes the canvas paints for `graph` with `layers`.
+fn canvas_shape_count(
+    graph: &AgentGraph,
+    layout: &mut GraphLayout,
+    layers: hcom_dashboard::canvas::EdgeLayers,
+) -> usize {
+    let palette = hcom_dashboard::canvas::ThemePalette::for_theme(
+        hcom_dashboard::config::ResolvedTheme::Dark,
+    );
+    let mut canvas = CanvasView::new();
+    canvas.layers = layers;
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(input, |ui| {
+        canvas.show(ui, graph, layout, None, &palette);
+    });
+    out.textures_delta.clear();
+    out.shapes.len()
+}
+
+#[test]
+fn test_task_77_45_each_edge_layer_switches_drawing_hit_test_and_legend() {
+    use hcom_dashboard::canvas::{EdgeLayers, Legend, ThemePalette, legend};
+    use hcom_dashboard::config::ResolvedTheme;
+
+    // parent spawned child; parent asked child (initiator + message arrow).
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[snap("parent", None), snap("child", Some("parent"))]);
+    graph.apply_message_event(&pair_msg(1, "parent", "child", Some("request"), false));
+    graph.refresh_initiators();
+    let mut layout = GraphLayout::new();
+    layout.set_mode(hcom_dashboard::layout::LayoutMode::Manual);
+    layout.sync_nodes(&graph);
+    let p = graph.get_node_index("parent").unwrap();
+    let c = graph.get_node_index("child").unwrap();
+    layout.set_node_pos(p, Pos2::new(-200.0, 0.0), false);
+    layout.set_node_pos(c, Pos2::new(200.0, 0.0), false);
+    let positions = |l: &GraphLayout| (l.nodes[&p].pos, l.nodes[&c].pos);
+    let before = positions(&layout);
+
+    let all = EdgeLayers::default();
+    let full = canvas_shape_count(&graph, &mut layout, all);
+    for off in [
+        EdgeLayers {
+            initiator: false,
+            ..all
+        },
+        EdgeLayers {
+            message: false,
+            ..all
+        },
+        EdgeLayers {
+            spawn: false,
+            ..all
+        },
+    ] {
+        let n = canvas_shape_count(&graph, &mut layout, off);
+        assert!(n < full, "{off:?} draws less: {n} < {full}");
+    }
+    assert_eq!(positions(&layout), before, "layers do not move nodes");
+
+    // Hit test: the spawn and the message edge overlap (same direction);
+    // switching one layer off leaves only the other hittable.
+    let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+    let mut canvas = CanvasView::new();
+    let hit_kinds = |canvas: &CanvasView| {
+        let mut kinds = Vec::new();
+        for y in 260..340 {
+            let pos = Pos2::new(400.0, y as f32);
+            if let Some(e) = canvas.hit_test_edge(pos, &graph, &layout, rect, 3.0) {
+                let k = match graph.graph[e] {
+                    hcom_dashboard::model::EdgeKind::Spawn(_) => "spawn",
+                    hcom_dashboard::model::EdgeKind::Message(_) => "message",
+                };
+                if !kinds.contains(&k) {
+                    kinds.push(k);
+                }
+            }
+        }
+        kinds.sort();
+        kinds
+    };
+    assert!(!hit_kinds(&canvas).is_empty());
+    canvas.layers.message = false;
+    assert_eq!(hit_kinds(&canvas), vec!["spawn"]);
+    canvas.layers = EdgeLayers {
+        spawn: false,
+        ..all
+    };
+    assert_eq!(hit_kinds(&canvas), vec!["message"]);
+
+    // Legend drops switched-off layers.
+    let visible = graph.graph.node_indices().collect();
+    let palette = ThemePalette::for_theme(ResolvedTheme::Dark);
+    let base = legend(&graph, &layout, &visible, None, &palette);
+    assert!(base.spawn && base.message);
+    let mut l: Legend = base.clone();
+    l.apply_layers(EdgeLayers {
+        message: false,
+        ..all
+    });
+    assert!(l.spawn && !l.message && !l.message_idle);
+    let mut l = base;
+    l.apply_layers(EdgeLayers {
+        spawn: false,
+        ..all
+    });
+    assert!(!l.spawn && l.message);
+}
+
+#[test]
+fn test_task_77_45_layers_and_metric_persist_with_defaults() {
+    use hcom_dashboard::config::{DashboardState, load_state};
+
+    let defaults: DashboardState = serde_json::from_str("{}").unwrap();
+    assert!(
+        defaults.show_initiator_edges && defaults.show_message_edges && defaults.show_spawn_edges
+    );
+    assert!(!defaults.edge_width_bytes, "default metric: count");
+    assert_eq!(
+        (
+            DashboardState::default().show_initiator_edges,
+            DashboardState::default().edge_width_bytes
+        ),
+        (true, false)
+    );
+
+    let (dir, mut app) = split_test_app(DashboardState::default());
+    app.state.show_initiator_edges = false;
+    app.state.show_spawn_edges = false;
+    app.state.edge_width_bytes = true;
+    app.save_state();
+    let loaded = load_state(dir.path());
+    assert!(!loaded.show_initiator_edges && loaded.show_message_edges && !loaded.show_spawn_edges);
+    assert!(loaded.edge_width_bytes);
+
+    // The canvas follows the state after a frame.
+    let mut fresh = hcom_dashboard::app::HcomDashboardApp::new_for_test(
+        hcom_dashboard::config::DashboardConfig::default(),
+        loaded,
+        dir.path().to_path_buf(),
+    );
+    let ctx = egui::Context::default();
+    run_app_frames(&ctx, &mut fresh, 1);
+    assert!(
+        !fresh.canvas.layers.initiator && fresh.canvas.layers.message && !fresh.canvas.layers.spawn
+    );
+    assert!(fresh.canvas.width_by_bytes);
+}
+
+#[test]
+fn test_task_77_45_edge_toggles_sit_after_layout_and_switch_the_state() {
+    use eframe::App;
+    use hcom_dashboard::config::{DashboardState, load_state};
+
+    let (dir, mut app) = split_test_app(DashboardState::default());
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1800.0, 800.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut run = |app: &mut hcom_dashboard::app::HcomDashboardApp, events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        let mut o = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        o.textures_delta.clear();
+        o
+    };
+    for _ in 0..2 {
+        run(&mut app, vec![]);
+    }
+    let out = run(&mut app, vec![]);
+    let rect =
+        |label: &str| widget_rect(&out, label).unwrap_or_else(|| panic!("{label:?} missing"));
+    let manual = rect("Manual");
+    let mut prev = manual;
+    for label in ["Start", "Msgs", "Spawn", "Count", "Bytes"] {
+        let r = rect(label);
+        assert!(
+            (r.center().y - manual.center().y).abs() < 1.0,
+            "{label} on the Layout row"
+        );
+        assert!(
+            r.left() > prev.right(),
+            "{label} after the previous control"
+        );
+        prev = r;
+    }
+
+    let click = |pos: Pos2| {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        vec![
+            vec![egui::Event::PointerMoved(pos), button(true)],
+            vec![button(false)],
+            vec![],
+        ]
+    };
+    for label in ["Msgs", "Bytes"] {
+        for events in click(rect(label).center()) {
+            run(&mut app, events);
+        }
+    }
+    assert!(!app.state.show_message_edges);
+    assert!(app.state.edge_width_bytes);
+    let saved = load_state(dir.path());
+    assert!(!saved.show_message_edges && saved.edge_width_bytes);
 }

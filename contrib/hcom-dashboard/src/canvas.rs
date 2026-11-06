@@ -200,6 +200,51 @@ pub struct Legend {
     pub message_idle: bool,
 }
 
+impl Legend {
+    /// Drops the entries of edge layers that are switched off.
+    pub fn apply_layers(&mut self, layers: EdgeLayers) {
+        self.spawn &= layers.spawn;
+        self.message &= layers.message;
+        self.message_idle &= layers.message;
+    }
+}
+
+/// Edge layers drawn and hit-tested on the canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EdgeLayers {
+    pub initiator: bool,
+    pub message: bool,
+    pub spawn: bool,
+}
+
+impl Default for EdgeLayers {
+    fn default() -> Self {
+        Self {
+            initiator: true,
+            message: true,
+            spawn: true,
+        }
+    }
+}
+
+impl EdgeLayers {
+    pub fn shows(&self, kind: &EdgeKind) -> bool {
+        match kind {
+            EdgeKind::Spawn(_) => self.spawn,
+            EdgeKind::Message(_) => self.message,
+        }
+    }
+}
+
+/// Width of a message arrow at zoom 1: 1 px plus up to 9 px by the square
+/// root of its share of the largest visible flow (`max`).
+pub fn flow_width(value: usize, max: usize) -> f32 {
+    if max == 0 {
+        return 1.0;
+    }
+    1.0 + 9.0 * (value as f32 / max as f32).sqrt().min(1.0)
+}
+
 /// Legend of what the canvas draws: nodes in `layout` and `visible`, and
 /// edges whose both endpoints are such nodes (the canvas visibility rule).
 /// `edge_counts` are the windowed counts as in `CanvasView::edge_counts`.
@@ -291,6 +336,9 @@ pub struct CanvasView {
     pub is_dragging: bool,
     /// Windowed message counts per edge; `None` = totals (no time window).
     pub edge_counts: Option<std::collections::HashMap<EdgeIndex, WindowedCount>>,
+    pub layers: EdgeLayers,
+    /// Message arrow width by text bytes instead of message count.
+    pub width_by_bytes: bool,
 }
 
 impl Default for CanvasView {
@@ -344,6 +392,28 @@ impl CanvasView {
             mouse_down_pos: None,
             is_dragging: false,
             edge_counts: None,
+            layers: EdgeLayers::default(),
+            width_by_bytes: false,
+        }
+    }
+
+    /// Windowed count of a message edge (totals without a time window).
+    fn edge_count(&self, idx: EdgeIndex, msg: &crate::model::MessageEdge) -> WindowedCount {
+        match &self.edge_counts {
+            Some(map) => map.get(&idx).copied().unwrap_or_default(),
+            None => WindowedCount {
+                count: msg.count,
+                bytes: msg.bytes,
+            },
+        }
+    }
+
+    /// The value the message arrow width follows (count or bytes).
+    pub fn flow_value(&self, wc: WindowedCount) -> usize {
+        if self.width_by_bytes {
+            wc.bytes
+        } else {
+            wc.count
         }
     }
 
@@ -414,6 +484,9 @@ impl CanvasView {
             let source_idx = edge_ref.source();
             let target_idx = edge_ref.target();
 
+            if !self.layers.shows(edge_ref.weight()) {
+                continue;
+            }
             if let Some(v) = visible_nodes
                 && (!v.contains(&source_idx) || !v.contains(&target_idx))
             {
@@ -671,7 +744,7 @@ impl CanvasView {
         // 4a. Initiator arrows below the message edges: straight between the
         // two curved message edges of a reciprocal pair, curved beside the
         // straight edge of a one-way pair.
-        for (a, b, initiators) in graph.iter_initiators() {
+        for (a, b, initiators) in graph.iter_initiators().filter(|_| self.layers.initiator) {
             let (Some(ia), Some(ib)) = (graph.get_node_index(a), graph.get_node_index(b)) else {
                 continue;
             };
@@ -745,11 +818,31 @@ impl CanvasView {
 
         // 4. Render Edges
         let node_radius = 26.0 * self.zoom;
+        let shown_edge = |e: &petgraph::stable_graph::EdgeReference<'_, EdgeKind>| {
+            self.layers.shows(e.weight())
+                && visible_nodes.is_none_or(|v| v.contains(&e.source()) && v.contains(&e.target()))
+                && layout.nodes.contains_key(&e.source())
+                && layout.nodes.contains_key(&e.target())
+        };
+        // Largest flow among the drawn message edges: the full-width arrow.
+        let max_flow = graph
+            .graph
+            .edge_references()
+            .filter(&shown_edge)
+            .filter_map(|e| match e.weight() {
+                EdgeKind::Message(m) => Some(self.flow_value(self.edge_count(e.id(), m))),
+                EdgeKind::Spawn(_) => None,
+            })
+            .max()
+            .unwrap_or(0);
         for edge_ref in graph.graph.edge_references() {
             let edge_id = edge_ref.id();
             let source_idx = edge_ref.source();
             let target_idx = edge_ref.target();
 
+            if !self.layers.shows(edge_ref.weight()) {
+                continue;
+            }
             if let Some(v) = visible_nodes
                 && (!v.contains(&source_idx) || !v.contains(&target_idx))
             {
@@ -810,17 +903,14 @@ impl CanvasView {
                     draw_arrow_head(&painter, end_pt, dir, arrow, color);
                 }
                 EdgeKind::Message(msg) => {
-                    let wc = match &self.edge_counts {
-                        Some(map) => map.get(&edge_id).copied().unwrap_or_default(),
-                        None => WindowedCount { count: msg.count },
-                    };
+                    let wc = self.edge_count(edge_id, msg);
                     // Edges without messages in the window are dimmed, not hidden,
                     // and stay clickable (hit test is unchanged).
                     let inactive = wc.count == 0;
                     let base_thickness = if inactive {
                         1.0 * self.zoom.clamp(0.6, 2.2)
                     } else {
-                        (1.8 + (wc.count as f32).log2().min(5.0)) * self.zoom.clamp(0.6, 2.2)
+                        flow_width(self.flow_value(wc), max_flow) * self.zoom.clamp(0.6, 2.2)
                     };
                     let thickness = if is_selected {
                         base_thickness + 2.0 * self.zoom
