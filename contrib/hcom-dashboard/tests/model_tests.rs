@@ -9161,3 +9161,94 @@ fn test_task_77_41_theme_toggle_sits_right_of_fit() {
     assert!(toggle.left() > fit.right(), "right of Fit");
     assert!(toggle.bottom() < layout.top(), "above the Layout row");
 }
+
+#[test]
+fn test_task_77_38_launcher_from_batch_launched_per_session() {
+    use hcom_dashboard::table_data::compute_event_stats;
+
+    // child_a: launched by an agent (autostart or hcom <cli>).
+    // user_b: launched by the user. bare_c: session without batch_launched.
+    // again_d: first session by an agent, new session by the user.
+    // again_e: first session by an agent, new session without batch_launched.
+    // self_f: relaunched by itself (handoff-like): no self parent.
+    let life = r#"
+{"id": 1, "instance": "child_a", "type": "life", "ts": "2026-11-01T10:00:00", "data": {"action": "created", "is_subagent": false}}
+{"id": 2, "instance": "wdt_main", "type": "life", "ts": "2026-11-01T10:00:00", "data": {"action": "batch_launched", "by": "wdt_main", "instances": ["child_a"]}}
+{"id": 3, "instance": "user_b", "type": "life", "ts": "2026-11-01T10:00:00", "data": {"action": "created"}}
+{"id": 4, "instance": "user", "type": "life", "ts": "2026-11-01T10:00:00", "data": {"action": "batch_launched", "by": "user", "instances": ["user_b"]}}
+{"id": 5, "instance": "bare_c", "type": "life", "ts": "2026-11-01T10:00:00", "data": {"action": "created"}}
+{"id": 6, "instance": "again_d", "type": "life", "ts": "2026-11-01T10:00:00", "data": {"action": "created"}}
+{"id": 7, "instance": "boss", "type": "life", "ts": "2026-11-01T10:00:00", "data": {"action": "batch_launched", "by": "boss", "instances": ["again_d", "again_e"]}}
+{"id": 8, "instance": "again_e", "type": "life", "ts": "2026-11-01T10:00:00", "data": {"action": "created"}}
+{"id": 9, "instance": "again_d", "type": "life", "ts": "2026-11-01T11:00:00", "data": {"action": "created"}}
+{"id": 10, "instance": "user", "type": "life", "ts": "2026-11-01T11:00:00", "data": {"action": "batch_launched", "by": "user", "instances": ["again_d"]}}
+{"id": 11, "instance": "again_e", "type": "life", "ts": "2026-11-01T11:00:00", "data": {"action": "created"}}
+{"id": 12, "instance": "self_f", "type": "life", "ts": "2026-11-01T11:00:00", "data": {"action": "batch_launched", "by": "self_f", "instances": ["self_f"]}}
+"#;
+    let stats = compute_event_stats(life, "", &std::collections::HashSet::new(), 0);
+    let launcher = |n: &str| stats.get(n).and_then(|s| s.launcher.clone());
+    assert_eq!(launcher("child_a").as_deref(), Some("wdt_main"));
+    assert_eq!(launcher("user_b"), None);
+    assert_eq!(launcher("bare_c"), None);
+    assert_eq!(
+        launcher("again_d"),
+        None,
+        "new user session drops the old launcher"
+    );
+    assert_eq!(
+        launcher("again_e"),
+        None,
+        "new session without batch_launched"
+    );
+    assert_eq!(launcher("self_f"), None);
+}
+
+#[test]
+fn test_task_77_38_launcher_becomes_spawn_parent_and_parent_name_wins() {
+    use hcom_dashboard::table_data::{TableRow, apply_event_stats, compute_event_stats};
+
+    let (_dir, mut app) = split_test_app(hcom_dashboard::config::DashboardState::default());
+    let row = |name: &str, parent: Option<&str>| TableRow {
+        instance: name.into(),
+        is_running: true,
+        status: "listening".into(),
+        parent_name: parent.map(Into::into),
+        ..Default::default()
+    };
+    app.table_rows = vec![
+        row("boss", None),
+        row("child", None),
+        row("sub", Some("claude_root")),
+    ];
+    let first = r#"
+{"id": 1, "instance": "boss", "type": "life", "ts": "2026-11-01T10:00:00", "data": {"action": "batch_launched", "by": "boss", "instances": ["child", "sub"]}}
+"#;
+    let stats = compute_event_stats(first, "", &std::collections::HashSet::new(), 0);
+    apply_event_stats(&mut app.table_rows, &stats);
+    app.sync_graph_from_table_rows();
+
+    let edges = &app.graph.spawn_edges;
+    assert!(edges.contains_key(&("boss".into(), "child".into())));
+    assert!(edges.contains_key(&("claude_root".into(), "sub".into())));
+    assert!(
+        !edges.contains_key(&("boss".into(), "sub".into())),
+        "parent_name wins"
+    );
+
+    // The user starts a new session of `child`: its spawn edge goes away.
+    let second = r#"
+{"id": 1, "instance": "boss", "type": "life", "ts": "2026-11-01T10:00:00", "data": {"action": "batch_launched", "by": "boss", "instances": ["child", "sub"]}}
+{"id": 2, "instance": "child", "type": "life", "ts": "2026-11-01T11:00:00", "data": {"action": "created"}}
+{"id": 3, "instance": "user", "type": "life", "ts": "2026-11-01T11:00:00", "data": {"action": "batch_launched", "by": "user", "instances": ["child"]}}
+"#;
+    let stats = compute_event_stats(second, "", &std::collections::HashSet::new(), 0);
+    apply_event_stats(&mut app.table_rows, &stats);
+    app.sync_graph_from_table_rows();
+    assert!(
+        !app.graph
+            .spawn_edges
+            .contains_key(&("boss".into(), "child".into()))
+    );
+    let child = app.graph.get_node_index("child").unwrap();
+    assert_eq!(app.graph.graph[child].parent_name, None);
+}

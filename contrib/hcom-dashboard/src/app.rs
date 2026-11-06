@@ -2371,10 +2371,14 @@ impl HcomDashboardApp {
                 _ => AgentStatus::Stopped,
             };
 
-            // If node already exists and has a parent_name from live sync,
-            // do not overwrite it with None if the table row had None.
+            // parent_name (Claude subagents) first, then the launcher from
+            // life events, which is authoritative once stats are applied
+            // (`starts_count`), so a new user-launched session drops the old
+            // launcher. Otherwise keep a parent_name from live sync.
             let parent_name = if let Some(ref p) = r.parent_name {
                 Some(p.clone())
+            } else if r.launcher.is_some() || r.starts_count.is_some() {
+                r.launcher.clone()
             } else if let Some(idx) = self.graph.get_node_index(name) {
                 self.graph
                     .graph
@@ -2999,6 +3003,8 @@ impl eframe::App for HcomDashboardApp {
                             &mut self.table_rows,
                             &self.cached_event_stats,
                         );
+                        // Launchers come from stats: refresh spawn parents.
+                        self.sync_graph_from_table_rows();
                     }
                     ActionResult::StatsFailed { error } => {
                         self.stats_reload_in_flight = false;

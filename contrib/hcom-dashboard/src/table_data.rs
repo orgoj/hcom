@@ -260,6 +260,7 @@ pub fn build_table_rows(
             detail,
             unread_count: live.unread_count.unwrap_or(0) as u32,
             parent_name: live.parent_name.clone(),
+            launcher: None,
             directory: live.directory.clone().unwrap_or_default(),
             branch,
             git_status: String::new(),
@@ -315,6 +316,7 @@ pub fn build_table_rows(
                 detail: cat.description.clone().unwrap_or_default(),
                 unread_count: 0,
                 parent_name: None,
+                launcher: None,
                 directory: cat.dir.clone().unwrap_or_default(),
                 branch: String::new(),
                 git_status: String::new(),
@@ -416,6 +418,9 @@ pub struct TableRow {
     pub detail: String,
     pub unread_count: u32,
     pub parent_name: Option<String>,
+    /// Spawn parent from life events (`EventStatsEntry::launcher`); `parent_name`
+    /// (Claude subagents) takes precedence.
+    pub launcher: Option<String>,
     pub directory: String,
     pub branch: String,
     pub git_status: String,
@@ -471,6 +476,7 @@ impl TableRow {
             detail: node.status_context.clone().unwrap_or_default(),
             unread_count: node.unread_count as u32,
             parent_name: node.parent_name.clone(),
+            launcher: None,
             directory: node.directory.clone().unwrap_or_default(),
             branch: String::new(),
             git_status: String::new(),
@@ -739,6 +745,15 @@ pub struct EventStatsEntry {
     pub stops: u64,
     pub failed: u64,
     pub last_start_ts: Option<u64>,
+    /// Agent that launched the current session: `by` of the last
+    /// `batch_launched` naming this instance since its last `created`.
+    /// None when the user (or an unknown caller) launched it.
+    pub launcher: Option<String>,
+}
+
+/// `batch_launched.by` values that mean the user launched the session.
+fn is_agent_launcher(by: &str, launched: &str) -> bool {
+    !by.is_empty() && by != launched && !matches!(by, "user" | "api" | "unknown" | "cli" | "system")
 }
 
 pub fn parse_event_ts(ts_str: &str) -> u64 {
@@ -792,6 +807,26 @@ pub fn compute_event_stats(
                 opened.insert(name.clone(), ts_sec);
                 if !ts_str.is_empty() {
                     entry.last_start = ts_str.to_string();
+                }
+                // A new session determines its launcher again. An hcom launch
+                // logs its child's `created` before its `batch_launched`
+                // (the launcher pre-registers the instance in the launch loop).
+                entry.launcher = None;
+            }
+            "batch_launched" => {
+                let by = data
+                    .and_then(|d| d.get("by"))
+                    .and_then(|b| b.as_str())
+                    .unwrap_or("");
+                let launched = data
+                    .and_then(|d| d.get("instances"))
+                    .and_then(|i| i.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|i| i.as_str());
+                for child in launched {
+                    stats.entry(child.to_string()).or_default().launcher =
+                        is_agent_launcher(by, child).then(|| by.to_string());
                 }
             }
             "stopped" => {
@@ -868,6 +903,7 @@ pub fn apply_event_stats(rows: &mut [TableRow], stats: &HashMap<String, EventSta
             r.last_start_text = st.last_start.clone();
             r.stops_summary = format!("{}/{}", st.stops, st.failed);
             r.failed_count = Some(st.failed);
+            r.launcher = st.launcher.clone();
         }
     }
 }
