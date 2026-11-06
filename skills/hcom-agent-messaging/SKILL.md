@@ -13,8 +13,10 @@ description: >
 Your name and the incoming message's sender and event id are in the message header.
 
 ```bash
-# reply to message <id> from <sender>
+# reply to a [request #<id>] from <sender>
 hcom send @<sender> --intent ack --reply-to <id> --name <your-name> -- 'reply text'
+# reply to an [inform #<id>] or [ack #<id>] (ack is rejected there)
+hcom send @<sender> --intent inform --reply-to <id> --name <your-name> -- 'reply text'
 # new message that expects an answer
 hcom send @<name> --intent request --name <your-name> -- 'message text'
 # text with backticks, code or markdown
@@ -25,7 +27,7 @@ the user's text
 EOF
 ```
 
-All flags go before `--`; everything after `--` is the message. `@<group>` reaches every catalog agent of that group in your scope and starts stopped ones. Intents: `request` (want reply), `inform` (no reply needed), `ack` (answer, requires `--reply-to`). No need to run `hcom status`, `hcom list` or `--help` before sending; use them only if the send fails.
+All flags go before `--`; everything after `--` is the message. `@<group>` reaches every catalog agent of that group in your scope and starts stopped ones. Intents: `request` (want reply), `inform` (no reply needed), `ack` (answer to a `request`, requires `--reply-to`; to an `inform` or `ack` reply with `inform --reply-to`). No need to run `hcom status`, `hcom list` or `--help` before sending; use them only if the send fails.
 
 When the user tells you who to message (an agent or group, with or without `@`), send the user's request to that name right away. Do not research the content first (web, code, transcripts) and do not verify the name with `hcom list` or the catalog; the recipient does the analysis. Look the name up only if the send fails.
 
