@@ -3760,6 +3760,71 @@ fn launch_scripts_export_catalog_agent_name_and_instance_name() {
 }
 
 #[test]
+fn nested_launch_created_event_names_the_launching_agent() {
+    let h = Hcom::new();
+    let a = h.start_with_process_id("proc-a");
+    let launch_as = |process_id: &str, launched_by: Option<&str>, name: &str| {
+        let mut command = h.cmd();
+        command.env("HCOM_PROCESS_ID", process_id);
+        if let Some(by) = launched_by {
+            command.env("HCOM_LAUNCHED_BY", by);
+        }
+        let output = command
+            .args([
+                "claude",
+                "--as",
+                name,
+                "--terminal",
+                "sh -c true {script}",
+                "--no-run-here",
+                "--go",
+            ])
+            .output()
+            .expect("run hcom");
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    let created = |name: &str| -> (String, i64) {
+        rusqlite::Connection::open(h.hcom_dir.join("hcom.db"))
+            .expect("open hcom db")
+            .query_row(
+                "SELECT json_extract(data, '$.by'), json_extract(data, '$.is_hcom_launched')
+                   FROM events WHERE type = 'life' AND instance = ?1
+                   AND json_extract(data, '$.action') = 'created'",
+                [name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("created event")
+    };
+
+    // A launches B; B runs with A's launch environment and launches C.
+    launch_as("proc-a", None, "bb");
+    let scripts = std::fs::read_dir(h.path().join(".tmp/launch"))
+        .expect("read launch directory")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let b_process = scripts
+        .split("HCOM_PROCESS_ID=")
+        .nth(1)
+        .and_then(|rest| {
+            rest.split(|c: char| c.is_whitespace() || c == '\'' || c == ';')
+                .find(|s| !s.is_empty())
+        })
+        .expect("process id in launch script")
+        .to_string();
+    launch_as(&b_process, Some(&a), "cc");
+
+    assert_eq!(created("bb"), (a.clone(), 1));
+    assert_eq!(created("cc"), ("bb".to_string(), 1));
+}
+
+#[test]
 fn handoff_relaunches_the_same_catalog_agent_under_its_instance_name() {
     let h = Hcom::new();
     std::fs::write(

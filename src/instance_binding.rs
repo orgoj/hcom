@@ -1127,6 +1127,47 @@ pub fn initialize_instance_in_position_file(
     hints: Option<&str>,
     cwd_override: Option<&str>,
 ) -> bool {
+    initialize_instance_with_launcher(
+        db,
+        instance_name,
+        session_id,
+        parent_session_id,
+        parent_name,
+        agent_id,
+        transcript_path,
+        tool,
+        background,
+        tag,
+        wait_timeout,
+        subagent_timeout,
+        hints,
+        cwd_override,
+        None,
+    )
+}
+
+/// [`initialize_instance_in_position_file`] for the launcher process, which
+/// pre-creates the child's row: `launched_by` names the launching identity for
+/// the `created` life event, because the launcher's own `HCOM_LAUNCHED_BY`
+/// names its parent, not itself.
+#[allow(clippy::too_many_arguments)]
+pub fn initialize_instance_with_launcher(
+    db: &HcomDb,
+    instance_name: &str,
+    session_id: Option<&str>,
+    parent_session_id: Option<&str>,
+    parent_name: Option<&str>,
+    agent_id: Option<&str>,
+    transcript_path: Option<&str>,
+    tool: Option<&str>,
+    background: bool,
+    tag: Option<&str>,
+    wait_timeout: Option<i64>,
+    subagent_timeout: Option<i64>,
+    hints: Option<&str>,
+    cwd_override: Option<&str>,
+    launched_by: Option<&str>,
+) -> bool {
     let cwd = cwd_override.map(|s| s.to_string()).unwrap_or_else(|| {
         std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
@@ -1278,6 +1319,7 @@ pub fn initialize_instance_in_position_file(
                         parent_session_id,
                         parent_name,
                         tool.unwrap_or(""),
+                        launched_by,
                     );
                     true
                 }
@@ -1295,12 +1337,16 @@ fn log_created_and_auto_subscribe(
     parent_session_id: Option<&str>,
     parent_name: Option<&str>,
     tool: &str,
+    launched_by: Option<&str>,
 ) {
-    let launcher = std::env::var("HCOM_LAUNCHED_BY").unwrap_or_else(|_| "unknown".to_string());
+    let launcher = match launched_by {
+        Some(by) => by.to_string(),
+        None => std::env::var("HCOM_LAUNCHED_BY").unwrap_or_else(|_| "unknown".to_string()),
+    };
     let event_data = serde_json::json!({
         "action": "created",
         "by": launcher,
-        "is_hcom_launched": is_launched,
+        "is_hcom_launched": is_launched || launched_by.is_some(),
         "is_subagent": parent_session_id.is_some(),
         "parent_name": parent_name.unwrap_or(""),
     });

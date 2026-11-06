@@ -1919,6 +1919,7 @@ fn append_initial_prompt_args(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn initialize_launch_instance(
     db: &HcomDb,
     params: &LaunchParams,
@@ -1927,9 +1928,10 @@ fn initialize_launch_instance(
     tag: &str,
     working_dir: &str,
     initial_event_id: i64,
+    launcher: &str,
 ) -> Result<()> {
     db.with_write_scope(|| {
-        if !instance_binding::initialize_instance_in_position_file(
+        if !instance_binding::initialize_instance_with_launcher(
             db,
             instance_name,
             params.prior_session_id.as_deref(),
@@ -1944,6 +1946,7 @@ fn initialize_launch_instance(
             None, // subagent_timeout
             None, // hints
             Some(working_dir),
+            Some(launcher),
         ) {
             bail!("Failed to initialize instance '{instance_name}'");
         }
@@ -2434,6 +2437,7 @@ pub fn launch(db: &HcomDb, mut params: LaunchParams) -> Result<LaunchResult> {
                 &effective_tag,
                 working_dir,
                 initial_event_id,
+                &launcher_name,
             )?;
             // `--as` is an identity choice, not merely a temporary launch name.
             // Record it on the placeholder so a native tool resume can adopt the
@@ -4547,8 +4551,17 @@ mod tests {
                 resume_cursor: Some(saved_cursor),
                 ..Default::default()
             };
-            initialize_launch_instance(&db, &params, "luna", "codex", "", "/tmp", saved_cursor)
-                .unwrap();
+            initialize_launch_instance(
+                &db,
+                &params,
+                "luna",
+                "codex",
+                "",
+                "/tmp",
+                saved_cursor,
+                "user",
+            )
+            .unwrap();
             let row = db.get_instance_full("luna").unwrap().unwrap();
             assert_eq!(row.last_event_id, saved_cursor);
             assert_eq!(row.session_id.as_deref(), Some("resumed-session"));
@@ -4580,7 +4593,8 @@ mod tests {
                 resume_cursor: resume.then_some(0),
                 ..Default::default()
             };
-            initialize_launch_instance(&db, &params, "luna", "codex", "", "/tmp", 0).unwrap();
+            initialize_launch_instance(&db, &params, "luna", "codex", "", "/tmp", 0, "user")
+                .unwrap();
             assert_eq!(
                 db.kv_get("events_sub:sub-saved").unwrap().is_some(),
                 resume,
@@ -4617,6 +4631,7 @@ mod tests {
                 "",
                 "/tmp",
                 initial_cursor,
+                "user",
             )
             .unwrap();
             assert!(db.get_unread_messages("luna").is_empty());
