@@ -308,6 +308,9 @@ pub struct HcomDashboardApp {
     pub send_text: String,
 
     pub inject_input_has_focus: bool,
+    /// A text field had the keyboard when the frame began: a single-line
+    /// field drops focus on Enter before the table reads the key.
+    text_focus_at_frame_start: bool,
 }
 
 /// (window, last_event_id, edge_count, live second or 0 for a fixed end).
@@ -522,6 +525,7 @@ impl HcomDashboardApp {
             send_target: String::new(),
             send_text: String::new(),
             inject_input_has_focus: false,
+            text_focus_at_frame_start: false,
             last_resolved_theme: None,
             desktop_theme: desktop_config_dir().and_then(|dir| desktop_theme(&dir)),
         };
@@ -617,6 +621,7 @@ impl HcomDashboardApp {
             send_target: String::new(),
             send_text: String::new(),
             inject_input_has_focus: false,
+            text_focus_at_frame_start: false,
             last_resolved_theme: None,
             desktop_theme: None,
         }
@@ -1091,17 +1096,28 @@ impl HcomDashboardApp {
             .as_deref()
             .and_then(|id| rows.iter().position(|r| target_of(r) == id));
         // Up/Down move the selection in the shown order, unless a text field
-        // has the keyboard; the moved row is scrolled into view below.
-        let (down, up) = if ui.ctx().text_edit_focused() {
-            (false, false)
+        // has the keyboard; the moved row is scrolled into view below. Enter
+        // attaches the selected row like a double-click.
+        let (down, up, enter) = if ui.ctx().text_edit_focused() {
+            (false, false, false)
         } else {
             ui.input(|i| {
                 (
                     i.key_pressed(egui::Key::ArrowDown),
                     i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::Enter),
                 )
             })
         };
+        // An open dialog keeps Enter for itself.
+        let dialog_open = self.confirm_kill_target.is_some()
+            || self.confirm_restart_target.is_some()
+            || self.confirm_kill_group.is_some()
+            || self.custom_cmd_confirm.is_some()
+            || self.show_start_dialog
+            || self.show_send_dialog;
+        let mut attach_row =
+            selected_row.filter(|_| enter && !dialog_open && !self.text_focus_at_frame_start);
         let last = rows.len().checked_sub(1);
         let key_row = match (down, up, selected_row, last) {
             (_, _, _, None) => None,
@@ -1169,6 +1185,9 @@ impl HcomDashboardApp {
                     if resp.clicked() {
                         clicked_row = Some(i);
                     }
+                    if resp.double_clicked() {
+                        attach_row = Some(i);
+                    }
                 }
                 let grid = egui::Grid::new("agent_table_grid")
                     .with_row_color(row_color)
@@ -1211,6 +1230,9 @@ impl HcomDashboardApp {
                                 if resp.clicked() {
                                     clicked_row = Some(i);
                                 }
+                                if resp.double_clicked() {
+                                    attach_row = Some(i);
+                                }
                                 if resp.hovered() {
                                     pointer_row = Some(i);
                                 }
@@ -1236,6 +1258,14 @@ impl HcomDashboardApp {
         }
         if let Some(i) = clicked_row {
             self.select_table_row(&rows[i]);
+        }
+        // Like a double-click on the graph node; only a running agent has a
+        // terminal to attach to.
+        if let Some(row) = attach_row.map(|i| &rows[i]).filter(|r| r.is_running) {
+            self.select_table_row(row);
+            let agent = target_of(row);
+            let custom_cmd = self.resolve_attach_cmd(Some(row), &agent);
+            self.dispatch_action(ActionRequest::Attach { agent, custom_cmd });
         }
     }
 
@@ -2825,6 +2855,7 @@ impl HcomDashboardApp {
 impl eframe::App for HcomDashboardApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.text_focus_at_frame_start = ctx.text_edit_focused();
         let palette = self.apply_theme(&ctx);
         let window = ui.max_rect();
 

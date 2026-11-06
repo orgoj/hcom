@@ -10412,3 +10412,159 @@ fn test_task_77_49_filter_table_toggle_and_graph_selection_scrolls_table() {
     app.save_state();
     assert!(!load_state(dir.path()).filter_table);
 }
+
+#[test]
+fn test_task_77_50_table_row_double_click_or_enter_attaches() {
+    use eframe::App;
+    use hcom_dashboard::action::{ActionRequest, ActionWorkerHandle};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = DashboardState {
+        columns: vec!["instance".into(), "agent".into()],
+        sort_col: Some("agent".into()),
+        ..Default::default()
+    };
+    let mut app =
+        HcomDashboardApp::new_for_test(DashboardConfig::default(), state, dir.path().to_path_buf());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    app.action_worker = Some(ActionWorkerHandle::new(MockActionRunner {
+        recorded: recorded.clone(),
+        fail_attach: false,
+        transcript_result: String::new(),
+    }));
+    app.table_rows = vec![
+        TableRow {
+            agent: "agent_alpha".into(),
+            instance: "inst_alpha_1".into(),
+            is_running: true,
+            status: "active".into(),
+            ..Default::default()
+        },
+        TableRow {
+            agent: "cat_beta".into(),
+            is_running: false,
+            status: "stopped".into(),
+            ..Default::default()
+        },
+    ];
+    app.sync_graph_from_table_rows();
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut time = 0.0;
+    let mut run = |app: &mut HcomDashboardApp, events: Vec<egui::Event>| {
+        time += 0.05;
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        out.textures_delta.clear();
+        out
+    };
+    let attaches = |name: &str| {
+        std::thread::sleep(Duration::from_millis(50));
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| matches!(r, ActionRequest::Attach { agent, .. } if agent == name))
+            .count()
+    };
+    let press = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let double_click =
+        |app: &mut HcomDashboardApp,
+         run: &mut dyn FnMut(&mut HcomDashboardApp, Vec<egui::Event>) -> egui::FullOutput,
+         row: usize| {
+            let p = app.table_row_bands[row].center();
+            run(app, vec![egui::Event::PointerMoved(p)]);
+            for pressed in [true, false, true, false] {
+                run(app, vec![press(p, pressed)]);
+            }
+            run(app, vec![]);
+        };
+    let enter = vec![egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    }];
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    assert_eq!(app.table_row_bands.len(), 2);
+
+    // A single click only selects.
+    let p = app.table_row_bands[0].center();
+    run(&mut app, vec![egui::Event::PointerMoved(p)]);
+    run(&mut app, vec![press(p, true)]);
+    run(&mut app, vec![press(p, false)]);
+    assert_eq!(app.selected_row_id.as_deref(), Some("inst_alpha_1"));
+    assert_eq!(attaches("inst_alpha_1"), 0, "single click does not attach");
+    // Let the double-click window pass.
+    for _ in 0..10 {
+        run(&mut app, vec![]);
+    }
+
+    // Double-click on the running row attaches it.
+    double_click(&mut app, &mut run, 0);
+    assert_eq!(attaches("inst_alpha_1"), 1);
+    for _ in 0..10 {
+        run(&mut app, vec![]);
+    }
+
+    // Enter on the selected running row attaches it.
+    run(&mut app, enter.clone());
+    assert_eq!(attaches("inst_alpha_1"), 2);
+
+    // An open dialog keeps Enter.
+    app.confirm_kill_target = Some("inst_alpha_1".into());
+    run(&mut app, enter.clone());
+    app.confirm_kill_target = None;
+    assert_eq!(attaches("inst_alpha_1"), 2, "dialog open");
+
+    // A focused text field (the search filter) keeps Enter.
+    let out = run(&mut app, vec![]);
+    let field = out
+        .shapes
+        .iter()
+        .find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text().starts_with("Search agent") => {
+                Some(Rect::from_min_size(t.pos, t.galley.size()))
+            }
+            _ => None,
+        })
+        .expect("search field text");
+    let f = Pos2::new(field.left() + 4.0, field.center().y);
+    run(&mut app, vec![egui::Event::PointerMoved(f)]);
+    run(&mut app, vec![press(f, true)]);
+    run(&mut app, vec![press(f, false)]);
+    assert!(ctx.text_edit_focused(), "search field has focus");
+    run(&mut app, enter.clone());
+    assert_eq!(attaches("inst_alpha_1"), 2, "text field keeps Enter");
+    ctx.memory_mut(|m| m.stop_text_input());
+    run(&mut app, vec![]);
+    for _ in 0..10 {
+        run(&mut app, vec![]);
+    }
+
+    // A stopped agent's row never attaches.
+    double_click(&mut app, &mut run, 1);
+    assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+    run(&mut app, enter);
+    assert_eq!(attaches("cat_beta"), 0, "stopped agent");
+}
