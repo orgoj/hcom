@@ -1,10 +1,10 @@
 use crate::action::{ActionRequest, ActionResult, ActionWorkerHandle, SystemActionRunner};
 use crate::canvas::{CanvasAction, CanvasView, ThemePalette};
 use crate::config::{
-    DEFAULT_DETAIL_WIDTH_PX, DETAIL_TABS, GraphConfig, GraphState, PlaceholderContext,
-    ResolvedTheme, SIDE_PANEL_MIN_WIDTH, SPLIT_FRAC_MAX, SPLIT_FRAC_MIN, ThemePreference, ViewMode,
-    desktop_config_dir, desktop_theme, load_config, load_state, replace_placeholders_str,
-    replace_placeholders_vec, save_state, screen_bar_buttons,
+    DEFAULT_DETAIL_WIDTH_PX, DETAIL_TABS, DashboardConfig, DashboardState, PlaceholderContext,
+    ResolvedTheme, SIDE_PANEL_MIN_WIDTH, ThemePreference, ViewMode, desktop_config_dir,
+    desktop_theme, load_config, load_state, replace_placeholders_str, replace_placeholders_vec,
+    save_state, screen_bar_buttons,
 };
 use crate::layout::{GraphLayout, LayoutMode};
 use crate::model::{
@@ -202,7 +202,7 @@ pub struct ContextMenuState {
     pub screen_pos: egui::Pos2,
 }
 
-pub struct HcomGraphApp {
+pub struct HcomDashboardApp {
     pub graph: AgentGraph,
     pub layout: GraphLayout,
     pub canvas: CanvasView,
@@ -235,8 +235,8 @@ pub struct HcomGraphApp {
 
     // Config & state
     pub hcom_dir: PathBuf,
-    pub config: GraphConfig,
-    pub state: GraphState,
+    pub config: DashboardConfig,
+    pub state: DashboardState,
     /// Active message time window (span and limit persisted in `state`).
     pub msg_window: MessageWindow,
     /// Key of the windowed edge counts held in `canvas.edge_counts`.
@@ -350,7 +350,7 @@ pub fn accept_generation_result(current_generation: u64, result_generation: u64)
     current_generation == result_generation
 }
 
-impl HcomGraphApp {
+impl HcomDashboardApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, sync: Option<BackgroundSync>) -> Self {
         let hcom_dir = std::env::var("HCOM_DIR")
             .map(PathBuf::from)
@@ -465,7 +465,7 @@ impl HcomGraphApp {
         app
     }
 
-    pub fn new_for_test(config: GraphConfig, state: GraphState, hcom_dir: PathBuf) -> Self {
+    pub fn new_for_test(config: DashboardConfig, state: DashboardState, hcom_dir: PathBuf) -> Self {
         let window_span = state.window_span_secs;
         Self {
             graph: AgentGraph::new(),
@@ -798,33 +798,6 @@ impl HcomGraphApp {
             _ => return,
         };
         self.select_detail_tab(tab);
-    }
-
-    /// Turns pixel sizes from an older state file into window fractions once
-    /// the window has a size (a minimized or unmapped window reports 0).
-    /// A gui-state.json `sash_pos` is hcom-gui's sash position, so the result
-    /// is only an approximation of that layout.
-    /// The converted state is marked dirty, so it is saved even without other changes.
-    pub fn adopt_legacy_split_sizes(&mut self, window: egui::Vec2) {
-        if window.y >= 1.0
-            && let Some(px) = self.state.sash_pos.take()
-            && self.state.table_height_frac.is_none()
-        {
-            self.state.table_height_frac =
-                Some((px / window.y).clamp(SPLIT_FRAC_MIN, SPLIT_FRAC_MAX));
-            self.mark_view_dirty();
-        }
-        if window.x >= 1.0 && self.state.detail_width_px.is_none() {
-            if let Some(f) = self.state.detail_width_frac.take() {
-                self.state.detail_width_px = Some((f * window.x).max(SIDE_PANEL_MIN_WIDTH));
-                self.state.side_panel_width = None;
-                self.mark_view_dirty();
-            } else if let Some(px) = self.state.side_panel_width.take() {
-                self.state.detail_width_px = Some(px.max(SIDE_PANEL_MIN_WIDTH));
-                self.state.detail_width_frac = None;
-                self.mark_view_dirty();
-            }
-        }
     }
 
     pub fn set_view_mode(&mut self, mode: ViewMode) {
@@ -2794,12 +2767,11 @@ impl HcomGraphApp {
     }
 }
 
-impl eframe::App for HcomGraphApp {
+impl eframe::App for HcomDashboardApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let palette = self.apply_theme(&ctx);
         let window = ui.max_rect();
-        self.adopt_legacy_split_sizes(window.size());
 
         // Periodic table data reload
         if !self.table_reload_in_flight
@@ -3079,7 +3051,7 @@ impl eframe::App for HcomGraphApp {
         egui::Panel::top("top_status_bar").show(ui, |ui| {
             // Row 1: Header + Counts
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("hcom graph").strong());
+                ui.heading(RichText::new("hcom-dashboard").strong());
                 ui.separator();
 
                 let mut active_count = 0;
@@ -4082,7 +4054,7 @@ impl eframe::App for HcomGraphApp {
     }
 }
 
-impl HcomGraphApp {
+impl HcomDashboardApp {
     pub fn handle_canvas_action(&mut self, action: Option<CanvasAction>) {
         if let Some(act) = action {
             self.auto_fit = false;

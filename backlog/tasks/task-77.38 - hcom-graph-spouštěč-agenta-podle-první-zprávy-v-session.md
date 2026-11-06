@@ -1,9 +1,10 @@
 ---
 id: TASK-77.38
-title: 'hcom-graph: spouštěč agenta podle první zprávy v session'
+title: 'hcom-dashboard: spouštěč agenta podle první zprávy v session'
 status: To Do
 assignee: []
-created_date: '2026-11-04 23:32'
+created_date: 2026-11-04 23:32
+updated_date: '2026-11-06T18:46:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77

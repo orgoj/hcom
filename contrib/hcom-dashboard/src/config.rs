@@ -44,7 +44,7 @@ pub struct ScreenBarButton {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GraphConfig {
+pub struct DashboardConfig {
     #[serde(default = "default_refresh_seconds")]
     pub refresh_seconds: u64,
     #[serde(default = "default_stats_seconds")]
@@ -161,7 +161,7 @@ pub fn default_columns() -> Vec<String> {
     ]
 }
 
-impl Default for GraphConfig {
+impl Default for DashboardConfig {
     fn default() -> Self {
         Self {
             refresh_seconds: default_refresh_seconds(),
@@ -335,22 +335,15 @@ where
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GraphState {
+pub struct DashboardState {
     #[serde(default)]
     pub geometry: Option<String>,
-    /// Legacy table height in pixels (older files, gui-state.json); read only,
-    /// turned into `table_height_frac` once the window size is known.
-    #[serde(default, skip_serializing)]
-    pub sash_pos: Option<f32>,
     /// Table height as a fraction of the window height.
     #[serde(default)]
     pub table_height_frac: Option<f32>,
     /// Detail panel width in pixels.
     #[serde(default)]
     pub detail_width_px: Option<f32>,
-    /// Legacy detail panel width as a fraction of the window width; read-only.
-    #[serde(default, skip_serializing)]
-    pub detail_width_frac: Option<f32>,
     /// Active panel layout mode: both graph and table, graph only, or table only.
     #[serde(default, deserialize_with = "deserialize_view_mode")]
     pub view_mode: Option<ViewMode>,
@@ -376,10 +369,6 @@ pub struct GraphState {
     /// Active tab of the right detail panel (one of `DETAIL_TABS`).
     #[serde(default)]
     pub detail_tab: String,
-    /// Legacy tab key (old graph-state.json, gui-state.json); read only and
-    /// used by `sanitize` when `detail_tab` is missing or invalid.
-    #[serde(default, skip_serializing)]
-    pub bottom_tab: Option<String>,
     #[serde(default = "default_true")]
     pub show_side_panel: bool,
     #[serde(default = "default_columns")]
@@ -398,8 +387,7 @@ pub struct GraphState {
     #[serde(default = "default_layout_mode")]
     pub layout_mode: String,
     /// World positions of user-pinned nodes by instance name; invalid entries
-    /// are dropped on load so one bad entry cannot reject the file. The
-    /// legacy `node_positions` key (every dragged node) is ignored.
+    /// are dropped on load so one bad entry cannot reject the file.
     #[serde(default, deserialize_with = "deserialize_pinned_positions")]
     pub pinned_positions: HashMap<String, SavedNodePos>,
     #[serde(default)]
@@ -408,9 +396,6 @@ pub struct GraphState {
     pub canvas_pan_x: Option<f32>,
     #[serde(default)]
     pub canvas_pan_y: Option<f32>,
-    /// Legacy detail panel width in pixels; read only, like `sash_pos`.
-    #[serde(default, skip_serializing)]
-    pub side_panel_width: Option<f32>,
 }
 
 /// A saved node position and when it was last stored (unix seconds).
@@ -447,10 +432,10 @@ where
         .collect())
 }
 
-impl GraphState {
+impl DashboardState {
     /// Drops or clamps values that cannot be used (non-finite numbers,
     /// zoom outside the canvas range, split fractions outside (0, 1), unknown detail
-    /// tab, preferring the legacy `bottom_tab`) and keeps only
+    /// tab) and keeps only
     /// the `MAX_NODE_POSITIONS` newest node positions.
     pub fn sanitize(&mut self) {
         use crate::canvas::{ZOOM_MAX, ZOOM_MIN};
@@ -478,24 +463,16 @@ impl GraphState {
             self.canvas_pan_x = None;
             self.canvas_pan_y = None;
         }
-        let usable_px = |v: Option<f32>| v.filter(|v| v.is_finite() && *v > 0.0);
-        self.sash_pos = usable_px(self.sash_pos);
-        self.side_panel_width = usable_px(self.side_panel_width);
         self.detail_width_px = self
             .detail_width_px
             .filter(|w| w.is_finite() && *w > 0.0)
             .map(|w| w.max(SIDE_PANEL_MIN_WIDTH));
-        let usable_frac = |v: Option<f32>| {
-            v.filter(|f| f.is_finite() && *f > 0.0 && *f < 1.0)
-                .map(|f| f.clamp(SPLIT_FRAC_MIN, SPLIT_FRAC_MAX))
-        };
-        self.table_height_frac = usable_frac(self.table_height_frac);
-        self.detail_width_frac = usable_frac(self.detail_width_frac);
-        let legacy = self.bottom_tab.take();
+        self.table_height_frac = self
+            .table_height_frac
+            .filter(|f| f.is_finite() && *f > 0.0 && *f < 1.0)
+            .map(|f| f.clamp(SPLIT_FRAC_MIN, SPLIT_FRAC_MAX));
         if !DETAIL_TABS.contains(&self.detail_tab.as_str()) {
-            self.detail_tab = legacy
-                .filter(|t| DETAIL_TABS.contains(&t.as_str()))
-                .unwrap_or_else(|| DEFAULT_DETAIL_TAB.into());
+            self.detail_tab = DEFAULT_DETAIL_TAB.into();
         }
     }
 
@@ -552,14 +529,12 @@ pub const DETAIL_TABS: [&str; 8] = [
 
 pub const DEFAULT_DETAIL_TAB: &str = "Summary";
 
-impl Default for GraphState {
+impl Default for DashboardState {
     fn default() -> Self {
         Self {
             geometry: None,
-            sash_pos: None,
             table_height_frac: None,
             detail_width_px: None,
-            detail_width_frac: None,
             view_mode: Some(ViewMode::Both),
             theme: None,
             show_table: true,
@@ -571,7 +546,6 @@ impl Default for GraphState {
             sort_col: default_sort_col(),
             sort_reverse: false,
             detail_tab: DEFAULT_DETAIL_TAB.into(),
-            bottom_tab: None,
             show_side_panel: true,
             columns: default_columns(),
             columns_known: Vec::new(),
@@ -583,81 +557,56 @@ impl Default for GraphState {
             canvas_zoom: None,
             canvas_pan_x: None,
             canvas_pan_y: None,
-            side_panel_width: None,
         }
     }
 }
 
-pub fn load_config(hcom_dir: &Path) -> GraphConfig {
-    let graph_json = hcom_dir.join("graph.json");
-    if graph_json.is_file() {
-        match fs::read_to_string(&graph_json) {
-            Ok(content) => match serde_json::from_str::<GraphConfig>(&content) {
+pub fn load_config(hcom_dir: &Path) -> DashboardConfig {
+    let path = hcom_dir.join("dashboard.json");
+    if path.is_file() {
+        match fs::read_to_string(&path) {
+            Ok(content) => match serde_json::from_str::<DashboardConfig>(&content) {
                 Ok(cfg) => return cfg,
-                Err(e) => eprintln!("Warning: failed to parse graph.json: {}", e),
+                Err(e) => eprintln!("Warning: failed to parse dashboard.json: {}", e),
             },
-            Err(e) => eprintln!("Warning: failed to read graph.json: {}", e),
+            Err(e) => eprintln!("Warning: failed to read dashboard.json: {}", e),
         }
     }
-
-    let gui_json = hcom_dir.join("gui.json");
-    if gui_json.is_file() {
-        match fs::read_to_string(&gui_json) {
-            Ok(content) => match serde_json::from_str::<GraphConfig>(&content) {
-                Ok(cfg) => return cfg,
-                Err(e) => eprintln!("Warning: failed to parse gui.json: {}", e),
-            },
-            Err(e) => eprintln!("Warning: failed to read gui.json: {}", e),
-        }
-    }
-
-    GraphConfig::default()
+    DashboardConfig::default()
 }
 
-pub fn load_state(hcom_dir: &Path) -> GraphState {
+pub fn load_state(hcom_dir: &Path) -> DashboardState {
     let mut state = read_state(hcom_dir);
     state.sanitize();
     state
 }
 
-fn read_state(hcom_dir: &Path) -> GraphState {
-    let graph_state_json = hcom_dir.join("graph-state.json");
-    if graph_state_json.is_file() {
-        match fs::read_to_string(&graph_state_json) {
-            Ok(content) => match serde_json::from_str::<GraphState>(&content) {
+fn read_state(hcom_dir: &Path) -> DashboardState {
+    let path = hcom_dir.join("dashboard-state.json");
+    if path.is_file() {
+        match fs::read_to_string(&path) {
+            Ok(content) => match serde_json::from_str::<DashboardState>(&content) {
                 Ok(state) => return state,
-                Err(e) => eprintln!("Warning: failed to parse graph-state.json: {}", e),
+                Err(e) => eprintln!("Warning: failed to parse dashboard-state.json: {}", e),
             },
-            Err(e) => eprintln!("Warning: failed to read graph-state.json: {}", e),
+            Err(e) => eprintln!("Warning: failed to read dashboard-state.json: {}", e),
         }
     }
-
-    let gui_state_json = hcom_dir.join("gui-state.json");
-    if gui_state_json.is_file() {
-        match fs::read_to_string(&gui_state_json) {
-            Ok(content) => match serde_json::from_str::<GraphState>(&content) {
-                Ok(state) => return state,
-                Err(e) => eprintln!("Warning: failed to parse gui-state.json: {}", e),
-            },
-            Err(e) => eprintln!("Warning: failed to read gui-state.json: {}", e),
-        }
-    }
-
-    GraphState::default()
+    DashboardState::default()
 }
 
-/// Saves state strictly to graph-state.json without ever mutating gui-state.json.
+/// Saves state to dashboard-state.json.
 /// The state is sanitized first (a NaN would be written as null and reject the
 /// file on the next load); the temp file is unique per process and save, so
 /// concurrent windows never rename each other's partial file (last writer wins).
-pub fn save_state(hcom_dir: &Path, state: &GraphState) -> Result<()> {
+pub fn save_state(hcom_dir: &Path, state: &DashboardState) -> Result<()> {
     static SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mut state = state.clone();
     state.sanitize();
-    let target = hcom_dir.join("graph-state.json");
+    let target = hcom_dir.join("dashboard-state.json");
     let seq = SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = hcom_dir.join(format!(
-        "graph-state.json.{}.{}.tmp",
+        "dashboard-state.json.{}.{}.tmp",
         std::process::id(),
         seq
     ));

@@ -1,10 +1,11 @@
 ---
 id: TASK-77.39
 title: Přejmenování hcom-graph na hcom-dashboard
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@hcom_dev__idea'
 created_date: '2026-11-06T17:33:00Z'
-updated_date: '2026-11-06T17:36:00Z'
+updated_date: '2026-11-06T18:47:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -21,8 +22,14 @@ Aplikace přerostla původní pasivní graf: má tabulku agentů, detail panel (
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Adresář contrib/hcom-dashboard, crate i binárka se jmenují hcom-dashboard a titulek okna uvádí hcom-dashboard
-- [ ] #2 Konfigurace se čte jen z ~/.hcom/dashboard.json; graph.json ani gui.json se nečtou, bez dashboard.json platí vestavěné výchozí hodnoty
-- [ ] #3 Stav se čte a ukládá jen v ~/.hcom/dashboard-state.json; graph-state.json ani gui-state.json se nečtou a kód jejich fallbacku a převodu starých klíčů je odstraněný
-- [ ] #4 README aplikace, contrib/README.md a testy používají jen nový název a nové soubory, bez zmínek o hcom-graph a starých souborech
+- [x] #1 Adresář contrib/hcom-dashboard, crate i binárka se jmenují hcom-dashboard a titulek okna uvádí hcom-dashboard
+- [x] #2 Konfigurace se čte jen z ~/.hcom/dashboard.json; graph.json ani gui.json se nečtou, bez dashboard.json platí vestavěné výchozí hodnoty
+- [x] #3 Stav se čte a ukládá jen v ~/.hcom/dashboard-state.json; graph-state.json ani gui-state.json se nečtou a kód jejich fallbacku a převodu starých klíčů je odstraněný
+- [x] #4 README aplikace, contrib/README.md a testy používají jen nový název a nové soubory; staré soubory zmiňují jen testy, které dokazují, že se nečtou ani nepřepisují
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Renamed contrib/hcom-graph to contrib/hcom-dashboard (crate, binary, window title, HcomDashboardApp/DashboardConfig/DashboardState). Config only ~/.hcom/dashboard.json, state only dashboard-state.json; graph.json/gui.json/graph-state.json/gui-state.json fallbacks and legacy key conversions removed with their tests (user: no backward compatibility before numbered releases). Tests test_config_reads_only_dashboard_json and test_state_reads_and_saves_only_dashboard_state_json. Review agent_review OK.
+<!-- SECTION:FINAL_SUMMARY:END -->

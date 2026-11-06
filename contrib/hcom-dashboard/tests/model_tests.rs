@@ -1,18 +1,18 @@
 use anyhow::Result;
 use chrono::Utc;
 use egui::{Color32, Pos2, Rect, Vec2};
-use hcom_graph::action::{ActionRequest, ActionResult, ActionRunner, ActionWorkerHandle};
-use hcom_graph::canvas::{CanvasView, distance_to_quadratic_bezier, distance_to_segment};
-use hcom_graph::layout::GraphLayout;
-use hcom_graph::model::{
+use hcom_dashboard::action::{ActionRequest, ActionResult, ActionRunner, ActionWorkerHandle};
+use hcom_dashboard::canvas::{CanvasView, distance_to_quadratic_bezier, distance_to_segment};
+use hcom_dashboard::layout::GraphLayout;
+use hcom_dashboard::model::{
     AgentGraph, AgentNode, AgentStatus, InstanceSnapshot, MessageData, MessageEvent,
     is_valid_identity, sanitize_display_string,
 };
-use hcom_graph::source::{
+use hcom_dashboard::source::{
     CommandExecutor, HcomSyncWorker, StreamHandle, StreamKillHandle, StreamReader,
     build_messages_follow_cmd, parse_instances, read_line_capped, split_system_stream,
 };
-use hcom_graph::sync::BackgroundSync;
+use hcom_dashboard::sync::BackgroundSync;
 use std::collections::VecDeque;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -857,7 +857,7 @@ fn test_sync_worker_lifecycle_and_db_reset() {
 
 #[test]
 fn test_system_command_executor_capped() {
-    use hcom_graph::source::SystemCommandExecutor;
+    use hcom_dashboard::source::SystemCommandExecutor;
     let executor = SystemCommandExecutor;
 
     #[cfg(unix)]
@@ -888,7 +888,7 @@ fn test_system_command_executor_capped() {
 
 #[test]
 fn test_system_command_executor_no_stderr_deadlock() {
-    use hcom_graph::source::SystemCommandExecutor;
+    use hcom_dashboard::source::SystemCommandExecutor;
     let executor = SystemCommandExecutor;
 
     #[cfg(unix)]
@@ -1746,7 +1746,7 @@ fn test_kill_requires_confirmation_flow_and_stale_target_check() {
 
 #[test]
 fn test_action_runner_stdout_capped_kills_child_and_avoids_deadlock() {
-    use hcom_graph::action::SystemActionRunner;
+    use hcom_dashboard::action::SystemActionRunner;
     let runner = SystemActionRunner::new();
     #[cfg(unix)]
     let res = runner.run_command_bounded("head", &["-c", "100000", "/dev/zero"], 1024, 1024, None);
@@ -1767,7 +1767,7 @@ fn test_action_runner_stdout_capped_kills_child_and_avoids_deadlock() {
 
 #[test]
 fn test_action_runner_concurrent_stderr_drain_no_deadlock() {
-    use hcom_graph::action::SystemActionRunner;
+    use hcom_dashboard::action::SystemActionRunner;
     let runner = SystemActionRunner::new();
     #[cfg(unix)]
     let res = runner.run_command_bounded(
@@ -1789,7 +1789,7 @@ fn test_action_runner_concurrent_stderr_drain_no_deadlock() {
 
 #[test]
 fn test_action_worker_handle_drop_cancels_hanging_process() {
-    use hcom_graph::action::SystemActionRunner;
+    use hcom_dashboard::action::SystemActionRunner;
 
     struct HangingActionRunner {
         inner: SystemActionRunner,
@@ -1842,7 +1842,7 @@ fn test_action_worker_handle_drop_cancels_hanging_process() {
 
 #[test]
 fn test_transcript_clamping_to_100() {
-    use hcom_graph::action::{
+    use hcom_dashboard::action::{
         build_attach_argv, build_inject_argv, build_kill_argv, build_transcript_argv,
         clamp_transcript_lines,
     };
@@ -1876,7 +1876,7 @@ fn test_transcript_clamping_to_100() {
 
 #[test]
 fn test_action_runner_cancel_while_in_wait_loop() {
-    use hcom_graph::action::SystemActionRunner;
+    use hcom_dashboard::action::SystemActionRunner;
 
     let runner = Arc::new(SystemActionRunner::new());
     let runner_thread = Arc::clone(&runner);
@@ -1909,88 +1909,71 @@ fn test_action_runner_cancel_while_in_wait_loop() {
 }
 
 #[test]
-fn test_config_fallback_gui_json_when_graph_json_missing() {
-    use hcom_graph::config::load_config;
+fn test_config_reads_only_dashboard_json() {
+    use hcom_dashboard::config::load_config;
     use tempfile::tempdir;
 
     let dir = tempdir().unwrap();
     let hcom_dir = dir.path();
+    let other = r#"{"refresh_seconds": 12, "stats_seconds": 99}"#;
+    std::fs::write(hcom_dir.join("gui.json"), other).unwrap();
+    std::fs::write(hcom_dir.join("graph.json"), other).unwrap();
+    let defaults = load_config(hcom_dir);
+    assert_ne!(
+        defaults.refresh_seconds, 12,
+        "gui.json and graph.json are not read"
+    );
 
-    // 1. Write gui.json
-    let gui_json = r#"{
-        "refresh_seconds": 12,
-        "stats_seconds": 99,
+    let dashboard_json = r#"{
+        "refresh_seconds": 3,
+        "stats_seconds": 30,
         "open_with": [
             {"label": "Zed", "cmd": ["zed", "{dir}"], "key": "z"}
         ]
     }"#;
-    std::fs::write(hcom_dir.join("gui.json"), gui_json).unwrap();
-
-    // 2. Load config -> should fall back to gui.json
+    std::fs::write(hcom_dir.join("dashboard.json"), dashboard_json).unwrap();
     let cfg = load_config(hcom_dir);
-    assert_eq!(cfg.refresh_seconds, 12);
-    assert_eq!(cfg.stats_seconds, 99);
+    assert_eq!(cfg.refresh_seconds, 3);
+    assert_eq!(cfg.stats_seconds, 30);
     assert_eq!(cfg.open_with.len(), 1);
     assert_eq!(cfg.open_with[0].label, "Zed");
-
-    // 3. Write graph.json -> should take precedence over gui.json
-    let graph_json = r#"{
-        "refresh_seconds": 3,
-        "stats_seconds": 30
-    }"#;
-    std::fs::write(hcom_dir.join("graph.json"), graph_json).unwrap();
-    let cfg2 = load_config(hcom_dir);
-    assert_eq!(cfg2.refresh_seconds, 3);
-    assert_eq!(cfg2.stats_seconds, 30);
 }
 
 #[test]
-fn test_state_fallback_and_save_never_touches_gui_state_json() {
-    use hcom_graph::config::{load_state, save_state};
+fn test_state_reads_and_saves_only_dashboard_state_json() {
+    use hcom_dashboard::config::{load_state, save_state};
     use tempfile::tempdir;
 
     let dir = tempdir().unwrap();
     let hcom_dir = dir.path();
+    let other = r#"{"running_only": true, "sort_col": "age"}"#;
+    std::fs::write(hcom_dir.join("gui-state.json"), other).unwrap();
+    std::fs::write(hcom_dir.join("graph-state.json"), other).unwrap();
 
-    // 1. Write gui-state.json
-    let gui_state_content = r#"{
-        "view_mode": "table_only",
-        "running_only": true,
-        "sort_col": "age",
-        "bottom_tab": "Transcript"
-    }"#;
-    std::fs::write(hcom_dir.join("gui-state.json"), gui_state_content).unwrap();
-
-    // 2. Load state -> should read from gui-state.json
     let mut state = load_state(hcom_dir);
-    assert!(state.show_table, "legacy view_mode is ignored");
-    assert!(state.running_only);
-    assert_eq!(state.sort_col.as_deref(), Some("age"));
-    assert_eq!(
-        state.detail_tab, "Transcript",
-        "legacy gui-state bottom_tab maps"
+    assert!(
+        !state.running_only,
+        "gui-state.json and graph-state.json are not read"
     );
 
-    // 3. Mutate state and save
     state.show_table = false;
-    state.running_only = false;
+    state.detail_tab = "Transcript".into();
     save_state(hcom_dir, &state).unwrap();
-
-    // 4. Verify graph-state.json was written
-    assert!(hcom_dir.join("graph-state.json").is_file());
     let reloaded = load_state(hcom_dir);
     assert!(!reloaded.show_table);
     assert_eq!(reloaded.detail_tab, "Transcript");
-    assert!(!reloaded.running_only);
-
-    // 5. CRITICAL BOUNDARY: verify gui-state.json content is COMPLETELY UNTOUCHED!
-    let current_gui_state = std::fs::read_to_string(hcom_dir.join("gui-state.json")).unwrap();
-    assert_eq!(current_gui_state, gui_state_content);
+    for name in ["gui-state.json", "graph-state.json"] {
+        assert_eq!(
+            std::fs::read_to_string(hcom_dir.join(name)).unwrap(),
+            other,
+            "{name} is untouched"
+        );
+    }
 }
 
 #[test]
 fn test_screen_bar_complete_set_and_custom_keys() {
-    use hcom_graph::config::{ScreenBarDef, screen_bar_buttons};
+    use hcom_dashboard::config::{ScreenBarDef, screen_bar_buttons};
 
     let defs = vec![
         ScreenBarDef::Builtin("Inject".into()),
@@ -2045,7 +2028,7 @@ fn test_screen_bar_complete_set_and_custom_keys() {
 
 #[test]
 fn test_placeholder_substitution_token_by_token() {
-    use hcom_graph::config::{
+    use hcom_dashboard::config::{
         PlaceholderContext, replace_placeholders_str, replace_placeholders_vec,
     };
 
@@ -2086,7 +2069,7 @@ fn test_placeholder_substitution_token_by_token() {
 
 #[test]
 fn test_table_sorting_with_empty_last_and_numeric() {
-    use hcom_graph::table_data::{TableRow, sort_rows};
+    use hcom_dashboard::table_data::{TableRow, sort_rows};
 
     let mut rows = vec![
         TableRow {
@@ -2144,7 +2127,7 @@ fn test_table_sorting_with_empty_last_and_numeric() {
 
 #[test]
 fn test_table_filtering_running_blocked_text_and_adhoc() {
-    use hcom_graph::table_data::{TableRow, filter_row};
+    use hcom_dashboard::table_data::{TableRow, filter_row};
 
     let row_running = TableRow {
         agent: "coach".into(),
@@ -2217,7 +2200,7 @@ fn test_table_filtering_running_blocked_text_and_adhoc() {
 
 #[test]
 fn test_dynamic_status_columns_extraction() {
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::table_data::TableRow;
     use std::collections::HashMap;
 
     let mut status_values = HashMap::new();
@@ -2262,14 +2245,14 @@ fn test_worker_generation_counter_drops_stale_response() {
             self.selection_generation
         }
 
-        fn handle_result(&mut self, res: &hcom_graph::action::ActionResult) {
+        fn handle_result(&mut self, res: &hcom_dashboard::action::ActionResult) {
             match res {
-                hcom_graph::action::ActionResult::ScreenLoaded {
+                hcom_dashboard::action::ActionResult::ScreenLoaded {
                     agent,
                     generation,
                     content,
                 } => {
-                    if hcom_graph::app::accept_generation_result(
+                    if hcom_dashboard::app::accept_generation_result(
                         self.selection_generation,
                         *generation,
                     ) && let Ok(text) = content
@@ -2277,12 +2260,12 @@ fn test_worker_generation_counter_drops_stale_response() {
                         self.screen_content = Some((agent.clone(), *generation, text.clone()));
                     }
                 }
-                hcom_graph::action::ActionResult::TranscriptLoaded {
+                hcom_dashboard::action::ActionResult::TranscriptLoaded {
                     agent,
                     generation,
                     content,
                 } => {
-                    if hcom_graph::app::accept_generation_result(
+                    if hcom_dashboard::app::accept_generation_result(
                         self.selection_generation,
                         *generation,
                     ) && let Ok(text) = content
@@ -2306,7 +2289,7 @@ fn test_worker_generation_counter_drops_stale_response() {
     assert_eq!(gen2, 2);
 
     // 3. Stale response for agent A arrives with gen1
-    let stale_screen = hcom_graph::action::ActionResult::ScreenLoaded {
+    let stale_screen = hcom_dashboard::action::ActionResult::ScreenLoaded {
         agent: "agent_a".into(),
         generation: gen1,
         content: Ok("stale content of A".into()),
@@ -2317,7 +2300,7 @@ fn test_worker_generation_counter_drops_stale_response() {
     assert!(state.screen_content.is_none());
 
     // 4. Fresh response for agent B arrives with gen2
-    let fresh_screen = hcom_graph::action::ActionResult::ScreenLoaded {
+    let fresh_screen = hcom_dashboard::action::ActionResult::ScreenLoaded {
         agent: "agent_b".into(),
         generation: gen2,
         content: Ok("fresh content of B".into()),
@@ -2332,20 +2315,20 @@ fn test_worker_generation_counter_drops_stale_response() {
 
 #[test]
 fn test_corrupt_config_logs_warning_and_uses_defaults() {
-    use hcom_graph::config::{load_config, load_state};
+    use hcom_dashboard::config::{load_config, load_state};
     use tempfile::tempdir;
 
     let dir = tempdir().unwrap();
     let hcom_dir = dir.path();
 
-    // Corrupt graph.json
-    std::fs::write(hcom_dir.join("graph.json"), "{ invalid: json: syntax").unwrap();
+    // Corrupt dashboard.json
+    std::fs::write(hcom_dir.join("dashboard.json"), "{ invalid: json: syntax").unwrap();
     let cfg = load_config(hcom_dir);
     // Should fallback to default refresh_seconds (5)
     assert_eq!(cfg.refresh_seconds, 5);
 
-    // Corrupt graph-state.json
-    std::fs::write(hcom_dir.join("graph-state.json"), "broken").unwrap();
+    // Corrupt dashboard-state.json
+    std::fs::write(hcom_dir.join("dashboard-state.json"), "broken").unwrap();
     let st = load_state(hcom_dir);
     assert!(st.show_table);
     assert_eq!(st.detail_tab, "Summary");
@@ -2354,7 +2337,7 @@ fn test_corrupt_config_logs_warning_and_uses_defaults() {
 
 #[test]
 fn test_unknown_placeholder_rejected() {
-    use hcom_graph::config::{PlaceholderContext, replace_placeholders_str};
+    use hcom_dashboard::config::{PlaceholderContext, replace_placeholders_str};
 
     let ctx = PlaceholderContext {
         dir: "/home/user",
@@ -2374,7 +2357,7 @@ fn test_unknown_placeholder_rejected() {
 
 #[test]
 fn test_parse_real_gui_json_copy() {
-    use hcom_graph::config::GraphConfig;
+    use hcom_dashboard::config::DashboardConfig;
 
     let gui_json = r#"{
       "refresh_seconds": 5,
@@ -2449,7 +2432,7 @@ fn test_parse_real_gui_json_copy() {
       ]
     }"#;
 
-    let cfg: GraphConfig = serde_json::from_str(gui_json).expect("parse real gui.json");
+    let cfg: DashboardConfig = serde_json::from_str(gui_json).expect("parse real dashboard.json");
     assert_eq!(cfg.refresh_seconds, 5);
     assert_eq!(cfg.open_with.len(), 6);
     assert_eq!(cfg.open_with[5].label, "Backlog");
@@ -2461,7 +2444,7 @@ fn test_parse_real_gui_json_copy() {
 
 #[test]
 fn test_build_table_rows_merges_live_and_catalog() {
-    use hcom_graph::table_data::build_table_rows;
+    use hcom_dashboard::table_data::build_table_rows;
 
     let live_json = r#"[
         {
@@ -2559,7 +2542,7 @@ fn test_build_table_rows_merges_live_and_catalog() {
 
 #[test]
 fn test_kill_group_strictly_matches_catalog_groups() {
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::table_data::TableRow;
 
     let row1 = TableRow {
         agent: "service_a".into(),
@@ -2602,7 +2585,7 @@ fn test_kill_group_strictly_matches_catalog_groups() {
 
 #[test]
 fn test_git_porcelain_v2_parsing() {
-    use hcom_graph::table_data::parse_git_porcelain_v2;
+    use hcom_dashboard::table_data::parse_git_porcelain_v2;
 
     let output = "# branch.oid 1234567890abcdef\n\
                   # branch.head feature/graph-gui\n\
@@ -2623,7 +2606,7 @@ fn test_git_porcelain_v2_parsing() {
 
 #[test]
 fn test_event_stats_computation_and_application() {
-    use hcom_graph::table_data::{TableRow, apply_event_stats, compute_event_stats};
+    use hcom_dashboard::table_data::{TableRow, apply_event_stats, compute_event_stats};
 
     let life_events = r#"
 {"id": 1, "instance": "worker_1", "type": "life", "ts": "2026-11-01T10:00:00Z", "data": {"action": "created"}}
@@ -2668,8 +2651,8 @@ fn test_event_stats_computation_and_application() {
 
 #[test]
 fn test_launch_context_placeholders_carried_in_table_row() {
-    use hcom_graph::config::{PlaceholderContext, replace_placeholders_str};
-    use hcom_graph::table_data::{LiveLaunchContext, TableRow};
+    use hcom_dashboard::config::{PlaceholderContext, replace_placeholders_str};
+    use hcom_dashboard::table_data::{LiveLaunchContext, TableRow};
 
     let row = TableRow {
         agent: "coder".into(),
@@ -2705,12 +2688,12 @@ fn test_launch_context_placeholders_carried_in_table_row() {
 
 #[test]
 fn test_in_flight_flags_reset_on_dispatch_failure() {
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
 
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         std::path::PathBuf::from("/tmp"),
     );
 
@@ -2808,9 +2791,9 @@ fn test_canvas_filtering_excludes_hidden_nodes_and_edges() {
 
 #[test]
 fn test_graph_state_layout_defaults_and_roundtrip() {
-    use hcom_graph::config::GraphState;
+    use hcom_dashboard::config::DashboardState;
 
-    let default_state = GraphState::default();
+    let default_state = DashboardState::default();
     assert!(
         default_state.show_side_panel,
         "detail panel defaults to open"
@@ -2818,58 +2801,28 @@ fn test_graph_state_layout_defaults_and_roundtrip() {
     assert!(default_state.show_table, "table defaults to shown");
     assert_eq!(default_state.detail_tab, "Summary");
 
-    // Legacy keys (view_mode, main_split_ratio) are ignored; new fields default.
-    let json_legacy = r#"{"view_mode":"split_horizontal","main_split_ratio":0.4}"#;
-    let parsed: GraphState = serde_json::from_str(json_legacy).expect("parse legacy state");
+    // Unknown keys and values are ignored; other fields default.
+    let json_unknown = r#"{"view_mode":"split_horizontal","main_split_ratio":0.4}"#;
+    let parsed: DashboardState = serde_json::from_str(json_unknown).expect("parse state");
     assert!(parsed.show_side_panel);
     assert!(parsed.show_table);
 
-    let custom_state = GraphState {
+    let custom_state = DashboardState {
         show_side_panel: false,
         show_table: false,
         detail_tab: "Events".into(),
         ..Default::default()
     };
     let serialized = serde_json::to_string(&custom_state).expect("serialize");
-    assert!(
-        !serialized.contains("bottom_tab"),
-        "legacy key is never written"
-    );
-    let restored: GraphState = serde_json::from_str(&serialized).expect("deserialize");
+    let restored: DashboardState = serde_json::from_str(&serialized).expect("deserialize");
     assert!(!restored.show_side_panel);
     assert!(!restored.show_table);
     assert_eq!(restored.detail_tab, "Events");
 }
 
 #[test]
-fn test_state_detail_tab_migrates_from_legacy_bottom_tab() {
-    use hcom_graph::config::load_state;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("graph-state.json");
-
-    // Only the legacy key: it becomes the detail tab.
-    std::fs::write(&path, r#"{"bottom_tab": "Report"}"#).unwrap();
-    assert_eq!(load_state(dir.path()).detail_tab, "Report");
-
-    // Both keys: the file still loads and the valid detail_tab wins.
-    std::fs::write(
-        &path,
-        r#"{"bottom_tab": "Screen", "detail_tab": "Log", "running_only": true}"#,
-    )
-    .unwrap();
-    let s = load_state(dir.path());
-    assert_eq!(s.detail_tab, "Log");
-    assert!(s.running_only, "file with both keys is not rejected");
-
-    // Invalid values everywhere (e.g. the old "Table" guard value): Summary.
-    std::fs::write(&path, r#"{"bottom_tab": "Table", "detail_tab": "Nope"}"#).unwrap();
-    assert_eq!(load_state(dir.path()).detail_tab, "Summary");
-}
-
-#[test]
 fn test_parse_context_percent_reads_trailing_percent_token() {
-    use hcom_graph::model::parse_context_percent;
+    use hcom_dashboard::model::parse_context_percent;
     assert_eq!(parse_context_percent("123k 45%"), Some(45.0));
     assert_eq!(parse_context_percent("80%"), Some(80.0));
     assert_eq!(parse_context_percent("130%"), Some(100.0));
@@ -2881,7 +2834,7 @@ fn test_parse_context_percent_reads_trailing_percent_token() {
 
 #[test]
 fn test_node_styles_from_rows_carry_roaming_and_context() {
-    use hcom_graph::table_data::{TableRow, node_styles_from_rows};
+    use hcom_dashboard::table_data::{TableRow, node_styles_from_rows};
     let rows = vec![
         TableRow {
             instance: "roamer".into(),
@@ -2911,7 +2864,7 @@ fn test_node_styles_from_rows_carry_roaming_and_context() {
     assert!(graph.node_style("roamer").is_roaming);
     assert_eq!(
         graph.node_style("unknown"),
-        hcom_graph::model::NodeStyle::default()
+        hcom_dashboard::model::NodeStyle::default()
     );
 }
 
@@ -2954,7 +2907,7 @@ fn test_cli_colors_match_spec_and_are_distinct() {
 
 #[test]
 fn test_context_fill_polygon_rises_from_bottom() {
-    use hcom_graph::canvas::context_fill_polygon;
+    use hcom_dashboard::canvas::context_fill_polygon;
     let c = Pos2::new(100.0, 100.0);
     let r = 20.0;
     assert!(context_fill_polygon(c, r, 0.0).is_empty());
@@ -2999,7 +2952,7 @@ fn window_msg(id: u64, ts: chrono::DateTime<Utc>, from: &str, to: &str) -> Messa
 #[test]
 fn test_message_window_bounds_presets_live_and_fixed_end() {
     use chrono::{Duration, TimeZone};
-    use hcom_graph::model::MessageWindow;
+    use hcom_dashboard::model::MessageWindow;
     let now = Utc.with_ymd_and_hms(2026, 11, 1, 15, 0, 0).unwrap();
 
     let all = MessageWindow::default();
@@ -3039,7 +2992,7 @@ fn test_message_window_bounds_presets_live_and_fixed_end() {
 #[test]
 fn test_windowed_edge_counts_window_last_n_and_unfiltered_totals() {
     use chrono::Duration;
-    use hcom_graph::model::{MessageWindow, WindowedCount};
+    use hcom_dashboard::model::{MessageWindow, WindowedCount};
     let now = Utc::now();
     let mut graph = AgentGraph::new();
     graph.apply_message_event(&window_msg(1, now - Duration::hours(3), "a", "b"));
@@ -3096,7 +3049,7 @@ fn test_windowed_edge_counts_window_last_n_and_unfiltered_totals() {
 #[test]
 fn test_windowed_counts_are_exact_without_implicit_limit() {
     use chrono::Duration;
-    use hcom_graph::model::{MessageWindow, WindowedCount};
+    use hcom_dashboard::model::{MessageWindow, WindowedCount};
     let now = Utc::now();
     let mut graph = AgentGraph::new();
     // 600 messages one second apart: more than the former 500 snapshot and
@@ -3148,22 +3101,22 @@ fn test_windowed_counts_are_exact_without_implicit_limit() {
     assert_eq!(count(&fixed_last), 7);
 
     assert_eq!(
-        hcom_graph::canvas::edge_badge_label(WindowedCount { count: 600 }).as_deref(),
+        hcom_dashboard::canvas::edge_badge_label(WindowedCount { count: 600 }).as_deref(),
         Some("600 msgs")
     );
     assert_eq!(
-        hcom_graph::canvas::edge_badge_label(Default::default()),
+        hcom_dashboard::canvas::edge_badge_label(Default::default()),
         None
     );
     assert_eq!(
-        hcom_graph::canvas::edge_badge_label(WindowedCount { count: 1 }).as_deref(),
+        hcom_dashboard::canvas::edge_badge_label(WindowedCount { count: 1 }).as_deref(),
         Some("1 msg")
     );
 }
 
 #[test]
 fn test_edge_badge_shown_from_two_messages_or_on_focus_edges() {
-    use hcom_graph::canvas::show_edge_badge;
+    use hcom_dashboard::canvas::show_edge_badge;
     assert!(!show_edge_badge(1, false));
     assert!(show_edge_badge(1, true));
     assert!(show_edge_badge(2, false));
@@ -3172,7 +3125,7 @@ fn test_edge_badge_shown_from_two_messages_or_on_focus_edges() {
 
 #[test]
 fn test_label_rect_sits_below_the_selection_ring() {
-    use hcom_graph::canvas::label_rect;
+    use hcom_dashboard::canvas::label_rect;
     for zoom in [0.5, 1.0, 2.5] {
         let c = Pos2::new(200.0, 100.0);
         let r = label_rect(c, Vec2::new(40.0, 14.0), zoom);
@@ -3184,7 +3137,7 @@ fn test_label_rect_sits_below_the_selection_ring() {
 
 #[test]
 fn test_visible_labels_hide_the_quieter_overlapping_label() {
-    use hcom_graph::canvas::visible_labels;
+    use hcom_dashboard::canvas::visible_labels;
     let a = Rect::from_min_size(Pos2::new(0.0, 0.0), Vec2::new(50.0, 10.0));
     let b = a.translate(Vec2::new(20.0, 2.0)); // overlaps a
     let far = a.translate(Vec2::new(200.0, 0.0));
@@ -3214,7 +3167,7 @@ fn test_visible_labels_hide_the_quieter_overlapping_label() {
 #[test]
 fn test_zero_count_edge_in_window_stays_selectable() {
     use chrono::Duration;
-    use hcom_graph::model::MessageWindow;
+    use hcom_dashboard::model::MessageWindow;
     let now = Utc::now();
     let mut graph = AgentGraph::new();
     graph.apply_message_event(&window_msg(1, now - Duration::hours(5), "node_a", "node_b"));
@@ -3240,8 +3193,8 @@ fn test_zero_count_edge_in_window_stays_selectable() {
 #[test]
 fn test_format_window_range_uses_utc() {
     use chrono::{Duration, TimeZone};
-    use hcom_graph::app::format_window_range;
-    use hcom_graph::model::MessageWindow;
+    use hcom_dashboard::app::format_window_range;
+    use hcom_dashboard::model::MessageWindow;
     let now = Utc.with_ymd_and_hms(2026, 11, 1, 15, 5, 0).unwrap();
     let w = MessageWindow {
         span_secs: Some(3600),
@@ -3264,22 +3217,22 @@ fn test_format_window_range_uses_utc() {
 
 #[test]
 fn test_graph_state_window_defaults_and_invalid_values() {
-    use hcom_graph::config::GraphState;
-    let old: GraphState = serde_json::from_str("{}").expect("old state");
+    use hcom_dashboard::config::DashboardState;
+    let old: DashboardState = serde_json::from_str("{}").expect("old state");
     assert_eq!(old.window_span_secs, None);
     assert_eq!(old.window_last_n, None);
     assert!(old.message_window().is_unfiltered());
 
-    let bad: GraphState =
+    let bad: DashboardState =
         serde_json::from_str(r#"{"window_span_secs": -5, "window_last_n": 0}"#).expect("parse");
     assert!(bad.message_window().is_unfiltered());
 
-    let good = GraphState {
+    let good = DashboardState {
         window_span_secs: Some(900),
         window_last_n: Some(20),
         ..Default::default()
     };
-    let restored: GraphState =
+    let restored: DashboardState =
         serde_json::from_str(&serde_json::to_string(&good).unwrap()).unwrap();
     let w = restored.message_window();
     assert_eq!(w.span_secs, Some(900));
@@ -3290,12 +3243,12 @@ fn test_graph_state_window_defaults_and_invalid_values() {
 #[test]
 fn test_app_window_refresh_caches_clamps_and_persists() {
     use chrono::Duration;
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState, load_state};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState, load_state};
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
     let now = Utc::now();
@@ -3353,7 +3306,7 @@ fn min_pair_distance(layout: &GraphLayout) -> f32 {
 
 #[test]
 fn test_spawn_depths_roots_chain_cycle_and_placeholder() {
-    use hcom_graph::layout::spawn_depths;
+    use hcom_dashboard::layout::spawn_depths;
     let mut graph = AgentGraph::new();
     graph.apply_instance_snapshot(&[
         layout_snap("root", None),
@@ -3382,7 +3335,7 @@ fn test_spawn_depths_roots_chain_cycle_and_placeholder() {
 
 #[test]
 fn test_tree_targets_layers_siblings_and_centered_parent() {
-    use hcom_graph::layout::tree_targets;
+    use hcom_dashboard::layout::tree_targets;
     let mut graph = AgentGraph::new();
     graph.apply_instance_snapshot(&[
         layout_snap("root", None),
@@ -3405,7 +3358,7 @@ fn test_tree_targets_layers_siblings_and_centered_parent() {
 
 #[test]
 fn test_hierarchy_mode_converges_to_layers_and_reparent_moves_subtree() {
-    use hcom_graph::layout::LayoutMode;
+    use hcom_dashboard::layout::LayoutMode;
     let mut graph = AgentGraph::new();
     graph.apply_instance_snapshot(&[
         layout_snap("root", None),
@@ -3549,7 +3502,7 @@ fn test_collision_pass_resumes_under_tight_budget() {
 
 #[test]
 fn test_manual_mode_does_not_move_nodes_but_places_new_ones() {
-    use hcom_graph::layout::LayoutMode;
+    use hcom_dashboard::layout::LayoutMode;
     let mut graph = AgentGraph::new();
     graph.apply_instance_snapshot(&[layout_snap("m1", None), layout_snap("m2", None)]);
     let mut layout = GraphLayout::new();
@@ -3618,9 +3571,9 @@ fn test_initial_placement_near_placeholder_parent_and_deterministic_spiral() {
 
 #[test]
 fn test_graph_state_layout_mode_default_and_roundtrip() {
-    use hcom_graph::config::GraphState;
-    use hcom_graph::layout::LayoutMode;
-    let old: GraphState = serde_json::from_str("{}").unwrap();
+    use hcom_dashboard::config::DashboardState;
+    use hcom_dashboard::layout::LayoutMode;
+    let old: DashboardState = serde_json::from_str("{}").unwrap();
     assert_eq!(old.layout_mode, "cluster");
     assert_eq!(
         LayoutMode::from_str_or_default(&old.layout_mode),
@@ -3635,11 +3588,11 @@ fn test_graph_state_layout_mode_default_and_roundtrip() {
         LayoutMode::Cluster,
         LayoutMode::Manual,
     ] {
-        let s = GraphState {
+        let s = DashboardState {
             layout_mode: m.as_str().into(),
             ..Default::default()
         };
-        let r: GraphState = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        let r: DashboardState = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(LayoutMode::from_str_or_default(&r.layout_mode), m);
     }
 }
@@ -3681,9 +3634,9 @@ fn test_cluster_springs_follow_reparent_without_new_event() {
 
 #[test]
 fn test_tooltip_config_default_custom_and_empty() {
-    use hcom_graph::config::{GraphConfig, default_tooltip};
+    use hcom_dashboard::config::{DashboardConfig, default_tooltip};
 
-    let cfg: GraphConfig = serde_json::from_str("{}").unwrap();
+    let cfg: DashboardConfig = serde_json::from_str("{}").unwrap();
     assert_eq!(cfg.tooltip, default_tooltip());
     assert_eq!(
         cfg.tooltip,
@@ -3692,18 +3645,18 @@ fn test_tooltip_config_default_custom_and_empty() {
         ]
     );
 
-    let cfg: GraphConfig =
+    let cfg: DashboardConfig =
         serde_json::from_str(r#"{"tooltip": ["dir", "status:done", "cli"]}"#).unwrap();
     assert_eq!(cfg.tooltip, ["dir", "status:done", "cli"]);
     assert_eq!(cfg.report.len(), 28, "report stays independent of tooltip");
 
-    let cfg: GraphConfig = serde_json::from_str(r#"{"tooltip": []}"#).unwrap();
+    let cfg: DashboardConfig = serde_json::from_str(r#"{"tooltip": []}"#).unwrap();
     assert!(cfg.tooltip.is_empty());
 }
 
 #[test]
 fn test_tooltip_lines_order_skip_empty_status_and_multiline() {
-    use hcom_graph::table_data::{TableRow, tooltip_lines};
+    use hcom_dashboard::table_data::{TableRow, tooltip_lines};
 
     let mut row = TableRow {
         instance: "worker_1".into(),
@@ -3732,14 +3685,14 @@ fn test_tooltip_lines_order_skip_empty_status_and_multiline() {
 
 #[test]
 fn test_tooltip_target_gates_and_content() {
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState};
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
     app.graph.apply_instance_snapshot(&[InstanceSnapshot {
@@ -3789,8 +3742,8 @@ fn test_tooltip_target_gates_and_content() {
     app.custom_cmd_confirm = Some(("x".into(), Vec::new(), None));
     assert_eq!(app.tooltip_target(false, false), None);
     app.custom_cmd_confirm = None;
-    app.context_menu = Some(hcom_graph::app::ContextMenuState {
-        target: hcom_graph::app::ContextMenuTarget::Node(idx),
+    app.context_menu = Some(hcom_dashboard::app::ContextMenuState {
+        target: hcom_dashboard::app::ContextMenuTarget::Node(idx),
         screen_pos: Pos2::ZERO,
     });
     assert_eq!(app.tooltip_target(false, false), None);
@@ -3833,15 +3786,15 @@ fn snap(name: &str, parent: Option<&str>) -> InstanceSnapshot {
 
 #[test]
 fn test_state_save_sanitizes_non_finite_and_keeps_other_keys() {
-    use hcom_graph::config::{GraphState, SavedNodePos, load_state, save_state};
+    use hcom_dashboard::config::{DashboardState, SavedNodePos, load_state, save_state};
 
     let dir = tempfile::tempdir().unwrap();
-    let mut state = GraphState {
+    let mut state = DashboardState {
         layout_mode: "manual".into(),
         canvas_zoom: Some(2.0),
         canvas_pan_x: Some(f32::NAN),
         canvas_pan_y: Some(5.0),
-        side_panel_width: Some(f32::INFINITY),
+        detail_width_px: Some(f32::INFINITY),
         ..Default::default()
     };
     state.pinned_positions.insert(
@@ -3866,7 +3819,7 @@ fn test_state_save_sanitizes_non_finite_and_keeps_other_keys() {
     assert_eq!(loaded.layout_mode, "manual");
     assert_eq!(loaded.canvas_zoom, Some(2.0));
     assert_eq!((loaded.canvas_pan_x, loaded.canvas_pan_y), (None, None));
-    assert_eq!(loaded.side_panel_width, None);
+    assert_eq!(loaded.detail_width_px, None);
     assert_eq!(loaded.pinned_positions.len(), 1);
     assert_eq!(
         loaded.pinned_positions["good"],
@@ -3877,24 +3830,23 @@ fn test_state_save_sanitizes_non_finite_and_keeps_other_keys() {
         }
     );
 
-    // Only graph-state.json exists: no gui-state.json, no leftover temp file.
+    // Only dashboard-state.json exists: no leftover temp file.
     let names: Vec<String> = std::fs::read_dir(dir.path())
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names, ["graph-state.json"]);
+    assert_eq!(names, ["dashboard-state.json"]);
 }
 
 #[test]
 fn test_state_load_drops_bad_position_entry_and_clamps_values() {
-    use hcom_graph::config::load_state;
+    use hcom_dashboard::config::load_state;
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
-        dir.path().join("graph-state.json"),
+        dir.path().join("dashboard-state.json"),
         r#"{
             "detail_tab": "Bogus",
-            "bottom_tab": "Log",
             "pinned_positions": {
                 "ok": {"x": 1.0, "y": 2.0, "saved_at": 5},
                 "nullx": {"x": null, "y": 2.0},
@@ -3903,51 +3855,40 @@ fn test_state_load_drops_bad_position_entry_and_clamps_values() {
             "canvas_zoom": 100.0,
             "canvas_pan_x": 3.0,
             "canvas_pan_y": 4.0,
-            "side_panel_width": 10.0,
-            "table_height_frac": 0.99,
-            "detail_width_frac": 0.5
+            "table_height_frac": 0.99
         }"#,
     )
     .unwrap();
     let s = load_state(dir.path());
-    assert_eq!(
-        s.detail_tab, "Log",
-        "invalid detail_tab falls back to legacy bottom_tab"
-    );
+    assert_eq!(s.detail_tab, "Summary", "invalid detail_tab falls back");
     assert_eq!(s.pinned_positions.keys().collect::<Vec<_>>(), ["ok"]);
-    assert_eq!(s.canvas_zoom, Some(hcom_graph::canvas::ZOOM_MAX));
+    assert_eq!(s.canvas_zoom, Some(hcom_dashboard::canvas::ZOOM_MAX));
     assert_eq!((s.canvas_pan_x, s.canvas_pan_y), (Some(3.0), Some(4.0)));
     assert_eq!(
-        s.side_panel_width,
-        Some(10.0),
-        "legacy px is kept for conversion"
-    );
-    assert_eq!(
         s.table_height_frac,
-        Some(hcom_graph::config::SPLIT_FRAC_MAX)
+        Some(hcom_dashboard::config::SPLIT_FRAC_MAX)
     );
-    assert_eq!(s.detail_width_frac, Some(0.5));
 }
 
 #[test]
 fn test_state_corrupt_file_uses_defaults() {
-    use hcom_graph::config::{GraphState, load_state};
+    use hcom_dashboard::config::{DashboardState, load_state};
 
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("graph-state.json"), "{ not json").unwrap();
+    std::fs::write(dir.path().join("dashboard-state.json"), "{ not json").unwrap();
     let s = load_state(dir.path());
-    let d = GraphState::default();
+    let d = DashboardState::default();
     assert_eq!(s.detail_tab, d.detail_tab);
     assert!(s.pinned_positions.is_empty());
     assert_eq!(s.canvas_zoom, None);
-    assert_eq!(s.side_panel_width, None);
+    assert_eq!(s.detail_width_px, None);
 }
 
 #[test]
 fn test_state_sanitize_caps_node_positions_to_newest() {
-    use hcom_graph::config::{GraphState, MAX_NODE_POSITIONS, SavedNodePos};
+    use hcom_dashboard::config::{DashboardState, MAX_NODE_POSITIONS, SavedNodePos};
 
-    let mut s = GraphState::default();
+    let mut s = DashboardState::default();
     for i in 0..(MAX_NODE_POSITIONS + 10) {
         s.pinned_positions.insert(
             format!("n{i}"),
@@ -3969,7 +3910,7 @@ fn test_state_sanitize_caps_node_positions_to_newest() {
 
 #[test]
 fn test_layout_pinned_node_starts_at_pin_and_stays_in_every_mode() {
-    use hcom_graph::layout::LayoutMode;
+    use hcom_dashboard::layout::LayoutMode;
 
     // "a" is pinned; its child "b" and the partner "c" pull and push on it.
     let mut graph = AgentGraph::new();
@@ -4020,7 +3961,7 @@ fn test_layout_set_pinned_pins_current_position_and_releases() {
 
 #[test]
 fn test_canvas_drag_release_keeps_only_user_pins() {
-    use hcom_graph::layout::LayoutMode;
+    use hcom_dashboard::layout::LayoutMode;
 
     let mut graph = AgentGraph::new();
     graph.apply_instance_snapshot(&[snap("a", None)]);
@@ -4057,8 +3998,8 @@ fn test_canvas_drag_release_keeps_only_user_pins() {
                     &graph,
                     &mut layout,
                     None,
-                    &hcom_graph::canvas::ThemePalette::for_theme(
-                        hcom_graph::config::ResolvedTheme::Dark,
+                    &hcom_dashboard::canvas::ThemePalette::for_theme(
+                        hcom_dashboard::config::ResolvedTheme::Dark,
                     ),
                 );
             },
@@ -4086,8 +4027,8 @@ fn test_canvas_drag_release_keeps_only_user_pins() {
                     &graph,
                     &mut layout,
                     None,
-                    &hcom_graph::canvas::ThemePalette::for_theme(
-                        hcom_graph::config::ResolvedTheme::Dark,
+                    &hcom_dashboard::canvas::ThemePalette::for_theme(
+                        hcom_dashboard::config::ResolvedTheme::Dark,
                     ),
                 );
             })
@@ -4102,14 +4043,14 @@ fn test_canvas_drag_release_keeps_only_user_pins() {
 
 #[test]
 fn test_app_persists_drag_and_view_with_debounce() {
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState, load_state};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState, load_state};
     use std::time::Instant;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
     app.graph.apply_instance_snapshot(&[snap("worker_1", None)]);
@@ -4120,7 +4061,7 @@ fn test_app_persists_drag_and_view_with_debounce() {
     // A drag of an unpinned node stores nothing.
     app.record_dragged_position(idx);
     assert!(app.layout.pinned_positions.is_empty());
-    assert!(!dir.path().join("graph-state.json").exists());
+    assert!(!dir.path().join("dashboard-state.json").exists());
 
     // Pin, then a drag of the pinned node moves its pin.
     app.toggle_pin(idx);
@@ -4150,9 +4091,9 @@ fn test_app_persists_drag_and_view_with_debounce() {
     assert!(!app.flush_view_state(Instant::now() + Duration::from_secs(5), false));
 
     // Restore into a fresh app.
-    let mut fresh = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState {
+    let mut fresh = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState {
             canvas_pan_x: Some(7.0),
             canvas_pan_y: Some(-8.0),
             ..load_state(dir.path())
@@ -4170,14 +4111,14 @@ fn test_app_persists_drag_and_view_with_debounce() {
 
 #[test]
 fn test_pin_survives_restart_when_initial_sync_runs_first() {
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState, load_state};
-    use hcom_graph::layout::LayoutMode;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState, load_state};
+    use hcom_dashboard::layout::LayoutMode;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
     app.graph
@@ -4188,10 +4129,10 @@ fn test_pin_survives_restart_when_initial_sync_runs_first() {
         .set_node_pos(idx, Pos2::new(400.0, -300.0), false);
     app.toggle_pin(idx);
 
-    // Restart in the order `HcomGraphApp::new` uses: the initial graph is
+    // Restart in the order `HcomDashboardApp::new` uses: the initial graph is
     // synced into the layout before the persisted view is applied.
-    let mut fresh = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
+    let mut fresh = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
         load_state(dir.path()),
         dir.path().to_path_buf(),
     );
@@ -4211,33 +4152,11 @@ fn test_pin_survives_restart_when_initial_sync_runs_first() {
     }
     assert_eq!(fresh.layout.nodes[&idx].pos, Pos2::new(400.0, -300.0));
 
-    // Unpin removes the entry from memory and from graph-state.json.
+    // Unpin removes the entry from memory and from dashboard-state.json.
     fresh.toggle_pin(idx);
     assert!(!fresh.layout.nodes[&idx].pinned);
     assert!(fresh.layout.pinned_positions.is_empty());
     assert!(load_state(dir.path()).pinned_positions.is_empty());
-}
-
-#[test]
-fn test_state_legacy_node_positions_are_dropped() {
-    use hcom_graph::config::{load_state, save_state};
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("graph-state.json");
-    std::fs::write(
-        &path,
-        r#"{
-            "layout_mode": "manual",
-            "node_positions": {"old": {"x": 1.0, "y": 2.0, "saved_at": 5}}
-        }"#,
-    )
-    .unwrap();
-    let s = load_state(dir.path());
-    assert_eq!(s.layout_mode, "manual", "other keys are kept");
-    assert!(s.pinned_positions.is_empty(), "legacy drags are not pins");
-    save_state(dir.path(), &s).unwrap();
-    let text = std::fs::read_to_string(&path).unwrap();
-    assert!(!text.contains("node_positions"), "{text}");
 }
 
 /// Screen rect of the first accesskit node whose label is `label`.
@@ -4258,11 +4177,12 @@ fn widget_rect(output: &egui::FullOutput, label: &str) -> Option<Rect> {
 #[test]
 fn test_context_menu_pins_and_unpins_node() {
     use eframe::App;
-    use hcom_graph::config::{GraphState, load_state};
+    use hcom_dashboard::config::{DashboardState, load_state};
 
-    let (dir, mut app) = split_test_app(GraphState::default());
+    let (dir, mut app) = split_test_app(DashboardState::default());
     app.apply_persisted_view();
-    app.layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    app.layout
+        .set_mode(hcom_dashboard::layout::LayoutMode::Manual);
     app.graph.apply_instance_snapshot(&[snap("worker_1", None)]);
     app.layout.sync_nodes(&app.graph);
     let idx = app.graph.get_node_index("worker_1").unwrap();
@@ -4272,7 +4192,7 @@ fn test_context_menu_pins_and_unpins_node() {
 
     let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
     let mut frame = eframe::Frame::_new_kittest();
-    let mut run = |app: &mut hcom_graph::app::HcomGraphApp, events: Vec<egui::Event>| {
+    let mut run = |app: &mut hcom_dashboard::app::HcomDashboardApp, events: Vec<egui::Event>| {
         let input = egui::RawInput {
             screen_rect: Some(screen),
             events,
@@ -4302,7 +4222,7 @@ fn test_context_menu_pins_and_unpins_node() {
         ]
     };
     // Opens the node menu and clicks the entry `label`.
-    let mut choose = |app: &mut hcom_graph::app::HcomGraphApp, label: &str| {
+    let mut choose = |app: &mut hcom_dashboard::app::HcomDashboardApp, label: &str| {
         let node = app
             .canvas
             .world_to_screen(app.layout.nodes[&idx].pos, app.canvas_rect);
@@ -4334,7 +4254,7 @@ fn test_context_menu_pins_and_unpins_node() {
 
 #[test]
 fn test_approx_eq_ignores_float_noise() {
-    use hcom_graph::app::approx_eq;
+    use hcom_dashboard::app::approx_eq;
     assert!(!approx_eq(None, 1.0, 0.5));
     assert!(approx_eq(Some(340.0), 340.3, 0.5));
     assert!(!approx_eq(Some(340.0), 341.0, 0.5));
@@ -4348,7 +4268,7 @@ fn test_canvas_plain_hover_sets_hovered_node() {
     graph.apply_instance_snapshot(&[snap("a", None)]);
     let idx = graph.get_node_index("a").unwrap();
     let mut layout = GraphLayout::new();
-    layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    layout.set_mode(hcom_dashboard::layout::LayoutMode::Manual);
     layout.sync_nodes(&graph);
     layout.set_node_pos(idx, Pos2::ZERO, false);
     let mut canvas = CanvasView::new();
@@ -4370,8 +4290,8 @@ fn test_canvas_plain_hover_sets_hovered_node() {
                 &graph,
                 &mut layout,
                 None,
-                &hcom_graph::canvas::ThemePalette::for_theme(
-                    hcom_graph::config::ResolvedTheme::Dark,
+                &hcom_dashboard::canvas::ThemePalette::for_theme(
+                    hcom_dashboard::config::ResolvedTheme::Dark,
                 ),
             );
             center = resp.rect.center();
@@ -4388,7 +4308,7 @@ fn test_canvas_plain_hover_sets_hovered_node() {
 /// and detail panels as egui stored them.
 fn run_app_events_full(
     ctx: &egui::Context,
-    app: &mut hcom_graph::app::HcomGraphApp,
+    app: &mut hcom_dashboard::app::HcomDashboardApp,
     size: Vec2,
     frames: Vec<Vec<egui::Event>>,
 ) -> (Option<Rect>, Option<Rect>, egui::Id) {
@@ -4418,7 +4338,7 @@ fn run_app_events_full(
 
 fn run_app_events(
     ctx: &egui::Context,
-    app: &mut hcom_graph::app::HcomGraphApp,
+    app: &mut hcom_dashboard::app::HcomDashboardApp,
     size: Vec2,
     frames: Vec<Vec<egui::Event>>,
 ) -> (Option<Rect>, Option<Rect>) {
@@ -4429,7 +4349,7 @@ fn run_app_events(
 /// `run_app_events` with `frames` frames without input on a 1000x700 window.
 fn run_app_frames(
     ctx: &egui::Context,
-    app: &mut hcom_graph::app::HcomGraphApp,
+    app: &mut hcom_dashboard::app::HcomDashboardApp,
     frames: usize,
 ) -> (Option<Rect>, Option<Rect>) {
     run_app_events(ctx, app, Vec2::new(1000.0, 700.0), vec![vec![]; frames])
@@ -4437,13 +4357,13 @@ fn run_app_frames(
 
 #[test]
 fn test_layout_table_spans_full_width_below_graph_and_detail_panel() {
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
     let ctx = egui::Context::default();
@@ -4478,21 +4398,21 @@ fn test_layout_table_spans_full_width_below_graph_and_detail_panel() {
     app.apply_function_key(egui::Key::F9);
     assert_eq!(app.state.detail_tab, "Report");
     assert_eq!(
-        hcom_graph::config::load_state(dir.path()).detail_tab,
+        hcom_dashboard::config::load_state(dir.path()).detail_tab,
         "Report"
     );
 }
 
 #[test]
 fn test_layout_oversized_saved_table_height_keeps_canvas_visible() {
-    use hcom_graph::app::{CANVAS_MIN_HEIGHT, HcomGraphApp};
-    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_dashboard::app::{CANVAS_MIN_HEIGHT, HcomDashboardApp};
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState {
-            sash_pos: Some(5000.0),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState {
+            table_height_frac: Some(0.95),
             ..Default::default()
         },
         dir.path().to_path_buf(),
@@ -4532,11 +4452,11 @@ fn drag_frames(from: Pos2, to: Pos2) -> Vec<Vec<egui::Event>> {
 }
 
 fn split_test_app(
-    state: hcom_graph::config::GraphState,
-) -> (tempfile::TempDir, hcom_graph::app::HcomGraphApp) {
+    state: hcom_dashboard::config::DashboardState,
+) -> (tempfile::TempDir, hcom_dashboard::app::HcomDashboardApp) {
     let dir = tempfile::tempdir().unwrap();
-    let app = hcom_graph::app::HcomGraphApp::new_for_test(
-        hcom_graph::config::GraphConfig::default(),
+    let app = hcom_dashboard::app::HcomDashboardApp::new_for_test(
+        hcom_dashboard::config::DashboardConfig::default(),
         state,
         dir.path().to_path_buf(),
     );
@@ -4545,10 +4465,10 @@ fn split_test_app(
 
 #[test]
 fn test_split_drag_saves_window_fractions_and_does_not_pan() {
-    use hcom_graph::config::GraphState;
+    use hcom_dashboard::config::DashboardState;
     use std::time::Instant;
 
-    let (dir, mut app) = split_test_app(GraphState::default());
+    let (dir, mut app) = split_test_app(DashboardState::default());
     let ctx = egui::Context::default();
     let size = Vec2::new(1000.0, 700.0);
     let (table, detail) = run_app_events(&ctx, &mut app, size, vec![vec![]; 3]);
@@ -4593,13 +4513,8 @@ fn test_split_drag_saves_window_fractions_and_does_not_pan() {
 
     // Saved: table as fraction, detail as pixels.
     app.flush_view_state(Instant::now() + Duration::from_secs(2), false);
-    let saved = std::fs::read_to_string(dir.path().join("graph-state.json")).unwrap();
+    let saved = std::fs::read_to_string(dir.path().join("dashboard-state.json")).unwrap();
     assert!(saved.contains("table_height_frac") && saved.contains("detail_width_px"));
-    assert!(
-        !saved.contains("sash_pos")
-            && !saved.contains("side_panel_width")
-            && !saved.contains("detail_width_frac")
-    );
 
     // Double-click resets the table split to the default.
     let at = Pos2::new(100.0, app_table_top(&ctx, &mut app, size));
@@ -4637,7 +4552,11 @@ fn test_split_drag_saves_window_fractions_and_does_not_pan() {
     assert_eq!(app.state.table_height_frac, Some(0.3));
 }
 
-fn app_table_top(ctx: &egui::Context, app: &mut hcom_graph::app::HcomGraphApp, size: Vec2) -> f32 {
+fn app_table_top(
+    ctx: &egui::Context,
+    app: &mut hcom_dashboard::app::HcomDashboardApp,
+    size: Vec2,
+) -> f32 {
     run_app_events(ctx, app, size, vec![vec![]; 2])
         .0
         .unwrap()
@@ -4646,12 +4565,12 @@ fn app_table_top(ctx: &egui::Context, app: &mut hcom_graph::app::HcomGraphApp, s
 
 #[test]
 fn test_split_sizes_ignore_content_changes() {
-    use hcom_graph::config::GraphState;
+    use hcom_dashboard::config::DashboardState;
 
-    let (_dir, mut app) = split_test_app(GraphState::default());
+    let (_dir, mut app) = split_test_app(DashboardState::default());
     let ctx = egui::Context::default();
     let (table, detail) = run_app_frames(&ctx, &mut app, 3);
-    for tab in hcom_graph::config::DETAIL_TABS {
+    for tab in hcom_dashboard::config::DETAIL_TABS {
         app.state.detail_tab = tab.to_string();
         app.action_error = Some("a long error message ".repeat(20));
         let (t, d) = run_app_frames(&ctx, &mut app, 2);
@@ -4661,9 +4580,9 @@ fn test_split_sizes_ignore_content_changes() {
 
 #[test]
 fn test_split_proportions_survive_another_window_size() {
-    use hcom_graph::config::GraphState;
+    use hcom_dashboard::config::DashboardState;
 
-    let state = GraphState {
+    let state = DashboardState {
         table_height_frac: Some(0.4),
         detail_width_px: Some(350.0),
         ..Default::default()
@@ -4689,7 +4608,7 @@ fn test_split_proportions_survive_another_window_size() {
 
     // A small window: the clamps win (canvas keeps its minimum), the stored
     // values stay for the next larger window.
-    let (_dir, mut app) = split_test_app(GraphState {
+    let (_dir, mut app) = split_test_app(DashboardState {
         table_height_frac: Some(0.9),
         detail_width_px: Some(400.0),
         ..state
@@ -4711,8 +4630,8 @@ fn test_split_proportions_survive_another_window_size() {
 
 #[test]
 fn test_split_tiny_and_zero_windows_do_not_panic() {
-    use hcom_graph::app::split_px;
-    use hcom_graph::config::GraphState;
+    use hcom_dashboard::app::split_px;
+    use hcom_dashboard::config::DashboardState;
 
     assert_eq!(split_px(0.3, 0.0, 80.0, 0.0, 150.0), 80.0);
     assert_eq!(split_px(0.3, 150.0, 80.0, 100.0, 150.0), 80.0);
@@ -4720,73 +4639,21 @@ fn test_split_tiny_and_zero_windows_do_not_panic() {
     assert_eq!(split_px(0.9, 1000.0, 80.0, 900.0, 150.0), 750.0);
 
     for size in [Vec2::new(200.0, 150.0), Vec2::ZERO] {
-        let (_dir, mut app) = split_test_app(GraphState {
-            sash_pos: Some(300.0),
-            side_panel_width: Some(400.0),
+        let (_dir, mut app) = split_test_app(DashboardState {
+            table_height_frac: Some(0.5),
+            detail_width_px: Some(400.0),
             ..Default::default()
         });
         let ctx = egui::Context::default();
         run_app_events(&ctx, &mut app, size, vec![vec![]; 3]);
-        if size == Vec2::ZERO {
-            assert_eq!(
-                app.state.sash_pos,
-                Some(300.0),
-                "no conversion without a window size"
-            );
-            assert_eq!(app.state.table_height_frac, None);
-        }
     }
 }
 
 #[test]
-fn test_split_legacy_conversion_to_pixels() {
-    use hcom_graph::config::GraphState;
-
-    let (_dir, mut app) = split_test_app(GraphState {
-        sash_pos: Some(280.0),
-        side_panel_width: Some(320.0),
-        detail_width_frac: None,
-        ..Default::default()
-    });
-    app.adopt_legacy_split_sizes(Vec2::new(1000.0, 700.0));
-    assert_eq!(app.state.table_height_frac, Some(0.4));
-    assert_eq!(app.state.detail_width_px, Some(320.0));
-    assert_eq!(
-        (
-            app.state.sash_pos,
-            app.state.side_panel_width,
-            app.state.detail_width_frac
-        ),
-        (None, None, None)
-    );
-
-    // detail_width_frac converts when detail_width_px is None.
-    let (_dir, mut app) = split_test_app(GraphState {
-        detail_width_frac: Some(0.35),
-        side_panel_width: Some(300.0),
-        ..Default::default()
-    });
-    app.adopt_legacy_split_sizes(Vec2::new(1000.0, 700.0));
-    assert_eq!(app.state.detail_width_px, Some(350.0));
-    assert_eq!(
-        (app.state.detail_width_frac, app.state.side_panel_width),
-        (None, None)
-    );
-
-    // An existing pixel width wins over legacy values.
-    let (_dir, mut app) = split_test_app(GraphState {
-        detail_width_px: Some(380.0),
-        detail_width_frac: Some(0.2),
-        side_panel_width: Some(300.0),
-        ..Default::default()
-    });
-    app.adopt_legacy_split_sizes(Vec2::new(1000.0, 700.0));
-    assert_eq!(app.state.detail_width_px, Some(380.0));
-}
-
-#[test]
 fn test_split_fraction_sanitize() {
-    use hcom_graph::config::{GraphState, SIDE_PANEL_MIN_WIDTH, SPLIT_FRAC_MAX, SPLIT_FRAC_MIN};
+    use hcom_dashboard::config::{
+        DashboardState, SIDE_PANEL_MIN_WIDTH, SPLIT_FRAC_MAX, SPLIT_FRAC_MIN,
+    };
     for (v, want_px) in [
         (f32::NAN, None),
         (f32::INFINITY, None),
@@ -4795,7 +4662,7 @@ fn test_split_fraction_sanitize() {
         (100.0, Some(SIDE_PANEL_MIN_WIDTH)),
         (400.0, Some(400.0)),
     ] {
-        let mut s = GraphState {
+        let mut s = DashboardState {
             detail_width_px: Some(v),
             ..Default::default()
         };
@@ -4807,7 +4674,7 @@ fn test_split_fraction_sanitize() {
         (0.01, Some(SPLIT_FRAC_MIN)),
         (0.4, Some(0.4)),
     ] {
-        let mut s = GraphState {
+        let mut s = DashboardState {
             table_height_frac: Some(v),
             ..Default::default()
         };
@@ -4817,57 +4684,11 @@ fn test_split_fraction_sanitize() {
 }
 
 #[test]
-fn test_split_legacy_conversion_is_saved_without_other_changes() {
-    use eframe::App;
-    use hcom_graph::config::{GraphState, load_state};
-
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("graph-state.json"),
-        r#"{"sash_pos": 280.0, "side_panel_width": 320.0,
-            "canvas_zoom": 1.0, "canvas_pan_x": 0.0, "canvas_pan_y": 0.0}"#,
-    )
-    .unwrap();
-    let mut app = hcom_graph::app::HcomGraphApp::new_for_test(
-        hcom_graph::config::GraphConfig::default(),
-        load_state(dir.path()),
-        dir.path().to_path_buf(),
-    );
-    app.apply_persisted_view();
-    let ctx = egui::Context::default();
-    run_app_events(&ctx, &mut app, Vec2::new(1000.0, 700.0), vec![vec![]; 2]);
-    app.on_exit();
-
-    let saved: GraphState = load_state(dir.path());
-    assert_eq!(saved.table_height_frac, Some(0.4));
-    assert_eq!(saved.detail_width_px, Some(320.0));
-    assert_eq!(
-        (
-            saved.sash_pos,
-            saved.side_panel_width,
-            saved.detail_width_frac
-        ),
-        (None, None, None)
-    );
-
-    let mut app = hcom_graph::app::HcomGraphApp::new_for_test(
-        hcom_graph::config::GraphConfig::default(),
-        saved,
-        dir.path().to_path_buf(),
-    );
-    let ctx = egui::Context::default();
-    let size = Vec2::new(1600.0, 1000.0);
-    let (t, d) = run_app_events(&ctx, &mut app, size, vec![vec![]; 3]);
-    assert!((t.unwrap().height() / size.y - 0.4).abs() < 0.01);
-    assert!((d.unwrap().width() - 320.0).abs() <= 1.0);
-}
-
-#[test]
 fn test_task_86_detail_panel_width_constant_across_agent_selections() {
-    use hcom_graph::config::GraphState;
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::config::DashboardState;
+    use hcom_dashboard::table_data::TableRow;
 
-    let (_dir, mut app) = split_test_app(GraphState {
+    let (_dir, mut app) = split_test_app(DashboardState {
         detail_width_px: Some(360.0),
         ..Default::default()
     });
@@ -4923,11 +4744,11 @@ fn detail_scroll_id(root: egui::Id, container_salt: &str, scroll_salt: &str) -> 
 
 #[test]
 fn test_task_86_screen_stick_to_bottom() {
-    use hcom_graph::config::GraphState;
-    use hcom_graph::model::{AgentNode, AgentStatus};
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::config::DashboardState;
+    use hcom_dashboard::model::{AgentNode, AgentStatus};
+    use hcom_dashboard::table_data::TableRow;
 
-    let (_dir, mut app) = split_test_app(GraphState::default());
+    let (_dir, mut app) = split_test_app(DashboardState::default());
     let node = AgentNode {
         name: "agent_term".into(),
         status: AgentStatus::Active,
@@ -4984,11 +4805,11 @@ fn test_task_86_screen_stick_to_bottom() {
 
 #[test]
 fn test_task_86_report_summary_horizontal_scroll_and_label_alignment() {
-    use hcom_graph::config::GraphState;
-    use hcom_graph::model::{AgentNode, AgentStatus};
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::config::DashboardState;
+    use hcom_dashboard::model::{AgentNode, AgentStatus};
+    use hcom_dashboard::table_data::TableRow;
 
-    let (_dir, mut app) = split_test_app(GraphState {
+    let (_dir, mut app) = split_test_app(DashboardState {
         detail_width_px: Some(300.0),
         ..Default::default()
     });
@@ -5082,11 +4903,11 @@ fn test_task_86_report_summary_horizontal_scroll_and_label_alignment() {
 
 #[test]
 fn test_task_86_selection_and_edge_dock_reopens_hidden_panel() {
-    use hcom_graph::config::GraphState;
-    use hcom_graph::model::{AgentNode, AgentStatus};
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::config::DashboardState;
+    use hcom_dashboard::model::{AgentNode, AgentStatus};
+    use hcom_dashboard::table_data::TableRow;
 
-    let (_dir, mut app) = split_test_app(GraphState {
+    let (_dir, mut app) = split_test_app(DashboardState {
         show_side_panel: false,
         ..Default::default()
     });
@@ -5149,7 +4970,7 @@ fn test_task_86_selection_and_edge_dock_reopens_hidden_panel() {
         .graph
         .get_node_index("test_agent_1")
         .expect("node exists");
-    app.handle_canvas_action(Some(hcom_graph::canvas::CanvasAction::NodeClicked(
+    app.handle_canvas_action(Some(hcom_dashboard::canvas::CanvasAction::NodeClicked(
         node_idx,
     )));
     assert!(
@@ -5159,7 +4980,7 @@ fn test_task_86_selection_and_edge_dock_reopens_hidden_panel() {
 
     // Hide again and test edge dock click
     app.state.show_side_panel = false;
-    let (_dir2, mut app2) = split_test_app(GraphState {
+    let (_dir2, mut app2) = split_test_app(DashboardState {
         show_side_panel: false,
         ..Default::default()
     });
@@ -5194,7 +5015,7 @@ fn test_task_86_selection_and_edge_dock_reopens_hidden_panel() {
 
 #[test]
 fn test_fit_view_fits_far_nodes_and_long_labels_with_margin() {
-    use hcom_graph::canvas::{CanvasView, ZOOM_MAX, fit_view};
+    use hcom_dashboard::canvas::{CanvasView, ZOOM_MAX, fit_view};
 
     let rect = Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(800.0, 500.0));
     assert_eq!(fit_view(&[], rect, 1.0), None);
@@ -5210,8 +5031,11 @@ fn test_fit_view_fits_far_nodes_and_long_labels_with_margin() {
     for (pos, w12) in items {
         let c = view.world_to_screen(pos, rect);
         let font = (12.0 * view.zoom).clamp(8.0, 18.0);
-        let label =
-            hcom_graph::canvas::label_rect(c, Vec2::new(w12 * font / 12.0, font * 1.2), view.zoom);
+        let label = hcom_dashboard::canvas::label_rect(
+            c,
+            Vec2::new(w12 * font / 12.0, font * 1.2),
+            view.zoom,
+        );
         let half_x = (37.0 * view.zoom).max(label.width() / 2.0);
         assert!(
             inner.contains(c - Vec2::new(half_x, 37.0 * view.zoom)),
@@ -5234,7 +5058,7 @@ fn test_fit_view_fits_far_nodes_and_long_labels_with_margin() {
     // Node and the label below it are centered together: the node sits
     // centered in x and above the center by half the label's extension.
     let font = (12.0 * z).clamp(8.0, 18.0);
-    let label = hcom_graph::canvas::label_rect(c, Vec2::new(40.0 * font / 12.0, font * 1.2), z);
+    let label = hcom_dashboard::canvas::label_rect(c, Vec2::new(40.0 * font / 12.0, font * 1.2), z);
     let content = Rect::from_min_max(c - Vec2::splat(37.0 * z), label.max);
     assert!((c.x - rect.center().x).abs() < 0.5, "x centered: {c:?}");
     assert!(
@@ -5245,7 +5069,7 @@ fn test_fit_view_fits_far_nodes_and_long_labels_with_margin() {
 
 #[test]
 fn test_edge_marker_points_from_the_border_to_off_view_nodes() {
-    use hcom_graph::canvas::edge_marker;
+    use hcom_dashboard::canvas::edge_marker;
 
     let rect = Rect::from_min_max(Pos2::ZERO, Pos2::new(400.0, 200.0));
     assert_eq!(edge_marker(rect, Pos2::new(10.0, 10.0)), None);
@@ -5283,8 +5107,8 @@ fn test_edge_marker_points_from_the_border_to_off_view_nodes() {
 
 /// App with three active agents pinned far from the origin.
 fn fit_test_app(
-    state: hcom_graph::config::GraphState,
-) -> (tempfile::TempDir, hcom_graph::app::HcomGraphApp) {
+    state: hcom_dashboard::config::DashboardState,
+) -> (tempfile::TempDir, hcom_dashboard::app::HcomDashboardApp) {
     let (dir, mut app) = split_test_app(state);
     app.apply_persisted_view();
     app.graph.apply_instance_snapshot(&[
@@ -5304,7 +5128,7 @@ fn fit_test_app(
     (dir, app)
 }
 
-fn all_nodes_in_canvas(app: &hcom_graph::app::HcomGraphApp) -> bool {
+fn all_nodes_in_canvas(app: &hcom_dashboard::app::HcomDashboardApp) -> bool {
     let rect = app.canvas_rect;
     app.layout
         .nodes
@@ -5314,9 +5138,9 @@ fn all_nodes_in_canvas(app: &hcom_graph::app::HcomGraphApp) -> bool {
 
 #[test]
 fn test_auto_fit_without_saved_view_shows_all_nodes_until_user_zooms() {
-    use hcom_graph::config::GraphState;
+    use hcom_dashboard::config::DashboardState;
 
-    let (_dir, mut app) = fit_test_app(GraphState::default());
+    let (_dir, mut app) = fit_test_app(DashboardState::default());
     let ctx = egui::Context::default();
     run_app_frames(&ctx, &mut app, 3);
     assert!(app.canvas_rect.is_positive());
@@ -5353,13 +5177,13 @@ fn test_auto_fit_without_saved_view_shows_all_nodes_until_user_zooms() {
 
 #[test]
 fn test_auto_fit_corrects_a_saved_view_without_visible_nodes() {
-    use hcom_graph::config::GraphState;
+    use hcom_dashboard::config::DashboardState;
 
-    let saved = |x: f32, y: f32| GraphState {
+    let saved = |x: f32, y: f32| DashboardState {
         canvas_zoom: Some(1.0),
         canvas_pan_x: Some(x),
         canvas_pan_y: Some(y),
-        ..GraphState::default()
+        ..DashboardState::default()
     };
     // Saved view far away from every node: fitted (AC3).
     let (_dir, mut app) = fit_test_app(saved(50_000.0, 0.0));
@@ -5380,12 +5204,12 @@ fn test_auto_fit_corrects_a_saved_view_without_visible_nodes() {
 
 #[test]
 fn test_auto_fit_skips_manual_mode_and_pressed_pointer_but_fit_button_works() {
-    use hcom_graph::config::GraphState;
+    use hcom_dashboard::config::DashboardState;
 
     // Manual mode: no auto-fit (AC5); the Fit request fits (AC2).
-    let (_dir, mut app) = fit_test_app(GraphState {
+    let (_dir, mut app) = fit_test_app(DashboardState {
         layout_mode: "manual".into(),
-        ..GraphState::default()
+        ..DashboardState::default()
     });
     let ctx = egui::Context::default();
     run_app_frames(&ctx, &mut app, 3);
@@ -5396,7 +5220,7 @@ fn test_auto_fit_skips_manual_mode_and_pressed_pointer_but_fit_button_works() {
     assert!(all_nodes_in_canvas(&app), "AC2: Fit in Manual mode");
 
     // Pointer held down (outside the canvas): no auto-fit (AC5).
-    let (_dir2, mut app) = fit_test_app(GraphState::default());
+    let (_dir2, mut app) = fit_test_app(DashboardState::default());
     let ctx = egui::Context::default();
     let at = Pos2::new(5.0, 5.0);
     let press = egui::Event::PointerButton {
@@ -5417,9 +5241,9 @@ fn test_auto_fit_skips_manual_mode_and_pressed_pointer_but_fit_button_works() {
 
 #[test]
 fn test_fit_button_ends_auto_fit_and_keeps_its_zoom() {
-    use hcom_graph::config::GraphState;
+    use hcom_dashboard::config::DashboardState;
 
-    let (_dir, mut app) = split_test_app(GraphState::default());
+    let (_dir, mut app) = split_test_app(DashboardState::default());
     app.apply_persisted_view();
     app.graph.apply_instance_snapshot(&[snap("solo", None)]);
     app.layout.sync_nodes(&app.graph);
@@ -5435,12 +5259,13 @@ fn test_fit_button_ends_auto_fit_and_keeps_its_zoom() {
 
 #[test]
 fn test_context_menu_lifecycle_and_outside_clicks() {
-    use hcom_graph::app::ContextMenuTarget;
-    use hcom_graph::config::GraphState;
+    use hcom_dashboard::app::ContextMenuTarget;
+    use hcom_dashboard::config::DashboardState;
 
-    let (_dir, mut app) = split_test_app(GraphState::default());
+    let (_dir, mut app) = split_test_app(DashboardState::default());
     app.apply_persisted_view();
-    app.layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    app.layout
+        .set_mode(hcom_dashboard::layout::LayoutMode::Manual);
     app.graph
         .apply_instance_snapshot(&[snap("worker_1", None), snap("worker_2", Some("worker_1"))]);
     app.layout.sync_nodes(&app.graph);
@@ -5449,7 +5274,7 @@ fn test_context_menu_lifecycle_and_outside_clicks() {
 
     let idx1 = app.graph.get_node_index("worker_1").unwrap();
     let idx2 = app.graph.get_node_index("worker_2").unwrap();
-    let node_screen_pos = |app: &hcom_graph::app::HcomGraphApp, idx| {
+    let node_screen_pos = |app: &hcom_dashboard::app::HcomDashboardApp, idx| {
         app.canvas
             .world_to_screen(app.layout.nodes[&idx].pos, app.canvas_rect)
     };
@@ -5585,7 +5410,7 @@ fn test_context_menu_lifecycle_and_outside_clicks() {
 /// sub-pixel collision corrections must not keep the layout awake (TASK-77.28).
 #[test]
 fn test_layout_realistic_graph_sleeps_in_cluster_and_hierarchy() {
-    use hcom_graph::layout::LayoutMode;
+    use hcom_dashboard::layout::LayoutMode;
     let nodes = [
         ("boss", None),
         ("m1", Some("boss")),
@@ -5705,7 +5530,7 @@ fn test_layout_alpha_cooling_sleeps_with_exhausted_budget() {
 
     layout.wake_up();
     assert!((layout.alpha - layout.alpha_reheat).abs() < 1e-6);
-    layout.set_mode(hcom_graph::layout::LayoutMode::Hierarchy);
+    layout.set_mode(hcom_dashboard::layout::LayoutMode::Hierarchy);
     assert_eq!(layout.alpha, 1.0, "mode switch reheats fully");
 }
 
@@ -5769,7 +5594,7 @@ fn jitter(frames: &[Vec<Pos2>]) -> (usize, f32) {
 /// graph: no visible back-and-forth (TASK-77.28 regression).
 #[test]
 fn test_layout_moves_smoothly_at_start_and_while_dragging() {
-    use hcom_graph::layout::LayoutMode;
+    use hcom_dashboard::layout::LayoutMode;
     for mode in [LayoutMode::Cluster, LayoutMode::Hierarchy] {
         let graph = realistic_layout_graph();
         let mut layout = GraphLayout::new();
@@ -5935,17 +5760,17 @@ fn filled_rects(output: &egui::FullOutput) -> Vec<(Rect, Color32)> {
 #[test]
 fn test_table_row_selection_is_one_full_width_band() {
     use eframe::App;
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState};
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
 
     let dir = tempfile::tempdir().unwrap();
-    let state = GraphState {
+    let state = DashboardState {
         columns: vec!["instance".into(), "roaming".into(), "detail".into()],
         ..Default::default()
     };
     let mut app =
-        HcomGraphApp::new_for_test(GraphConfig::default(), state, dir.path().to_path_buf());
+        HcomDashboardApp::new_for_test(DashboardConfig::default(), state, dir.path().to_path_buf());
     app.graph
         .apply_instance_snapshot(&[snap("worker_1", None), snap("worker_2", None)]);
     let w2 = app.graph.get_node_index("worker_2").unwrap();
@@ -5965,7 +5790,7 @@ fn test_table_row_selection_is_one_full_width_band() {
     let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
     let mut frame = eframe::Frame::_new_kittest();
     let mut time = 0.0;
-    let mut run = |app: &mut HcomGraphApp, events: Vec<egui::Event>| {
+    let mut run = |app: &mut HcomDashboardApp, events: Vec<egui::Event>| {
         time += 0.1;
         let input = egui::RawInput {
             screen_rect: Some(screen),
@@ -6074,19 +5899,19 @@ fn test_table_row_selection_is_one_full_width_band() {
 #[test]
 fn test_table_arrow_keys_select_rows_in_shown_order() {
     use eframe::App;
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState};
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
 
     let dir = tempfile::tempdir().unwrap();
-    let state = GraphState {
+    let state = DashboardState {
         columns: vec!["instance".into()],
         sort_col: Some("instance".into()),
         sort_reverse: true,
         ..Default::default()
     };
     let mut app =
-        HcomGraphApp::new_for_test(GraphConfig::default(), state, dir.path().to_path_buf());
+        HcomDashboardApp::new_for_test(DashboardConfig::default(), state, dir.path().to_path_buf());
     let mut names: Vec<String> = (0..60).map(|i| format!("w{i:02}_keep")).collect();
     names.push("zz_other".into());
     let snaps: Vec<_> = names.iter().map(|n| snap(n, None)).collect();
@@ -6104,7 +5929,7 @@ fn test_table_arrow_keys_select_rows_in_shown_order() {
     let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
     let mut frame = eframe::Frame::_new_kittest();
     let mut time = 0.0;
-    let mut run = |app: &mut HcomGraphApp, events: Vec<egui::Event>| {
+    let mut run = |app: &mut HcomDashboardApp, events: Vec<egui::Event>| {
         time += 0.1;
         let input = egui::RawInput {
             screen_rect: Some(screen),
@@ -6128,8 +5953,8 @@ fn test_table_arrow_keys_select_rows_in_shown_order() {
     for _ in 0..3 {
         run(&mut app, vec![]);
     }
-    let sel = |app: &HcomGraphApp| app.selected_row_id.clone();
-    let node = |app: &HcomGraphApp, n: &str| app.graph.get_node_index(n);
+    let sel = |app: &HcomDashboardApp| app.selected_row_id.clone();
+    let node = |app: &HcomDashboardApp, n: &str| app.graph.get_node_index(n);
 
     // Nothing selected: Up takes the last shown row, Down the first one
     // (sorted descending, "zz_other" filtered out).
@@ -6197,14 +6022,14 @@ fn test_table_arrow_keys_select_rows_in_shown_order() {
 
 #[test]
 fn test_idle_column_queues_listening_periods_only_while_shown() {
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState};
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
     let row = |name: &str, status: &str, since: u64| TableRow {
@@ -6232,22 +6057,23 @@ fn test_idle_column_queues_listening_periods_only_while_shown() {
 
 /// App with one agent `worker_1` (table row with `dir`), Manual layout,
 /// the node at the world origin.
-fn tooltip_app(dir: &str) -> (hcom_graph::app::HcomGraphApp, tempfile::TempDir) {
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState};
-    use hcom_graph::table_data::TableRow;
+fn tooltip_app(dir: &str) -> (hcom_dashboard::app::HcomDashboardApp, tempfile::TempDir) {
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
     let tmp = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         tmp.path().to_path_buf(),
     );
     app.graph.apply_instance_snapshot(&[snap("worker_1", None)]);
-    app.layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    app.layout
+        .set_mode(hcom_dashboard::layout::LayoutMode::Manual);
     app.layout.sync_nodes(&app.graph);
     let idx = app.graph.get_node_index("worker_1").unwrap();
     app.layout.set_node_pos(idx, Pos2::ZERO, false);
-    app.table_rows = vec![hcom_graph::table_data::TableRow {
+    app.table_rows = vec![hcom_dashboard::table_data::TableRow {
         instance: "worker_1".into(),
         cli: "codex".into(),
         status: "listening".into(),
@@ -6259,7 +6085,7 @@ fn tooltip_app(dir: &str) -> (hcom_graph::app::HcomGraphApp, tempfile::TempDir) 
 
 /// Hovers `worker_1` for enough frames to fade the tooltip in; returns the
 /// tooltip rect and the node's screen center.
-fn hover_tooltip_rect(app: &mut hcom_graph::app::HcomGraphApp) -> (Option<Rect>, Pos2) {
+fn hover_tooltip_rect(app: &mut hcom_dashboard::app::HcomDashboardApp) -> (Option<Rect>, Pos2) {
     let ctx = egui::Context::default();
     let size = Vec2::new(1200.0, 900.0);
     run_app_events(&ctx, app, size, vec![vec![]; 2]);
@@ -6295,7 +6121,7 @@ fn test_tooltip_width_follows_content() {
 
 #[test]
 fn test_tooltip_placement_prefers_right_left_below_above() {
-    use hcom_graph::canvas::tooltip_placement;
+    use hcom_dashboard::canvas::tooltip_placement;
     let canvas = Rect::from_min_size(Pos2::new(0.0, 40.0), Vec2::new(800.0, 600.0));
     let size = Vec2::new(220.0, 120.0);
     let r = 37.0;
@@ -6322,7 +6148,7 @@ fn test_tooltip_placement_prefers_right_left_below_above() {
 
 #[test]
 fn test_tooltip_never_covers_a_node_near_the_canvas_edge() {
-    use hcom_graph::canvas::tooltip_placement;
+    use hcom_dashboard::canvas::tooltip_placement;
     let canvas = Rect::from_min_size(Pos2::new(0.0, 40.0), Vec2::new(800.0, 600.0));
     let size = Vec2::new(220.0, 120.0);
     let r = 37.0;
@@ -6348,7 +6174,7 @@ fn test_tooltip_never_covers_a_node_near_the_canvas_edge() {
 
 #[test]
 fn test_shorten_path_home_and_middle_ellipsis() {
-    use hcom_graph::table_data::shorten_path;
+    use hcom_dashboard::table_data::shorten_path;
     let home = Some("/home/michael");
     assert_eq!(shorten_path("/home/michael", home, 48), "~");
     assert_eq!(shorten_path("/home/michael/x", home, 48), "~/x");
@@ -6374,7 +6200,7 @@ fn test_shorten_path_home_and_middle_ellipsis() {
 fn test_tooltip_dir_is_shortened_with_and_without_home() {
     let (mut app, _t) = tooltip_app("/home/u/projects/x");
     let idx = app.graph.get_node_index("worker_1").unwrap();
-    let dir = |app: &hcom_graph::app::HcomGraphApp| {
+    let dir = |app: &hcom_dashboard::app::HcomDashboardApp| {
         let (_, lines) = app.tooltip_content(idx).unwrap();
         lines.into_iter().find(|(k, _)| k == "dir").unwrap().1
     };
@@ -6393,7 +6219,7 @@ fn test_tooltip_sits_beside_the_hovered_node() {
     let (mut app, _t) = tooltip_app("/w");
     let (rect, center) = hover_tooltip_rect(&mut app);
     let rect = rect.expect("tooltip shown");
-    let r = hcom_graph::canvas::node_extent(app.canvas.zoom);
+    let r = hcom_dashboard::canvas::node_extent(app.canvas.zoom);
     assert!(
         !rect.intersects(Rect::from_center_size(center, Vec2::splat(2.0 * r))),
         "{rect:?} {center:?}"
@@ -6421,7 +6247,7 @@ fn test_tooltip_switch_to_a_wider_card_near_the_edge_never_covers_the_node() {
     let canvas = app.canvas_rect;
     let a = app.graph.get_node_index("worker_1").unwrap();
     let b = app.graph.get_node_index("worker_2").unwrap();
-    let r = hcom_graph::canvas::node_extent(app.canvas.zoom);
+    let r = hcom_dashboard::canvas::node_extent(app.canvas.zoom);
     // Room for a narrow card right of b, not for the wide one.
     let b_screen = Pos2::new(canvas.max.x - r - 8.0 - 260.0, canvas.center().y);
     let b_world = app.canvas.screen_to_world(b_screen, canvas);
@@ -6465,7 +6291,7 @@ fn test_tooltip_switch_to_a_wider_card_near_the_edge_never_covers_the_node() {
     // Same node, content refreshed from short to long while hovered.
     let long_dir = app.table_rows[1].directory.clone();
     app.table_rows[1].directory = "/w".into();
-    let hover_b = |app: &mut hcom_graph::app::HcomGraphApp, frames: usize| {
+    let hover_b = |app: &mut hcom_dashboard::app::HcomDashboardApp, frames: usize| {
         run_app_events(
             &ctx,
             app,
@@ -6520,9 +6346,9 @@ fn legend_message(from: &str, to: &str, id: u64) -> MessageEvent {
 
 #[test]
 fn test_legend_lists_only_visible_encodings() {
-    use hcom_graph::canvas::{Legend, ThemePalette, legend};
-    use hcom_graph::config::ResolvedTheme;
-    use hcom_graph::model::{NodeStyle, WindowedCount};
+    use hcom_dashboard::canvas::{Legend, ThemePalette, legend};
+    use hcom_dashboard::config::ResolvedTheme;
+    use hcom_dashboard::model::{NodeStyle, WindowedCount};
     use std::collections::{HashMap, HashSet};
 
     let mut graph = AgentGraph::new();
@@ -6613,24 +6439,25 @@ fn test_legend_lists_only_visible_encodings() {
 #[test]
 fn test_legend_tab_is_selected_saved_and_restored() {
     use eframe::App;
-    use hcom_graph::config::{GraphState, load_state};
+    use hcom_dashboard::config::{DashboardState, load_state};
 
-    let (dir, mut app) = split_test_app(GraphState::default());
+    let (dir, mut app) = split_test_app(DashboardState::default());
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
     let mut frame = eframe::Frame::_new_kittest();
-    let mut run =
-        |ctx: &egui::Context, app: &mut hcom_graph::app::HcomGraphApp, events: Vec<egui::Event>| {
-            let input = egui::RawInput {
-                screen_rect: Some(screen),
-                events,
-                ..Default::default()
-            };
-            let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
-            out.textures_delta.clear();
-            out
+    let mut run = |ctx: &egui::Context,
+                   app: &mut hcom_dashboard::app::HcomDashboardApp,
+                   events: Vec<egui::Event>| {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
         };
+        let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        out.textures_delta.clear();
+        out
+    };
     run(&ctx, &mut app, vec![]);
     let out = run(&ctx, &mut app, vec![]);
     let tab = widget_rect(&out, "Legend").expect("Legend tab");
@@ -6683,10 +6510,10 @@ fn test_legend_tab_is_selected_saved_and_restored() {
 
 #[test]
 fn test_task_77_29_hierarchy_and_spawn_edges_preserved_across_table_sync() {
-    use hcom_graph::model::InstanceSnapshot;
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::model::InstanceSnapshot;
+    use hcom_dashboard::table_data::TableRow;
 
-    let (_dir, mut app) = split_test_app(hcom_graph::config::GraphState::default());
+    let (_dir, mut app) = split_test_app(hcom_dashboard::config::DashboardState::default());
 
     // 1. Live snapshots initialize parent and child with a spawn edge
     let snapshots = vec![
@@ -6771,10 +6598,10 @@ fn test_task_77_29_hierarchy_and_spawn_edges_preserved_across_table_sync() {
 #[test]
 fn test_task_77_29_table_and_graph_node_parity_and_visible_projection() {
     use eframe::App;
-    use hcom_graph::model::MessageData;
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::model::MessageData;
+    use hcom_dashboard::table_data::TableRow;
 
-    let (_dir, mut app) = split_test_app(hcom_graph::config::GraphState::default());
+    let (_dir, mut app) = split_test_app(hcom_dashboard::config::DashboardState::default());
 
     // 1. Table rows contain 2 running instances and 3 stopped catalog agents (5 total)
     app.table_rows = vec![
@@ -6821,7 +6648,7 @@ fn test_task_77_29_table_and_graph_node_parity_and_visible_projection() {
 
     // 2. Add an orphan placeholder node for a message recipient that is NOT in the table
     app.graph
-        .apply_message_event(&hcom_graph::model::MessageEvent {
+        .apply_message_event(&hcom_dashboard::model::MessageEvent {
             id: 100,
             ts: chrono::Utc::now(),
             instance: "agent_a_inst1".into(),
@@ -6983,27 +6810,28 @@ fn test_task_77_29_table_and_graph_node_parity_and_visible_projection() {
 
 #[test]
 fn test_task_77_30_view_mode_migration_persistence_and_f4_toggle() {
-    use hcom_graph::config::{GraphState, ViewMode, load_state, save_state};
+    use hcom_dashboard::config::{DashboardState, ViewMode, load_state, save_state};
 
     // 1. Legacy migration: JSON without view_mode, show_table = false
-    let legacy_graph_only: GraphState = serde_json::from_str(r#"{"show_table": false}"#).unwrap();
+    let legacy_graph_only: DashboardState =
+        serde_json::from_str(r#"{"show_table": false}"#).unwrap();
     assert_eq!(legacy_graph_only.view_mode, None);
     assert_eq!(legacy_graph_only.effective_view_mode(), ViewMode::GraphOnly);
 
     // 2. Legacy migration: JSON without view_mode, show_table = true
-    let legacy_both: GraphState = serde_json::from_str(r#"{"show_table": true}"#).unwrap();
+    let legacy_both: DashboardState = serde_json::from_str(r#"{"show_table": true}"#).unwrap();
     assert_eq!(legacy_both.view_mode, None);
     assert_eq!(legacy_both.effective_view_mode(), ViewMode::Both);
 
     // 3. Default state
-    let def = GraphState::default();
+    let def = DashboardState::default();
     assert_eq!(def.view_mode, Some(ViewMode::Both));
     assert_eq!(def.effective_view_mode(), ViewMode::Both);
     assert!(def.show_table);
 
     // 4. Persistence round-trip with set_view_mode
     let dir = tempfile::tempdir().unwrap();
-    let mut state = GraphState::default();
+    let mut state = DashboardState::default();
     state.set_view_mode(ViewMode::TableOnly);
     assert_eq!(state.view_mode, Some(ViewMode::TableOnly));
     assert!(state.show_table);
@@ -7026,7 +6854,7 @@ fn test_task_77_30_view_mode_migration_persistence_and_f4_toggle() {
     assert!(!reloaded2.show_table);
 
     // 5. F4 toggle on App
-    let (_td, mut app) = split_test_app(GraphState::default());
+    let (_td, mut app) = split_test_app(DashboardState::default());
     assert_eq!(app.state.effective_view_mode(), ViewMode::Both);
 
     // Both -> GraphOnly
@@ -7046,9 +6874,9 @@ fn test_task_77_30_view_mode_migration_persistence_and_f4_toggle() {
 
 #[test]
 fn test_task_77_30_view_modes_render_expected_panels() {
-    use hcom_graph::config::{GraphState, ViewMode};
+    use hcom_dashboard::config::{DashboardState, ViewMode};
 
-    let (_dir, mut app) = split_test_app(GraphState::default());
+    let (_dir, mut app) = split_test_app(DashboardState::default());
 
     // In ViewMode::Both: agent_table_panel bottom panel exists
     app.set_view_mode(ViewMode::Both);
@@ -7089,15 +6917,15 @@ fn test_task_77_30_view_modes_render_expected_panels() {
 
 #[test]
 fn test_task_77_30_unified_selection_and_action_dispatch() {
-    use hcom_graph::action::{ActionRequest, ActionWorkerHandle};
-    use hcom_graph::canvas::CanvasAction;
-    use hcom_graph::config::{GraphState, ViewMode};
-    use hcom_graph::model::MessageData;
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::action::{ActionRequest, ActionWorkerHandle};
+    use hcom_dashboard::canvas::CanvasAction;
+    use hcom_dashboard::config::{DashboardState, ViewMode};
+    use hcom_dashboard::model::MessageData;
+    use hcom_dashboard::table_data::TableRow;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
-    let (_dir, mut app) = split_test_app(GraphState::default());
+    let (_dir, mut app) = split_test_app(DashboardState::default());
 
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let runner = MockActionRunner {
@@ -7130,7 +6958,8 @@ fn test_task_77_30_unified_selection_and_action_dispatch() {
     let idx_beta = app.graph.get_node_index("cat_beta").unwrap();
 
     // Fix node positions in manual mode so screen coordinates are stable
-    app.layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    app.layout
+        .set_mode(hcom_dashboard::layout::LayoutMode::Manual);
     app.layout.sync_nodes(&app.graph);
     app.layout
         .set_node_pos(idx_alpha, Pos2::new(100.0, 100.0), false);
@@ -7153,8 +6982,8 @@ fn test_task_77_30_unified_selection_and_action_dispatch() {
                 &app.graph,
                 &mut app.layout,
                 None,
-                &hcom_graph::canvas::ThemePalette::for_theme(
-                    hcom_graph::config::ResolvedTheme::Dark,
+                &hcom_dashboard::canvas::ThemePalette::for_theme(
+                    hcom_dashboard::config::ResolvedTheme::Dark,
                 ),
             );
             center_alpha = app
@@ -7192,8 +7021,8 @@ fn test_task_77_30_unified_selection_and_action_dispatch() {
                 &app.graph,
                 &mut app.layout,
                 None,
-                &hcom_graph::canvas::ThemePalette::for_theme(
-                    hcom_graph::config::ResolvedTheme::Dark,
+                &hcom_dashboard::canvas::ThemePalette::for_theme(
+                    hcom_dashboard::config::ResolvedTheme::Dark,
                 ),
             );
             app.handle_canvas_action(action);
@@ -7244,8 +7073,8 @@ fn test_task_77_30_unified_selection_and_action_dispatch() {
                 &app.graph,
                 &mut app.layout,
                 None,
-                &hcom_graph::canvas::ThemePalette::for_theme(
-                    hcom_graph::config::ResolvedTheme::Dark,
+                &hcom_dashboard::canvas::ThemePalette::for_theme(
+                    hcom_dashboard::config::ResolvedTheme::Dark,
                 ),
             );
             app.handle_canvas_action(action);
@@ -7293,7 +7122,7 @@ fn test_task_77_30_unified_selection_and_action_dispatch() {
     // 4. Edge click: selects edge, clears node and row selection
     // Add a message edge between the nodes
     app.graph
-        .apply_message_event(&hcom_graph::model::MessageEvent {
+        .apply_message_event(&hcom_dashboard::model::MessageEvent {
             id: 1,
             ts: chrono::Utc::now(),
             instance: "inst_alpha_1".into(),
@@ -7360,10 +7189,10 @@ fn test_task_77_30_unified_selection_and_action_dispatch() {
 #[test]
 fn test_task_77_32_click_on_node_does_not_pan_zoom_or_move_graph() {
     use eframe::App;
-    use hcom_graph::config::{GraphState, ViewMode};
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::config::{DashboardState, ViewMode};
+    use hcom_dashboard::table_data::TableRow;
 
-    let (_dir, mut app) = split_test_app(GraphState::default());
+    let (_dir, mut app) = split_test_app(DashboardState::default());
     app.set_view_mode(ViewMode::GraphOnly);
     app.auto_fit = true;
 
@@ -7378,7 +7207,8 @@ fn test_task_77_32_click_on_node_does_not_pan_zoom_or_move_graph() {
 
     let idx = app.graph.get_node_index("inst_fixed_1").unwrap();
     let initial_pos = Pos2::ZERO;
-    app.layout.set_mode(hcom_graph::layout::LayoutMode::Cluster);
+    app.layout
+        .set_mode(hcom_dashboard::layout::LayoutMode::Cluster);
     app.layout.sync_nodes(&app.graph);
     app.layout.set_node_pos(idx, initial_pos, false);
     app.layout.is_sleeping = true;
@@ -7474,10 +7304,10 @@ fn test_task_77_32_click_on_node_does_not_pan_zoom_or_move_graph() {
 #[test]
 fn test_task_77_32_sub_threshold_motion_does_not_pan_or_drag() {
     use eframe::App;
-    use hcom_graph::config::{GraphState, ViewMode};
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::config::{DashboardState, ViewMode};
+    use hcom_dashboard::table_data::TableRow;
 
-    let (_dir, mut app) = split_test_app(GraphState::default());
+    let (_dir, mut app) = split_test_app(DashboardState::default());
     app.set_view_mode(ViewMode::GraphOnly);
 
     app.table_rows = vec![TableRow {
@@ -7491,7 +7321,8 @@ fn test_task_77_32_sub_threshold_motion_does_not_pan_or_drag() {
 
     let idx = app.graph.get_node_index("inst_sub_1").unwrap();
     let initial_pos = Pos2::ZERO;
-    app.layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    app.layout
+        .set_mode(hcom_dashboard::layout::LayoutMode::Manual);
     app.layout.sync_nodes(&app.graph);
     app.layout.set_node_pos(idx, initial_pos, false);
 
@@ -7552,10 +7383,10 @@ fn test_task_77_32_sub_threshold_motion_does_not_pan_or_drag() {
 #[test]
 fn test_task_77_32_fast_drag_beyond_hit_radius_drags_candidate() {
     use eframe::App;
-    use hcom_graph::config::{GraphState, ViewMode};
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::config::{DashboardState, ViewMode};
+    use hcom_dashboard::table_data::TableRow;
 
-    let (_dir, mut app) = split_test_app(GraphState::default());
+    let (_dir, mut app) = split_test_app(DashboardState::default());
     app.set_view_mode(ViewMode::GraphOnly);
 
     app.table_rows = vec![TableRow {
@@ -7569,7 +7400,8 @@ fn test_task_77_32_fast_drag_beyond_hit_radius_drags_candidate() {
 
     let idx = app.graph.get_node_index("inst_fast_1").unwrap();
     let initial_pos = Pos2::ZERO;
-    app.layout.set_mode(hcom_graph::layout::LayoutMode::Manual);
+    app.layout
+        .set_mode(hcom_dashboard::layout::LayoutMode::Manual);
     app.layout.sync_nodes(&app.graph);
     app.layout.set_node_pos(idx, initial_pos, false);
 
@@ -7633,16 +7465,16 @@ fn test_task_77_32_fast_drag_beyond_hit_radius_drags_candidate() {
 #[test]
 fn test_task_77_33_cell_text_and_empty_space_click_selects_row() {
     use eframe::App;
-    use hcom_graph::config::GraphState;
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::config::DashboardState;
+    use hcom_dashboard::table_data::TableRow;
 
     let dir = tempfile::tempdir().unwrap();
-    let state = GraphState {
+    let state = DashboardState {
         columns: vec!["instance".into(), "roaming".into(), "detail".into()],
         ..Default::default()
     };
-    let mut app = hcom_graph::app::HcomGraphApp::new_for_test(
-        hcom_graph::config::GraphConfig::default(),
+    let mut app = hcom_dashboard::app::HcomDashboardApp::new_for_test(
+        hcom_dashboard::config::DashboardConfig::default(),
         state,
         dir.path().to_path_buf(),
     );
@@ -7666,7 +7498,7 @@ fn test_task_77_33_cell_text_and_empty_space_click_selects_row() {
     let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
     let mut frame = eframe::Frame::_new_kittest();
     let mut time = 0.0;
-    let mut run = |app: &mut hcom_graph::app::HcomGraphApp, events: Vec<egui::Event>| {
+    let mut run = |app: &mut hcom_dashboard::app::HcomDashboardApp, events: Vec<egui::Event>| {
         time += 0.1;
         let input = egui::RawInput {
             screen_rect: Some(screen),
@@ -7742,14 +7574,14 @@ fn test_task_77_33_cell_text_and_empty_space_click_selects_row() {
 #[test]
 fn test_task_77_35_detail_panel_is_fixed_and_never_hidden_by_agent_status_or_selection() {
     use eframe::App;
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState};
-    use hcom_graph::table_data::TableRow;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
 
@@ -7777,7 +7609,7 @@ fn test_task_77_35_detail_panel_is_fixed_and_never_hidden_by_agent_status_or_sel
     let mut time = 0.0;
     let root = std::cell::Cell::new(egui::Id::NULL);
 
-    let mut run = |app: &mut HcomGraphApp| {
+    let mut run = |app: &mut HcomDashboardApp| {
         time += 0.1;
         let input = egui::RawInput {
             screen_rect: Some(screen),
@@ -7828,7 +7660,7 @@ fn test_task_77_35_detail_panel_is_fixed_and_never_hidden_by_agent_status_or_sel
     );
 
     // 4. Clear selection: panel remains open with identical width
-    app.handle_canvas_action(Some(hcom_graph::canvas::CanvasAction::SelectionCleared));
+    app.handle_canvas_action(Some(hcom_dashboard::canvas::CanvasAction::SelectionCleared));
     let _ = run(&mut app);
     assert!(app.state.show_side_panel);
     let detail_cleared = panel_rect(&ctx, "detail_side_panel").expect("detail_side_panel rendered");
@@ -7916,7 +7748,7 @@ fn test_task_77_35_detail_panel_is_fixed_and_never_hidden_by_agent_status_or_sel
     );
 
     // If an in-flight result with the old generation arrives, accept_generation_result rejects it
-    assert!(!hcom_graph::app::accept_generation_result(
+    assert!(!hcom_dashboard::app::accept_generation_result(
         app.selection_generation,
         active_gen
     ));
@@ -7944,14 +7776,14 @@ fn test_task_77_35_detail_panel_is_fixed_and_never_hidden_by_agent_status_or_sel
 #[test]
 fn test_task_77_34_config_tab_displays_agents_json_info_for_stopped_agent() {
     use eframe::App;
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState, load_state, save_state};
-    use hcom_graph::table_data::build_table_rows;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState, load_state, save_state};
+    use hcom_dashboard::table_data::build_table_rows;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
 
@@ -8003,7 +7835,7 @@ fn test_task_77_34_config_tab_displays_agents_json_info_for_stopped_agent() {
     let mut frame = eframe::Frame::_new_kittest();
     let mut time = 0.0;
 
-    let mut run = |app: &mut HcomGraphApp| {
+    let mut run = |app: &mut HcomDashboardApp| {
         time += 0.1;
         let input = egui::RawInput {
             screen_rect: Some(screen),
@@ -8112,7 +7944,7 @@ fn test_task_77_34_config_tab_displays_agents_json_info_for_stopped_agent() {
 #[test]
 fn test_task_77_31_canonical_round_trip() {
     use chrono::DateTime;
-    use hcom_graph::model::{MessageRange, format_canonical_range, parse_time_range};
+    use hcom_dashboard::model::{MessageRange, format_canonical_range, parse_time_range};
 
     let now = DateTime::from_timestamp(1700000000, 0).unwrap();
 
@@ -8155,7 +7987,7 @@ fn test_task_77_31_canonical_round_trip() {
 #[test]
 fn test_task_77_31_fractional_seconds_normalized_to_second_precision() {
     use chrono::{DateTime, Utc};
-    use hcom_graph::model::{MessageRange, format_canonical_range, parse_time_range};
+    use hcom_dashboard::model::{MessageRange, format_canonical_range, parse_time_range};
 
     let now = DateTime::from_timestamp(1700000000, 0).unwrap();
     let text = "2026-11-03T12:00:00.123Z - 2026-11-03T13:00:00.789Z";
@@ -8185,7 +8017,7 @@ fn test_task_77_31_fractional_seconds_normalized_to_second_precision() {
 #[test]
 fn test_task_77_31_delimiters_and_syntax() {
     use chrono::DateTime;
-    use hcom_graph::model::parse_time_range;
+    use hcom_dashboard::model::parse_time_range;
 
     let now = DateTime::from_timestamp(1700000000, 0).unwrap();
 
@@ -8211,7 +8043,7 @@ fn test_task_77_31_delimiters_and_syntax() {
 #[test]
 fn test_task_77_31_strict_start_before_end_and_equality_rejected() {
     use chrono::DateTime;
-    use hcom_graph::model::parse_time_range;
+    use hcom_dashboard::model::parse_time_range;
 
     let now = DateTime::from_timestamp(1700000000, 0).unwrap();
 
@@ -8233,7 +8065,7 @@ fn test_task_77_31_strict_start_before_end_and_equality_rejected() {
 #[test]
 fn test_task_77_31_relative_overflow_and_invalid_numbers_rejected() {
     use chrono::DateTime;
-    use hcom_graph::model::parse_time_range;
+    use hcom_dashboard::model::parse_time_range;
 
     let now = DateTime::from_timestamp(1700000000, 0).unwrap();
 
@@ -8259,13 +8091,13 @@ fn test_task_77_31_relative_overflow_and_invalid_numbers_rejected() {
 #[test]
 fn test_task_77_31_enter_with_focus_clears_invalid_formats_canonical_and_persists() {
     use eframe::App;
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState, load_state};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState, load_state};
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
 
@@ -8325,26 +8157,26 @@ fn test_task_77_31_enter_with_focus_clears_invalid_formats_canonical_and_persist
         "Window span must be 3600s"
     );
 
-    // Verify persistence to graph-state.json
+    // Verify persistence to dashboard-state.json
     let reloaded = load_state(dir.path());
     assert_eq!(
         reloaded.window_span_secs,
         Some(3600),
-        "graph-state.json must persist window_span_secs on Enter commit"
+        "dashboard-state.json must persist window_span_secs on Enter commit"
     );
 }
 
 #[test]
 fn test_task_77_31_clamping_outside_retained_bounds() {
     use chrono::DateTime;
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState};
-    use hcom_graph::model::{MessageData, MessageEvent, MessageRange};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::model::{MessageData, MessageEvent, MessageRange};
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
 
@@ -8389,14 +8221,14 @@ fn test_task_77_31_clamping_outside_retained_bounds() {
 
 #[test]
 fn test_task_77_31_slider_left_boundary_all_and_right_boundary_live() {
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState};
-    use hcom_graph::model::MessageRange;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::model::MessageRange;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
 
@@ -8421,14 +8253,14 @@ fn test_task_77_31_slider_left_boundary_all_and_right_boundary_live() {
 #[test]
 fn test_task_77_31_invalid_text_leaves_window_intact_and_marks_invalid() {
     use eframe::App;
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState, load_state};
-    use hcom_graph::model::MessageRange;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState, load_state};
+    use hcom_dashboard::model::MessageRange;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
 
@@ -8497,14 +8329,14 @@ fn test_task_77_31_invalid_text_leaves_window_intact_and_marks_invalid() {
 fn test_task_77_31_slider_thumbs_coincide_at_min_no_panic_and_drags_safely() {
     use chrono::DateTime;
     use eframe::App;
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState};
-    use hcom_graph::model::{MessageData, MessageEvent, MessageRange};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::model::{MessageData, MessageEvent, MessageRange};
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
 
@@ -8617,14 +8449,14 @@ fn test_task_77_31_slider_thumbs_coincide_at_min_no_panic_and_drags_safely() {
 #[test]
 fn test_task_77_31_apply_message_range_rejects_overflow_and_preserves_prior_window() {
     use chrono::DateTime;
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState};
-    use hcom_graph::model::{MAX_DURATION_SECS, MessageData, MessageEvent, MessageRange};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::model::{MAX_DURATION_SECS, MessageData, MessageEvent, MessageRange};
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
 
@@ -8711,24 +8543,24 @@ fn test_task_77_31_apply_message_range_rejects_overflow_and_preserves_prior_wind
 
 #[test]
 fn test_task_77_37_theme_deserialization_and_forward_compatibility() {
-    use hcom_graph::config::{GraphState, ThemePreference};
+    use hcom_dashboard::config::{DashboardState, ThemePreference};
 
     // 1. Explicit theme preferences
     let json_light = r#"{"theme": "light"}"#;
-    let state_light: GraphState = serde_json::from_str(json_light).unwrap();
+    let state_light: DashboardState = serde_json::from_str(json_light).unwrap();
     assert_eq!(state_light.theme, Some(ThemePreference::Light));
 
     let json_dark = r#"{"theme": "dark"}"#;
-    let state_dark: GraphState = serde_json::from_str(json_dark).unwrap();
+    let state_dark: DashboardState = serde_json::from_str(json_dark).unwrap();
     assert_eq!(state_dark.theme, Some(ThemePreference::Dark));
 
     let json_auto = r#"{"theme": "auto"}"#;
-    let state_auto: GraphState = serde_json::from_str(json_auto).unwrap();
+    let state_auto: DashboardState = serde_json::from_str(json_auto).unwrap();
     assert_eq!(state_auto.theme, Some(ThemePreference::Auto));
 
     // 2. Missing theme defaults to None (which acts as Auto)
     let json_empty = r#"{}"#;
-    let state_empty: GraphState = serde_json::from_str(json_empty).unwrap();
+    let state_empty: DashboardState = serde_json::from_str(json_empty).unwrap();
     assert_eq!(state_empty.theme, None);
 
     // 3. Forward-compatibility: unknown theme names must not reject state
@@ -8737,7 +8569,7 @@ fn test_task_77_37_theme_deserialization_and_forward_compatibility() {
         "detail_width_px": 420.0,
         "sort_col": "status"
     }"#;
-    let state_unknown: GraphState = serde_json::from_str(json_unknown).unwrap();
+    let state_unknown: DashboardState = serde_json::from_str(json_unknown).unwrap();
     assert_eq!(
         state_unknown.theme, None,
         "Unknown theme must deserialize to None without error"
@@ -8746,19 +8578,19 @@ fn test_task_77_37_theme_deserialization_and_forward_compatibility() {
     assert_eq!(state_unknown.sort_col, Some("status".into()));
 
     // 4. Round-trip serialization
-    let state = GraphState {
+    let state = DashboardState {
         theme: Some(ThemePreference::Light),
         ..Default::default()
     };
     let serialized = serde_json::to_string(&state).unwrap();
     assert!(serialized.contains(r#""theme":"light""#));
-    let restored: GraphState = serde_json::from_str(&serialized).unwrap();
+    let restored: DashboardState = serde_json::from_str(&serialized).unwrap();
     assert_eq!(restored.theme, Some(ThemePreference::Light));
 }
 
 #[test]
 fn test_task_77_37_system_theme_resolution() {
-    use hcom_graph::config::{ResolvedTheme, ThemePreference};
+    use hcom_dashboard::config::{ResolvedTheme, ThemePreference};
 
     // Auto theme resolution
     assert_eq!(
@@ -8819,9 +8651,9 @@ fn wcag_contrast_ratio(c1: egui::Color32, c2: egui::Color32) -> f64 {
 
 #[test]
 fn test_task_77_37_palette_contrast_all_entries() {
-    use hcom_graph::canvas::ThemePalette;
-    use hcom_graph::config::ResolvedTheme;
-    use hcom_graph::model::AgentStatus;
+    use hcom_dashboard::canvas::ThemePalette;
+    use hcom_dashboard::config::ResolvedTheme;
+    use hcom_dashboard::model::AgentStatus;
 
     for resolved in [ResolvedTheme::Dark, ResolvedTheme::Light] {
         let palette = ThemePalette::for_theme(resolved);
@@ -8929,10 +8761,10 @@ fn test_task_77_37_palette_contrast_all_entries() {
 
 #[test]
 fn test_task_77_37_legend_matches_active_palette() {
-    use hcom_graph::canvas::{ThemePalette, legend};
-    use hcom_graph::config::ResolvedTheme;
-    use hcom_graph::layout::GraphLayout;
-    use hcom_graph::model::AgentGraph;
+    use hcom_dashboard::canvas::{ThemePalette, legend};
+    use hcom_dashboard::config::ResolvedTheme;
+    use hcom_dashboard::layout::GraphLayout;
+    use hcom_dashboard::model::AgentGraph;
     use std::collections::HashSet;
 
     let mut graph = AgentGraph::new();
@@ -8973,12 +8805,12 @@ fn test_task_77_37_legend_matches_active_palette() {
 
     // Status colors in active palette
     assert_ne!(
-        light_palette.status_color(&hcom_graph::model::AgentStatus::Active),
-        dark_palette.status_color(&hcom_graph::model::AgentStatus::Active)
+        light_palette.status_color(&hcom_dashboard::model::AgentStatus::Active),
+        dark_palette.status_color(&hcom_dashboard::model::AgentStatus::Active)
     );
     assert_ne!(
-        light_palette.status_color(&hcom_graph::model::AgentStatus::Listening),
-        dark_palette.status_color(&hcom_graph::model::AgentStatus::Listening)
+        light_palette.status_color(&hcom_dashboard::model::AgentStatus::Listening),
+        dark_palette.status_color(&hcom_dashboard::model::AgentStatus::Listening)
     );
 }
 
@@ -8986,23 +8818,23 @@ fn test_task_77_37_legend_matches_active_palette() {
 fn test_task_77_37_top_bar_theme_toggle_cycles_and_persists() {
     use eframe::App;
     use egui::{Pos2, Rect, Vec2};
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState, ThemePreference, load_state};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState, ThemePreference, load_state};
 
     let dir = tempfile::tempdir().unwrap();
-    let state = GraphState {
+    let state = DashboardState {
         theme: Some(ThemePreference::Auto),
         ..Default::default()
     };
     let mut app =
-        HcomGraphApp::new_for_test(GraphConfig::default(), state, dir.path().to_path_buf());
+        HcomDashboardApp::new_for_test(DashboardConfig::default(), state, dir.path().to_path_buf());
 
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
     let mut frame = eframe::Frame::_new_kittest();
     let run = |ctx: &egui::Context,
-               app: &mut HcomGraphApp,
+               app: &mut HcomDashboardApp,
                frame: &mut eframe::Frame,
                events: Vec<egui::Event>| {
         let input = egui::RawInput {
@@ -9018,7 +8850,7 @@ fn test_task_77_37_top_bar_theme_toggle_cycles_and_persists() {
     };
 
     let click_widget = |ctx: &egui::Context,
-                        app: &mut HcomGraphApp,
+                        app: &mut HcomDashboardApp,
                         frame: &mut eframe::Frame,
                         out: &egui::FullOutput,
                         substr: &str| {
@@ -9102,9 +8934,9 @@ fn test_task_77_37_top_bar_theme_toggle_cycles_and_persists() {
 
 #[test]
 fn test_task_77_37_detail_tabs_palette_contrast_light_mode() {
-    use hcom_graph::canvas::ThemePalette;
-    use hcom_graph::config::ResolvedTheme;
-    use hcom_graph::model::AgentStatus;
+    use hcom_dashboard::canvas::ThemePalette;
+    use hcom_dashboard::config::ResolvedTheme;
+    use hcom_dashboard::model::AgentStatus;
 
     let palette = ThemePalette::for_theme(ResolvedTheme::Light);
     let panel_bg = egui::Color32::from_rgb(255, 255, 255);
@@ -9143,16 +8975,16 @@ fn test_task_77_37_detail_tabs_palette_contrast_light_mode() {
 
 #[test]
 fn test_task_77_37_auto_restores_light_visuals_when_light_system_had_dark_visuals() {
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState, ResolvedTheme, ThemePreference};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState, ResolvedTheme, ThemePreference};
 
     let dir = tempfile::tempdir().unwrap();
-    let state = GraphState {
+    let state = DashboardState {
         theme: Some(ThemePreference::Auto),
         ..Default::default()
     };
     let mut app =
-        HcomGraphApp::new_for_test(GraphConfig::default(), state, dir.path().to_path_buf());
+        HcomDashboardApp::new_for_test(DashboardConfig::default(), state, dir.path().to_path_buf());
 
     let ctx = egui::Context::default();
     let input = egui::RawInput {
@@ -9174,7 +9006,7 @@ fn test_task_77_37_auto_restores_light_visuals_when_light_system_had_dark_visual
 
 #[test]
 fn test_task_77_40_lxqt_palette_theme() {
-    use hcom_graph::config::lxqt_palette_theme;
+    use hcom_dashboard::config::lxqt_palette_theme;
 
     let light =
         "[General]\ntheme=Clearlooks\n\n[Palette]\nbase_color=#ffffff\nwindow_color=#efefef\n";
@@ -9191,7 +9023,7 @@ fn test_task_77_40_lxqt_palette_theme() {
 
 #[test]
 fn test_task_77_40_gtk_settings_theme() {
-    use hcom_graph::config::gtk_settings_theme;
+    use hcom_dashboard::config::gtk_settings_theme;
 
     let light = "[Settings]\ngtk-theme-name = Arc-Lighter\n";
     assert_eq!(gtk_settings_theme(light), Some(egui::Theme::Light));
@@ -9210,7 +9042,7 @@ fn test_task_77_40_gtk_settings_theme() {
 
 #[test]
 fn test_task_77_40_desktop_theme_sources_in_order() {
-    use hcom_graph::config::desktop_theme;
+    use hcom_dashboard::config::desktop_theme;
 
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(desktop_theme(dir.path()), None, "no files: no theme");
@@ -9238,13 +9070,13 @@ fn test_task_77_40_desktop_theme_sources_in_order() {
 
 #[test]
 fn test_task_77_40_auto_uses_desktop_theme_when_system_reports_none() {
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState, ResolvedTheme};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState, ResolvedTheme};
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
     let ctx = egui::Context::default();
@@ -9261,13 +9093,13 @@ fn test_task_77_40_auto_uses_desktop_theme_when_system_reports_none() {
 #[test]
 fn test_task_77_41_theme_toggle_sits_right_of_fit() {
     use eframe::App;
-    use hcom_graph::app::HcomGraphApp;
-    use hcom_graph::config::{GraphConfig, GraphState};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
 
     let dir = tempfile::tempdir().unwrap();
-    let mut app = HcomGraphApp::new_for_test(
-        GraphConfig::default(),
-        GraphState::default(),
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
         dir.path().to_path_buf(),
     );
     let ctx = egui::Context::default();

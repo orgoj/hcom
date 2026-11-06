@@ -21,7 +21,7 @@ pub const NO_CLASS: &str = "-";
 const MAX_STDOUT: usize = 1 << 20;
 const MAX_STDERR: usize = 64 << 10;
 
-/// hcom-graph is built only from this repository, next to the classifier.
+/// hcom-dashboard is built only from this repository, next to the classifier.
 pub const IDLE_CHECK: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../idle-classifier/idle_check.py"

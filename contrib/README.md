@@ -258,9 +258,9 @@ characters as JSON escapes). Without `screen_bar` all built-ins are shown; `[]` 
 the bar. An unknown name, any other item or a repeated label is reported in the log and
 skipped; a `screen_bar` that is not a list keeps the default bar.
 
-## hcom-graph
+## hcom-dashboard
 
-2D cyclic graph GUI dashboard in Rust (`egui`/`eframe`) visualizing running `hcom` agents:
+Dashboard in Rust (`egui`/`eframe`) visualizing running `hcom` agents:
 - Nodes represent agents, colored by status (`active` green, `listening` blue, `blocked` red, `stopped` gray).
 - Edges represent relationships:
   - Directed silver lines with arrow for spawn relationships (parent -> child).
@@ -272,21 +272,21 @@ skipped; a `screen_bar` that is not a list keeps the default bar.
   - `Pin Position` / `Unpin Position` in a node's right-click menu keeps a node in place across layout modes and restarts.
   - Top status bar with agent counts by state, message stats, zoom reset and zoom percentage.
 - Layout and selection:
-  - Toolbar layout selector: `Both (F4)` (graph + agent table), `Graph` (canvas only), and `Table` (table only). Persisted in GUI state (`view_mode`).
+  - Toolbar layout selector: `Both (F4)` (graph + agent table), `Graph` (canvas only), and `Table` (table only). Persisted in `~/.hcom/dashboard-state.json` (`view_mode`); configuration in `~/.hcom/dashboard.json`.
   - Detail panel tabs: `Summary`, `Report (F9)`, `Screen (F5)`, `Transcript (F6)`, `Events (F7)`, `Log (F8)`, `Config`, and `Legend`. When an agent is stopped, `Screen`, `Transcript`, and `Events` link to `Config` to inspect catalog attributes from `agents.json`.
   - Message time window: interactive two-handle slider (dragging start and end handles, with boundary snapping to All and Live) and direct text input (relative spans like `1h`, `15m`, `all`, or absolute intervals like `12:00 - 13:00`, `2026-11-03 12:00 - 2026-11-03 13:00`). Invalid text is highlighted in red leaving the interval untouched.
   - Unified selection: clicking a node or table row synchronizes selection across canvas, table, and detail panel. Double-clicking a node attaches to the agent. Clicking an edge selects the relationship and clears agent selection; clicking empty canvas clears selection.
 
 ### Running
 
-To run `hcom-graph`:
+To run `hcom-dashboard`:
 
 ```bash
-cargo run --manifest-path contrib/hcom-graph/Cargo.toml
+cargo run --manifest-path contrib/hcom-dashboard/Cargo.toml
 ```
 
 To run tests:
 
 ```bash
-cargo test --manifest-path contrib/hcom-graph/Cargo.toml
+cargo test --manifest-path contrib/hcom-dashboard/Cargo.toml
 ```

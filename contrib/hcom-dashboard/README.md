@@ -1,8 +1,8 @@
-# hcom-graph
+# hcom-dashboard
 
 Native Rust GUI for visualizing and managing `hcom` agents, instances, and message flows. Built with `egui`/`eframe`.
 
-`hcom-graph` integrates interactive 2D node-link graph visualization with full agent fleet management:
+`hcom-dashboard` integrates interactive 2D node-link graph visualization with full agent fleet management:
 - **Layout**: the graph canvas fills the upper left; the right detail panel holds the tabs of the selected agent (Summary, Report (F9), Screen (F5), Transcript (F6), Events (F7), Log (F8), Config) and the graph-wide Legend tab. The agent table spans the full window width at the bottom. The toolbar view selector switches between `Both (F4)`, `Graph`, and `Table` modes (pressing F4 toggles between Both and Graph modes); `Detail` shows or hides the detail panel; an F5–F9 key opens the detail panel on its tab. F-keys act even while a text field has focus. Drag the table top edge or the detail panel left edge to resize (double-click resets to 30 %); a size is stored as a fraction of the window, so it stays put until you drag again and keeps its proportion on another screen. Panel content never changes the size. Widen the detail panel for the Screen tab (terminal lines scroll horizontally, the inject bar stays at the panel bottom). The canvas keeps at least 150 px of height and 200 px of width while the panels need more; the panels never go below 80 px (table) and 240 px (detail panel), so in a very small window the canvas gives way first. The stored fraction stays for the next larger window.
 - **Config tab & stopped agents**: When an agent is stopped, the Screen, Transcript, and Events detail tabs show an explicit stopped notice with a `📋 View Config` shortcut to switch to the Config tab. The Config tab displays the agent's catalog attributes from `agents.json` (CLI tool, description, directory, model, reasoning effort, groups, roaming configuration, skills, instructions, status columns) with parameter preview controls for future editing, while adhering to catalog isolation (catalog provenance paths are not exposed).
 - **Table**: Real-time listing of active instances and catalog agents with configurable columns and search/filtering. A click anywhere in a row selects it (one band over the whole row) and its graph node; Up/Down select the next or previous row in the shown order like a click and scroll it into view (not while a text field has focus; the graph has no keyboard control); cells longer than 300 px end with … and show the full value in a tooltip; a click on a column header sorts by it.
@@ -20,25 +20,21 @@ Native Rust GUI for visualizing and managing `hcom` agents, instances, and messa
 
 ## Configuration & State Persistence
 
-`hcom-graph` adheres to strict configuration and state isolation rules:
+`hcom-dashboard` keeps its configuration and state in its own files:
 
-### Configuration Precedence
-1. `~/.hcom/graph.json` (takes precedence if present).
-2. `~/.hcom/gui.json` (fallback, fully compatible with `contrib/hcom-gui`).
-
-If neither exists or if syntax is corrupt, built-in defaults are used.
+### Configuration
+`~/.hcom/dashboard.json` (same keys as `contrib/hcom-gui`'s `gui.json`). If it is missing or its syntax is corrupt, built-in defaults are used.
 
 ### State Persistence
 User layout preferences (table and detail panel visibility, active detail tab, table height and detail panel width as window fractions, active filters, sort order, layout mode, the message window span and limit, zoom, pan, and the positions of pinned nodes) are saved to:
 ```
-~/.hcom/graph-state.json
+~/.hcom/dashboard-state.json
 ```
-> **CRITICAL BOUNDARY:** `hcom-graph` **NEVER** modifies or writes to `~/.hcom/gui-state.json`. It only reads `gui-state.json` as a one-way initial fallback if `graph-state.json` does not exist.
 
-- A pinned node's position (`pinned_positions`) is stored by instance name when it is pinned and when a drag of the pinned node ends; the 500 most recently stored pins are kept. A pinned node starts there and the simulation does not move it in any mode, *Hierarchy* included. The `node_positions` key of older versions (every dragged node) is ignored and dropped on the next save.
+- A pinned node's position (`pinned_positions`) is stored by instance name when it is pinned and when a drag of the pinned node ends; the 500 most recently stored pins are kept. A pinned node starts there and the simulation does not move it in any mode, *Hierarchy* included.
 - Zoom, pan and the split fractions are saved 1 s after the last change (no mouse button held) and on a normal exit; a kill can lose the last second.
-- Invalid values are dropped or clamped on load and before saving (non-finite numbers, zoom outside 15–400 %, split fraction outside 0–1 (dropped) or outside 5–95 % (clamped), an unknown detail tab becomes Summary; a legacy `bottom_tab` from an older file or `gui-state.json` is used when `detail_tab` is missing); a bad position entry is skipped without rejecting the file, and an unreadable `graph-state.json` falls back to defaults. Older files and `gui-state.json` with pixel sizes (`sash_pos`, `side_panel_width`) are converted to fractions of the first known window size; a `gui-state.json` `sash_pos` is hcom-gui's sash position, so the result only approximates that layout.
-- Several open `hcom-graph` windows share the file: each save writes a unique temp file and renames it, so the file stays valid and the last writer wins.
+- Invalid values are dropped or clamped on load and before saving (non-finite numbers, zoom outside 15–400 %, split fraction outside 0–1 (dropped) or outside 5–95 % (clamped), an unknown detail tab becomes Summary); a bad position entry is skipped without rejecting the file, and an unreadable `dashboard-state.json` falls back to defaults.
+- Several open `hcom-dashboard` windows share the file: each save writes a unique temp file and renames it, so the file stays valid and the last writer wins.
 
 ---
 

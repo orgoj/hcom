@@ -1,5 +1,5 @@
 [package]
-name = "hcom-graph"
+name = "hcom-dashboard"
 version = "0.1.0"
 edition = "2024"
 
