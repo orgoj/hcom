@@ -27,6 +27,8 @@ pub const CANVAS_MIN_WIDTH: f32 = 200.0;
 pub const TABLE_PANEL_MIN_HEIGHT: f32 = 80.0;
 /// Window fraction of the table height and the detail panel width by default.
 pub const DEFAULT_SPLIT_FRAC: f32 = 0.3;
+/// Extra gap before Kill in the agent panel's quick actions.
+pub const KILL_GAP: f32 = 16.0;
 const SPLIT_HANDLE_WIDTH: f32 = 6.0;
 
 /// Panel size in px for a window fraction, at least `min` and leaving `keep`
@@ -1832,6 +1834,8 @@ impl HcomDashboardApp {
                     last_lines: 30,
                 });
             }
+            // Destructive action last, set apart from the others.
+            ui.add_space(KILL_GAP);
             if ui
                 .button(RichText::new("Kill").color(Color32::from_rgb(231, 76, 60)))
                 .clicked()
@@ -3459,7 +3463,12 @@ impl eframe::App for HcomDashboardApp {
                         };
                         self.confirm_restart_target = Some((target_instance, cmd));
                     }
-                    if ui
+                }
+
+                // Destructive actions: own group at the end of the row.
+                ui.separator();
+                if let Some(ref a) = selected_agent_opt
+                    && ui
                         .add_enabled(
                             is_running,
                             egui::Button::new(
@@ -3467,79 +3476,87 @@ impl eframe::App for HcomDashboardApp {
                             ),
                         )
                         .clicked()
-                    {
-                        self.confirm_kill_target = Some(a.clone());
-                    }
+                {
+                    self.confirm_kill_target = Some(a.clone());
                 }
 
-                // Kill Group button
-                ui.menu_button("Kill group ▾", |ui| {
-                    // 1. Filtered (N)
-                    let running_filtered: Vec<String> = filtered_rows
-                        .iter()
-                        .filter(|r| r.is_running && !r.instance.is_empty())
-                        .map(|r| r.instance.clone())
-                        .collect();
-                    let count_filtered = running_filtered.len();
-                    let btn_filtered = ui.add_enabled(
-                        count_filtered > 0,
-                        egui::Button::new(format!("Filtered ({})", count_filtered)),
-                    );
-                    if btn_filtered.clicked() {
-                        self.confirm_kill_group = Some(running_filtered);
-                        ui.close();
-                    }
-
-                    ui.separator();
-
-                    // 2. Catalog groups (@group)
-                    if !self.catalog_groups.is_empty() {
-                        ui.label(RichText::new("Catalog Groups:").weak());
-                        for group in &self.catalog_groups {
-                            let group_targets: Vec<String> = all_rows
-                                .iter()
-                                .filter(|r| {
-                                    r.is_running
-                                        && !r.instance.is_empty()
-                                        && r.groups.iter().any(|g| g == group)
-                                })
-                                .map(|r| r.instance.clone())
-                                .collect();
-                            let count = group_targets.len();
-                            let btn = ui.add_enabled(
-                                count > 0,
-                                egui::Button::new(format!("@{} ({})", group, count)),
-                            );
-                            if btn.clicked() {
-                                self.confirm_kill_group = Some(group_targets);
-                                ui.close();
-                            }
+                // Kill Group button: disabled when no menu entry has a target.
+                let running_filtered: Vec<String> = filtered_rows
+                    .iter()
+                    .filter(|r| r.is_running && !r.instance.is_empty())
+                    .map(|r| r.instance.clone())
+                    .collect();
+                let group_running = all_rows.iter().any(|r| {
+                    r.is_running
+                        && !r.instance.is_empty()
+                        && (r.groups.iter().any(|g| self.catalog_groups.contains(g))
+                            || self.tool_groups.contains(&r.cli))
+                });
+                let kill_group_enabled = !running_filtered.is_empty() || group_running;
+                ui.add_enabled_ui(kill_group_enabled, |ui| {
+                    ui.menu_button("Kill group ▾", |ui| {
+                        // 1. Filtered (N)
+                        let count_filtered = running_filtered.len();
+                        let btn_filtered = ui.add_enabled(
+                            count_filtered > 0,
+                            egui::Button::new(format!("Filtered ({})", count_filtered)),
+                        );
+                        if btn_filtered.clicked() {
+                            self.confirm_kill_group = Some(running_filtered);
+                            ui.close();
                         }
+
                         ui.separator();
-                    }
 
-                    // 3. Tool groups (tool:cli)
-                    if !self.tool_groups.is_empty() {
-                        ui.label(RichText::new("CLI Groups:").weak());
-                        for tool in &self.tool_groups {
-                            let tool_targets: Vec<String> = all_rows
-                                .iter()
-                                .filter(|r| {
-                                    r.is_running && !r.instance.is_empty() && r.cli == *tool
-                                })
-                                .map(|r| r.instance.clone())
-                                .collect();
-                            let count = tool_targets.len();
-                            let btn = ui.add_enabled(
-                                count > 0,
-                                egui::Button::new(format!("tool:{} ({})", tool, count)),
-                            );
-                            if btn.clicked() {
-                                self.confirm_kill_group = Some(tool_targets);
-                                ui.close();
+                        // 2. Catalog groups (@group)
+                        if !self.catalog_groups.is_empty() {
+                            ui.label(RichText::new("Catalog Groups:").weak());
+                            for group in &self.catalog_groups {
+                                let group_targets: Vec<String> = all_rows
+                                    .iter()
+                                    .filter(|r| {
+                                        r.is_running
+                                            && !r.instance.is_empty()
+                                            && r.groups.iter().any(|g| g == group)
+                                    })
+                                    .map(|r| r.instance.clone())
+                                    .collect();
+                                let count = group_targets.len();
+                                let btn = ui.add_enabled(
+                                    count > 0,
+                                    egui::Button::new(format!("@{} ({})", group, count)),
+                                );
+                                if btn.clicked() {
+                                    self.confirm_kill_group = Some(group_targets);
+                                    ui.close();
+                                }
+                            }
+                            ui.separator();
+                        }
+
+                        // 3. Tool groups (tool:cli)
+                        if !self.tool_groups.is_empty() {
+                            ui.label(RichText::new("CLI Groups:").weak());
+                            for tool in &self.tool_groups {
+                                let tool_targets: Vec<String> = all_rows
+                                    .iter()
+                                    .filter(|r| {
+                                        r.is_running && !r.instance.is_empty() && r.cli == *tool
+                                    })
+                                    .map(|r| r.instance.clone())
+                                    .collect();
+                                let count = tool_targets.len();
+                                let btn = ui.add_enabled(
+                                    count > 0,
+                                    egui::Button::new(format!("tool:{} ({})", tool, count)),
+                                );
+                                if btn.clicked() {
+                                    self.confirm_kill_group = Some(tool_targets);
+                                    ui.close();
+                                }
                             }
                         }
-                    }
+                    });
                 });
             });
 

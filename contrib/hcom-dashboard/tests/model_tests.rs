@@ -4208,6 +4208,119 @@ fn widget_rect(output: &egui::FullOutput, label: &str) -> Option<Rect> {
     })
 }
 
+/// Screen rects and disabled flags of all accesskit nodes labelled `label`, top to bottom.
+fn widget_rects(output: &egui::FullOutput, label: &str) -> Vec<(Rect, bool)> {
+    let Some(update) = output.platform_output.accesskit_update.as_ref() else {
+        return Vec::new();
+    };
+    let mut found: Vec<(Rect, bool)> = update
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.label() == Some(label))
+        .filter_map(|(_, node)| {
+            let b = node.bounds()?;
+            let rect = Rect::from_min_max(
+                Pos2::new(b.x0 as f32, b.y0 as f32),
+                Pos2::new(b.x1 as f32, b.y1 as f32),
+            );
+            Some((rect, node.is_disabled()))
+        })
+        .collect();
+    found.sort_by(|a, b| a.0.top().total_cmp(&b.0.top()));
+    found
+}
+
+#[test]
+fn test_kill_actions_are_separated_from_restart_attach_and_transcript() {
+    use eframe::App;
+    use hcom_dashboard::config::DashboardState;
+    use hcom_dashboard::table_data::TableRow;
+
+    let (_dir, mut app) = split_test_app(DashboardState::default());
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 800.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut render = |app: &mut hcom_dashboard::app::HcomDashboardApp| {
+        let mut out = None;
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let mut o = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+            o.textures_delta.clear();
+            out = Some(o);
+        }
+        out.unwrap()
+    };
+
+    // Nothing running: Kill group has nothing to act on.
+    let out = render(&mut app);
+    let kill_group = widget_rects(&out, "Kill group ▾");
+    assert_eq!(kill_group.len(), 1);
+    assert!(
+        kill_group[0].1,
+        "Kill group disabled without running agents"
+    );
+
+    let row = TableRow {
+        agent: "worker".into(),
+        instance: "worker_1".into(),
+        is_running: true,
+        status: "active".into(),
+        ..Default::default()
+    };
+    app.table_rows = vec![row.clone()];
+    app.sync_graph_from_table_rows();
+    app.select_table_row(&row);
+    let out = render(&mut app);
+
+    let one = |label: &str| {
+        let r = widget_rects(&out, label);
+        assert!(!r.is_empty(), "{label:?} missing");
+        r[0]
+    };
+    let (restart, _) = one("Restart");
+    let (attach, _) = one("Attach");
+    let kills = widget_rects(&out, "Kill");
+    assert_eq!(kills.len(), 2, "toolbar Kill and panel Kill");
+    let (toolbar_kill, panel_kill) = (kills[0].0, kills[1].0);
+    let (kill_group, kill_group_disabled) = one("Kill group ▾");
+    assert!(
+        !kill_group_disabled,
+        "Kill group enabled with a running agent"
+    );
+
+    // Toolbar: Attach, Restart | Kill, Kill group, all on one row.
+    let spacing = ctx.global_style().spacing.item_spacing.x;
+    for r in [attach, toolbar_kill, kill_group] {
+        assert!(
+            (r.center().y - restart.center().y).abs() < 1.0,
+            "one row: {r:?}"
+        );
+    }
+    assert!(attach.right() < restart.left());
+    assert!(
+        toolbar_kill.left() - restart.right() > spacing + 2.0,
+        "separator between Restart and Kill: {restart:?} / {toolbar_kill:?}"
+    );
+    assert!(toolbar_kill.right() < kill_group.left(), "Kill group last");
+
+    // Agent panel: Attach (Focus), Transcript, gap, Kill.
+    let (panel_attach, _) = one("Attach (Focus)");
+    let transcript = widget_rects(&out, "Transcript")
+        .into_iter()
+        .map(|(r, _)| r)
+        .find(|r| (r.center().y - panel_kill.center().y).abs() < 1.0)
+        .expect("panel Transcript on the Kill row");
+    assert!(panel_attach.right() < transcript.left());
+    assert!(
+        panel_kill.left() - transcript.right() >= spacing + hcom_dashboard::app::KILL_GAP - 1.0,
+        "gap before panel Kill: {transcript:?} / {panel_kill:?}"
+    );
+}
+
 #[test]
 fn test_context_menu_pins_and_unpins_node() {
     use eframe::App;
