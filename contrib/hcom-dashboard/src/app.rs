@@ -348,6 +348,67 @@ pub fn format_window_range(
     )
 }
 
+/// Text of the `Last:` message limit: `no limit` for 0, else `N msgs`.
+pub fn format_last_limit(n: usize) -> String {
+    if n == 0 {
+        "no limit".to_string()
+    } else {
+        format!("{n} msgs")
+    }
+}
+
+/// Header agent count and its tooltip.
+pub fn format_agent_count(shown: usize, total: usize) -> (String, &'static str) {
+    (
+        format!("Shown {shown} / {total}"),
+        "Shown: agents the search and filters let through (table and graph).\n\
+         Total: every known agent, i.e. hcom instances and catalog agents, \
+         filtered or not; the status counts cover the total.",
+    )
+}
+
+/// Fields of the agent Summary grid from the selected node, else the selected
+/// row; empty fields are left out. Status Age uses the `since` column format.
+pub fn agent_meta_fields(
+    node: Option<&AgentNode>,
+    row: Option<&TableRow>,
+) -> Vec<(&'static str, String)> {
+    let (detail, age, unread, tool, dir, parent) = match (node, row) {
+        (Some(n), _) => (
+            n.status_context.clone().unwrap_or_default(),
+            if n.status_age_seconds > 0 {
+                crate::table_data::format_age(n.status_age_seconds)
+            } else {
+                String::new()
+            },
+            n.unread_count.to_string(),
+            n.tool.clone().unwrap_or_default(),
+            n.directory.clone().unwrap_or_default(),
+            n.parent_name.clone().unwrap_or_default(),
+        ),
+        (None, Some(r)) => (
+            r.detail.clone(),
+            r.since_text.clone(),
+            r.unread_count.to_string(),
+            r.cli.clone(),
+            r.directory.clone(),
+            String::new(),
+        ),
+        (None, None) => return Vec::new(),
+    };
+    [
+        ("Status Detail", detail),
+        ("Status Age", age),
+        ("Unread Count", unread),
+        ("CLI Tool", tool),
+        ("Directory", dir),
+        ("Parent", parent),
+    ]
+    .into_iter()
+    .filter(|(_, v)| !v.trim().is_empty())
+    .collect()
+}
+
 pub fn accept_generation_result(current_generation: u64, result_generation: u64) -> bool {
     current_generation == result_generation
 }
@@ -1395,8 +1456,8 @@ impl HcomDashboardApp {
         response = response.on_hover_text(format!(
             "Range: {} to {}\nDrag left thumb: start time (drag to min for all)\nDrag right thumb: end time (drag to max for live)",
             start_dt.format("%Y-%m-%d %H:%M:%S UTC"),
-            if *end_ts >= max_ts - 2.0 {
-                "now (live)".into()
+            if self.msg_window.end.is_none() {
+                "now".into()
             } else {
                 format!("{}", end_dt.format("%Y-%m-%d %H:%M:%S UTC"))
             }
@@ -1556,9 +1617,17 @@ impl HcomDashboardApp {
             .add(
                 egui::DragValue::new(&mut limit)
                     .range(0..=10_000)
-                    .suffix(" msgs"),
+                    .custom_formatter(|n, _| format_last_limit(n as usize))
+                    .custom_parser(|s| {
+                        let s = s.trim().trim_end_matches("msgs").trim();
+                        if s.is_empty() || s.eq_ignore_ascii_case("no limit") {
+                            Some(0.0)
+                        } else {
+                            s.parse().ok()
+                        }
+                    }),
             )
-            .on_hover_text("Keep only the newest N messages in the window (0 = off)");
+            .on_hover_text("Keep only the newest N messages in the window (0 = no limit)");
         if resp.changed() {
             self.msg_window.last_n = (limit > 0).then_some(limit);
             self.state.window_last_n = self.msg_window.last_n;
@@ -1742,81 +1811,13 @@ impl HcomDashboardApp {
             .min_col_width(100.0)
             .spacing([10.0, 6.0])
             .show(ui, |ui| {
-                ui.label(RichText::new("Status Detail:").weak());
-                let detail = if let Some(ref n) = selected_node {
-                    n.status_context.as_deref().unwrap_or("none").to_string()
-                } else if let Some(ref r) = selected_row {
-                    if !r.detail.is_empty() {
-                        r.detail.clone()
-                    } else {
-                        "none".to_string()
-                    }
-                } else {
-                    "none".to_string()
-                };
-                ui.label(detail);
-                ui.end_row();
-
-                ui.label(RichText::new("Status Age:").weak());
-                let age = if let Some(ref n) = selected_node {
-                    format!("{}s", n.status_age_seconds)
-                } else if let Some(ref r) = selected_row {
-                    r.since_text.clone()
-                } else {
-                    "-".to_string()
-                };
-                ui.label(age);
-                ui.end_row();
-
-                ui.label(RichText::new("Unread Count:").weak());
-                let unread = if let Some(ref n) = selected_node {
-                    format!("{}", n.unread_count)
-                } else if let Some(ref r) = selected_row {
-                    format!("{}", r.unread_count)
-                } else {
-                    "-".to_string()
-                };
-                ui.label(unread);
-                ui.end_row();
-
-                ui.label(RichText::new("CLI Tool:").weak());
-                let tool = if let Some(ref n) = selected_node {
-                    n.tool.as_deref().unwrap_or("-").to_string()
-                } else if let Some(ref r) = selected_row {
-                    if !r.cli.is_empty() {
-                        r.cli.clone()
-                    } else {
-                        "-".to_string()
-                    }
-                } else {
-                    "-".to_string()
-                };
-                ui.label(tool);
-                ui.end_row();
-
-                ui.label(RichText::new("Directory:").weak());
-                let dir = if let Some(ref n) = selected_node {
-                    n.directory.as_deref().unwrap_or("-").to_string()
-                } else if let Some(ref r) = selected_row {
-                    if !r.directory.is_empty() {
-                        r.directory.clone()
-                    } else {
-                        "-".to_string()
-                    }
-                } else {
-                    "-".to_string()
-                };
-                ui.label(dir);
-                ui.end_row();
-
-                ui.label(RichText::new("Parent:").weak());
-                let parent = if let Some(ref n) = selected_node {
-                    n.parent_name.as_deref().unwrap_or("none").to_string()
-                } else {
-                    "none".to_string()
-                };
-                ui.label(parent);
-                ui.end_row();
+                for (label, value) in
+                    agent_meta_fields(selected_node.as_ref(), selected_row.as_ref())
+                {
+                    ui.label(RichText::new(format!("{label}:")).weak());
+                    ui.label(value);
+                    ui.end_row();
+                }
             });
 
         ui.add_space(8.0);
@@ -3126,7 +3127,8 @@ impl eframe::App for HcomDashboardApp {
                     }
                 }
 
-                ui.label(format!("Agents: {}", total_count));
+                let (count_text, count_help) = format_agent_count(shown_count, total_count);
+                ui.label(count_text).on_hover_text(count_help);
                 ui.colored_label(
                     palette.status_color(&AgentStatus::Active),
                     format!("● {} active", active_count),
@@ -3345,12 +3347,6 @@ impl eframe::App for HcomDashboardApp {
                 if filter_changed {
                     self.save_state();
                 }
-
-                ui.separator();
-                ui.label(format!(
-                    "Zobrazeno: {} / Celkem: {}",
-                    shown_count, total_count
-                ));
             });
 
             // Row 2b: Message time window (presets, custom span/limit, scrubber, range)

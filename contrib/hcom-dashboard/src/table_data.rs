@@ -451,7 +451,7 @@ impl TableRow {
             crate::model::AgentStatus::Stopped => "stopped",
         };
         let since_text = if node.status_age_seconds > 0 {
-            format!("{}s", node.status_age_seconds)
+            format_age(node.status_age_seconds)
         } else {
             String::new()
         };

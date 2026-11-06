@@ -1,9 +1,11 @@
 ---
 id: TASK-77.26
-title: 'Drobné úpravy textů a formátů (okno zpráv, počty, Status Age)'
-status: To Do
-assignee: []
-created_date: '2026-11-01 19:40'
+title: Drobné úpravy textů a formátů (okno zpráv, počty, Status Age)
+status: Done
+assignee:
+  - '@hcom_dev__idea'
+created_date: 2026-11-01 19:40
+updated_date: '2026-11-06T21:26:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -20,8 +22,20 @@ UX review F10-F12/S9: '0 min'/'0 msgs' čtou jako nic, popisek end je nejasný, 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Vlastní rozsah 0 se zobrazuje jako 'all' a Last 0 jako 'no limit'
-- [ ] #2 Pravý popisek posuvníku je 'now' při zapnutém Live, jinak čas konce v UTC
-- [ ] #3 Záhlaví ukazuje jeden srozumitelný počet v angličtině (např. 'Shown 21 / 53') a 'Agents' i total mají vysvětlení v tooltipu
-- [ ] #4 Status Age v panelu agenta má stejný relativní formát jako sloupec since a prázdná pole se nevypisují
+- [x] #1 Záhlaví ukazuje jeden srozumitelný počet v angličtině (např. 'Shown 21 / 53') a 'Agents' i total mají vysvětlení v tooltipu
+- [x] #2 Status Age v panelu agenta má stejný relativní formát jako sloupec since a prázdná pole se nevypisují
+- [x] #3 Vlastní rozsah bez omezení se v textovém poli zobrazuje jako 'all' a Last 0 jako 'no limit'
+- [x] #4 Tooltip posuvníku uvádí konec okna 'now' při zapnutém Live, jinak čas konce v UTC (stálý pravý popisek posuvník po přepracování okna nemá)
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+AC #1 a #2 přepsány na současné UI (okno zpráv přepracováno po UX review: vlastní rozsah je textové pole, které už 'all' ukazuje; posuvník má jen tooltip). Rozsah se nemění.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Last 0 = 'no limit', tooltip posuvníku 'now' podle Live, záhlaví 'Shown N / M' s tooltipem (české Zobrazeno/Celkem pryč), Summary bez prázdných polí a Status Age ve formátu since (agent_meta_fields, format_age). Ověřeno test_task_77_26_last_limit_count_and_agent_fields_texts a upraveným test_task_77_29_table_and_graph_node_parity_and_visible_projection; fmt, clippy 0 warnings, cargo test 17+183. Review agent_review OK.
+<!-- SECTION:FINAL_SUMMARY:END -->

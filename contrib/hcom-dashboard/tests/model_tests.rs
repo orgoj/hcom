@@ -7000,29 +7000,28 @@ fn test_task_77_29_table_and_graph_node_parity_and_visible_projection() {
     let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
     out.textures_delta.clear();
 
-    // Verify accesskit labels for counts
-    let has_agents_total = out
+    // One English count in the header (TASK-77.26 AC3), no second total.
+    let values: Vec<String> = out
         .platform_output
         .accesskit_update
         .as_ref()
-        .is_some_and(|u| u.nodes.iter().any(|(_, n)| n.value() == Some("Agents: 5")));
+        .map(|u| {
+            u.nodes
+                .iter()
+                .filter_map(|(_, n)| n.value().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
     assert!(
-        has_agents_total,
-        "Header must show 'Agents: 5' matching total table rows"
+        values.iter().any(|v| v == "Shown 5 / 5"),
+        "Counter must show 'Shown 5 / 5'"
     );
-
-    let has_zobrazeno = out
-        .platform_output
-        .accesskit_update
-        .as_ref()
-        .is_some_and(|u| {
-            u.nodes.iter().any(|(_, n)| {
-                n.value().is_some_and(|v| {
-                    v.contains("Zobrazeno: 5 / Celkem: 5") || v.contains("Shown 5 / 5")
-                })
-            })
-        });
-    assert!(has_zobrazeno, "Counter must show 5 / 5 matching both views");
+    assert!(
+        !values
+            .iter()
+            .any(|v| v.starts_with("Agents:") || v.contains("Zobrazeno") || v.contains("Celkem")),
+        "no second or Czech count"
+    );
 
     // Filter by running_only:
     app.state.running_only = true;
@@ -7065,11 +7064,9 @@ fn test_task_77_29_table_and_graph_node_parity_and_visible_projection() {
         .accesskit_update
         .as_ref()
         .is_some_and(|u| {
-            u.nodes.iter().any(|(_, n)| {
-                n.value().is_some_and(|v| {
-                    v.contains("Zobrazeno: 2 / Celkem: 5") || v.contains("Shown 2 / 5")
-                })
-            })
+            u.nodes
+                .iter()
+                .any(|(_, n)| n.value().is_some_and(|v| v == "Shown 2 / 5"))
         });
     assert!(
         has_filtered_count,
@@ -10199,4 +10196,29 @@ fn test_task_77_46_reset_sits_right_of_fit_and_is_disabled_in_manual() {
         );
         assert_eq!(is_disabled, disabled, "{mode}: disabled only in Manual");
     }
+}
+
+#[test]
+fn test_task_77_26_last_limit_count_and_agent_fields_texts() {
+    use hcom_dashboard::app::{agent_meta_fields, format_agent_count, format_last_limit};
+    // AC1: Last 0 reads as no limit.
+    assert_eq!(format_last_limit(0), "no limit");
+    assert_eq!(format_last_limit(25), "25 msgs");
+    // AC3: one English count, both numbers explained in the tooltip.
+    let (text, help) = format_agent_count(21, 53);
+    assert_eq!(text, "Shown 21 / 53");
+    assert!(help.contains("Shown:") && help.contains("Total:"));
+    // AC4: Status Age in the since format, empty fields left out.
+    let mut graph = AgentGraph::new();
+    let mut s = snap("worker", None);
+    s.status_age_seconds = Some(300);
+    s.tool = Some("claude".into());
+    graph.apply_instance_snapshot(&[s]);
+    let node = graph.graph[graph.get_node_index("worker").unwrap()].clone();
+    let fields = agent_meta_fields(Some(&node), None);
+    let labels: Vec<&str> = fields.iter().map(|(l, _)| *l).collect();
+    assert_eq!(labels, ["Status Age", "Unread Count", "CLI Tool"]);
+    assert_eq!(fields[0].1, hcom_dashboard::table_data::format_age(300));
+    assert_eq!(fields[0].1, "5m");
+    assert!(agent_meta_fields(None, None).is_empty());
 }
