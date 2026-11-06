@@ -146,11 +146,22 @@ pub trait ActionRunner: Send + Sync {
 
 type GitStatusCache = Arc<Mutex<std::collections::HashMap<String, (Instant, String, String)>>>;
 
-#[derive(Clone, Default)]
+/// `max_stdout` for output read in full (Events, Transcript, Screen tabs).
+pub const NO_STDOUT_LIMIT: usize = usize::MAX - 1;
+
+#[derive(Clone)]
 pub struct SystemActionRunner {
     active_child: Arc<Mutex<Option<Child>>>,
     git_cache: GitStatusCache,
     usage_cache: Arc<Mutex<crate::usage::UsageCache>>,
+    /// Time limit of `run_command_bounded` (30 s).
+    pub command_timeout: Duration,
+}
+
+impl Default for SystemActionRunner {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SystemActionRunner {
@@ -159,6 +170,7 @@ impl SystemActionRunner {
             active_child: Arc::new(Mutex::new(None)),
             git_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
             usage_cache: Arc::default(),
+            command_timeout: Duration::from_secs(30),
         }
     }
 
@@ -203,36 +215,53 @@ impl SystemActionRunner {
             err_buf
         });
 
-        // Concurrently read stdout up to max_stdout + 1
-        let mut stdout_buf = Vec::new();
-        let read_bytes =
-            match Read::take(&mut stdout, (max_stdout + 1) as u64).read_to_end(&mut stdout_buf) {
-                Ok(n) => n,
-                Err(e) => {
-                    self.cancel();
-                    let _ = stderr_handle.join();
-                    return Err(format!("Failed reading stdout: {}", e));
-                }
+        // Read stdout up to max_stdout + 1 in a thread, so the timeout below
+        // also covers a command that keeps writing.
+        let mut stdout_handle = Some(spawn(move || {
+            let mut buf = Vec::new();
+            Read::take(&mut stdout, (max_stdout + 1) as u64)
+                .read_to_end(&mut buf)
+                .map(|_| buf)
+        }));
+        let mut stdout_buf: Option<Vec<u8>> = None;
+        // Joins the stdout reader; an error kills the child.
+        let finish_stdout = |handle: std::thread::JoinHandle<std::io::Result<Vec<u8>>>| {
+            let res = match handle.join() {
+                Ok(Ok(buf)) if buf.len() > max_stdout => Err(format!(
+                    "Command {} output exceeded maximum allowed size of {} bytes",
+                    program, max_stdout
+                )),
+                Ok(Ok(buf)) => Ok(buf),
+                Ok(Err(e)) => Err(format!("Failed reading stdout: {}", e)),
+                Err(_) => Err("Failed reading stdout: reader panicked".to_string()),
             };
-
-        // If stdout exceeded limit, kill child immediately and reap
-        if read_bytes > max_stdout {
-            self.cancel();
-            let _ = stderr_handle.join();
-            return Err(format!(
-                "Command {} output exceeded maximum allowed size of {} bytes",
-                program, max_stdout
-            ));
-        }
+            if res.is_err() {
+                self.cancel();
+            }
+            res
+        };
 
         // Wait for child process while keeping it cancellable until termination
         let start_time = Instant::now();
-        let timeout = Duration::from_secs(30);
+        let timeout = self.command_timeout;
         let status = loop {
+            if stdout_buf.is_none() && stdout_handle.as_ref().is_some_and(|h| h.is_finished()) {
+                match finish_stdout(stdout_handle.take().unwrap()) {
+                    Ok(buf) => stdout_buf = Some(buf),
+                    Err(e) => {
+                        let _ = stderr_handle.join();
+                        return Err(e);
+                    }
+                }
+            }
             if start_time.elapsed() > timeout {
                 self.cancel();
                 let _ = stderr_handle.join();
-                return Err(format!("Command {} timed out after 30 seconds", program));
+                return Err(format!(
+                    "Command {} timed out after {} seconds",
+                    program,
+                    timeout.as_secs()
+                ));
             }
             let mut guard = self.active_child.lock().unwrap();
             if let Some(mut child) = guard.take() {
@@ -263,6 +292,17 @@ impl SystemActionRunner {
             }
         };
 
+        let stdout_buf = match (stdout_buf, stdout_handle) {
+            (Some(buf), _) => buf,
+            (None, Some(handle)) => match finish_stdout(handle) {
+                Ok(buf) => buf,
+                Err(e) => {
+                    let _ = stderr_handle.join();
+                    return Err(e);
+                }
+            },
+            (None, None) => unreachable!("stdout is either read or still has its reader"),
+        };
         let err_buf = stderr_handle.join().unwrap_or_default();
         let stdout_str = String::from_utf8_lossy(&stdout_buf).to_string();
         let stderr_str = String::from_utf8_lossy(&err_buf).trim().to_string();
@@ -319,7 +359,7 @@ impl ActionRunner for SystemActionRunner {
             } => {
                 let argv = build_transcript_argv(&agent, last_lines);
                 let argv_ref: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-                let res = self.run_command_bounded("hcom", &argv_ref, 32768, 4096, None);
+                let res = self.run_command_bounded("hcom", &argv_ref, NO_STDOUT_LIMIT, 4096, None);
                 Some(ActionResult::TranscriptLoaded {
                     agent,
                     generation,
@@ -327,7 +367,13 @@ impl ActionRunner for SystemActionRunner {
                 })
             }
             ActionRequest::Screen { agent, generation } => {
-                let res = self.run_command_bounded("hcom", &["term", &agent], 32768, 4096, None);
+                let res = self.run_command_bounded(
+                    "hcom",
+                    &["term", &agent],
+                    NO_STDOUT_LIMIT,
+                    4096,
+                    None,
+                );
                 Some(ActionResult::ScreenLoaded {
                     agent,
                     generation,
@@ -343,7 +389,7 @@ impl ActionRunner for SystemActionRunner {
                 let res = self.run_command_bounded(
                     "hcom",
                     &["events", "--agent", &agent, "--last", &last_str],
-                    32768,
+                    NO_STDOUT_LIMIT,
                     4096,
                     None,
                 );

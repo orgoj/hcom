@@ -1745,6 +1745,40 @@ fn test_kill_requires_confirmation_flow_and_stale_target_check() {
 }
 
 #[test]
+fn test_task_77_42_no_stdout_limit_reads_large_output_in_full() {
+    use hcom_dashboard::action::{NO_STDOUT_LIMIT, SystemActionRunner};
+    let runner = SystemActionRunner::new();
+    let out = runner
+        .run_command_bounded(
+            "head",
+            &["-c", "200000", "/dev/zero"],
+            NO_STDOUT_LIMIT,
+            4096,
+            None,
+        )
+        .expect("output above 32 KiB is read in full");
+    assert_eq!(out.len(), 200_000);
+}
+
+#[test]
+fn test_task_77_42_timeout_stops_endless_output_without_limit() {
+    use hcom_dashboard::action::{NO_STDOUT_LIMIT, SystemActionRunner};
+    let mut runner = SystemActionRunner::new();
+    runner.command_timeout = std::time::Duration::from_secs(1);
+    let start = std::time::Instant::now();
+    let res = runner.run_command_bounded(
+        "sh",
+        &["-c", "while :; do echo x; sleep 0.01; done"],
+        NO_STDOUT_LIMIT,
+        4096,
+        None,
+    );
+    let err = res.expect_err("endless output must time out");
+    assert!(err.contains("timed out"), "{err}");
+    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
 fn test_action_runner_stdout_capped_kills_child_and_avoids_deadlock() {
     use hcom_dashboard::action::SystemActionRunner;
     let runner = SystemActionRunner::new();
