@@ -3,8 +3,8 @@ id: TASK-77.25
 title: 'Hierarchy: zalamování plochých vrstev a role zprávových hran'
 status: To Do
 assignee: []
-created_date: '2026-11-01 19:40'
-updated_date: '2026-11-01 19:40'
+created_date: 2026-11-01 19:40
+updated_date: '2026-11-06T20:03:00Z'
 labels: []
 dependencies:
   - TASK-77.18
@@ -26,3 +26,9 @@ UX review F7 (část S1): s málo spawn hranami je Hierarchy jedna dlouhá řada
 - [ ] #2 Hierarchy se po Fit vejde do plátna bez uzlů za okrajem
 - [ ] #3 Chování zprávových hran v Hierarchy (pružiny, ztlumení nebo skrytí) je rozhodnuté uživatelem a zapsané v úkolu před implementací
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Uživatel (2026-11-06): částečně vyřešeno TASK-77.38 (spawn hrany podle batch_launched.by), Hierarchy už není jedna řada kořenů. Zbývá ověřit na živých datech, zda kořeny bez potomků ještě přetékají šířku (AC #1, #2). AC #3 (zprávové hrany v Hierarchy) může pokrýt samostatné vypínání vrstev hran z TASK-77.45.
+<!-- SECTION:NOTES:END -->
