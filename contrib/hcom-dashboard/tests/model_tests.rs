@@ -3399,7 +3399,7 @@ fn test_tree_targets_layers_siblings_and_centered_parent() {
         layout_snap("a1", Some("a")),
     ]);
     let slot = 100.0;
-    let t = tree_targets(&graph, 130.0, slot);
+    let t = tree_targets(&graph, 130.0, slot, hcom_dashboard::layout::NO_CANVAS);
     let p = |n: &str| t[&graph.get_node_index(n).unwrap()];
     assert!((p("a").y - p("root").y - 130.0).abs() < 1e-3);
     assert!((p("a1").y - p("a").y - 130.0).abs() < 1e-3);
@@ -3408,6 +3408,105 @@ fn test_tree_targets_layers_siblings_and_centered_parent() {
     assert!(p("c").x - p("b").x >= slot - 1e-3);
     // Parent centered over its first and last child.
     assert!((p("root").x - (p("a").x + p("c").x) / 2.0).abs() < 1e-3);
+}
+
+#[test]
+fn test_tree_targets_wrap_lone_roots_below_trees_when_top_layer_is_too_wide() {
+    use hcom_dashboard::layout::tree_targets;
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[
+        layout_snap("root", None),
+        layout_snap("a", Some("root")),
+        layout_snap("b", Some("root")),
+        layout_snap("l1", None),
+        layout_snap("l2", None),
+        layout_snap("l3", None),
+        layout_snap("l4", None),
+        layout_snap("l5", None),
+    ]);
+    let (h, slot) = (130.0, 100.0);
+    let p = |t: &std::collections::HashMap<_, Pos2>, n: &str| t[&graph.get_node_index(n).unwrap()];
+
+    // Top layer of 7 slots fits 7: unchanged, lone roots stay in the top row.
+    let t = tree_targets(&graph, h, slot, (7, 4));
+    assert!(
+        ["l1", "l5"]
+            .iter()
+            .all(|n| (p(&t, n).y - p(&t, "root").y).abs() < 1e-3)
+    );
+
+    // 6 slots wide but one layer high: one long row below the trees fits
+    // best (largest zoom).
+    let t = tree_targets(&graph, h, slot, (6, 1));
+    let kid_y = p(&t, "a").y;
+    assert!(
+        ["l1", "l2", "l3", "l4", "l5"]
+            .iter()
+            .all(|n| (p(&t, n).y - (kid_y + h)).abs() < 1e-3)
+    );
+
+    // Only 3 fit on a square canvas: lone roots in rows of 3 below the
+    // deepest tree layer.
+    let t = tree_targets(&graph, h, slot, (3, 4));
+    let kid_y = p(&t, "a").y;
+    for n in ["l1", "l2", "l3"] {
+        assert!((p(&t, n).y - (kid_y + h)).abs() < 1e-3, "{n} in row 1");
+    }
+    for n in ["l4", "l5"] {
+        assert!(
+            (p(&t, n).y - (kid_y + 2.0 * h)).abs() < 1e-3,
+            "{n} in row 2"
+        );
+    }
+    assert!((p(&t, "l2").x - p(&t, "l1").x - slot).abs() < 1e-3);
+    // Rows are centered and the whole block is centered in y.
+    assert!((p(&t, "l2").x).abs() < 1e-3);
+    assert!((p(&t, "l4").x + p(&t, "l5").x).abs() < 1e-3);
+    assert!((p(&t, "root").y + p(&t, "l4").y).abs() < 1e-3);
+    // The tree keeps its shape.
+    assert!((p(&t, "a").y - p(&t, "root").y - h).abs() < 1e-3);
+    assert!((p(&t, "root").x - (p(&t, "a").x + p(&t, "b").x) / 2.0).abs() < 1e-3);
+}
+
+#[test]
+fn test_hierarchy_with_many_lone_roots_fits_canvas_above_min_zoom() {
+    use hcom_dashboard::config::DashboardState;
+    let (_dir, mut app) = split_test_app(DashboardState {
+        layout_mode: "hierarchy".into(),
+        ..DashboardState::default()
+    });
+    let mut snaps = vec![
+        snap("root", None),
+        snap("kid_a", Some("root")),
+        snap("kid_b", Some("root")),
+    ];
+    snaps.extend((0..60).map(|i| snap(&format!("lone_{i:02}"), None)));
+    app.apply_persisted_view();
+    app.graph.apply_instance_snapshot(&snaps);
+    app.layout.sync_nodes(&app.graph);
+    let ctx = egui::Context::default();
+    run_app_frames(&ctx, &mut app, 300);
+    assert!(
+        app.layout.canvas_cells.0 < 62,
+        "canvas narrower than the top layer"
+    );
+    // The first known canvas size placed the nodes on the wrapped rows.
+    let off = app
+        .layout
+        .tree_targets
+        .iter()
+        .map(|(i, t)| app.layout.nodes[i].pos.distance(*t))
+        .fold(0.0f32, f32::max);
+    assert!(off < 30.0, "nodes at their wrapped targets: {off}");
+    assert!(
+        all_nodes_in_canvas(&app),
+        "AC2: no node beyond the canvas edge"
+    );
+    assert!(
+        app.canvas.zoom > 2.0 * hcom_dashboard::canvas::ZOOM_MIN,
+        "wrapped rows keep a readable zoom: {}",
+        app.canvas.zoom
+    );
 }
 
 #[test]

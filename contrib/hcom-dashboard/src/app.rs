@@ -3071,6 +3071,8 @@ impl eframe::App for HcomDashboardApp {
 
         // 3. Physics simulation step
         let dt = ctx.input(|i| i.stable_dt);
+        self.layout
+            .set_canvas_size(&self.graph, self.canvas_rect.size());
         let motion = self.layout.step(&self.graph, dt);
         if motion > 0.0 || self.canvas.dragged_node.is_some() || self.pending_action.is_some() {
             ctx.request_repaint();

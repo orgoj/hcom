@@ -9,6 +9,8 @@ const GOLDEN_ANGLE: f32 = 2.399_963;
 /// Margin included in `collision_radius` beyond the node rings (body 26 +
 /// rings 13 + this margin).
 const COLLISION_MARGIN: f32 = 1.0;
+/// Canvas size in tree cells when it is unknown: the Hierarchy never wraps.
+pub const NO_CANVAS: (usize, usize) = (usize::MAX, usize::MAX);
 
 #[derive(Debug, Clone)]
 pub struct NodePhysics {
@@ -114,6 +116,9 @@ pub struct GraphLayout {
     pub last_collision_pass_clean: bool,
 
     tree_key: Option<u64>,
+    /// Canvas size at zoom 1 in tree slots and layers; a top layer wider
+    /// than the canvas wraps its lone roots (see `tree_targets`).
+    pub canvas_cells: (usize, usize),
     pub tree_targets: HashMap<NodeIndex, egui::Pos2>,
     springs_key: Option<(usize, u64, usize, u64)>,
     springs: Vec<Spring>,
@@ -168,6 +173,7 @@ impl GraphLayout {
             collision_pass_clean: true,
             last_collision_pass_clean: false,
             tree_key: None,
+            canvas_cells: NO_CANVAS,
             tree_targets: HashMap::new(),
             springs_key: None,
             springs: Vec::new(),
@@ -317,8 +323,52 @@ impl GraphLayout {
         let key = structure_key(graph);
         if self.tree_key != Some(key) {
             self.tree_targets =
-                tree_targets(graph, self.h_layer, 2.0 * self.collision_radius + 20.0);
+                tree_targets(graph, self.h_layer, self.tree_slot(), self.canvas_cells);
             self.tree_key = Some(key);
+        }
+    }
+
+    /// Horizontal distance of tree slots in Hierarchy mode.
+    fn tree_slot(&self) -> f32 {
+        2.0 * self.collision_radius + 20.0
+    }
+
+    /// Sets the canvas size (screen px, i.e. world units at zoom 1) that
+    /// bounds the Hierarchy top layer. A change of the size in tree slots and
+    /// layers recomputes the tree and wakes the layout in Hierarchy mode; a
+    /// non-positive or unknown size disables wrapping. The first known size
+    /// (at start, the nodes were placed for an unknown one) moves unpinned
+    /// nodes straight to their new targets.
+    pub fn set_canvas_size(&mut self, graph: &AgentGraph, size: egui::Vec2) {
+        let cells = if size.is_finite() && size.x > 0.0 && size.y > 0.0 {
+            (
+                ((size.x / self.tree_slot()).floor() as usize).max(1),
+                ((size.y / self.h_layer).floor() as usize).max(1),
+            )
+        } else {
+            NO_CANVAS
+        };
+        if cells == self.canvas_cells {
+            return;
+        }
+        let first = self.canvas_cells == NO_CANVAS;
+        self.canvas_cells = cells;
+        if self.mode != LayoutMode::Hierarchy {
+            return;
+        }
+        self.tree_key = None;
+        self.wake_up();
+        self.alpha = 1.0;
+        if first {
+            self.refresh_tree_targets(graph);
+            for (idx, phys) in self.nodes.iter_mut() {
+                if let Some(t) = self.tree_targets.get(idx)
+                    && !phys.pinned
+                {
+                    phys.pos = *t;
+                    phys.vel = egui::Vec2::ZERO;
+                }
+            }
         }
     }
 
@@ -840,9 +890,85 @@ pub fn spawn_depths(graph: &AgentGraph) -> HashMap<NodeIndex, usize> {
 
 /// Tidy tree layout of the spawn forest: leaves on consecutive x slots of
 /// width `slot`, each parent centered over its children, y = depth * `h_layer`.
-/// The result is centered around the origin.
-pub fn tree_targets(graph: &AgentGraph, h_layer: f32, slot: f32) -> HashMap<NodeIndex, egui::Pos2> {
+/// When the top layer needs more slots than the canvas width holds
+/// (`canvas` = size at zoom 1 in slots and layers), roots without children
+/// leave it and fill rows below the trees, one `h_layer` apart, each row
+/// centered; the row length (at least the tree width) is the one whose block
+/// fits the canvas at the largest zoom. The result is centered around the
+/// origin.
+pub fn tree_targets(
+    graph: &AgentGraph,
+    h_layer: f32,
+    slot: f32,
+    canvas: (usize, usize),
+) -> HashMap<NodeIndex, egui::Pos2> {
     let (roots, children) = spawn_forest(graph);
+    let is_lone = |n: &NodeIndex| children.get(n).is_none_or(|c| c.is_empty());
+    let targets = tidy_forest(graph, &roots, &children, h_layer, slot, None);
+    let lone: Vec<NodeIndex> = roots.iter().copied().filter(is_lone).collect();
+    let (cols, rows) = canvas;
+    if targets.trees_leaf_slots <= cols || lone.is_empty() {
+        return targets.positions;
+    }
+    let lone_set: HashSet<NodeIndex> = lone.iter().copied().collect();
+    let trees = tidy_forest(graph, &roots, &children, h_layer, slot, Some(&lone_set));
+    let tree_rows = if trees.positions.is_empty() {
+        0
+    } else {
+        trees.max_depth + 1
+    };
+    // Row capacity (at least the tree width) whose block fits the canvas at
+    // the largest zoom; the smallest such capacity on a tie.
+    let fit_scale = |cap: usize| {
+        let total = tree_rows + lone.len().div_ceil(cap);
+        (cols as f32 / cap as f32).min(rows as f32 / total as f32)
+    };
+    let min_cap = trees.trees_leaf_slots.max(1);
+    let row_cap = (min_cap..=min_cap.max(lone.len()))
+        .fold((min_cap, f32::MIN), |best, cap| {
+            let s = fit_scale(cap);
+            if s > best.1 { (cap, s) } else { best }
+        })
+        .0;
+    let lone_rows = lone.len().div_ceil(row_cap);
+    // Shift the tree block so trees and lone rows together are centered in y.
+    let total_rows = tree_rows + lone_rows;
+    let top = -((total_rows - 1) as f32) * h_layer / 2.0;
+    let tree_top = -(trees.max_depth as f32) * h_layer / 2.0;
+    let mut out: HashMap<NodeIndex, egui::Pos2> = trees
+        .positions
+        .into_iter()
+        .map(|(idx, p)| (idx, egui::pos2(p.x, p.y - tree_top + top)))
+        .collect();
+    for (k, &idx) in lone.iter().enumerate() {
+        let row = k / row_cap;
+        let col = k % row_cap;
+        let in_row = (lone.len() - row * row_cap).min(row_cap);
+        let x = (col as f32 - (in_row - 1) as f32 / 2.0) * slot;
+        let y = top + (tree_rows + row) as f32 * h_layer;
+        out.insert(idx, egui::pos2(x, y));
+    }
+    out
+}
+
+struct TidyForest {
+    positions: HashMap<NodeIndex, egui::Pos2>,
+    /// Leaf slots used, i.e. the width of the layer in slots.
+    trees_leaf_slots: usize,
+    max_depth: usize,
+}
+
+/// Tidy layout of the forest started from `roots` and then from every
+/// unreached node (cycles), skipping the `skip` roots; centered around the
+/// origin.
+fn tidy_forest(
+    graph: &AgentGraph,
+    roots: &[NodeIndex],
+    children: &HashMap<NodeIndex, Vec<NodeIndex>>,
+    h_layer: f32,
+    slot: f32,
+    skip: Option<&HashSet<NodeIndex>>,
+) -> TidyForest {
     let mut all: Vec<NodeIndex> = graph.graph.node_indices().collect();
     all.sort();
     let mut x_of: HashMap<NodeIndex, f32> = HashMap::new();
@@ -878,12 +1004,12 @@ pub fn tree_targets(graph: &AgentGraph, h_layer: f32, slot: f32) -> HashMap<Node
         x_of.insert(node, x);
     }
 
-    for start in roots.into_iter().chain(all) {
-        if !depth_of.contains_key(&start) {
+    for &start in roots.iter().chain(&all) {
+        if !depth_of.contains_key(&start) && !skip.is_some_and(|s| s.contains(&start)) {
             place(
                 start,
                 0,
-                &children,
+                children,
                 &mut x_of,
                 &mut depth_of,
                 &mut next_slot,
@@ -892,12 +1018,18 @@ pub fn tree_targets(graph: &AgentGraph, h_layer: f32, slot: f32) -> HashMap<Node
         }
     }
 
-    let max_depth = depth_of.values().copied().max().unwrap_or(0) as f32;
+    let max_depth = depth_of.values().copied().max().unwrap_or(0);
     let width = next_slot.saturating_sub(1) as f32 * slot;
-    x_of.into_iter()
+    let positions = x_of
+        .into_iter()
         .map(|(idx, x)| {
-            let y = depth_of[&idx] as f32 * h_layer - max_depth * h_layer / 2.0;
+            let y = depth_of[&idx] as f32 * h_layer - max_depth as f32 * h_layer / 2.0;
             (idx, egui::pos2(x - width / 2.0, y))
         })
-        .collect()
+        .collect();
+    TidyForest {
+        positions,
+        trees_leaf_slots: next_slot,
+        max_depth,
+    }
 }
