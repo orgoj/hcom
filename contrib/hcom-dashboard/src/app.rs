@@ -284,6 +284,9 @@ pub struct HcomDashboardApp {
     /// Data row (0-based) under the pointer in the last frame; painted as a
     /// weaker band than the selection.
     table_hover_row: Option<usize>,
+    /// Selection the table last scrolled to; a different selection (e.g. a
+    /// graph click) scrolls its row into view once.
+    table_scrolled_id: Option<String>,
     /// Screen bands of the data rows in the last frame, full grid width.
     pub table_row_bands: Vec<egui::Rect>,
     pub show_start_dialog: bool,
@@ -361,7 +364,8 @@ pub fn format_last_limit(n: usize) -> String {
 pub fn format_agent_count(shown: usize, total: usize) -> (String, &'static str) {
     (
         format!("Shown {shown} / {total}"),
-        "Shown: agents the search and filters let through (table and graph).\n\
+        "Shown: agents the search and filters let through (graph, and the table \
+         while Filter table is on).\n\
          Total: every known agent, i.e. hcom instances and catalog agents, \
          filtered or not; the status counts cover the total.",
     )
@@ -499,6 +503,7 @@ impl HcomDashboardApp {
             screen_inject_enter: true,
             selected_row_id: None,
             table_hover_row: None,
+            table_scrolled_id: None,
             table_row_bands: Vec::new(),
             show_start_dialog: false,
             start_agent_name: String::new(),
@@ -593,6 +598,7 @@ impl HcomDashboardApp {
             screen_inject_enter: true,
             selected_row_id: None,
             table_hover_row: None,
+            table_scrolled_id: None,
             table_row_bands: Vec::new(),
             show_start_dialog: false,
             start_agent_name: String::new(),
@@ -1111,6 +1117,15 @@ impl HcomDashboardApp {
             }
             selected_row = Some(k);
         }
+        // A selection made elsewhere (graph) scrolls its row into view once,
+        // as soon as the table shows it.
+        let scroll_row = key_row
+            .or_else(|| selected_row.filter(|_| self.selected_row_id != self.table_scrolled_id));
+        if self.selected_row_id.is_none() {
+            self.table_scrolled_id = None;
+        } else if selected_row.is_some() {
+            self.table_scrolled_id = self.selected_row_id.clone();
+        }
         let hover_row = self.table_hover_row;
         // Grid row 0 is the header; data row i is grid row i + 1. The band
         // covers the full grid width, including spacing and empty cells.
@@ -1206,7 +1221,7 @@ impl HcomDashboardApp {
                         }
                     });
                 grid_x = grid.response.rect.x_range();
-                if let Some(span) = key_row.and_then(|k| row_spans.get(k)) {
+                if let Some(span) = scroll_row.and_then(|k| row_spans.get(k)) {
                     ui.scroll_to_rect(egui::Rect::from_x_y_ranges(grid_x, *span), None);
                 }
             });
@@ -3108,6 +3123,22 @@ impl eframe::App for HcomDashboardApp {
             self.state.empty_last,
         );
         let shown_count = filtered_rows.len();
+        // The table can show every agent (e.g. to start a stopped one) while
+        // the graph keeps following the search and filters.
+        let unfiltered_rows;
+        let table_rows: &[TableRow] = if self.state.filter_table {
+            &filtered_rows
+        } else {
+            let mut rows = all_rows.clone();
+            sort_rows(
+                &mut rows,
+                self.state.sort_col.as_deref().unwrap_or("instance"),
+                self.state.sort_reverse,
+                self.state.empty_last,
+            );
+            unfiltered_rows = rows;
+            &unfiltered_rows
+        };
 
         let visible_node_indices = self.visible_nodes_for_rows(&filtered_rows);
 
@@ -3344,6 +3375,16 @@ impl eframe::App for HcomDashboardApp {
                 }
                 if ui
                     .checkbox(&mut self.state.hide_adhoc, "Hide ad-hoc")
+                    .changed()
+                {
+                    filter_changed = true;
+                }
+                if ui
+                    .checkbox(&mut self.state.filter_table, "Filter table")
+                    .on_hover_text(
+                        "On: the table shows the same agents as the graph.\n\
+                         Off: the table shows every agent; the graph stays filtered.",
+                    )
                     .changed()
                 {
                     filter_changed = true;
@@ -3951,7 +3992,7 @@ impl eframe::App for HcomDashboardApp {
             let table_resp = egui::Panel::bottom("agent_table_panel")
                 .exact_size(table_h)
                 .show(ui, |ui| {
-                    self.render_table(ui, &filtered_rows);
+                    self.render_table(ui, table_rows);
                 });
             table_rect = Some(table_resp.response.rect);
         }
@@ -3998,7 +4039,7 @@ impl eframe::App for HcomDashboardApp {
                 self.show_canvas(ui, &visible_node_indices, &palette);
             }
             ViewMode::TableOnly => {
-                self.render_table(ui, &filtered_rows);
+                self.render_table(ui, table_rows);
             }
         });
 

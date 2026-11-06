@@ -10299,3 +10299,116 @@ fn test_task_77_11_new_live_messages_flash_their_edge_once() {
     );
     const { assert!(FLASH_SECS <= 0.5, "a short moment") };
 }
+
+#[test]
+fn test_task_77_49_filter_table_toggle_and_graph_selection_scrolls_table() {
+    use eframe::App;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState, load_state};
+    use hcom_dashboard::table_data::TableRow;
+
+    assert!(DashboardState::default().filter_table, "default: filtered");
+    let dir = tempfile::tempdir().unwrap();
+    let state = DashboardState {
+        columns: vec!["instance".into()],
+        sort_col: Some("instance".into()),
+        ..Default::default()
+    };
+    let mut app =
+        HcomDashboardApp::new_for_test(DashboardConfig::default(), state, dir.path().to_path_buf());
+    let mut names: Vec<String> = (0..60).map(|i| format!("w{i:02}_keep")).collect();
+    names.push("zz_other".into());
+    let snaps: Vec<_> = names.iter().map(|n| snap(n, None)).collect();
+    app.graph.apply_instance_snapshot(&snaps);
+    app.table_rows = names
+        .iter()
+        .map(|n| TableRow {
+            instance: n.clone(),
+            ..Default::default()
+        })
+        .collect();
+    app.search_query = "_keep".into();
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut time = 0.0;
+    let mut run_events = |app: &mut HcomDashboardApp, mut events: Vec<egui::Event>| {
+        for _ in 0..3 {
+            time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(time),
+                events: std::mem::take(&mut events),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+            out.textures_delta.clear();
+        }
+    };
+
+    // Filtered: the table follows the search like the graph.
+    run_events(&mut app, vec![]);
+    assert_eq!(app.table_row_bands.len(), 60);
+    // Full: every agent in the table, the graph stays filtered.
+    app.state.filter_table = false;
+    run_events(&mut app, vec![]);
+    assert_eq!(app.table_row_bands.len(), 61);
+    let band = *app.table_row_bands.last().unwrap();
+    assert!(band.top() > screen.bottom(), "last row starts out of view");
+
+    // Selecting a graph node far down the table scrolls its row into view.
+    let target = "w59_keep";
+    app.selected_row_id = Some(target.into());
+    app.canvas.selected_node = app.graph.get_node_index(target);
+    for _ in 0..4 {
+        run_events(&mut app, vec![]);
+    }
+    let band = app.table_row_bands[59];
+    assert!(
+        band.bottom() <= screen.bottom() + 1.0 && band.top() >= 0.0,
+        "selected row scrolled into view: {band:?}"
+    );
+
+    // Deselect, wheel the table back to the top, then select the same node
+    // again: it scrolls into view again.
+    app.selected_row_id = None;
+    app.canvas.selected_node = None;
+    run_events(&mut app, vec![]);
+    let over_table = app.table_row_bands[59].center();
+    let wheel = egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: Vec2::new(0.0, 5000.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    };
+    for _ in 0..4 {
+        run_events(
+            &mut app,
+            vec![egui::Event::PointerMoved(over_table), wheel.clone()],
+        );
+    }
+    for _ in 0..10 {
+        run_events(&mut app, vec![]);
+    }
+    assert!(
+        app.table_row_bands[59].top() > screen.bottom(),
+        "wheeled away: {:?}",
+        app.table_row_bands[59]
+    );
+    app.selected_row_id = Some(target.into());
+    app.canvas.selected_node = app.graph.get_node_index(target);
+    for _ in 0..4 {
+        run_events(&mut app, vec![]);
+    }
+    let band = app.table_row_bands[59];
+    assert!(
+        band.bottom() <= screen.bottom() + 1.0 && band.top() >= 0.0,
+        "reselected row scrolled into view again: {band:?}"
+    );
+
+    // The toggle persists.
+    app.save_state();
+    assert!(!load_state(dir.path()).filter_table);
+}

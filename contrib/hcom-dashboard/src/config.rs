@@ -360,6 +360,10 @@ pub struct DashboardState {
     pub hide_disabled: bool,
     #[serde(default)]
     pub hide_adhoc: bool,
+    /// The table follows the search and filters like the graph; off shows
+    /// every agent in the table (the graph stays filtered).
+    #[serde(default = "default_true")]
+    pub filter_table: bool,
     #[serde(default = "default_true")]
     pub empty_last: bool,
     #[serde(default = "default_sort_col")]
@@ -552,6 +556,7 @@ impl Default for DashboardState {
             blocked_only: false,
             hide_disabled: true,
             hide_adhoc: false,
+            filter_table: true,
             empty_last: true,
             sort_col: default_sort_col(),
             sort_reverse: false,
