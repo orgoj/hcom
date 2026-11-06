@@ -9440,6 +9440,33 @@ fn test_task_77_38_launcher_from_batch_launched_per_session() {
 }
 
 #[test]
+fn test_task_95_handoff_relaunch_keeps_the_launcher() {
+    use hcom_dashboard::table_data::compute_event_stats;
+
+    // Live sequence of `hcom handoff`: handoff, stopped, created, then a
+    // detached batch_launched by the user. A later plain relaunch by the
+    // user (no handoff) determines the launcher again.
+    let handoff = r#"
+{"id": 1, "instance": "worker", "type": "life", "ts": "2026-11-01T10:00:00", "data": {"action": "created"}}
+{"id": 2, "instance": "boss", "type": "life", "ts": "2026-11-01T10:00:00", "data": {"action": "batch_launched", "by": "boss", "instances": ["worker"]}}
+{"id": 3, "instance": "worker", "type": "life", "ts": "2026-11-01T11:00:00", "data": {"action": "handoff", "by": "worker"}}
+{"id": 4, "instance": "worker", "type": "life", "ts": "2026-11-01T11:00:00", "data": {"action": "stopped", "by": "cli"}}
+{"id": 5, "instance": "worker", "type": "life", "ts": "2026-11-01T11:00:02", "data": {"action": "created"}}
+{"id": 6, "instance": "user", "type": "life", "ts": "2026-11-01T11:00:02", "data": {"action": "batch_launched", "by": "user", "instances": ["worker"]}}
+"#;
+    let relaunch = r#"
+{"id": 7, "instance": "worker", "type": "life", "ts": "2026-11-01T12:00:00", "data": {"action": "stopped", "by": "cli"}}
+{"id": 8, "instance": "worker", "type": "life", "ts": "2026-11-01T12:00:02", "data": {"action": "created"}}
+{"id": 9, "instance": "user", "type": "life", "ts": "2026-11-01T12:00:02", "data": {"action": "batch_launched", "by": "user", "instances": ["worker"]}}
+"#;
+    let none = std::collections::HashSet::new();
+    let stats = compute_event_stats(handoff, "", &none, 0);
+    assert_eq!(stats["worker"].launcher.as_deref(), Some("boss"));
+    let stats = compute_event_stats(&format!("{handoff}{relaunch}"), "", &none, 0);
+    assert_eq!(stats["worker"].launcher, None, "a plain relaunch resets it");
+}
+
+#[test]
 fn test_task_77_38_launcher_becomes_spawn_parent_and_parent_name_wins() {
     use hcom_dashboard::table_data::{TableRow, apply_event_stats, compute_event_stats};
 

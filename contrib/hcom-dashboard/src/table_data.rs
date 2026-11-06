@@ -746,7 +746,8 @@ pub struct EventStatsEntry {
     pub failed: u64,
     pub last_start_ts: Option<u64>,
     /// Agent that launched the current session: `by` of the last
-    /// `batch_launched` naming this instance since its last `created`.
+    /// `batch_launched` naming this instance since its last `created`; a
+    /// handoff relaunch keeps the previous launcher.
     /// None when the user (or an unknown caller) launched it.
     pub launcher: Option<String>,
     /// Event ids of this instance's `created` events, ascending.
@@ -788,6 +789,9 @@ pub fn compute_event_stats(
 
     let mut opened: HashMap<String, u64> = HashMap::new();
     let mut stats: HashMap<String, EventStatsEntry> = HashMap::new();
+    // Instances whose next relaunch is a handoff: like a compact, it keeps
+    // the launcher (the relaunch itself runs detached, `by` = user).
+    let mut handing_off: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for e in life_events {
         let name = match e.get("instance").and_then(|i| i.as_str()) {
@@ -816,7 +820,9 @@ pub fn compute_event_stats(
                 // A new session determines its launcher again. An hcom launch
                 // logs its child's `created` before its `batch_launched`
                 // (the launcher pre-registers the instance in the launch loop).
-                entry.launcher = None;
+                if !handing_off.contains(&name) {
+                    entry.launcher = None;
+                }
             }
             "batch_launched" => {
                 let by = data
@@ -830,6 +836,9 @@ pub fn compute_event_stats(
                     .flatten()
                     .filter_map(|i| i.as_str());
                 for child in launched {
+                    if handing_off.remove(child) {
+                        continue;
+                    }
                     stats.entry(child.to_string()).or_default().launcher =
                         is_agent_launcher(by, child).then(|| by.to_string());
                 }
@@ -842,6 +851,7 @@ pub fn compute_event_stats(
             }
             "handoff" => {
                 entry.handoffs += 1;
+                handing_off.insert(name.clone());
             }
             "launch_failed" | "launch_blocked" => {
                 entry.failed += 1;
