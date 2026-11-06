@@ -663,7 +663,7 @@ fn send_message_with_catalog_outcome(
                         return Err("Ack-on-ack loop detected. Message blocked.".to_string());
                     }
                     if parent_intent == "inform" {
-                        return Err("Cannot ack an inform - informational messages don't need acknowledgment.".to_string());
+                        return Err("Cannot ack an inform - informational messages don't need acknowledgment. To reply with content, use --intent inform --reply-to <id>.".to_string());
                     }
                 }
             }
