@@ -2893,6 +2893,15 @@ impl eframe::App for HcomDashboardApp {
             (alt_x, fkey)
         });
 
+        // "/" focuses the search field unless a text field has the keyboard.
+        // The typed text, not the key, so every keyboard layout works.
+        let focus_search = !ctx.text_edit_focused()
+            && ctx.input(|i| {
+                i.events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::Text(t) if t == "/"))
+            });
+
         if clear_search && !self.inject_input_has_focus {
             self.search_query.clear();
         }
@@ -3376,10 +3385,13 @@ impl eframe::App for HcomDashboardApp {
 
                 // Search query
                 ui.label("Filter:");
-                ui.add(
+                let search = ui.add(
                     egui::TextEdit::singleline(&mut self.search_query)
                         .hint_text("Search agent, dir, tool... (/ to focus)"),
                 );
+                if focus_search {
+                    search.request_focus();
+                }
                 if ui.small_button("✖").clicked() {
                     self.search_query.clear();
                 }

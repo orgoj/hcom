@@ -10568,3 +10568,49 @@ fn test_task_77_50_table_row_double_click_or_enter_attaches() {
     run(&mut app, enter);
     assert_eq!(attaches("cat_beta"), 0, "stopped agent");
 }
+
+#[test]
+fn test_task_77_51_slash_focuses_the_search_field() {
+    use eframe::App;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
+        dir.path().to_path_buf(),
+    );
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut time = 0.0;
+    let mut run = |app: &mut HcomDashboardApp, events: Vec<egui::Event>| {
+        time += 0.05;
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            time: Some(time),
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| app.ui(ui, &mut frame))
+            .textures_delta
+            .clear();
+    };
+    let slash = || vec![egui::Event::Text("/".into())];
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    assert!(!ctx.text_edit_focused());
+
+    run(&mut app, slash());
+    run(&mut app, vec![]);
+    assert!(ctx.text_edit_focused(), "/ focuses the search field");
+    assert_eq!(app.search_query, "", "the shortcut is not typed");
+
+    // Inside the field, / is ordinary input.
+    run(&mut app, slash());
+    run(&mut app, vec![]);
+    assert_eq!(app.search_query, "/");
+    assert!(ctx.text_edit_focused());
+}
