@@ -3174,6 +3174,18 @@ impl eframe::App for HcomDashboardApp {
                         self.save_state();
                     }
                     ui.separator();
+                    // Right-to-left: Reset is drawn right of Fit.
+                    if ui
+                        .add_enabled(
+                            self.layout.mode != LayoutMode::Manual,
+                            egui::Button::new("Reset"),
+                        )
+                        .on_hover_text("Rearrange unpinned agents from scratch")
+                        .on_disabled_hover_text("Reset arranges Hierarchy and Cluster, not Manual")
+                        .clicked()
+                    {
+                        self.layout.start_transition(&self.graph);
+                    }
                     if ui
                         .button("Fit")
                         .on_hover_text("Zoom and pan so all shown agents fit the graph")
@@ -3235,6 +3247,7 @@ impl eframe::App for HcomDashboardApp {
                         && self.layout.mode != mode
                     {
                         self.layout.set_mode(mode);
+                        self.layout.start_transition(&self.graph);
                         self.state.layout_mode = mode.as_str().to_string();
                         self.save_state();
                     }

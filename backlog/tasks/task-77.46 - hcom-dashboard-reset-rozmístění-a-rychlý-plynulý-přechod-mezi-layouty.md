@@ -1,10 +1,11 @@
 ---
 id: TASK-77.46
 title: 'hcom-dashboard: reset rozmístění a rychlý plynulý přechod mezi layouty'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@hcom_dev__idea'
 created_date: '2026-11-06T20:05:00Z'
-updated_date: '2026-11-06T20:11:00Z'
+updated_date: '2026-11-06T21:20:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -21,12 +22,12 @@ Uživatel (2026-11-06): rozházení uzlů se mu nelíbí; osamělé uzly bez hra
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Tlačítko Reset je v řádku s Fit hned vpravo od Fit; v režimu Manual je neaktivní
-- [ ] #2 Reset v Hierarchy a Cluster přeskládá všechny nepřipnuté uzly do rozmístění aktuálního režimu spočítaného znovu od nuly (nezávisle na současných pozicích)
-- [ ] #3 Připnuté uzly zůstávají při resetu i při přepnutí režimu na svém místě; kdo je chce přeskládat, musí je odepnout
-- [ ] #4 Po resetu i po přepnutí mezi Hierarchy a Cluster dojedou uzly k cíli plynulou animací (zrychlení a zpomalení, bez skoku) za 3 až 5 s a potom je graf v klidu
-- [ ] #5 Osamělé uzly bez hran končí v cílovém rozmístění u ostatních uzlů, ne daleko od nich
-- [ ] #6 Regresní testy pokrývají cílové rozmístění bez závislosti na výchozích pozicích, nepohnuté připnuté uzly, délku a plynulost animace (bez skoku mezi snímky), neaktivní Reset v Manual a polohu tlačítka vedle Fit
+- [x] #1 Tlačítko Reset je v řádku s Fit hned vpravo od Fit; v režimu Manual je neaktivní
+- [x] #2 Reset v Hierarchy a Cluster přeskládá všechny nepřipnuté uzly do rozmístění aktuálního režimu spočítaného znovu od nuly (nezávisle na současných pozicích)
+- [x] #3 Připnuté uzly zůstávají při resetu i při přepnutí režimu na svém místě; kdo je chce přeskládat, musí je odepnout
+- [x] #4 Po resetu i po přepnutí mezi Hierarchy a Cluster dojedou uzly k cíli plynulou animací (zrychlení a zpomalení, bez skoku) za 3 až 5 s a potom je graf v klidu
+- [x] #5 Osamělé uzly bez hran končí v cílovém rozmístění u ostatních uzlů, ne daleko od nich
+- [x] #6 Regresní testy pokrývají cílové rozmístění bez závislosti na výchozích pozicích, nepohnuté připnuté uzly, délku a plynulost animace (bez skoku mezi snímky), neaktivní Reset v Manual a polohu tlačítka vedle Fit
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -39,4 +40,12 @@ Uživatel (2026-11-06): rozházení uzlů se mu nelíbí; osamělé uzly bez hra
 
 <!-- SECTION:NOTES:BEGIN -->
 Uživatel (2026-11-06): Reset vpravo vedle Fit; piny zůstávají (pro přeskládání odepnout); animace 3–5 s, plynulá, bez skoku; v Manual je Reset neaktivní.
+
+Implementace: GraphLayout::planned_positions (klon layoutu, nepřipnuté uzly na výchozí pozice nezávislé na současných, simulace bez rozpočtu do spánku; v Cluster uzly bez hran v řadách pod ostatními), start_transition + advance_transition (smoothstep 4 s, TRANSITION_SECS, piny stojí, potom spánek). Spouští ji Reset (vpravo od Fit, neaktivní v Manual), přepnutí režimu a změna velikosti plátna v Hierarchy; strukturální změna během přechodu ho přeplánuje; ruční posun uzlu ho z přechodu vyřadí. Známé: plánování běží synchronně ve snímku kliknutí; po pozdějším strukturálním probuzení může fyzika uzly bez hran v Cluster znovu odsunout (Reset je vrátí). README doplněno i o zalamování z TASK-77.25. Review agent_review OK.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Reset vpravo od Fit a plynulý 4s přechod (ease-in-out) do rozmístění spočítaného od nuly, po Resetu, přepnutí režimu a resize v Hierarchy; piny zůstávají, uzly bez hran v Cluster u ostatních. Ověřeno testy test_task_77_46_* (nezávislost cíle, piny, AC5, délka 3–5 s, krok ≤ 1,5× průměru, klid po přechodu, poloha a neaktivita Resetu); fmt, clippy 0 warnings, cargo test 17+182.
+<!-- SECTION:FINAL_SUMMARY:END -->

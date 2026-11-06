@@ -9996,3 +9996,207 @@ fn test_task_77_45_edge_toggles_sit_after_layout_and_switch_the_state() {
     let saved = load_state(dir.path());
     assert!(!saved.show_message_edges && saved.edge_width_bytes);
 }
+
+/// Tree boss → m1 → a1, boss → m2, messages boss–m1 and m2–a1, and three
+/// nodes without any edge (TASK-77.46).
+fn reset_test_graph() -> AgentGraph {
+    let mut graph = AgentGraph::new();
+    graph.apply_instance_snapshot(&[
+        layout_snap("boss", None),
+        layout_snap("m1", Some("boss")),
+        layout_snap("m2", Some("boss")),
+        layout_snap("a1", Some("m1")),
+        layout_snap("lone1", None),
+        layout_snap("lone2", None),
+        layout_snap("lone3", None),
+    ]);
+    let mut id = 0;
+    for (from, to, count) in [("boss", "m1", 10), ("m2", "a1", 3)] {
+        for _ in 0..count {
+            id += 1;
+            graph.apply_message_event(&MessageEvent {
+                id,
+                ts: Utc::now(),
+                instance: from.into(),
+                data: MessageData {
+                    from: from.into(),
+                    delivered_to: vec![to.into()],
+                    mentions: vec![],
+                    intent: None,
+                    reply_to: None,
+                    text: "x".into(),
+                },
+            });
+        }
+    }
+    graph
+}
+
+/// Settled layout of `reset_test_graph` in `mode` with `m2` pinned.
+fn settled_reset_layout(
+    graph: &AgentGraph,
+    mode: hcom_dashboard::layout::LayoutMode,
+) -> GraphLayout {
+    let mut layout = GraphLayout::new();
+    layout.set_mode(mode);
+    layout.sync_nodes(graph);
+    for _ in 0..1500 {
+        layout.step(graph, 1.0 / 60.0);
+    }
+    let m2 = graph.get_node_index("m2").unwrap();
+    layout.set_pinned(m2, "m2", true);
+    layout
+}
+
+#[test]
+fn test_task_77_46_planned_layout_ignores_current_positions_and_keeps_pins() {
+    use hcom_dashboard::layout::LayoutMode;
+    let graph = reset_test_graph();
+    for mode in [LayoutMode::Cluster, LayoutMode::Hierarchy] {
+        let mut layout = settled_reset_layout(&graph, mode);
+        let m2 = graph.get_node_index("m2").unwrap();
+        let m2_pos = layout.nodes[&m2].pos;
+        let plan = layout.planned_positions(&graph);
+        // Scatter every unpinned node: the plan must not change (AC2).
+        for (k, (_, phys)) in layout.nodes.iter_mut().enumerate() {
+            if !phys.pinned {
+                phys.pos = Pos2::new((k * 997 % 3000) as f32 - 1500.0, (k * 613 % 2000) as f32);
+            }
+        }
+        let again = layout.planned_positions(&graph);
+        assert_eq!(plan.len(), graph.graph.node_count());
+        for (idx, p) in &plan {
+            assert!(
+                p.distance(again[idx]) < 0.01,
+                "{mode:?}: {} planned independent of current positions",
+                graph.graph[*idx].name
+            );
+        }
+        // The pinned node stays (AC3).
+        assert_eq!(plan[&m2], m2_pos, "{mode:?}: pinned node kept");
+        // Nodes without edges end next to the others (AC5).
+        let at = |n: &str| plan[&graph.get_node_index(n).unwrap()];
+        if mode == LayoutMode::Cluster {
+            // Within two slots of the bounding box of the connected nodes.
+            let rest = ["boss", "m1", "m2", "a1"]
+                .iter()
+                .fold(Rect::NOTHING, |b, n| {
+                    b.union(Rect::from_center_size(at(n), Vec2::ZERO))
+                });
+            for n in ["lone1", "lone2", "lone3"] {
+                let d = rest.distance_to_pos(at(n));
+                assert!(d <= 200.0 + 1e-3, "{mode:?}: {n} near the others, {d} away");
+            }
+        } else {
+            // In the root layer, each with a neighbour about one slot away.
+            for n in ["lone1", "lone2", "lone3"] {
+                assert!(
+                    (at(n).y - at("boss").y).abs() < 25.0,
+                    "{n} in the root layer"
+                );
+                let nearest = plan
+                    .values()
+                    .filter(|p| **p != at(n))
+                    .map(|p| p.distance(at(n)))
+                    .fold(f32::MAX, f32::min);
+                assert!(nearest < 130.0, "{n} next to a neighbour, {nearest} away");
+            }
+        }
+    }
+}
+
+#[test]
+fn test_task_77_46_transition_is_eased_takes_four_seconds_and_rests() {
+    use hcom_dashboard::layout::{LayoutMode, TRANSITION_SECS};
+    assert!((3.0..=5.0).contains(&TRANSITION_SECS));
+    let graph = reset_test_graph();
+    // Reset in Cluster, then a switch Cluster → Hierarchy.
+    let mut layout = settled_reset_layout(&graph, LayoutMode::Cluster);
+    for switch in [None, Some(LayoutMode::Hierarchy)] {
+        if let Some(mode) = switch {
+            layout.set_mode(mode);
+        }
+        let m2 = graph.get_node_index("m2").unwrap();
+        let m2_pos = layout.nodes[&m2].pos;
+        let plan = layout.planned_positions(&graph);
+        let start: std::collections::HashMap<_, Pos2> =
+            layout.nodes.iter().map(|(i, p)| (*i, p.pos)).collect();
+        layout.start_transition(&graph);
+        let dt = 1.0 / 60.0;
+        let mut frames = 0usize;
+        let mut prev = start.clone();
+        let mut max_step: std::collections::HashMap<_, f32> = Default::default();
+        while layout.transition.is_some() {
+            layout.step(&graph, dt);
+            frames += 1;
+            assert!(frames < 1000, "transition ends");
+            for (idx, p) in &layout.nodes {
+                let s = max_step.entry(*idx).or_insert(0.0f32);
+                *s = s.max(p.pos.distance(prev[idx]));
+            }
+            prev = layout.nodes.iter().map(|(i, p)| (*i, p.pos)).collect();
+        }
+        let secs = frames as f32 * dt;
+        assert!((3.0..=5.0).contains(&secs), "{switch:?}: {secs} s");
+        for (idx, p) in &layout.nodes {
+            let name = &graph.graph[*idx].name;
+            assert!(
+                p.pos.distance(plan[idx]) < 0.01,
+                "{switch:?}: {name} at its target"
+            );
+            // Smoothstep peaks at 1.5× the mean speed: no jump between frames.
+            let mean = start[idx].distance(plan[idx]) / frames as f32;
+            assert!(
+                max_step[idx] <= 1.5 * mean * 1.05 + 0.01,
+                "{switch:?}: {name} step {} vs mean {mean}",
+                max_step[idx]
+            );
+        }
+        assert_eq!(layout.nodes[&m2].pos, m2_pos, "{switch:?}: pin kept");
+        assert!(layout.is_sleeping, "{switch:?}: graph at rest");
+        let rest: Vec<Pos2> = layout.nodes.values().map(|p| p.pos).collect();
+        layout.step(&graph, dt);
+        let after: Vec<Pos2> = layout.nodes.values().map(|p| p.pos).collect();
+        assert_eq!(rest, after, "{switch:?}: no motion after the transition");
+    }
+}
+
+#[test]
+fn test_task_77_46_reset_sits_right_of_fit_and_is_disabled_in_manual() {
+    use eframe::App;
+    use hcom_dashboard::config::DashboardState;
+    for (mode, disabled) in [("cluster", false), ("hierarchy", false), ("manual", true)] {
+        let (_dir, mut app) = split_test_app(DashboardState {
+            layout_mode: mode.into(),
+            ..DashboardState::default()
+        });
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 800.0));
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut out = None;
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let mut o = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+            o.textures_delta.clear();
+            out = Some(o);
+        }
+        let out = out.unwrap();
+        let fit = widget_rect(&out, "Fit").expect("Fit button");
+        let reset = widget_rects(&out, "Reset");
+        assert_eq!(reset.len(), 1, "{mode}: one Reset button");
+        let (rect, is_disabled) = reset[0];
+        assert!(
+            (rect.center().y - fit.center().y).abs() < 2.0,
+            "{mode}: Fit row"
+        );
+        assert!(
+            rect.left() > fit.right() && rect.left() - fit.right() < 12.0,
+            "{mode}: right next to Fit"
+        );
+        assert_eq!(is_disabled, disabled, "{mode}: disabled only in Manual");
+    }
+}

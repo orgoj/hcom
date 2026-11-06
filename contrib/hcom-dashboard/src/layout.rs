@@ -59,6 +59,19 @@ struct Spring {
     msgs: usize,
 }
 
+/// Duration of the eased move to a planned arrangement after a Reset or a
+/// mode switch.
+pub const TRANSITION_SECS: f32 = 4.0;
+
+/// Eased move of the unpinned nodes from `from` to `to`.
+#[derive(Debug, Clone)]
+pub struct Transition {
+    from: HashMap<NodeIndex, egui::Pos2>,
+    to: HashMap<NodeIndex, egui::Pos2>,
+    elapsed: f32,
+}
+
+#[derive(Clone)]
 pub struct GraphLayout {
     pub nodes: HashMap<NodeIndex, NodePhysics>,
     pub sorted_indices: Vec<NodeIndex>,
@@ -125,6 +138,9 @@ pub struct GraphLayout {
     /// Positions of user-pinned nodes by name; a pinned node starts there and
     /// the simulation does not move it, in every mode.
     pub pinned_positions: HashMap<String, egui::Pos2>,
+    /// Running eased move to a planned arrangement; replaces the simulation
+    /// while it lasts.
+    pub transition: Option<Transition>,
 }
 
 impl Default for GraphLayout {
@@ -178,6 +194,7 @@ impl GraphLayout {
             springs_key: None,
             springs: Vec::new(),
             pinned_positions: HashMap::new(),
+            transition: None,
         }
     }
 
@@ -185,6 +202,7 @@ impl GraphLayout {
     /// of the previous mode is mixed in, and wakes the simulation.
     pub fn set_mode(&mut self, mode: LayoutMode) {
         self.mode = mode;
+        self.transition = None;
         self.reset_cursors();
         self.tree_key = None;
         self.is_sleeping = false;
@@ -241,7 +259,8 @@ impl GraphLayout {
         // Only a structural change wakes the layout; a periodic snapshot of
         // the same graph or a message between known partners does not.
         let key = wake_key(graph);
-        if self.wake_key != Some(key) {
+        let changed = self.wake_key != Some(key);
+        if changed {
             self.wake_key = Some(key);
             self.wake_up();
             self.alpha = 1.0;
@@ -275,6 +294,138 @@ impl GraphLayout {
             self.collision_i = 0;
             self.collision_j = 1;
         }
+        // A structural change during a transition re-plans it from here.
+        if changed && self.transition.is_some() {
+            self.start_transition(graph);
+        }
+    }
+
+    /// Arrangement of the current mode computed from scratch: pinned nodes
+    /// stay, every other node starts at its initial position (independent of
+    /// its current one) and the simulation runs without frame budget until
+    /// it sleeps. In Cluster mode, unpinned nodes without any edge then fill
+    /// rows below the others.
+    pub fn planned_positions(&self, graph: &AgentGraph) -> HashMap<NodeIndex, egui::Pos2> {
+        let mut sim = self.clone();
+        sim.transition = None;
+        sim.max_step_duration = std::time::Duration::from_secs(3600);
+        sim.tree_key = None;
+        sim.reset_cursors();
+        let depths = spawn_depths(graph);
+        let mut free: Vec<NodeIndex> = sim
+            .nodes
+            .iter()
+            .filter(|(_, p)| !p.pinned)
+            .map(|(i, _)| *i)
+            .collect();
+        free.sort_by_key(|i| (depths.get(i).copied().unwrap_or(0), *i));
+        sim.nodes.retain(|_, p| p.pinned);
+        if sim.mode == LayoutMode::Hierarchy {
+            sim.refresh_tree_targets(graph);
+        }
+        for &idx in &free {
+            let pos = sim.initial_position(graph, idx);
+            sim.nodes.insert(
+                idx,
+                NodePhysics {
+                    pos,
+                    vel: egui::Vec2::ZERO,
+                    pinned: false,
+                },
+            );
+        }
+        sim.sorted_indices = sim.nodes.keys().copied().collect();
+        sim.sorted_indices.sort();
+        sim.is_sleeping = false;
+        sim.calm_steps = 0;
+        sim.alpha = 1.0;
+        for _ in 0..3000 {
+            sim.step(graph, 1.0 / 60.0);
+            if sim.is_sleeping {
+                break;
+            }
+        }
+        let mut out: HashMap<NodeIndex, egui::Pos2> =
+            sim.nodes.iter().map(|(i, p)| (*i, p.pos)).collect();
+        if sim.mode == LayoutMode::Cluster {
+            sim.refresh_springs(graph);
+            let linked: HashSet<NodeIndex> = sim.springs.iter().flat_map(|s| [s.a, s.b]).collect();
+            let mut lone: Vec<NodeIndex> = free
+                .iter()
+                .copied()
+                .filter(|i| !linked.contains(i))
+                .collect();
+            lone.sort();
+            let rest = out
+                .iter()
+                .filter(|(i, _)| !lone.contains(i))
+                .fold(egui::Rect::NOTHING, |b, (_, p)| {
+                    b.union(egui::Rect::from_center_size(*p, egui::Vec2::ZERO))
+                });
+            if !lone.is_empty() && rest.is_finite() {
+                let slot = self.tree_slot();
+                let cols = ((rest.width() / slot).floor() as usize + 1)
+                    .max(lone.len().isqrt())
+                    .max(1);
+                for (k, &idx) in lone.iter().enumerate() {
+                    let (row, col) = (k / cols, k % cols);
+                    let in_row = (lone.len() - row * cols).min(cols);
+                    let x = rest.center().x + (col as f32 - (in_row - 1) as f32 / 2.0) * slot;
+                    let y = rest.max.y + (row + 1) as f32 * slot;
+                    out.insert(idx, egui::pos2(x, y));
+                }
+            }
+        }
+        out
+    }
+
+    /// Starts an eased move of the unpinned nodes to `planned_positions`;
+    /// nothing in Manual mode.
+    pub fn start_transition(&mut self, graph: &AgentGraph) {
+        if self.mode == LayoutMode::Manual {
+            return;
+        }
+        let to = self.planned_positions(graph);
+        let from = self.nodes.iter().map(|(i, p)| (*i, p.pos)).collect();
+        self.transition = Some(Transition {
+            from,
+            to,
+            elapsed: 0.0,
+        });
+        self.is_sleeping = false;
+    }
+
+    /// Advances the transition by `dt`: smoothstep from `from` to `to`, so
+    /// the move accelerates and decelerates without a jump. At the end the
+    /// nodes rest on their targets and the layout sleeps. Returns the
+    /// largest displacement of this frame.
+    fn advance_transition(&mut self, dt: f32) -> f32 {
+        let Some(tr) = self.transition.as_mut() else {
+            return 0.0;
+        };
+        tr.elapsed += dt.clamp(0.0, 0.1);
+        let t = (tr.elapsed / TRANSITION_SECS).min(1.0);
+        let e = t * t * (3.0 - 2.0 * t);
+        let mut motion = 0.0f32;
+        for (idx, to) in &tr.to {
+            if let (Some(from), Some(phys)) = (tr.from.get(idx), self.nodes.get_mut(idx))
+                && !phys.pinned
+            {
+                let p = *from + (*to - *from) * e;
+                motion = motion.max(p.distance(phys.pos));
+                phys.pos = p;
+                phys.vel = egui::Vec2::ZERO;
+            }
+        }
+        if t >= 1.0 {
+            self.transition = None;
+            self.is_sleeping = true;
+            self.calm_steps = 0;
+            // A later wake reheats gently instead of re-running the cooling.
+            self.alpha = self.alpha_min;
+            return motion;
+        }
+        motion.max(self.epsilon_sleep + 0.1)
     }
 
     /// Position of a new node: its tree target in Hierarchy mode; otherwise
@@ -338,7 +489,8 @@ impl GraphLayout {
     /// layers recomputes the tree and wakes the layout in Hierarchy mode; a
     /// non-positive or unknown size disables wrapping. The first known size
     /// (at start, the nodes were placed for an unknown one) moves unpinned
-    /// nodes straight to their new targets.
+    /// nodes straight to their new targets; a later change moves them there
+    /// with a transition.
     pub fn set_canvas_size(&mut self, graph: &AgentGraph, size: egui::Vec2) {
         let cells = if size.is_finite() && size.x > 0.0 && size.y > 0.0 {
             (
@@ -359,7 +511,9 @@ impl GraphLayout {
         self.tree_key = None;
         self.wake_up();
         self.alpha = 1.0;
-        if first {
+        if !first {
+            self.start_transition(graph);
+        } else {
             self.refresh_tree_targets(graph);
             for (idx, phys) in self.nodes.iter_mut() {
                 if let Some(t) = self.tree_targets.get(idx)
@@ -449,6 +603,10 @@ impl GraphLayout {
     }
 
     pub fn set_node_pos(&mut self, idx: NodeIndex, pos: egui::Pos2, pinned: bool) {
+        // A node placed by hand leaves a running transition.
+        if let Some(tr) = self.transition.as_mut() {
+            tr.to.remove(&idx);
+        }
         if let Some(phys) = self.nodes.get_mut(&idx) {
             phys.pos = pos;
             phys.vel = egui::Vec2::ZERO;
@@ -486,7 +644,13 @@ impl GraphLayout {
     /// collision pass was clean and either motion stayed below the threshold
     /// or alpha cooled below `alpha_min`.
     pub fn step(&mut self, graph: &AgentGraph, dt: f32) -> f32 {
-        if self.is_sleeping || self.mode == LayoutMode::Manual {
+        if self.mode == LayoutMode::Manual {
+            return 0.0;
+        }
+        if self.transition.is_some() {
+            return self.advance_transition(dt);
+        }
+        if self.is_sleeping {
             return 0.0;
         }
         let start_time = std::time::Instant::now();
