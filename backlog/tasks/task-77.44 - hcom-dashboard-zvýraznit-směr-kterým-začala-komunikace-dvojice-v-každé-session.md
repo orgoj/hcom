@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-06T19:41:00Z'
+updated_date: '2026-11-06T19:43:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -24,8 +25,14 @@ ordinal: 137000
 <!-- AC:BEGIN -->
 - [ ] #1 Šipky zpráv dál ukazují oba směry, jednosměrná komunikace má jen jednu šipku
 - [ ] #2 Komunikace dvojice se dělí na úseky; nový úsek začne life eventem created kteréhokoli z dvojice
-- [ ] #3 Iniciátor úseku je odesílatel první zprávy v úseku
-- [ ] #4 Směr, kterým začal aspoň jeden úsek, je v grafu zvýrazněný; zahájily-li úseky obě strany, jsou zvýrazněné oba směry
-- [ ] #5 Detail hrany a tooltip uvádějí iniciátora (u více úseků všechny s počtem)
-- [ ] #6 Regresní testy pokrývají jednosměrnou komunikaci, zahájení každou stranou, nový úsek po created jedné strany a oba zvýrazněné směry
+- [ ] #3 Směr, kterým začal aspoň jeden úsek, je v grafu zvýrazněný; zahájily-li úseky obě strany, jsou zvýrazněné oba směry
+- [ ] #4 Detail hrany a tooltip uvádějí iniciátora (u více úseků všechny s počtem)
+- [ ] #5 Iniciátor úseku je odesílatel první zprávy v úseku, která není odpovědí: zprávy s reply_to nebo s intent ack úsek nezahajují; úsek bez takové zprávy nemá iniciátora
+- [ ] #6 Regresní testy pokrývají jednosměrnou komunikaci, zahájení každou stranou, nový úsek po created jedné strany, odpověď (reply_to i ack) jako první zprávu úseku a oba zvýrazněné směry
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Uživatel (2026-11-06): odpovědi (reply_to, intent ack) konverzaci nezahajují; např. po restartu agenta mu druhý teprve odpovídá na dřívější dotaz, to není začátek konverzace.
+<!-- SECTION:NOTES:END -->
