@@ -339,7 +339,13 @@ pub struct CanvasView {
     pub layers: EdgeLayers,
     /// Message arrow width by text bytes instead of message count.
     pub width_by_bytes: bool,
+    /// Message edges (from, to) that flash until the given `ui` time after
+    /// a new message arrived (TASK-77.11).
+    pub flash_until: std::collections::HashMap<(String, String), f64>,
 }
+
+/// How long a message edge flashes after a new message, in seconds.
+pub const FLASH_SECS: f64 = 0.4;
 
 impl Default for CanvasView {
     fn default() -> Self {
@@ -394,6 +400,31 @@ impl CanvasView {
             edge_counts: None,
             layers: EdgeLayers::default(),
             width_by_bytes: false,
+            flash_until: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Lets every message edge of `new` that has more messages than in `old`
+    /// flash for `FLASH_SECS` from `now`. Nothing when `old` held no messages
+    /// yet (the history loaded at start).
+    pub fn flash_new_messages(&mut self, old: &AgentGraph, new: &AgentGraph, now: f64) {
+        if old.last_event_id == 0 {
+            return;
+        }
+        let before: std::collections::HashMap<(&str, &str), usize> = old
+            .iter_message_edges()
+            .map(|m| ((m.from.as_str(), m.to.as_str()), m.count))
+            .collect();
+        for m in new.iter_message_edges() {
+            if m.count
+                > before
+                    .get(&(m.from.as_str(), m.to.as_str()))
+                    .copied()
+                    .unwrap_or(0)
+            {
+                self.flash_until
+                    .insert((m.from.clone(), m.to.clone()), now + FLASH_SECS);
+            }
         }
     }
 
@@ -824,6 +855,13 @@ impl CanvasView {
                 && layout.nodes.contains_key(&e.source())
                 && layout.nodes.contains_key(&e.target())
         };
+        // Flashing edges: repaint when the next flash ends.
+        let now = ui.input(|i| i.time);
+        self.flash_until.retain(|_, t| *t > now);
+        if let Some(end) = self.flash_until.values().copied().reduce(f64::min) {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(end - now));
+        }
         // Largest flow among the drawn message edges: the full-width arrow.
         let max_flow = graph
             .graph
@@ -920,7 +958,10 @@ impl CanvasView {
                         base_thickness
                     };
 
-                    let color = if is_selected {
+                    let flashing = self
+                        .flash_until
+                        .contains_key(&(msg.from.clone(), msg.to.clone()));
+                    let color = if is_selected || flashing {
                         palette.edge_selected
                     } else if is_hovered {
                         palette.message_edge_hover

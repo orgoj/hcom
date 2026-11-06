@@ -2860,6 +2860,11 @@ impl eframe::App for HcomDashboardApp {
         {
             // Node styles come from table reloads, not from the sync snapshot.
             let styles = std::mem::take(&mut self.graph.node_styles);
+            // New messages flash their edge briefly, only in a Live window.
+            if self.msg_window.end.is_none() {
+                let now = ctx.input(|i| i.time);
+                self.canvas.flash_new_messages(&self.graph, &updated, now);
+            }
             self.graph = updated;
             self.graph.node_styles = styles;
             self.sync_graph_from_table_rows();

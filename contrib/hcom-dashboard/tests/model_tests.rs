@@ -10222,3 +10222,53 @@ fn test_task_77_26_last_limit_count_and_agent_fields_texts() {
     assert_eq!(fields[0].1, "5m");
     assert!(agent_meta_fields(None, None).is_empty());
 }
+
+#[test]
+fn test_task_77_11_new_live_messages_flash_their_edge_once() {
+    use hcom_dashboard::canvas::FLASH_SECS;
+    let msg = |graph: &mut AgentGraph, id: u64, from: &str, to: &str| {
+        graph.apply_message_event(&MessageEvent {
+            id,
+            ts: Utc::now(),
+            instance: from.into(),
+            data: MessageData {
+                from: from.into(),
+                delivered_to: vec![to.into()],
+                mentions: vec![],
+                intent: None,
+                reply_to: None,
+                text: "x".into(),
+            },
+        });
+    };
+    let mut old = AgentGraph::new();
+    msg(&mut old, 1, "a", "b");
+    msg(&mut old, 2, "c", "d");
+    let mut new = old.clone();
+    msg(&mut new, 3, "a", "b");
+    msg(&mut new, 4, "b", "a");
+
+    // History loaded at start (nothing before): no flash.
+    let mut canvas = CanvasView::new();
+    canvas.flash_new_messages(&AgentGraph::new(), &new, 10.0);
+    assert!(canvas.flash_until.is_empty());
+
+    // Only edges with new messages flash, for FLASH_SECS.
+    canvas.flash_new_messages(&old, &new, 10.0);
+    let mut keys: Vec<_> = canvas.flash_until.keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            ("a".to_string(), "b".to_string()),
+            ("b".to_string(), "a".to_string())
+        ]
+    );
+    assert!(
+        canvas
+            .flash_until
+            .values()
+            .all(|t| (*t - 10.0 - FLASH_SECS).abs() < 1e-9)
+    );
+    const { assert!(FLASH_SECS <= 0.5, "a short moment") };
+}
