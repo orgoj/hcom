@@ -31,6 +31,8 @@ pub struct ThemePalette {
     pub message_edge: Color32,
     pub message_edge_hover: Color32,
     pub message_edge_idle: Color32,
+    /// Main arrow from the side that started the conversation of a pair.
+    pub initiator_edge: Color32,
     pub edge_selected: Color32,
     pub roaming_outline: Color32,
     // Badges & labels
@@ -69,6 +71,7 @@ impl ThemePalette {
                 message_edge: Color32::from_rgb(165, 105, 189),
                 message_edge_hover: Color32::from_rgb(210, 150, 235),
                 message_edge_idle: Color32::from_rgba_unmultiplied(165, 105, 189, 50),
+                initiator_edge: Color32::from_rgba_unmultiplied(26, 188, 156, 150),
                 edge_selected: Color32::from_rgb(241, 196, 15),
                 roaming_outline: Color32::from_rgb(200, 205, 220),
                 badge_fill: Color32::from_rgb(35, 38, 50),
@@ -100,6 +103,7 @@ impl ThemePalette {
                 message_edge: Color32::from_rgb(142, 68, 173),
                 message_edge_hover: Color32::from_rgb(125, 45, 155),
                 message_edge_idle: Color32::from_rgba_unmultiplied(142, 68, 173, 60),
+                initiator_edge: Color32::from_rgba_unmultiplied(13, 148, 136, 150),
                 edge_selected: Color32::from_rgb(217, 119, 6),
                 roaming_outline: Color32::from_rgb(85, 95, 115),
                 badge_fill: Color32::from_rgb(235, 238, 245),
@@ -664,6 +668,81 @@ impl CanvasView {
             }
         }
 
+        // 4a. Initiator arrows below the message edges: straight between the
+        // two curved message edges of a reciprocal pair, curved beside the
+        // straight edge of a one-way pair.
+        for (a, b, initiators) in graph.iter_initiators() {
+            let (Some(ia), Some(ib)) = (graph.get_node_index(a), graph.get_node_index(b)) else {
+                continue;
+            };
+            if let Some(v) = visible_nodes
+                && (!v.contains(&ia) || !v.contains(&ib))
+            {
+                continue;
+            }
+            let (Some(pa), Some(pb)) = (layout.nodes.get(&ia), layout.nodes.get(&ib)) else {
+                continue;
+            };
+            let p1 = self.world_to_screen(pa.pos, rect);
+            let p2 = self.world_to_screen(pb.pos, rect);
+            let d = p2 - p1;
+            let len = d.length();
+            let gap = self.edge_gap();
+            if len <= 2.0 * gap {
+                continue;
+            }
+            let dir = d / len;
+            let normal = Vec2::new(-dir.y, dir.x);
+            let start_pt = p1 + dir * gap;
+            let end_pt = p2 - dir * gap;
+            let reciprocal = graph.graph.contains_edge(ia, ib) && graph.graph.contains_edge(ib, ia);
+            let ctrl = start_pt
+                + (end_pt - start_pt) * 0.5
+                + if reciprocal {
+                    Vec2::ZERO
+                } else {
+                    normal * (18.0 * self.zoom)
+                };
+            let color = palette.initiator_edge;
+            let stroke = Stroke::new(4.0 * self.zoom.clamp(0.6, 2.2), color);
+            let head = 12.0 * self.zoom;
+            let (head_at_a, head_at_b) = initiator_heads(a, initiators);
+            let tip_a = if head_at_a {
+                start_pt + (ctrl - start_pt).normalized() * head
+            } else {
+                start_pt
+            };
+            let tip_b = if head_at_b {
+                end_pt - (end_pt - ctrl).normalized() * head
+            } else {
+                end_pt
+            };
+            // One polyline: overlapping segments would darken the translucent stroke.
+            let points = (0..=16)
+                .map(|step| {
+                    let t = step as f32 / 16.0;
+                    let it = 1.0 - t;
+                    Pos2::new(
+                        it * it * tip_a.x + 2.0 * it * t * ctrl.x + t * t * tip_b.x,
+                        it * it * tip_a.y + 2.0 * it * t * ctrl.y + t * t * tip_b.y,
+                    )
+                })
+                .collect();
+            painter.add(egui::Shape::line(points, stroke));
+            if head_at_a {
+                draw_arrow_head(
+                    &painter,
+                    start_pt,
+                    (start_pt - ctrl).normalized(),
+                    head,
+                    color,
+                );
+            }
+            if head_at_b {
+                draw_arrow_head(&painter, end_pt, (end_pt - ctrl).normalized(), head, color);
+            }
+        }
+
         // 4. Render Edges
         let node_radius = 26.0 * self.zoom;
         for edge_ref in graph.graph.edge_references() {
@@ -1157,6 +1236,26 @@ pub fn context_fill_polygon(center: Pos2, radius: f32, percent: f32) -> Vec<Pos2
             center + Vec2::new(a.cos(), a.sin()) * radius
         })
         .collect()
+}
+
+/// Arrow heads of the initiator arrow of pair `a`–`b`: `(at a, at b)`. The
+/// arrow points away from each side that started a segment.
+pub fn initiator_heads(a: &str, initiators: &[(String, usize)]) -> (bool, bool) {
+    let by_a = initiators.iter().any(|(n, _)| n == a);
+    let by_b = initiators.iter().any(|(n, _)| n != a);
+    (by_b, by_a)
+}
+
+/// Pair initiators as shown in the edge detail and tooltip, e.g.
+/// `alice (3), bob (1)`; `None` without an initiator.
+pub fn format_initiators(initiators: &[(String, usize)]) -> Option<String> {
+    (!initiators.is_empty()).then(|| {
+        initiators
+            .iter()
+            .map(|(n, c)| format!("{n} ({c})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
 }
 
 fn draw_arrow_head(painter: &egui::Painter, tip: Pos2, dir: Vec2, size: f32, color: Color32) {

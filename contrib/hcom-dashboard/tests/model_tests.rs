@@ -160,6 +160,7 @@ fn test_malicious_sender_advances_watermark_without_stuck_loop() {
             delivered_to: vec!["agent_valid".into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: "text".into(),
         },
     };
@@ -179,6 +180,7 @@ fn test_malicious_sender_advances_watermark_without_stuck_loop() {
             delivered_to: vec!["bob".into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: "hello".into(),
         },
     };
@@ -411,6 +413,7 @@ fn test_reset_preserves_spawn_edges_and_stable_indices() {
             delivered_to: vec!["child".into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: "hello".into(),
         },
     };
@@ -456,6 +459,7 @@ fn test_message_accumulation_cyclic() {
                 delivered_to: vec!["bob".into()],
                 mentions: vec!["bob".into()],
                 intent: Some("request".into()),
+                reply_to: None,
                 text: format!("Request #{}", id),
             },
         };
@@ -472,6 +476,7 @@ fn test_message_accumulation_cyclic() {
                 delivered_to: vec!["alice".into()],
                 mentions: vec!["alice".into()],
                 intent: Some("ack".into()),
+                reply_to: None,
                 text: format!("Reply #{}", id),
             },
         };
@@ -504,6 +509,7 @@ fn test_watermark_deduplication() {
             delivered_to: vec!["agent_b".into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: "Hello".into(),
         },
     };
@@ -524,6 +530,7 @@ fn test_watermark_deduplication() {
             delivered_to: vec!["agent_b".into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: "Hello duplicate".into(),
         },
     };
@@ -538,6 +545,7 @@ fn test_watermark_deduplication() {
             delivered_to: vec!["agent_b".into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: "Older event".into(),
         },
     };
@@ -573,6 +581,7 @@ fn test_current_db_id_monotonicity() {
                 delivered_to: vec!["y".into()],
                 mentions: vec![],
                 intent: None,
+                reply_to: None,
                 text: "ping".into(),
             },
         };
@@ -597,6 +606,7 @@ fn test_message_edge_keeps_full_history_and_sanitizes() {
                 delivered_to: vec!["bob".into()],
                 mentions: vec![],
                 intent: Some("chat\x1b[31m".into()),
+                reply_to: None,
                 text: format!("msg_{}\x1b[2J\u{200B}", id),
             },
         };
@@ -632,6 +642,7 @@ fn test_conversation_history_bidirectional_sorting_capped_at_50() {
                 delivered_to: vec!["bob".into()],
                 mentions: vec![],
                 intent: None,
+                reply_to: None,
                 text: format!("alice_{}", i),
             },
         };
@@ -650,6 +661,7 @@ fn test_conversation_history_bidirectional_sorting_capped_at_50() {
                 delivered_to: vec!["alice".into()],
                 mentions: vec![],
                 intent: None,
+                reply_to: None,
                 text: format!("bob_{}", i),
             },
         };
@@ -686,6 +698,7 @@ fn test_reset_clears_message_history() {
             delivered_to: vec!["bob".into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: "hello".into(),
         },
     };
@@ -1643,6 +1656,7 @@ fn test_canvas_edge_and_node_hit_testing() {
             delivered_to: vec!["node_b".into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: "test".into(),
         },
     };
@@ -2788,6 +2802,7 @@ fn test_canvas_filtering_excludes_hidden_nodes_and_edges() {
             delivered_to: vec!["agent_b".into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: "test".into(),
         },
     };
@@ -2978,6 +2993,7 @@ fn window_msg(id: u64, ts: chrono::DateTime<Utc>, from: &str, to: &str) -> Messa
             delivered_to: vec![to.into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: format!("m{id}"),
         },
     }
@@ -5614,6 +5630,7 @@ fn test_layout_realistic_graph_sleeps_in_cluster_and_hierarchy() {
                         delivered_to: vec![to.into()],
                         mentions: vec![],
                         intent: None,
+                        reply_to: None,
                         text: "x".into(),
                     },
                 });
@@ -6486,6 +6503,7 @@ fn legend_message(from: &str, to: &str, id: u64) -> MessageEvent {
             delivered_to: vec![to.into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: "hi".into(),
         },
     }
@@ -6804,6 +6822,7 @@ fn test_task_77_29_table_and_graph_node_parity_and_visible_projection() {
                 delivered_to: vec!["orphan_message_target".into()],
                 mentions: vec![],
                 intent: None,
+                reply_to: None,
                 text: "hello".into(),
             },
         });
@@ -7278,6 +7297,7 @@ fn test_task_77_30_unified_selection_and_action_dispatch() {
                 delivered_to: vec!["cat_beta".into()],
                 mentions: vec![],
                 intent: None,
+                reply_to: None,
                 text: "ping".into(),
             },
         });
@@ -8339,6 +8359,7 @@ fn test_task_77_31_clamping_outside_retained_bounds() {
             delivered_to: vec!["inst2".into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: "hello".into(),
         },
     });
@@ -8500,6 +8521,7 @@ fn test_task_77_31_slider_thumbs_coincide_at_min_no_panic_and_drags_safely() {
             delivered_to: vec!["inst2".into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: "hello".into(),
         },
     });
@@ -8620,6 +8642,7 @@ fn test_task_77_31_apply_message_range_rejects_overflow_and_preserves_prior_wind
             delivered_to: vec!["inst2".into()],
             mentions: vec![],
             intent: None,
+            reply_to: None,
             text: "hello".into(),
         },
     });
@@ -9364,4 +9387,238 @@ fn test_task_77_38_launcher_becomes_spawn_parent_and_parent_name_wins() {
     );
     let child = app.graph.get_node_index("child").unwrap();
     assert_eq!(app.graph.graph[child].parent_name, None);
+}
+
+/// Message `id` from `from` to `to`; `reply` sets `reply_to`.
+fn pair_msg(id: u64, from: &str, to: &str, intent: Option<&str>, reply: bool) -> MessageEvent {
+    MessageEvent {
+        id,
+        ts: Utc::now(),
+        instance: from.into(),
+        data: MessageData {
+            from: from.into(),
+            delivered_to: vec![to.into()],
+            mentions: vec![],
+            intent: intent.map(Into::into),
+            reply_to: reply.then(|| serde_json::json!("1")),
+            text: format!("m{id}"),
+        },
+    }
+}
+
+/// Graph with `messages` and `starts` (instance, created event id), refreshed.
+fn initiator_graph(messages: &[MessageEvent], starts: &[(&str, u64)]) -> AgentGraph {
+    let mut g = AgentGraph::new();
+    for m in messages {
+        g.apply_message_event(m);
+    }
+    let mut map: std::collections::HashMap<String, Vec<u64>> = Default::default();
+    for (n, id) in starts {
+        map.entry(n.to_string()).or_default().push(*id);
+    }
+    g.set_session_starts(map);
+    g.refresh_initiators();
+    g
+}
+
+fn owned(v: &[(&str, usize)]) -> Vec<(String, usize)> {
+    v.iter().map(|(n, c)| (n.to_string(), *c)).collect()
+}
+
+#[test]
+fn test_task_77_44_one_way_conversation_has_one_message_arrow_and_its_initiator() {
+    use hcom_dashboard::canvas::initiator_heads;
+    let g = initiator_graph(
+        &[
+            pair_msg(10, "asker", "knowledge", Some("request"), false),
+            pair_msg(11, "asker", "knowledge", Some("inform"), false),
+        ],
+        &[],
+    );
+    assert!(g.get_message_edge("asker", "knowledge").is_some());
+    assert!(
+        g.get_message_edge("knowledge", "asker").is_none(),
+        "one-way: a single message arrow"
+    );
+    assert_eq!(g.initiators("knowledge", "asker"), owned(&[("asker", 1)]));
+    // Pair key is ordered: "asker" < "knowledge"; the arrow points at knowledge.
+    assert_eq!(
+        initiator_heads("asker", g.initiators("asker", "knowledge")),
+        (false, true)
+    );
+}
+
+#[test]
+fn test_task_77_44_segments_split_at_created_of_either_side() {
+    use hcom_dashboard::canvas::initiator_heads;
+    let msgs = [
+        pair_msg(10, "alice", "bob", Some("request"), false),
+        pair_msg(11, "bob", "alice", Some("request"), false),
+        // bob restarts (created 20): new segment, bob asks first.
+        pair_msg(21, "bob", "alice", Some("request"), false),
+        pair_msg(22, "alice", "bob", Some("request"), false),
+        // alice restarts (created 30): alice asks first.
+        pair_msg(31, "alice", "bob", None, false),
+    ];
+    // Without session starts the whole conversation is one segment.
+    let g = initiator_graph(&msgs, &[]);
+    assert_eq!(g.initiators("alice", "bob"), owned(&[("alice", 1)]));
+
+    let g = initiator_graph(&msgs, &[("bob", 5), ("bob", 20), ("alice", 30)]);
+    assert_eq!(
+        g.initiators("alice", "bob"),
+        owned(&[("alice", 2), ("bob", 1)])
+    );
+    assert_eq!(
+        initiator_heads("alice", g.initiators("alice", "bob")),
+        (true, true),
+        "both sides started a segment: heads at both ends"
+    );
+    // Messages in both directions keep both message arrows.
+    assert!(g.get_message_edge("alice", "bob").is_some());
+    assert!(g.get_message_edge("bob", "alice").is_some());
+}
+
+#[test]
+fn test_task_77_44_replies_and_acks_do_not_start_a_segment() {
+    use hcom_dashboard::canvas::initiator_heads;
+    let msgs = [
+        pair_msg(10, "alice", "bob", Some("request"), false),
+        // bob restarts and first answers the old question (reply_to), then
+        // acks; alice's next request starts the segment.
+        pair_msg(21, "bob", "alice", Some("inform"), true),
+        pair_msg(22, "bob", "alice", Some("ack"), false),
+        pair_msg(23, "alice", "bob", Some("request"), false),
+        // alice restarts: this segment has only a reply and an ack.
+        pair_msg(31, "bob", "alice", None, true),
+        pair_msg(32, "alice", "bob", Some("ack"), false),
+    ];
+    let g = initiator_graph(&msgs, &[("bob", 20), ("alice", 30)]);
+    assert_eq!(g.initiators("alice", "bob"), owned(&[("alice", 2)]));
+    assert_eq!(
+        initiator_heads("alice", g.initiators("alice", "bob")),
+        (false, true)
+    );
+
+    // Only replies and acks: no initiator, no main arrow.
+    let g = initiator_graph(
+        &[
+            pair_msg(10, "alice", "bob", None, true),
+            pair_msg(11, "bob", "alice", Some("ack"), false),
+        ],
+        &[],
+    );
+    assert!(g.initiators("alice", "bob").is_empty());
+    assert_eq!(g.iter_initiators().count(), 0);
+}
+
+#[test]
+fn test_task_77_44_reply_to_parsed_from_stream_and_session_starts_from_life_events() {
+    use hcom_dashboard::source::{StreamItem, parse_stream_line};
+    use hcom_dashboard::table_data::compute_event_stats;
+
+    // reply_to is a string in hcom, a number must not drop the message.
+    for (line, reply) in [
+        (
+            r#"{"id":5,"ts":"2026-11-06T10:00:00Z","type":"message","instance":"bob","data":{"from":"bob","delivered_to":["alice"],"text":"x","reply_to":"4:BOXE"}}"#,
+            true,
+        ),
+        (
+            r#"{"id":6,"ts":"2026-11-06T10:00:00Z","type":"message","instance":"bob","data":{"from":"bob","delivered_to":["alice"],"text":"x","reply_to":4}}"#,
+            true,
+        ),
+        (
+            r#"{"id":7,"ts":"2026-11-06T10:00:00Z","type":"message","instance":"bob","data":{"from":"bob","delivered_to":["alice"],"text":"x"}}"#,
+            false,
+        ),
+    ] {
+        let StreamItem::Message(ev) = parse_stream_line(line) else {
+            panic!("not parsed: {line}");
+        };
+        let mut g = AgentGraph::new();
+        assert!(g.apply_message_event(&ev));
+        let stored = &g.get_message_edge("bob", "alice").unwrap().history[0];
+        assert_eq!(stored.is_reply, reply, "{line}");
+    }
+
+    let life = r#"
+{"id": 3, "instance": "alice", "type": "life", "ts": "2026-11-01T10:00:00", "data": {"action": "created"}}
+{"id": 9, "instance": "alice", "type": "life", "ts": "2026-11-01T11:00:00", "data": {"action": "created"}}
+{"id": 5, "instance": "alice", "type": "life", "ts": "2026-11-01T10:30:00", "data": {"action": "stopped"}}
+"#;
+    let stats = compute_event_stats(life, "", &std::collections::HashSet::new(), 0);
+    assert_eq!(stats["alice"].session_starts, vec![3, 9]);
+}
+
+#[test]
+fn test_task_77_44_edge_detail_and_tooltip_name_the_initiators() {
+    use hcom_dashboard::canvas::format_initiators;
+    use hcom_dashboard::config::DashboardState;
+
+    assert_eq!(format_initiators(&[]), None);
+    assert_eq!(
+        format_initiators(&owned(&[("alice", 2), ("bob", 1)])).as_deref(),
+        Some("alice (2), bob (1)")
+    );
+
+    let (_dir, mut app) = split_test_app(DashboardState::default());
+    app.table_rows = ["alice", "bob"]
+        .iter()
+        .map(|n| hcom_dashboard::table_data::TableRow {
+            agent: n.to_string(),
+            instance: n.to_string(),
+            is_running: true,
+            status: "listening".into(),
+            ..Default::default()
+        })
+        .collect();
+    app.sync_graph_from_table_rows();
+    app.graph
+        .apply_message_event(&pair_msg(10, "alice", "bob", Some("request"), false));
+    app.graph
+        .apply_message_event(&pair_msg(21, "bob", "alice", Some("request"), false));
+    app.graph
+        .set_session_starts([("bob".to_string(), vec![20])].into_iter().collect());
+    app.graph.refresh_initiators();
+    let edge = app.graph.message_edges[&("bob".to_string(), "alice".to_string())];
+    app.canvas.hovered_edge = Some(edge);
+    assert_eq!(
+        app.edge_tooltip_text().as_deref(),
+        Some("bob → alice: 1 messages\nStarted by: alice (1), bob (1)")
+    );
+    app.canvas.hovered_node = app.graph.get_node_index("bob");
+    assert_eq!(app.edge_tooltip_text(), None, "a hovered node wins");
+
+    // The edge detail names the initiators; the canvas draws the arrow.
+    app.layout.sync_nodes(&app.graph);
+    app.canvas.selected_edge = Some(edge);
+    app.state.show_side_panel = true;
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut out = None;
+    for _ in 0..3 {
+        use eframe::App;
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))),
+            ..Default::default()
+        };
+        let mut o = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        o.textures_delta.clear();
+        out = Some(o);
+    }
+    // Plain labels carry their text as the accesskit value.
+    let texts: Vec<String> = out
+        .unwrap()
+        .platform_output
+        .accesskit_update
+        .unwrap()
+        .nodes
+        .into_iter()
+        .filter_map(|(_, n)| n.value().map(str::to_string))
+        .collect();
+    assert!(
+        texts.iter().any(|t| t == "Started by: alice (1), bob (1)"),
+        "edge detail lists the initiators: {texts:?}"
+    );
 }

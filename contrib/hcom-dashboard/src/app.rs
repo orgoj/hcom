@@ -1607,6 +1607,11 @@ impl HcomDashboardApp {
                         ui.label(format!("Messages in window (directed): {}", wc.count));
                     }
                     ui.label(format!("Total Messages (directed): {}", msg.count));
+                    if let Some(text) =
+                        crate::canvas::format_initiators(self.graph.initiators(&from, &to))
+                    {
+                        ui.label(format!("Started by: {text}"));
+                    }
                     ui.label(format!(
                         "Last Active: {}",
                         msg.last_timestamp.format("%Y-%m-%d %H:%M:%S UTC")
@@ -2687,6 +2692,31 @@ impl HcomDashboardApp {
         }
         self.handle_canvas_action(action);
         self.render_node_tooltip(ui.ctx(), response.rect);
+        if let Some(text) = self.edge_tooltip_text() {
+            response.on_hover_text_at_pointer(text);
+        }
+    }
+
+    /// Hover text of the hovered message edge: direction, count and who
+    /// started the pair's conversation.
+    pub fn edge_tooltip_text(&self) -> Option<String> {
+        if self.canvas.hovered_node.is_some() {
+            return None;
+        }
+        let Some(EdgeKind::Message(msg)) = self
+            .canvas
+            .hovered_edge
+            .and_then(|e| self.graph.graph.edge_weight(e))
+        else {
+            return None;
+        };
+        let mut text = format!("{} → {}: {} messages", msg.from, msg.to, msg.count);
+        if let Some(by) =
+            crate::canvas::format_initiators(self.graph.initiators(&msg.from, &msg.to))
+        {
+            text.push_str(&format!("\nStarted by: {by}"));
+        }
+        Some(text)
     }
 
     /// Hover card beside the hovered node (see `tooltip_placement`), kept
@@ -3009,6 +3039,13 @@ impl eframe::App for HcomDashboardApp {
                         );
                         // Launchers come from stats: refresh spawn parents.
                         self.sync_graph_from_table_rows();
+                        self.graph.set_session_starts(
+                            self.cached_event_stats
+                                .iter()
+                                .filter(|(_, s)| !s.session_starts.is_empty())
+                                .map(|(n, s)| (n.clone(), s.session_starts.clone()))
+                                .collect(),
+                        );
                     }
                     ActionResult::StatsFailed { error } => {
                         self.stats_reload_in_flight = false;
@@ -3022,6 +3059,8 @@ impl eframe::App for HcomDashboardApp {
         for action in queued_actions {
             self.dispatch_action(action);
         }
+
+        self.graph.refresh_initiators();
 
         // 3. Physics simulation step
         let dt = ctx.input(|i| i.stable_dt);

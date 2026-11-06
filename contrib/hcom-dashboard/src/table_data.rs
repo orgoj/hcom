@@ -749,6 +749,8 @@ pub struct EventStatsEntry {
     /// `batch_launched` naming this instance since its last `created`.
     /// None when the user (or an unknown caller) launched it.
     pub launcher: Option<String>,
+    /// Event ids of this instance's `created` events, ascending.
+    pub session_starts: Vec<u64>,
 }
 
 /// `batch_launched.by` values that mean the user launched the session.
@@ -804,6 +806,9 @@ pub fn compute_event_stats(
         match action {
             "created" => {
                 entry.starts += 1;
+                if let Some(id) = e.get("id").and_then(|i| i.as_u64()) {
+                    entry.session_starts.push(id);
+                }
                 opened.insert(name.clone(), ts_sec);
                 if !ts_str.is_empty() {
                     entry.last_start = ts_str.to_string();

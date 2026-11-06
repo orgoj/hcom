@@ -194,6 +194,16 @@ pub struct StoredMessage {
     pub intent: Option<String>,
     pub preview: String,
     pub text: String,
+    /// Sent with `reply_to`: answers an earlier message.
+    #[serde(default)]
+    pub is_reply: bool,
+}
+
+impl StoredMessage {
+    /// Can start a conversation: neither a reply nor an ack.
+    pub fn opens_conversation(&self) -> bool {
+        !self.is_reply && self.intent.as_deref() != Some("ack")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -235,6 +245,9 @@ pub struct MessageData {
     #[serde(default)]
     pub mentions: Vec<String>,
     pub intent: Option<String>,
+    /// Id of the answered message (`"42"` or `"7:BOXE"`); any JSON value.
+    #[serde(default)]
+    pub reply_to: Option<serde_json::Value>,
     #[serde(default)]
     pub text: String,
 }
@@ -528,6 +541,21 @@ pub struct AgentGraph {
     pub message_edges: HashMap<(String, String), EdgeIndex>,
     pub last_event_id: u64,
     pub node_styles: HashMap<String, NodeStyle>,
+    /// Event ids of each instance's life `created` events (session starts).
+    pub session_starts: HashMap<String, Vec<u64>>,
+    /// Who started the conversation of a pair, per `pair_key`; see
+    /// `refresh_initiators`.
+    initiators: HashMap<(String, String), Vec<(String, usize)>>,
+    initiators_dirty: bool,
+}
+
+/// Unordered pair key: the two names in ascending order.
+fn pair_key(a: &str, b: &str) -> (String, String) {
+    if a <= b {
+        (a.to_string(), b.to_string())
+    } else {
+        (b.to_string(), a.to_string())
+    }
 }
 
 impl AgentGraph {
@@ -705,6 +733,7 @@ impl AgentGraph {
                 intent: intent.clone(),
                 preview: preview.clone(),
                 text: sanitized_text.clone(),
+                is_reply: event.data.reply_to.is_some(),
             };
 
             if let Some(&edge_idx) = self.message_edges.get(&edge_key) {
@@ -734,7 +763,87 @@ impl AgentGraph {
         }
 
         self.last_event_id = event.id;
+        self.initiators_dirty = true;
         true
+    }
+
+    /// Replaces the session starts (event ids of life `created` per instance).
+    pub fn set_session_starts(&mut self, starts: HashMap<String, Vec<u64>>) {
+        if self.session_starts != starts {
+            self.session_starts = starts;
+            self.initiators_dirty = true;
+        }
+    }
+
+    /// Recomputes the conversation initiators after messages or session
+    /// starts changed. The conversation of a pair splits into segments at
+    /// every session start of either side; a segment's initiator is the
+    /// sender of its first message that is neither a reply nor an ack.
+    pub fn refresh_initiators(&mut self) {
+        if !self.initiators_dirty {
+            return;
+        }
+        self.initiators_dirty = false;
+        let pairs: std::collections::HashSet<(String, String)> = self
+            .message_edges
+            .keys()
+            .map(|(f, t)| pair_key(f, t))
+            .collect();
+        self.initiators = pairs
+            .into_iter()
+            .filter_map(|(a, b)| {
+                let found = self.compute_initiators(&a, &b);
+                (!found.is_empty()).then_some(((a, b), found))
+            })
+            .collect();
+    }
+
+    fn compute_initiators(&self, a: &str, b: &str) -> Vec<(String, usize)> {
+        let mut messages: Vec<&StoredMessage> = [(a, b), (b, a)]
+            .iter()
+            .filter_map(|(f, t)| self.get_message_edge(f, t))
+            .flat_map(|e| e.history.iter())
+            .collect();
+        messages.sort_by_key(|m| m.id);
+        let mut bounds: Vec<u64> = [a, b]
+            .iter()
+            .filter_map(|n| self.session_starts.get(*n))
+            .flatten()
+            .copied()
+            .collect();
+        bounds.sort_unstable();
+
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        let mut done_segment = None;
+        for m in messages {
+            let segment = bounds.partition_point(|&b| b < m.id);
+            if done_segment == Some(segment) || !m.opens_conversation() {
+                continue;
+            }
+            done_segment = Some(segment);
+            match counts.iter_mut().find(|(n, _)| *n == m.from) {
+                Some((_, c)) => *c += 1,
+                None => counts.push((m.from.clone(), 1)),
+            }
+        }
+        counts.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
+        counts
+    }
+
+    /// Initiators of the conversation between `a` and `b` with their segment
+    /// counts, most first; empty when no segment has one.
+    /// Valid after `refresh_initiators`.
+    pub fn initiators(&self, a: &str, b: &str) -> &[(String, usize)] {
+        self.initiators
+            .get(&pair_key(a, b))
+            .map_or(&[], |v| v.as_slice())
+    }
+
+    /// Every pair with an initiator: `(a, b, initiators)`, `a < b`.
+    pub fn iter_initiators(&self) -> impl Iterator<Item = (&str, &str, &[(String, usize)])> {
+        self.initiators
+            .iter()
+            .map(|((a, b), v)| (a.as_str(), b.as_str(), v.as_slice()))
     }
 
     /// Returns the combined conversation history between two agents (a -> b and b -> a),
@@ -846,6 +955,7 @@ impl AgentGraph {
             .retain_edges(|frozen, edge_idx| !matches!(frozen[edge_idx], EdgeKind::Message(_)));
         self.message_edges.clear();
         self.last_event_id = 0;
+        self.initiators_dirty = true;
 
         for node in self.graph.node_weights_mut() {
             node.unread_count = 0;
