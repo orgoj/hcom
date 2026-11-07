@@ -12010,3 +12010,117 @@ fn test_task_77_68_start_selects_the_started_instance() {
     assert_eq!(app.selected_row_id.as_deref(), Some("inst_alpha_1"));
     assert!(app.select_next.is_none());
 }
+
+/// `Columns…` opens a dialog with every column (shown ones first, in
+/// order, then the rest with the status:<name> columns); the keyboard
+/// reorders and toggles, OK keeps at least one column, the choice is saved
+/// in the state file, Reset returns to the default (TASK-77.63).
+#[test]
+fn test_task_77_63_columns_dialog_chooses_and_orders_columns() {
+    use hcom_dashboard::config::{DashboardConfig, default_columns, load_state};
+    use hcom_dashboard::table_data::{ALL_COLUMNS, column_choices};
+
+    let (mut app, _recorded, dir) = task_77_52_app(DashboardConfig::default());
+    app.table_rows[0]
+        .status_values
+        .insert("phase".into(), "x".into());
+    let items = column_choices(&app.state.columns, &app.table_rows);
+    assert_eq!(items[0], ("instance".to_string(), true));
+    assert_eq!(items[1], ("agent".to_string(), true));
+    assert!(items[2..].iter().all(|(_, on)| !on));
+    for c in ALL_COLUMNS.iter().map(|c| c.to_string()).chain([
+        "status:status".into(),
+        "status:next".into(),
+        "status:phase".into(),
+    ]) {
+        assert_eq!(items.iter().filter(|(k, _)| *k == c).count(), 1, "{c}");
+    }
+
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let none = egui::Modifiers::NONE;
+    let key = |k, m| vec![task_77_52_key(k, m)];
+    let click_text = |run: &mut dyn FnMut(
+        &mut hcom_dashboard::app::HcomDashboardApp,
+        Vec<egui::Event>,
+    ) -> egui::FullOutput,
+                      app: &mut hcom_dashboard::app::HcomDashboardApp,
+                      label: &str| {
+        let out = run(app, vec![]);
+        let p = out
+            .shapes
+            .iter()
+            .rev()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == label => {
+                    Some(Rect::from_min_size(t.pos, t.galley.size()).center())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{label} shown"));
+        run(app, vec![egui::Event::PointerMoved(p)]);
+        for pressed in [true, false] {
+            run(
+                app,
+                vec![egui::Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: none,
+                }],
+            );
+        }
+        run(app, vec![]);
+    };
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    click_text(&mut run, &mut app, "Columns…");
+    assert!(app.columns_dialog.is_some(), "dialog open");
+    assert!(app.modal_open());
+
+    // agent up before instance, then roaming (third) shown.
+    run(&mut app, key(egui::Key::ArrowDown, none));
+    run(&mut app, key(egui::Key::ArrowUp, egui::Modifiers::COMMAND));
+    run(&mut app, key(egui::Key::ArrowDown, none));
+    run(&mut app, key(egui::Key::ArrowDown, none));
+    run(&mut app, key(egui::Key::Space, none));
+    let (items, current) = app.columns_dialog.clone().unwrap();
+    assert_eq!(current, 2);
+    assert_eq!(
+        items[..3]
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect::<Vec<_>>(),
+        ["agent", "instance", "roaming"]
+    );
+    assert!(app.selected_row_id.is_none(), "arrows stay in the dialog");
+    run(&mut app, key(egui::Key::Enter, none));
+    run(&mut app, vec![]);
+    assert!(app.columns_dialog.is_none());
+    let want = vec!["agent".to_string(), "instance".into(), "roaming".into()];
+    assert_eq!(app.state.columns, want);
+    assert_eq!(load_state(dir.path()).columns, want, "saved");
+
+    // Every column hidden: OK does nothing; Escape closes without change.
+    click_text(&mut run, &mut app, "Columns…");
+    for _ in 0..3 {
+        run(&mut app, key(egui::Key::Space, none));
+        run(&mut app, key(egui::Key::ArrowDown, none));
+    }
+    run(&mut app, key(egui::Key::Enter, none));
+    run(&mut app, vec![]);
+    assert!(app.columns_dialog.is_some(), "one column must stay");
+    assert_eq!(app.state.columns, want);
+    run(&mut app, key(egui::Key::Escape, none));
+    run(&mut app, vec![]);
+    assert!(app.columns_dialog.is_none());
+    assert_eq!(app.state.columns, want);
+
+    // Reset returns to the default set.
+    click_text(&mut run, &mut app, "Columns…");
+    click_text(&mut run, &mut app, "Reset");
+    assert!(app.columns_dialog.is_none());
+    assert_eq!(app.state.columns, default_columns());
+    assert_eq!(load_state(dir.path()).columns, default_columns());
+}

@@ -363,6 +363,57 @@ pub fn node_styles_from_rows(rows: &[TableRow]) -> HashMap<String, crate::model:
         .collect()
 }
 
+/// Every column `TableRow::get_cell_value` knows, besides `status:<name>`.
+pub const ALL_COLUMNS: &[&str] = &[
+    "agent",
+    "instance",
+    "roaming",
+    "cli",
+    "status",
+    "since",
+    "idle",
+    "age",
+    "context",
+    "quota",
+    "detail",
+    "unread",
+    "dir",
+    "branch",
+    "git",
+    "where",
+    "config",
+    "starts",
+    "runtime",
+    "handoffs",
+    "msgs",
+    "last_start",
+    "stops",
+    "failed",
+];
+
+/// The Columns dialog list: the shown columns in their order (checked),
+/// then every other column (unchecked), including the `status:<name>`
+/// columns of the report fields and of the rows.
+pub fn column_choices(shown: &[String], rows: &[TableRow]) -> Vec<(String, bool)> {
+    let mut status: Vec<String> = rows
+        .iter()
+        .flat_map(|r| r.status_values.keys().map(|k| format!("status:{k}")))
+        .collect();
+    status.sort();
+    let mut items: Vec<(String, bool)> = shown.iter().map(|c| (c.clone(), true)).collect();
+    let others = ALL_COLUMNS
+        .iter()
+        .chain(REPORT_FIELDS.iter().filter(|f| f.starts_with("status:")))
+        .map(|c| c.to_string())
+        .chain(status);
+    for c in others {
+        if !items.iter().any(|(k, _)| *k == c) {
+            items.push((c, false));
+        }
+    }
+    items
+}
+
 pub const REPORT_FIELDS: &[&str] = &[
     "status:status",
     "status:done",

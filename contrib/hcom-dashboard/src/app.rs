@@ -393,6 +393,8 @@ pub struct HcomDashboardApp {
     modal_at_frame_start: bool,
 
     pub show_send_dialog: bool,
+    /// Open Columns dialog: (column, shown) in order and the current item.
+    pub columns_dialog: Option<(Vec<(String, bool)>, usize)>,
     pub send_target: String,
     pub send_text: String,
 
@@ -617,6 +619,7 @@ impl HcomDashboardApp {
             modal_was_open: false,
             modal_at_frame_start: false,
             show_send_dialog: false,
+            columns_dialog: None,
             send_target: String::new(),
             send_text: String::new(),
             inject_input_has_focus: false,
@@ -719,6 +722,7 @@ impl HcomDashboardApp {
             modal_was_open: false,
             modal_at_frame_start: false,
             show_send_dialog: false,
+            columns_dialog: None,
             send_target: String::new(),
             send_text: String::new(),
             inject_input_has_focus: false,
@@ -1247,7 +1251,8 @@ impl HcomDashboardApp {
             || self.confirm_kill_group.is_some()
             || self.custom_cmd_confirm.is_some()
             || self.show_start_dialog
-            || self.show_send_dialog;
+            || self.show_send_dialog
+            || self.columns_dialog.is_some();
         let mut attach_row =
             selected_row.filter(|_| enter && !dialog_open && !self.text_focus_at_frame_start);
         let last = rows.len().checked_sub(1);
@@ -2808,6 +2813,7 @@ impl HcomDashboardApp {
             || self.custom_cmd_confirm.is_some()
             || self.show_start_dialog
             || self.show_send_dialog
+            || self.columns_dialog.is_some()
     }
 
     pub fn overlay_open(&self) -> bool {
@@ -2818,6 +2824,7 @@ impl HcomDashboardApp {
             || self.custom_cmd_confirm.is_some()
             || self.show_start_dialog
             || self.show_send_dialog
+            || self.columns_dialog.is_some()
     }
 
     /// Node whose hover tooltip shows this frame: the hovered node, unless the
@@ -4105,6 +4112,23 @@ impl eframe::App for HcomDashboardApp {
                         }
                     });
                 });
+
+                ui.separator();
+                if ui
+                    .button("Columns…")
+                    .on_hover_text("Choose the table columns and their order")
+                    .clicked()
+                {
+                    let shown: Vec<String> = if self.state.columns.is_empty() {
+                        DEFAULT_COLUMNS.iter().map(|s| s.to_string()).collect()
+                    } else {
+                        self.state.columns.clone()
+                    };
+                    self.columns_dialog = Some((
+                        crate::table_data::column_choices(&shown, &self.table_rows),
+                        0,
+                    ));
+                }
             });
 
             if let Some(action) = toolbar_action_to_dispatch {
@@ -4436,6 +4460,93 @@ impl eframe::App for HcomDashboardApp {
             });
             if escape {
                 self.show_send_dialog = false;
+            }
+        }
+
+        // Columns dialog, like contrib/hcom-gui: Space or a click on the box
+        // toggles, Up/Down choose, Ctrl+Up/Down or the buttons move, Enter is
+        // OK; at least one column stays shown. Reset returns to the default.
+        if let Some((mut items, mut current)) = self.columns_dialog.take() {
+            let mut keep = true;
+            let mut apply: Option<Vec<String>> = None;
+            let (_, escape) = show_modal(&ctx, "Columns", |ui| {
+                let key = |k, m| ui.input_mut(|i| i.consume_key(m, k));
+                let ctrl = egui::Modifiers::COMMAND;
+                let none = egui::Modifiers::NONE;
+                let mut step = 0i32;
+                if key(egui::Key::ArrowUp, ctrl) {
+                    step = -1;
+                } else if key(egui::Key::ArrowDown, ctrl) {
+                    step = 1;
+                } else if key(egui::Key::ArrowUp, none) {
+                    current = current.saturating_sub(1);
+                } else if key(egui::Key::ArrowDown, none) {
+                    current = (current + 1).min(items.len().saturating_sub(1));
+                }
+                if key(egui::Key::Space, none)
+                    && let Some(item) = items.get_mut(current)
+                {
+                    item.1 = !item.1;
+                }
+                let mut ok = key(egui::Key::Enter, none);
+                egui::ScrollArea::vertical()
+                    .max_height(ui.ctx().content_rect().height() * 0.6)
+                    .show(ui, |ui| {
+                        for (i, (col, on)) in items.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(on, "");
+                                let label = ui.selectable_label(i == current, col.as_str());
+                                if label.clicked() {
+                                    current = i;
+                                }
+                                if label.double_clicked() {
+                                    *on = !*on;
+                                }
+                                if i == current && step != 0 {
+                                    label.scroll_to_me(None);
+                                }
+                            });
+                        }
+                    });
+                let any_shown = items.iter().any(|(_, on)| *on);
+                if !any_shown {
+                    ui.label("At least one column must stay shown.");
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Up").clicked() {
+                        step = -1;
+                    }
+                    if ui.button("Down").clicked() {
+                        step = 1;
+                    }
+                    if ui.button("Reset").clicked() {
+                        apply = Some(crate::config::default_columns());
+                    }
+                    ok |= ui.add_enabled(any_shown, egui::Button::new("OK")).clicked();
+                    if ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                });
+                let target = current as i32 + step;
+                if step != 0 && target >= 0 && (target as usize) < items.len() {
+                    items.swap(current, target as usize);
+                    current = target as usize;
+                }
+                if ok && any_shown && apply.is_none() {
+                    apply = Some(
+                        items
+                            .iter()
+                            .filter(|(_, on)| *on)
+                            .map(|(c, _)| c.clone())
+                            .collect(),
+                    );
+                }
+            });
+            if let Some(columns) = apply {
+                self.state.columns = columns;
+                self.save_state();
+            } else if keep && !escape {
+                self.columns_dialog = Some((items, current));
             }
         }
         self.modal_was_open = self.modal_open();
