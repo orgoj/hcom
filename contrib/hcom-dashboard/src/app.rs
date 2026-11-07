@@ -3077,6 +3077,28 @@ impl eframe::App for HcomDashboardApp {
         if let Some(key) = fkey {
             self.apply_function_key(key);
         }
+        // Alt+Left/Right select the previous/next detail tab wherever the
+        // keyboard is; consumed so a text field does not also move its cursor.
+        let (alt_left, alt_right) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft),
+                i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowRight),
+            )
+        });
+        if alt_left || alt_right {
+            let cur = DETAIL_TABS
+                .iter()
+                .position(|t| *t == self.state.detail_tab)
+                .unwrap_or(0);
+            let next = if alt_right {
+                (cur + 1).min(DETAIL_TABS.len() - 1)
+            } else {
+                cur.saturating_sub(1)
+            };
+            if next != cur || !self.state.show_side_panel {
+                self.select_detail_tab(DETAIL_TABS[next]);
+            }
+        }
 
         // 1. Ingest non-blocking updates from BackgroundSync
         if let Some(ref sync) = self.sync

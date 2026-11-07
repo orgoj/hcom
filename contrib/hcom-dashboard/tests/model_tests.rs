@@ -11116,3 +11116,42 @@ fn test_task_77_56_browse_choice_fills_dir() {
     app.open_start_dialog(&row);
     assert!(app.start_dir_pick.is_none());
 }
+
+#[test]
+fn test_task_77_57_alt_left_right_switch_detail_tabs() {
+    use hcom_dashboard::config::{DETAIL_TABS, DashboardConfig};
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let alt = egui::Modifiers::ALT;
+    let left = |m| vec![task_77_52_key(egui::Key::ArrowLeft, m)];
+    let right = |m| vec![task_77_52_key(egui::Key::ArrowRight, m)];
+    let last = DETAIL_TABS.len() - 1;
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    app.select_detail_tab(DETAIL_TABS[0]);
+    run(&mut app, vec![]);
+
+    // At the first tab Alt+Left stays.
+    run(&mut app, left(alt));
+    assert_eq!(app.state.detail_tab, DETAIL_TABS[0]);
+
+    // In a text field too, Alt+Right selects the next tab like a click.
+    task_77_52_focus_search(&ctx, &mut app, &mut run);
+    run(&mut app, right(alt));
+    assert_eq!(app.state.detail_tab, DETAIL_TABS[1]);
+    assert!(ctx.text_edit_focused(), "the field keeps the keyboard");
+    run(&mut app, right(egui::Modifiers::NONE));
+    assert_eq!(app.state.detail_tab, DETAIL_TABS[1], "plain arrow");
+    run(&mut app, left(alt));
+    assert_eq!(app.state.detail_tab, DETAIL_TABS[0]);
+
+    // At the last tab Alt+Right stays; a hidden panel is shown.
+    app.select_detail_tab(DETAIL_TABS[last]);
+    app.state.show_side_panel = false;
+    run(&mut app, right(alt));
+    assert_eq!(app.state.detail_tab, DETAIL_TABS[last]);
+    assert!(app.state.show_side_panel, "shown like a click on the tab");
+}
