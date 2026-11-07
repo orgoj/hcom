@@ -12124,3 +12124,65 @@ fn test_task_77_63_columns_dialog_chooses_and_orders_columns() {
     assert_eq!(app.state.columns, default_columns());
     assert_eq!(load_state(dir.path()).columns, default_columns());
 }
+
+/// A new ERROR log line while another detail tab is open puts a red dot on
+/// the Log tab; opening Log clears it; other log output adds none
+/// (TASK-77.64).
+#[test]
+fn test_task_77_64_log_tab_marks_a_new_error() {
+    use hcom_dashboard::canvas::ThemePalette;
+    use hcom_dashboard::config::{DashboardConfig, ResolvedTheme, ThemePreference};
+    use hcom_dashboard::table_data::RowState;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    app.state.theme = Some(ThemePreference::Light);
+    app.state.show_side_panel = true;
+    app.select_detail_tab("Summary");
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let log_tab = |out: &egui::FullOutput| {
+        out.shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text().starts_with("Log (F8)") => {
+                    Some(t.galley.clone())
+                }
+                _ => None,
+            })
+            .expect("Log tab shown")
+    };
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    app.command_logs.push("[OK] Command output:\nfine".into());
+    let out = run(&mut app, vec![]);
+    assert_eq!(log_tab(&out).text(), "Log (F8)", "no mark without an error");
+
+    app.command_logs.push("[ERROR] Command failed: boom".into());
+    let out = run(&mut app, vec![]);
+    let tab = log_tab(&out);
+    assert_eq!(tab.text(), "Log (F8) ●");
+    let red = ThemePalette::for_theme(ResolvedTheme::Light).row_state_color(RowState::Error);
+    assert_eq!(tab.job.sections.last().unwrap().format.color, red);
+    assert!(app.log_error_mark);
+
+    app.select_detail_tab("Log");
+    let out = run(&mut app, vec![]);
+    assert_eq!(log_tab(&out).text(), "Log (F8)", "opening Log clears it");
+    app.select_detail_tab("Summary");
+    let out = run(&mut app, vec![]);
+    assert_eq!(
+        log_tab(&out).text(),
+        "Log (F8)",
+        "a seen error stays cleared"
+    );
+
+    // An error while Log is open adds no mark either.
+    app.select_detail_tab("Log");
+    run(&mut app, vec![]);
+    app.command_logs.push("[ERROR] another".into());
+    run(&mut app, vec![]);
+    app.select_detail_tab("Screen");
+    let out = run(&mut app, vec![]);
+    assert_eq!(log_tab(&out).text(), "Log (F8)");
+}

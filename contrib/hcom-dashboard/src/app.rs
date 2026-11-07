@@ -349,6 +349,10 @@ pub struct HcomDashboardApp {
     pub transcript_content: Option<(String, u64, String)>,
     pub events_content: Option<(String, u64, String)>,
     pub command_logs: Vec<String>,
+    /// Log lines already checked for a new error, and whether one arrived
+    /// while another tab was open: a red dot on the Log tab (TASK-77.64).
+    pub log_checked: usize,
+    pub log_error_mark: bool,
 
     // Screen tab inject bar
     pub screen_inject_text: String,
@@ -593,6 +597,8 @@ impl HcomDashboardApp {
             transcript_content: None,
             events_content: None,
             command_logs: Vec::new(),
+            log_checked: 0,
+            log_error_mark: false,
             screen_inject_text: String::new(),
             screen_inject_enter: true,
             selected_row_id: None,
@@ -696,6 +702,8 @@ impl HcomDashboardApp {
             transcript_content: None,
             events_content: None,
             command_logs: Vec::new(),
+            log_checked: 0,
+            log_error_mark: false,
             screen_inject_text: String::new(),
             screen_inject_enter: true,
             selected_row_id: None,
@@ -2331,6 +2339,18 @@ impl HcomDashboardApp {
         visible: &std::collections::HashSet<NodeIndex>,
         palette: &ThemePalette,
     ) {
+        // A new ERROR line while another tab is open marks the Log tab; the
+        // open Log tab clears the mark.
+        self.log_checked = self.log_checked.min(self.command_logs.len());
+        if self.state.detail_tab == "Log" {
+            self.log_error_mark = false;
+        } else if self.command_logs[self.log_checked..]
+            .iter()
+            .any(|l| l.starts_with("[ERROR]"))
+        {
+            self.log_error_mark = true;
+        }
+        self.log_checked = self.command_logs.len();
         ui.horizontal_wrapped(|ui| {
             for (tab, label) in DETAIL_TABS.iter().zip([
                 "Summary",
@@ -2342,8 +2362,25 @@ impl HcomDashboardApp {
                 "Config",
                 "Legend",
             ]) {
+                let mut text = egui::WidgetText::from(label);
+                if *tab == "Log" && self.log_error_mark {
+                    let mut job = egui::text::LayoutJob::default();
+                    let style = ui.style().clone();
+                    for part in [
+                        RichText::new(label),
+                        RichText::new(" ●").color(palette.row_state_color(RowState::Error)),
+                    ] {
+                        part.append_to(
+                            &mut job,
+                            &style,
+                            egui::FontSelection::Default,
+                            egui::Align::Center,
+                        );
+                    }
+                    text = job.into();
+                }
                 if ui
-                    .selectable_label(self.state.detail_tab == *tab, label)
+                    .selectable_label(self.state.detail_tab == *tab, text)
                     .clicked()
                 {
                     self.select_detail_tab(tab);

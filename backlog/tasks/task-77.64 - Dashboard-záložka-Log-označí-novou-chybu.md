@@ -1,9 +1,11 @@
 ---
 id: TASK-77.64
 title: 'Dashboard: záložka Log označí novou chybu'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@hcom_dev__idea'
 created_date: '2026-11-07T12:00:00Z'
+updated_date: '2026-11-07T13:36:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
