@@ -1,11 +1,11 @@
 ---
 id: TASK-77.65
 title: 'Dashboard: řádky tabulky obarvené podle stavu agenta'
-status: In Progress
+status: Done
 assignee:
   - '@hcom_dev__idea'
 created_date: '2026-11-07T12:00:00Z'
-updated_date: '2026-11-07T13:24:00Z'
+updated_date: '2026-11-07T13:28:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -22,7 +22,13 @@ Uživatel: v tabulce nemají řádky barvu podle stavu. hcom-gui barví text ř�
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Text řádku má barvu podle stavu agenta jako v hcom-gui (active, blocked, needs_user, error, stopped, disabled)
-- [ ] #2 Barvy fungují ve světlém i tmavém tématu a vybraný řádek zůstane čitelný
-- [ ] #3 Headless test ověří barvu řádků podle stavu
+- [x] #1 Text řádku má barvu podle stavu agenta jako v hcom-gui (active, blocked, needs_user, error, stopped, disabled)
+- [x] #2 Barvy fungují ve světlém i tmavém tématu a vybraný řádek zůstane čitelný
+- [x] #3 Headless test ověří barvu řádků podle stavu
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Row text colored by TableRow::row_state (hcom-gui tag rules) with ThemePalette::row_state_color (hcom-gui hex in light, lighter hues in dark); disabled struck through; selected row keeps selection text color. Blocked is not bold: egui strong() only changes color. Verified by test_task_77_65_table_rows_colored_by_state; agent_review approved.
+<!-- SECTION:FINAL_SUMMARY:END -->
