@@ -13052,6 +13052,171 @@ fn test_task_77_73_show_session_in_graph() {
     assert!((600..=602).contains(&span_secs.unwrap()), "{span_secs:?}");
 }
 
+/// After Show in graph the Sessions header offers Restore window, which
+/// brings back the earlier window and list scroll position; a window change
+/// by the user ends the offer; Escape restores too (TASK-77.78).
+#[test]
+fn test_task_77_78_restore_window_after_show_in_graph() {
+    use hcom_dashboard::config::DashboardConfig;
+    use hcom_dashboard::model::MessageRange;
+    use hcom_dashboard::sessions::SessionInfo;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut run = task_77_52_runner(ctx.clone());
+    let now = chrono::Utc::now();
+    let now_s = now.timestamp() as u64;
+    // A message older than every session keeps fixed ends from clamping.
+    app.graph
+        .apply_message_event(&hcom_dashboard::model::MessageEvent {
+            id: 1,
+            ts: now - chrono::Duration::days(3),
+            instance: "inst_alpha_1".into(),
+            data: hcom_dashboard::model::MessageData {
+                from: "inst_alpha_1".into(),
+                delivered_to: vec!["cat_beta".into()],
+                mentions: vec![],
+                intent: None,
+                reply_to: None,
+                text: "x".into(),
+            },
+        });
+    let row = app
+        .table_rows
+        .iter()
+        .find(|r| r.agent == "cat_beta")
+        .unwrap()
+        .clone();
+    app.select_table_row(&row);
+    app.select_detail_tab("Sessions");
+    run(&mut app, vec![]);
+    let sessions: Vec<SessionInfo> = (0..20u64)
+        .map(|i| SessionInfo {
+            start_ts: now_s - (i + 1) * 7200,
+            end_ts: Some(now_s - (i + 1) * 7200 + 600),
+            launcher: "user".into(),
+            session_id: format!("sid-{i:02}"),
+            tool: "claude".into(),
+            ..Default::default()
+        })
+        .collect();
+    app.sessions_content = Some((
+        "cat_beta".into(),
+        app.selection_generation,
+        Ok(sessions.clone()),
+    ));
+    app.apply_message_range(MessageRange::Live { span_secs: None }, now)
+        .unwrap();
+    app.sessions_scroll_to = Some(300.0);
+    run(&mut app, vec![]);
+    run(&mut app, vec![]);
+    assert!(
+        (app.sessions_scroll_y - 300.0).abs() < 1.0,
+        "{}",
+        app.sessions_scroll_y
+    );
+
+    let texts = |out: &egui::FullOutput| -> Vec<String> {
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let show = |app: &mut hcom_dashboard::app::HcomDashboardApp,
+                run: &mut dyn FnMut(
+        &mut hcom_dashboard::app::HcomDashboardApp,
+        Vec<egui::Event>,
+    ) -> egui::FullOutput| {
+        app.show_session_in_graph(&sessions[2]);
+        let out = run(app, vec![]);
+        assert!(
+            matches!(app.current_message_range(now), MessageRange::Fixed { .. }),
+            "session window"
+        );
+        assert!(
+            texts(&out)
+                .iter()
+                .any(|t| t.starts_with("Graph shows session sid-02 (")),
+            "{:?}",
+            texts(&out)
+        );
+        let out = run(app, vec![]);
+        widget_rect(&out, "Restore window").expect("Restore window offered")
+    };
+
+    // Restore window: the window and scroll position come back.
+    let p = show(&mut app, &mut run).center();
+    // A second Show in graph keeps the window from before the first.
+    app.show_session_in_graph(&sessions[5]);
+    app.show_session_in_graph(&sessions[2]);
+    run(&mut app, vec![egui::Event::PointerMoved(p)]);
+    for pressed in [true, false] {
+        run(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: p,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+    run(&mut app, vec![]);
+    let out = run(&mut app, vec![]);
+    assert_eq!(
+        app.current_message_range(now),
+        MessageRange::Live { span_secs: None },
+        "All with Live"
+    );
+    assert!(app.graph_restore.is_none());
+    assert!(widget_rect(&out, "Restore window").is_none());
+    assert!(
+        texts(&out)
+            .iter()
+            .any(|t| t == "20 sessions in the time window (20 total)"),
+        "{:?}",
+        texts(&out)
+    );
+    assert!(
+        (app.sessions_scroll_y - 300.0).abs() < 1.0,
+        "{}",
+        app.sessions_scroll_y
+    );
+
+    // A preset chosen by the user ends the offer.
+    show(&mut app, &mut run);
+    app.apply_message_range(
+        MessageRange::Live {
+            span_secs: Some(6 * 3600),
+        },
+        now,
+    )
+    .unwrap();
+    run(&mut app, vec![]);
+    let out = run(&mut app, vec![]);
+    assert!(app.graph_restore.is_none());
+    assert!(widget_rect(&out, "Restore window").is_none());
+
+    // Escape on the Sessions tab restores.
+    app.apply_message_range(MessageRange::Live { span_secs: None }, now)
+        .unwrap();
+    run(&mut app, vec![]);
+    show(&mut app, &mut run);
+    run(
+        &mut app,
+        vec![task_77_52_key(egui::Key::Escape, egui::Modifiers::NONE)],
+    );
+    assert_eq!(
+        app.current_message_range(now),
+        MessageRange::Live { span_secs: None }
+    );
+    assert!(app.graph_restore.is_none());
+}
+
 /// Equal consecutive Log lines collapse into one with a count (TASK-77.74).
 #[test]
 fn test_task_77_74_log_collapses_repeats() {

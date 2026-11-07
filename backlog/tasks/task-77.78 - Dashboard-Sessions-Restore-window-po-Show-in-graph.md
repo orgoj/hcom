@@ -1,9 +1,11 @@
 ---
 id: TASK-77.78
 title: 'Dashboard Sessions: Restore window po Show in graph'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@hcom_dev__idea'
 created_date: '2026-11-07T15:57:00Z'
+updated_date: '2026-11-07T16:21:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -20,8 +22,14 @@ UX review 2026-11-07 (F2, A3, A4; Q2 rozhodnuto: jen Restore window, pravidlo se
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Seznam Sessions agenta se 171 sessions odscrollovaný na 3. kartu: po Show in graph se objeví pruh Graph shows session … [Restore window]; po Restore window je okno zpět All s Live zapnutým, seznam ukazuje 171 sessions a 3. karta je na stejné pozici
-- [ ] #2 Po Show in graph a kliknutí na preset 6h pruh zmizí a obnova se nenabízí
-- [ ] #3 Restore window je dosažitelné Tabem z hlavičky Sessions a Escapem
-- [ ] #4 Karta zobrazené session je zvýrazněná
+- [x] #1 Seznam Sessions agenta se 171 sessions odscrollovaný na 3. kartu: po Show in graph se objeví pruh Graph shows session … [Restore window]; po Restore window je okno zpět All s Live zapnutým, seznam ukazuje 171 sessions a 3. karta je na stejné pozici
+- [x] #2 Po Show in graph a kliknutí na preset 6h pruh zmizí a obnova se nenabízí
+- [x] #3 Restore window je dosažitelné Tabem z hlavičky Sessions a Escapem
+- [x] #4 Karta zobrazené session je zvýrazněná
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+GraphRestore ukládá okno a scroll Sessions před prvním Show in graph; hlavička ukazuje Graph shows session … [Restore window]; Restore window i Escape na Sessions vrátí okno a scroll (scroll až v dalším snímku); jiná změna okna/last-N nabídku zruší; zobrazená karta je zvýrazněná. Test test_task_77_78_restore_window_after_show_in_graph; review agent_review OK.
+<!-- SECTION:FINAL_SUMMARY:END -->

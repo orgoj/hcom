@@ -353,6 +353,11 @@ pub struct HcomDashboardApp {
     /// Transcript tab shows this session file of the agent instead of its
     /// live transcript (Sessions tab Transcript button).
     pub session_transcript: Option<(String, String)>,
+    /// Window to restore after Sessions `Show in graph` (TASK-77.78).
+    pub graph_restore: Option<GraphRestore>,
+    /// Sessions list scroll offset of the last frame, and one to apply.
+    pub sessions_scroll_y: f32,
+    pub sessions_scroll_to: Option<f32>,
     pub command_logs: Vec<String>,
     /// Log lines already checked for a new error, and whether one arrived
     /// while another tab was open: a red dot on the Log tab (TASK-77.64).
@@ -437,6 +442,19 @@ pub type SessionsContent = Option<(
     u64,
     Result<Vec<crate::sessions::SessionInfo>, String>,
 )>;
+
+/// Window and Sessions scroll offset before the first `Show in graph`,
+/// offered back while the window stays the one it set (TASK-77.78).
+#[derive(Debug, Clone)]
+pub struct GraphRestore {
+    pub range: MessageRange,
+    pub scroll_y: f32,
+    /// Session shown in the graph and its label for the Sessions header.
+    pub session_id: String,
+    pub label: String,
+    /// Window and last-N set by `Show in graph`; any other ends the offer.
+    pub shown: (MessageRange, Option<usize>),
+}
 
 /// (window, last_event_id, edge_count, live second or 0 for a fixed end).
 type WindowCacheKey = (MessageWindow, u64, usize, i64);
@@ -647,6 +665,9 @@ impl HcomDashboardApp {
             events_content: None,
             sessions_content: None,
             session_transcript: None,
+            graph_restore: None,
+            sessions_scroll_y: 0.0,
+            sessions_scroll_to: None,
             command_logs: Vec::new(),
             log_checked: 0,
             log_error_mark: false,
@@ -756,6 +777,9 @@ impl HcomDashboardApp {
             events_content: None,
             sessions_content: None,
             session_transcript: None,
+            graph_restore: None,
+            sessions_scroll_y: 0.0,
+            sessions_scroll_to: None,
             command_logs: Vec::new(),
             log_checked: 0,
             log_error_mark: false,
@@ -2482,14 +2506,48 @@ impl HcomDashboardApp {
             shown.len(),
             sessions.len()
         ));
+        let mut restore = false;
+        if let Some(r) = &self.graph_restore {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!("Graph shows {}", r.label));
+                restore = ui
+                    .button("Restore window")
+                    .on_hover_text(
+                        "Back to the window and list position before Show in graph (Esc)",
+                    )
+                    .clicked();
+            });
+        }
+        if restore {
+            self.restore_graph_window();
+        }
+        let shown_id = self.graph_restore.as_ref().map(|r| r.session_id.clone());
         let mut action: Option<(&'static str, crate::sessions::SessionInfo)> = None;
-        egui::ScrollArea::vertical()
+        let mut area = egui::ScrollArea::vertical()
             .id_salt("sessions_scroll_tab")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for (i, s) in shown.iter().enumerate() {
-                    ui.push_id(i, |ui| {
-                        ui.separator();
+            .auto_shrink([false, false]);
+        // After a restore in this frame the list still shows the old window:
+        // scroll in the next frame.
+        if restore {
+            ui.ctx().request_repaint();
+        } else if let Some(y) = self.sessions_scroll_to.take() {
+            area = area.vertical_scroll_offset(y);
+        }
+        let scroll = area.show(ui, |ui| {
+            for (i, s) in shown.iter().enumerate() {
+                ui.push_id(i, |ui| {
+                    ui.separator();
+                    // The session shown in the graph keeps a highlight.
+                    let mut card = egui::Frame::new();
+                    if shown_id
+                        .as_deref()
+                        .is_some_and(|id| !id.is_empty() && id == s.session_id)
+                    {
+                        card = card
+                            .fill(ui.visuals().selection.bg_fill.gamma_multiply(0.35))
+                            .inner_margin(4.0);
+                    }
+                    card.show(ui, |ui| {
                         let fmt = |ts: u64, f: &str| {
                             chrono::DateTime::from_timestamp(ts as i64, 0)
                                 .map(|d| d.with_timezone(&chrono::Local).format(f).to_string())
@@ -2580,8 +2638,10 @@ impl HcomDashboardApp {
                             }
                         });
                     });
-                }
-            });
+                });
+            }
+        });
+        self.sessions_scroll_y = scroll.state.clamped_offset().y;
         match action {
             Some(("t", s)) => self.show_session_transcript(&agent, &s.transcript_path),
             Some(("g", s)) => self.show_session_in_graph(&s),
@@ -2621,8 +2681,60 @@ impl HcomDashboardApp {
                 span_secs: Some((now.timestamp() - session.start_ts as i64).max(1)),
             },
         };
+        let before = (self.current_message_range(now), self.sessions_scroll_y);
         if self.apply_message_range(range, now).is_ok() {
+            // A second Show in graph keeps the window from before the first.
+            let (range, scroll_y) = match self.graph_restore.take() {
+                Some(r) => (r.range, r.scroll_y),
+                None => before,
+            };
+            let local = |ts: u64| {
+                chrono::DateTime::from_timestamp(ts as i64, 0)
+                    .map(|d| {
+                        d.with_timezone(&chrono::Local)
+                            .format("%m-%d %H:%M")
+                            .to_string()
+                    })
+                    .unwrap_or_default()
+            };
+            let until = session.end_ts.map_or("running".into(), local);
+            let id: String = session.session_id.chars().take(8).collect();
+            self.graph_restore = Some(GraphRestore {
+                range,
+                scroll_y,
+                session_id: session.session_id.clone(),
+                label: format!("session {id} ({} – {until})", local(session.start_ts)),
+                shown: (self.current_message_range(now), self.msg_window.last_n),
+            });
             self.save_state();
+        }
+    }
+
+    /// `Restore window`: the window and Sessions scroll offset from before
+    /// `Show in graph` (TASK-77.78).
+    pub fn restore_graph_window(&mut self) {
+        if let Some(r) = self.graph_restore.take() {
+            if self
+                .apply_message_range(r.range, chrono::Utc::now())
+                .is_ok()
+            {
+                self.save_state();
+            }
+            self.sessions_scroll_to = Some(r.scroll_y);
+        }
+    }
+
+    /// Forgets the restore offer once the window is no longer the one
+    /// `Show in graph` set (preset, slider, text field, Live, last-N).
+    fn drop_stale_graph_restore(&mut self) {
+        let now = chrono::Utc::now();
+        let current = (self.current_message_range(now), self.msg_window.last_n);
+        if self
+            .graph_restore
+            .as_ref()
+            .is_some_and(|r| r.shown != current)
+        {
+            self.graph_restore = None;
         }
     }
 
@@ -3621,6 +3733,19 @@ impl eframe::App for HcomDashboardApp {
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
             self.action_error = None;
+        }
+        // Escape on the Sessions tab restores the window from before
+        // `Show in graph`, under the same conditions (TASK-77.78).
+        self.drop_stale_graph_restore();
+        if !self.modal_at_frame_start
+            && self.context_menu.is_none()
+            && !self.text_focus_last_frame
+            && self.graph_restore.is_some()
+            && self.state.show_side_panel
+            && self.state.detail_tab == "Sessions"
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.restore_graph_window();
         }
         if clear_search && !self.inject_input_has_focus {
             self.search_query.clear();
