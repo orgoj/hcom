@@ -5730,7 +5730,11 @@ impl eframe::App for HcomDashboardApp {
                                 } else {
                                     "Pin Position"
                                 };
-                            if ui.button(pin_label).clicked() {
+                            if ui
+                                .button(pin_label)
+                                .on_hover_text("Also Shift+click on the node")
+                                .clicked()
+                            {
                                 self.toggle_pin(node_idx);
                                 close_menu = true;
                             }
@@ -5862,6 +5866,7 @@ impl HcomDashboardApp {
                         self.on_selection_changed();
                     }
                 }
+                CanvasAction::NodeShiftClicked(idx) => self.toggle_pin(idx),
                 CanvasAction::NodeDoubleClicked(idx) => {
                     if let Some(node) = self.graph.graph.node_weight(idx) {
                         let name = node.name.clone();

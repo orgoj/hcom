@@ -4648,6 +4648,93 @@ fn test_top_bar_wraps_and_keeps_controls_on_screen() {
 }
 
 #[test]
+fn test_shift_click_toggles_pin_and_shift_drag_keeps_it() {
+    use eframe::App;
+    use hcom_dashboard::config::{DashboardState, load_state};
+
+    let (dir, mut app) = split_test_app(DashboardState::default());
+    app.apply_persisted_view();
+    app.layout
+        .set_mode(hcom_dashboard::layout::LayoutMode::Manual);
+    app.graph.apply_instance_snapshot(&[snap("worker_1", None)]);
+    app.layout.sync_nodes(&app.graph);
+    let idx = app.graph.get_node_index("worker_1").unwrap();
+    let ctx = egui::Context::default();
+    run_app_frames(&ctx, &mut app, 5);
+
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let shift = egui::Modifiers::SHIFT;
+    // Shift is held in every frame of this test.
+    let mut run = |app: &mut hcom_dashboard::app::HcomDashboardApp, events: Vec<egui::Event>| {
+        let mut all = vec![egui::Event::ModifiersChanged(shift)];
+        all.extend(events);
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events: all,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| app.ui(ui, &mut frame))
+            .textures_delta
+            .clear();
+    };
+    let button = |pos: Pos2, pressed: bool| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: shift,
+    };
+    let node = |app: &hcom_dashboard::app::HcomDashboardApp| {
+        app.canvas
+            .world_to_screen(app.layout.nodes[&idx].pos, app.canvas_rect)
+    };
+    let mut shift_click = |app: &mut hcom_dashboard::app::HcomDashboardApp| {
+        let p = node(app);
+        run(app, vec![egui::Event::PointerMoved(p), button(p, true)]);
+        run(app, vec![button(p, false)]);
+        run(app, vec![]);
+    };
+
+    shift_click(&mut app);
+    assert!(app.layout.nodes[&idx].pinned, "Shift+click pins");
+    assert!(
+        load_state(dir.path())
+            .pinned_positions
+            .contains_key("worker_1")
+    );
+    // A second Shift+click right away (a Shift double click) unpins too.
+    shift_click(&mut app);
+    assert!(!app.layout.nodes[&idx].pinned, "Shift+click unpins");
+    assert!(
+        !load_state(dir.path())
+            .pinned_positions
+            .contains_key("worker_1")
+    );
+
+    // A Shift drag moves the unpinned node and leaves it unpinned.
+    run_app_frames(&ctx, &mut app, 40);
+    let from = node(&app);
+    let before = app.layout.nodes[&idx].pos;
+    let to = from + Vec2::new(60.0, 0.0);
+    run(
+        &mut app,
+        vec![egui::Event::PointerMoved(from), button(from, true)],
+    );
+    run(
+        &mut app,
+        vec![egui::Event::PointerMoved(from + Vec2::new(30.0, 0.0))],
+    );
+    run(&mut app, vec![egui::Event::PointerMoved(to)]);
+    run(&mut app, vec![button(to, false)]);
+    run(&mut app, vec![]);
+    assert!(
+        app.layout.nodes[&idx].pos.x > before.x + 10.0,
+        "node was dragged"
+    );
+    assert!(!app.layout.nodes[&idx].pinned, "Shift drag does not pin");
+}
+
+#[test]
 fn test_context_menu_pins_and_unpins_node() {
     use eframe::App;
     use hcom_dashboard::config::{DashboardState, load_state};

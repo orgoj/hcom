@@ -341,6 +341,8 @@ pub fn legend(
 pub enum CanvasAction {
     NodeClicked(NodeIndex),
     NodeDoubleClicked(NodeIndex),
+    /// Shift+click on a node: toggle its pin.
+    NodeShiftClicked(NodeIndex),
     EdgeClicked(EdgeIndex),
     NodeSecondaryClicked(NodeIndex, Pos2),
     EdgeSecondaryClicked(EdgeIndex, Pos2),
@@ -727,14 +729,25 @@ impl CanvasView {
         }
 
         // Handle Clicks (when not dragging)
+        let shift = ui.input(|i| i.modifiers.shift);
         if response.double_clicked() && !self.is_dragging {
-            if let Some(node_idx) = self.hovered_node {
+            if let Some(node_idx) = self.hovered_node
+                && shift
+            {
+                // Each click of a fast Shift double click toggles the pin.
+                triggered_action = Some(CanvasAction::NodeShiftClicked(node_idx));
+            } else if let Some(node_idx) = self.hovered_node {
                 self.selected_node = Some(node_idx);
                 self.selected_edge = None;
                 triggered_action = Some(CanvasAction::NodeDoubleClicked(node_idx));
             }
         } else if response.clicked() && !self.is_dragging {
-            if let Some(node_idx) = self.hovered_node {
+            if let Some(node_idx) = self.hovered_node
+                && shift
+            {
+                // Shift+click toggles the pin and leaves the selection alone.
+                triggered_action = Some(CanvasAction::NodeShiftClicked(node_idx));
+            } else if let Some(node_idx) = self.hovered_node {
                 self.selected_node = Some(node_idx);
                 self.selected_edge = None;
                 triggered_action = Some(CanvasAction::NodeClicked(node_idx));
