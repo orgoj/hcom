@@ -13375,37 +13375,40 @@ fn test_task_77_71_window_state_is_remembered() {
     use hcom_dashboard::config::{DashboardState, load_state, save_state};
 
     let fresh = DashboardState::default();
-    assert_eq!(fresh.start_viewport(), ([1200.0, 800.0], false));
+    assert_eq!(fresh.start_viewport(), ([1200.0, 800.0], None, false));
 
     let mut s = DashboardState::default();
-    assert!(s.record_window(Some(false), Some([1400.0, 900.0])));
+    assert!(s.record_window(Some(false), Some([1400.0, 900.0]), Some([10.0, 20.0])));
     assert!(
-        !s.record_window(Some(false), Some([1400.2, 900.0])),
+        !s.record_window(Some(false), Some([1400.2, 900.0]), Some([10.2, 20.0])),
         "no change"
     );
-    assert!(s.record_window(Some(true), Some([2560.0, 1400.0])));
+    assert!(s.record_window(Some(true), Some([2560.0, 1400.0]), Some([0.0, 0.0])));
     assert_eq!(
         s.window_size,
         Some([1400.0, 900.0]),
         "maximized size not kept"
     );
     assert!(
-        !s.record_window(None, None),
+        !s.record_window(None, None, None),
         "unknown state changes nothing"
     );
 
     let dir = tempfile::tempdir().unwrap();
     save_state(dir.path(), &s).unwrap();
     let loaded = load_state(dir.path());
-    assert_eq!(loaded.start_viewport(), ([1400.0, 900.0], true));
+    assert_eq!(
+        loaded.start_viewport(),
+        ([1400.0, 900.0], Some([10.0, 20.0]), true)
+    );
 
     // Unmaximized again: the normal size, not maximized.
     let mut s = loaded;
-    assert!(s.record_window(Some(false), Some([1000.0, 700.0])));
+    assert!(s.record_window(Some(false), Some([1000.0, 700.0]), Some([30.0, 40.0])));
     save_state(dir.path(), &s).unwrap();
     assert_eq!(
         load_state(dir.path()).start_viewport(),
-        ([1000.0, 700.0], false)
+        ([1000.0, 700.0], Some([30.0, 40.0]), false)
     );
 
     // A saved size below the minimum window falls back to the default.
@@ -13516,6 +13519,73 @@ fn test_task_77_86_start_maximized_survives_first_frames() {
     );
     let ctx = egui::Context::default();
     assert!(!asks_maximize(&frame_at(&mut app, &ctx, 0.0, false)));
+}
+
+/// The normal window size and position are recorded once they held for
+/// 0.5 s, so the short frames of a (un)maximize transition (not maximized
+/// yet, already the big size) never replace them (TASK-77.87).
+#[test]
+fn test_task_77_87_normal_geometry_ignores_transition_frames() {
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+
+    let frame_at = |app: &mut HcomDashboardApp,
+                    ctx: &egui::Context,
+                    time: f64,
+                    maximized: bool,
+                    pos: [f32; 2],
+                    size: [f32; 2]| {
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::from(size))),
+            time: Some(time),
+            ..Default::default()
+        };
+        let vp = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+        vp.maximized = Some(maximized);
+        vp.inner_rect = Some(Rect::from_min_size(Pos2::from(pos), Vec2::from(size)));
+        vp.outer_rect = Some(Rect::from_min_size(Pos2::from(pos), Vec2::from(size)));
+        ctx.run_ui(input, |ui| eframe::App::ui(app, ui, &mut frame))
+            .textures_delta
+            .clear();
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
+        dir.path().into(),
+    );
+    let ctx = egui::Context::default();
+    let normal = ([100.0, 50.0], [1000.0, 700.0]);
+    let big = ([0.0, 0.0], [1900.0, 1050.0]);
+
+    // A fresh normal geometry is not recorded at once, but after 0.5 s.
+    frame_at(&mut app, &ctx, 0.0, false, normal.0, normal.1);
+    assert_eq!(app.state.window_size, None);
+    frame_at(&mut app, &ctx, 0.6, false, normal.0, normal.1);
+    assert_eq!(app.state.window_size, Some(normal.1));
+    assert_eq!(app.state.window_pos, Some(normal.0));
+
+    // Maximize: one transition frame with the big size, then maximized.
+    frame_at(&mut app, &ctx, 1.0, false, big.0, big.1);
+    frame_at(&mut app, &ctx, 1.1, true, big.0, big.1);
+    assert!(app.state.window_maximized);
+    // Unmaximize: a transition frame with the big size, then the normal.
+    frame_at(&mut app, &ctx, 2.0, false, big.0, big.1);
+    frame_at(&mut app, &ctx, 2.1, false, normal.0, normal.1);
+    assert!(!app.state.window_maximized);
+    assert_eq!(app.state.window_size, Some(normal.1), "big size never kept");
+    assert_eq!(app.state.window_pos, Some(normal.0));
+
+    // A moved and resized normal window is recorded after 0.5 s.
+    frame_at(&mut app, &ctx, 3.0, false, [300.0, 200.0], [1200.0, 800.0]);
+    frame_at(&mut app, &ctx, 3.6, false, [300.0, 200.0], [1200.0, 800.0]);
+    assert_eq!(app.state.window_size, Some([1200.0, 800.0]));
+    assert_eq!(app.state.window_pos, Some([300.0, 200.0]));
+    assert_eq!(
+        app.state.start_viewport(),
+        ([1200.0, 800.0], Some([300.0, 200.0]), false)
+    );
 }
 
 /// Two handoffs in a row chain three sessions (TASK-77.75).

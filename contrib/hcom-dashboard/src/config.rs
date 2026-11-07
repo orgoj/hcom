@@ -344,6 +344,9 @@ pub struct DashboardState {
     /// Inner size [w, h] of the last non-maximized window.
     #[serde(default)]
     pub window_size: Option<[f32; 2]>,
+    /// Outer position [x, y] of the last non-maximized window.
+    #[serde(default)]
+    pub window_pos: Option<[f32; 2]>,
     /// Table height as a fraction of the window height.
     #[serde(default)]
     pub table_height_frac: Option<f32>,
@@ -497,20 +500,33 @@ impl DashboardState {
         self.window_size = self
             .window_size
             .filter(|[w, h]| w.is_finite() && h.is_finite() && *w >= 600.0 && *h >= 400.0);
+        self.window_pos = self
+            .window_pos
+            .filter(|[x, y]| x.is_finite() && y.is_finite());
     }
 
-    /// Window settings for the next start: the saved size (default
-    /// 1200x800) and whether it opens maximized.
-    pub fn start_viewport(&self) -> ([f32; 2], bool) {
+    /// Window settings for the next start: the saved normal size (default
+    /// 1200x800), position (None: the window manager places it) and
+    /// whether it opens maximized.
+    pub fn start_viewport(&self) -> ([f32; 2], Option<[f32; 2]>, bool) {
         (
             self.window_size.unwrap_or([1200.0, 800.0]),
+            self.window_pos,
             self.window_maximized,
         )
     }
 
     /// Records the window `maximized` flag and, while not maximized, its
-    /// inner size; returns true when something changed.
-    pub fn record_window(&mut self, maximized: Option<bool>, size: Option<[f32; 2]>) -> bool {
+    /// inner size and outer position; returns true when something changed.
+    pub fn record_window(
+        &mut self,
+        maximized: Option<bool>,
+        size: Option<[f32; 2]>,
+        pos: Option<[f32; 2]>,
+    ) -> bool {
+        let differs = |old: Option<[f32; 2]>, [a, b]: [f32; 2]| {
+            old.is_none_or(|[oa, ob]| (oa - a).abs() > 0.5 || (ob - b).abs() > 0.5)
+        };
         let mut changed = false;
         if let Some(m) = maximized
             && m != self.window_maximized
@@ -518,14 +534,19 @@ impl DashboardState {
             self.window_maximized = m;
             changed = true;
         }
-        if maximized == Some(false)
-            && let Some([w, h]) = size
-            && self
-                .window_size
-                .is_none_or(|[ow, oh]| (ow - w).abs() > 0.5 || (oh - h).abs() > 0.5)
-        {
-            self.window_size = Some([w, h]);
-            changed = true;
+        if maximized == Some(false) {
+            if let Some(s) = size
+                && differs(self.window_size, s)
+            {
+                self.window_size = Some(s);
+                changed = true;
+            }
+            if let Some(p) = pos
+                && differs(self.window_pos, p)
+            {
+                self.window_pos = Some(p);
+                changed = true;
+            }
         }
         changed
     }
@@ -590,6 +611,7 @@ impl Default for DashboardState {
             geometry: None,
             window_maximized: false,
             window_size: None,
+            window_pos: None,
             table_height_frac: None,
             detail_width_px: None,
             view_mode: Some(ViewMode::Both),

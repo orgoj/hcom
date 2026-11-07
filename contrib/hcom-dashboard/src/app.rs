@@ -433,6 +433,9 @@ pub struct HcomDashboardApp {
     /// deadline in egui time passes) the app asks for it and does not record
     /// `window_maximized = false` (TASK-77.86). Deadline 0 = not yet set.
     pub pending_maximize: Option<f64>,
+    /// Normal window geometry (inner size, outer position) and the egui time
+    /// it was first seen; recorded once it held for 0.5 s (TASK-77.87).
+    window_geom_since: Option<(GeomKey, f64)>,
 }
 
 /// Consecutive equal lines as one line with their count (Log tab).
@@ -546,6 +549,9 @@ pub fn sessions_header_text(shown: usize, total: usize) -> String {
 
 /// Sessions header line while the agent runs (TASK-77.83).
 pub const RESUME_OFF_TEXT: &str = "agent is running — Resume is off (Fork works)";
+
+/// Normal window geometry: inner size and outer position (when known).
+type GeomKey = ([f32; 2], Option<[f32; 2]>);
 
 /// One-line hint of the Resume (`r`) or Fork (`f`) dialog (TASK-77.82).
 pub fn session_dialog_hint(sub: &str) -> &'static str {
@@ -786,6 +792,7 @@ impl HcomDashboardApp {
             text_focus_at_frame_start: false,
             text_focus_last_frame: false,
             pending_maximize: None,
+            window_geom_since: None,
             last_resolved_theme: None,
             desktop_theme: desktop_config_dir().and_then(|dir| desktop_theme(&dir)),
         };
@@ -903,6 +910,7 @@ impl HcomDashboardApp {
             text_focus_at_frame_start: false,
             text_focus_last_frame: false,
             pending_maximize,
+            window_geom_since: None,
             last_resolved_theme: None,
             desktop_theme: None,
         }
@@ -5612,9 +5620,37 @@ impl eframe::App for HcomDashboardApp {
             self.state.canvas_pan_y = Some(pan.y);
             self.mark_view_dirty();
         }
-        // Maximized flag and normal size, restored at the next start.
-        let (maximized, inner, time) =
-            ctx.input(|i| (i.viewport().maximized, i.viewport().inner_rect, i.time));
+        // Maximized flag and normal size and position, restored at the next
+        // start.
+        let (maximized, inner, outer, time) = ctx.input(|i| {
+            (
+                i.viewport().maximized,
+                i.viewport().inner_rect,
+                i.viewport().outer_rect,
+                i.time,
+            )
+        });
+        // A normal geometry counts once it held for 0.5 s: frames of a
+        // (un)maximize transition carry the other state's size (TASK-77.87).
+        let geom = (maximized == Some(false))
+            .then(|| inner.map(|r| ([r.width(), r.height()], outer.map(|o| [o.min.x, o.min.y]))))
+            .flatten();
+        let settled = match (geom, self.window_geom_since) {
+            (Some(g), Some((c, since))) if c == g => time - since >= 0.5,
+            (Some(g), _) => {
+                self.window_geom_since = Some((g, time));
+                ctx.request_repaint_after(Duration::from_millis(550));
+                false
+            }
+            (None, _) => {
+                self.window_geom_since = None;
+                false
+            }
+        };
+        let (size, pos) = match geom {
+            Some((s, p)) if settled => (Some(s), p),
+            _ => (None, None),
+        };
         // Some window managers ignore the maximized flag of a new window:
         // ask again once it is up, and record nothing until it reports
         // maximized or 2 s pass (TASK-77.86).
@@ -5626,11 +5662,7 @@ impl eframe::App for HcomDashboardApp {
                 self.pending_maximize = Some(time + 2.0);
             }
         }
-        if self.pending_maximize.is_none()
-            && self
-                .state
-                .record_window(maximized, inner.map(|r| [r.width(), r.height()]))
-        {
+        if self.pending_maximize.is_none() && self.state.record_window(maximized, size, pos) {
             self.mark_view_dirty();
         }
         let pointer_down = ctx.input(|i| i.pointer.any_down());
