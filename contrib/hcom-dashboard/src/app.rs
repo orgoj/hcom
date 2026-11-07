@@ -355,7 +355,8 @@ pub struct HcomDashboardApp {
     pub sessions_content: SessionsContent,
     /// Transcript tab shows this session file of the agent instead of its
     /// live transcript (Sessions tab Transcript button).
-    pub session_transcript: Option<(String, String)>,
+    /// (agent, transcript path, header label: title · start · id8).
+    pub session_transcript: Option<(String, String, String)>,
     /// Window to restore after Sessions `Show in graph` (TASK-77.78).
     pub graph_restore: Option<GraphRestore>,
     /// Sessions list scroll offset of the last frame, and one to apply.
@@ -523,6 +524,20 @@ where
         end_text
     };
     format!("{start_text} – {end_text}")
+}
+
+/// Sessions header count (TASK-77.85): `24 sessions` when the window shows
+/// them all, else `1 of 171 sessions in the time window`, and
+/// `No sessions in the time window (N total)` for none.
+pub fn sessions_header_text(shown: usize, total: usize) -> String {
+    let noun = |n: usize| if n == 1 { "session" } else { "sessions" };
+    if shown == 0 {
+        format!("No sessions in the time window ({total} total)")
+    } else if shown == total {
+        format!("{total} {}", noun(total))
+    } else {
+        format!("{shown} of {total} {} in the time window", noun(total))
+    }
 }
 
 /// Sessions header line while the agent runs (TASK-77.83).
@@ -1082,7 +1097,7 @@ impl HcomDashboardApp {
             return;
         }
         if self.state.detail_tab == "Transcript"
-            && let Some((agent, path)) = self.session_transcript.clone()
+            && let Some((agent, path, _)) = self.session_transcript.clone()
         {
             if selected.as_ref() == Some(&agent) {
                 self.dispatch_action(ActionRequest::SessionTranscript {
@@ -2572,11 +2587,20 @@ impl HcomDashboardApp {
             .iter()
             .filter(|s| s.overlaps(start, end, now))
             .collect();
-        ui.weak(format!(
-            "{} sessions in the time window ({} total)",
-            shown.len(),
-            sessions.len()
-        ));
+        let mut show_all = false;
+        ui.horizontal_wrapped(|ui| {
+            ui.weak(sessions_header_text(shown.len(), sessions.len()));
+            if shown.is_empty() && !sessions.is_empty() {
+                show_all = ui
+                    .button("Show all")
+                    .on_hover_text("Set the message window to All")
+                    .clicked();
+            }
+        });
+        if show_all {
+            let _ = self.apply_message_range(MessageRange::Live { span_secs: None }, now_dt);
+            self.save_state();
+        }
         if agent_running {
             ui.weak(RESUME_OFF_TEXT);
         }
@@ -2595,6 +2619,8 @@ impl HcomDashboardApp {
         if restore {
             self.restore_graph_window();
         }
+        // The header stays above the scrolling cards.
+        ui.separator();
         let shown_id = self.graph_restore.as_ref().map(|r| r.session_id.clone());
         let mut action: Option<(&'static str, crate::sessions::SessionInfo)> = None;
         let mut area = egui::ScrollArea::vertical()
@@ -2616,7 +2642,9 @@ impl HcomDashboardApp {
         let scroll = area.show(ui, |ui| {
             for (i, s) in shown.iter().enumerate() {
                 ui.push_id(i, |ui| {
-                    ui.separator();
+                    if i > 0 {
+                        ui.separator();
+                    }
                     // The session shown in the graph keeps a highlight.
                     let mut card = egui::Frame::new();
                     if shown_id
@@ -2799,7 +2827,7 @@ impl HcomDashboardApp {
         }
         self.sessions_jump = jump;
         match action {
-            Some(("t", s)) => self.show_session_transcript(&agent, &s.transcript_path),
+            Some(("t", s)) => self.show_session_transcript(&agent, &s),
             Some(("g", s)) => self.show_session_in_graph(&s),
             Some((sub, s)) => self.open_session_dialog(&agent, sub, &s),
             None => {}
@@ -2896,12 +2924,28 @@ impl HcomDashboardApp {
     }
 
     /// Transcript tab with the transcript file of one session of `agent`.
-    pub fn show_session_transcript(&mut self, agent: &str, path: &str) {
+    pub fn show_session_transcript(&mut self, agent: &str, s: &crate::sessions::SessionInfo) {
         self.transcript_content = None;
         self.state.detail_tab = "Transcript".into();
         self.state.show_side_panel = true;
         self.save_state();
-        self.session_transcript = Some((agent.to_string(), path.to_string()));
+        let mut label: Vec<String> = Vec::new();
+        if !s.title.is_empty() {
+            label.push(s.title.clone());
+        }
+        if let Some(d) = chrono::DateTime::from_timestamp(session_minutes(s).0 as i64, 0) {
+            label.push(
+                d.with_timezone(&chrono::Local)
+                    .format("%m-%d %H:%M")
+                    .to_string(),
+            );
+        }
+        label.push(s.session_id.chars().take(8).collect());
+        self.session_transcript = Some((
+            agent.to_string(),
+            s.transcript_path.clone(),
+            format!("Session transcript: {}", label.join(" · ")),
+        ));
         self.on_selection_changed();
     }
 
@@ -2999,11 +3043,11 @@ impl HcomDashboardApp {
                 let session_path = self
                     .session_transcript
                     .as_ref()
-                    .filter(|(a, _)| agent.as_ref() == Some(a))
-                    .map(|(_, p)| p.clone());
-                if let Some(path) = &session_path {
+                    .filter(|(a, _, _)| agent.as_ref() == Some(a))
+                    .map(|(_, p, l)| (p.clone(), l.clone()));
+                if let Some((path, label)) = &session_path {
                     ui.horizontal(|ui| {
-                        ui.weak(format!("Session transcript: {path}"));
+                        ui.weak(label).on_hover_text(path);
                         if ui.small_button("Back to Sessions").clicked() {
                             self.select_detail_tab("Sessions");
                         }

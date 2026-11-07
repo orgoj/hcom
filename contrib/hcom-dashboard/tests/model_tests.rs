@@ -12718,6 +12718,103 @@ fn test_task_77_69_resume_and_fork_availability() {
     }
 }
 
+/// Sessions header copy: `N sessions` when all are shown, `1 of N sessions in
+/// the time window`, `No sessions in the time window (N total)` with `Show
+/// all`; the header stays put while the cards scroll (TASK-77.85).
+#[test]
+fn test_task_77_85_sessions_header_copy_show_all_and_fixed_header() {
+    use hcom_dashboard::app::sessions_header_text;
+    use hcom_dashboard::config::DashboardConfig;
+    use hcom_dashboard::sessions::SessionInfo;
+
+    assert_eq!(sessions_header_text(24, 24), "24 sessions");
+    assert_eq!(sessions_header_text(1, 1), "1 session");
+    assert_eq!(
+        sessions_header_text(1, 171),
+        "1 of 171 sessions in the time window"
+    );
+    assert_eq!(
+        sessions_header_text(0, 3),
+        "No sessions in the time window (3 total)"
+    );
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut run = task_77_52_runner(ctx.clone());
+    let row = app
+        .table_rows
+        .iter()
+        .find(|r| r.agent == "cat_beta")
+        .unwrap()
+        .clone();
+    app.select_table_row(&row);
+    app.select_detail_tab("Sessions");
+    for _ in 0..5 {
+        std::thread::sleep(Duration::from_millis(20));
+        run(&mut app, vec![]);
+    }
+    let now = chrono::Utc::now().timestamp() as u64;
+    let sessions: Vec<SessionInfo> = (0..20u64)
+        .map(|i| SessionInfo {
+            start_ts: now - (i + 2) * 86400,
+            end_ts: Some(now - (i + 2) * 86400 + 600),
+            session_id: format!("sid-{i:02}"),
+            ..Default::default()
+        })
+        .collect();
+    app.sessions_content = Some(("cat_beta".into(), app.selection_generation, Ok(sessions)));
+    app.set_message_window(Some(3600), None);
+    run(&mut app, vec![]);
+    let text_rect = |out: &egui::FullOutput, s: &str| {
+        out.shapes.iter().find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text() == s => {
+                Some(t.galley.rect.translate(t.pos.to_vec2()))
+            }
+            _ => None,
+        })
+    };
+    let out = run(&mut app, vec![]);
+    assert!(text_rect(&out, "No sessions in the time window (20 total)").is_some());
+    let p = widget_rect(&out, "Show all").expect("Show all").center();
+    run(&mut app, vec![egui::Event::PointerMoved(p)]);
+    for pressed in [true, false] {
+        run(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: p,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+    assert!(app.msg_window.is_unfiltered(), "Show all sets All");
+    run(&mut app, vec![]);
+    let out = run(&mut app, vec![]);
+    let header = text_rect(&out, "20 sessions").expect("all shown");
+    let first = text_rect(&out, "session sid-00").expect("first card");
+    assert!(first.top() > header.bottom());
+    // Scrolled: the header keeps its place, cards pass below it.
+    app.sessions_scroll_to = Some(400.0);
+    run(&mut app, vec![]);
+    let out = run(&mut app, vec![]);
+    assert!(app.sessions_scroll_y > 300.0);
+    let header2 = text_rect(&out, "20 sessions").expect("header still shown");
+    assert_eq!(header2, header);
+    for c in &out.shapes {
+        if let egui::Shape::Text(t) = &c.shape
+            && t.galley.text().starts_with("session sid-")
+        {
+            let r = t.galley.rect.translate(t.pos.to_vec2());
+            assert!(
+                c.clip_rect.top() > header.bottom() || r.bottom() < c.clip_rect.top(),
+                "card text clipped below the header"
+            );
+        }
+    }
+}
+
 /// At the minimum detail-panel width the Sessions tab wraps instead of
 /// widening the panel: every tab name, every Sessions line start and the
 /// Resume button lie inside the panel (TASK-77.84).
@@ -13042,7 +13139,7 @@ fn test_task_77_69_sessions_tab_resume_fork_transcript() {
     assert!(
         texts
             .iter()
-            .any(|t| t == "1 sessions in the time window (2 total)"),
+            .any(|t| t == "1 of 2 sessions in the time window"),
         "{texts:?}"
     );
     assert!(texts.iter().any(|t| t.contains("session sid-new")));
@@ -13151,12 +13248,33 @@ fn test_task_77_69_sessions_tab_resume_fork_transcript() {
         std::thread::sleep(Duration::from_millis(20));
         run(&mut app, vec![]);
     }
+    // Header: start time and id (no title here), the path in a tooltip
+    // (TASK-77.85).
+    let header = format!(
+        "Session transcript: {} · sid-new",
+        chrono::DateTime::from_timestamp(((now - 1200) / 60 * 60) as i64, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%m-%d %H:%M")
+    );
     let out = run(&mut app, vec![]);
-    let shown = out.shapes.iter().any(|c| {
-        matches!(&c.shape,
-        egui::Shape::Text(t) if t.galley.text() == "Session transcript: /t/sid-new.jsonl")
+    let rect = out.shapes.iter().find_map(|c| match &c.shape {
+        egui::Shape::Text(t) if t.galley.text() == header => {
+            Some(t.galley.rect.translate(t.pos.to_vec2()))
+        }
+        _ => None,
     });
-    assert!(shown);
+    let rect = rect.unwrap_or_else(|| panic!("{header}"));
+    let mut tooltip = false;
+    run(&mut app, vec![egui::Event::PointerMoved(rect.center())]);
+    for _ in 0..20 {
+        let out = run(&mut app, vec![]);
+        tooltip |= out.shapes.iter().any(|c| {
+            matches!(&c.shape,
+            egui::Shape::Text(t) if t.galley.text() == "/t/sid-new.jsonl")
+        });
+    }
+    assert!(tooltip, "path in the tooltip");
     // The user picking the tab returns it to the live transcript.
     app.select_detail_tab("Transcript");
     assert_eq!(app.session_transcript, None);
@@ -13861,9 +13979,7 @@ fn test_task_77_78_restore_window_after_show_in_graph() {
     assert!(app.graph_restore.is_none());
     assert!(widget_rect(&out, "Restore window").is_none());
     assert!(
-        texts(&out)
-            .iter()
-            .any(|t| t == "20 sessions in the time window (20 total)"),
+        texts(&out).iter().any(|t| t == "20 sessions"),
         "{:?}",
         texts(&out)
     );
