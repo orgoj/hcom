@@ -338,6 +338,12 @@ where
 pub struct DashboardState {
     #[serde(default)]
     pub geometry: Option<String>,
+    /// Window was maximized when last seen.
+    #[serde(default)]
+    pub window_maximized: bool,
+    /// Inner size [w, h] of the last non-maximized window.
+    #[serde(default)]
+    pub window_size: Option<[f32; 2]>,
     /// Table height as a fraction of the window height.
     #[serde(default)]
     pub table_height_frac: Option<f32>,
@@ -488,6 +494,40 @@ impl DashboardState {
         if !DETAIL_TABS.contains(&self.detail_tab.as_str()) {
             self.detail_tab = DEFAULT_DETAIL_TAB.into();
         }
+        self.window_size = self
+            .window_size
+            .filter(|[w, h]| w.is_finite() && h.is_finite() && *w >= 600.0 && *h >= 400.0);
+    }
+
+    /// Window settings for the next start: the saved size (default
+    /// 1200x800) and whether it opens maximized.
+    pub fn start_viewport(&self) -> ([f32; 2], bool) {
+        (
+            self.window_size.unwrap_or([1200.0, 800.0]),
+            self.window_maximized,
+        )
+    }
+
+    /// Records the window `maximized` flag and, while not maximized, its
+    /// inner size; returns true when something changed.
+    pub fn record_window(&mut self, maximized: Option<bool>, size: Option<[f32; 2]>) -> bool {
+        let mut changed = false;
+        if let Some(m) = maximized
+            && m != self.window_maximized
+        {
+            self.window_maximized = m;
+            changed = true;
+        }
+        if maximized == Some(false)
+            && let Some([w, h]) = size
+            && self
+                .window_size
+                .is_none_or(|[ow, oh]| (ow - w).abs() > 0.5 || (oh - h).abs() > 0.5)
+        {
+            self.window_size = Some([w, h]);
+            changed = true;
+        }
+        changed
     }
 
     /// Persisted window settings as a live window (end follows now);
@@ -548,6 +588,8 @@ impl Default for DashboardState {
     fn default() -> Self {
         Self {
             geometry: None,
+            window_maximized: false,
+            window_size: None,
             table_height_frac: None,
             detail_width_px: None,
             view_mode: Some(ViewMode::Both),
@@ -593,6 +635,17 @@ pub fn load_config(hcom_dir: &Path) -> DashboardConfig {
         }
     }
     DashboardConfig::default()
+}
+
+/// `$HCOM_DIR`, else `~/.hcom`.
+pub fn hcom_dir() -> PathBuf {
+    std::env::var("HCOM_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::var("HOME")
+                .map(|h| PathBuf::from(h).join(".hcom"))
+                .unwrap_or_else(|_| PathBuf::from(".hcom"))
+        })
 }
 
 pub fn load_state(hcom_dir: &Path) -> DashboardState {

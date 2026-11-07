@@ -1,5 +1,9 @@
 ro ~/projects/hcom
 rw ~/.hcom
+# Agent transcripts (absolute paths in ~/.hcom), read-only.
+ro ~/.claude/projects
+ro ~/.codex/sessions
+ro ~/.gemini/antigravity-cli
 pid host
 path ~/projects/hcom/target/release
 res 1280x900

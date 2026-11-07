@@ -12730,3 +12730,68 @@ fn test_task_77_70_successful_load_clears_its_stale_error() {
         assert_eq!(app.action_error.as_deref(), Some(err));
     }
 }
+
+/// The window opens maximized or in its last normal size (TASK-77.71).
+#[test]
+fn test_task_77_71_window_state_is_remembered() {
+    use hcom_dashboard::config::{DashboardState, load_state, save_state};
+
+    let fresh = DashboardState::default();
+    assert_eq!(fresh.start_viewport(), ([1200.0, 800.0], false));
+
+    let mut s = DashboardState::default();
+    assert!(s.record_window(Some(false), Some([1400.0, 900.0])));
+    assert!(
+        !s.record_window(Some(false), Some([1400.2, 900.0])),
+        "no change"
+    );
+    assert!(s.record_window(Some(true), Some([2560.0, 1400.0])));
+    assert_eq!(
+        s.window_size,
+        Some([1400.0, 900.0]),
+        "maximized size not kept"
+    );
+    assert!(
+        !s.record_window(None, None),
+        "unknown state changes nothing"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    save_state(dir.path(), &s);
+    let loaded = load_state(dir.path());
+    assert_eq!(loaded.start_viewport(), ([1400.0, 900.0], true));
+
+    // Unmaximized again: the normal size, not maximized.
+    let mut s = loaded;
+    assert!(s.record_window(Some(false), Some([1000.0, 700.0])));
+    save_state(dir.path(), &s);
+    assert_eq!(
+        load_state(dir.path()).start_viewport(),
+        ([1000.0, 700.0], false)
+    );
+
+    // A saved size below the minimum window falls back to the default.
+    s.window_size = Some([100.0, 50.0]);
+    save_state(dir.path(), &s);
+    assert_eq!(load_state(dir.path()).start_viewport().0, [1200.0, 800.0]);
+}
+
+/// The app records the viewport's maximized flag into its state.
+#[test]
+fn test_task_77_71_app_records_maximized_viewport() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut input = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 700.0))),
+        ..Default::default()
+    };
+    let vp = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+    vp.maximized = Some(true);
+    vp.inner_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 700.0)));
+    let mut out = ctx.run_ui(input, |ui| eframe::App::ui(&mut app, ui, &mut frame));
+    out.textures_delta.clear();
+    assert!(app.state.window_maximized);
+}

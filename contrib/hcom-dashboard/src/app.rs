@@ -535,13 +535,7 @@ pub fn accept_generation_result(current_generation: u64, result_generation: u64)
 
 impl HcomDashboardApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, sync: Option<BackgroundSync>) -> Self {
-        let hcom_dir = std::env::var("HCOM_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::env::var("HOME")
-                    .map(|h| PathBuf::from(h).join(".hcom"))
-                    .unwrap_or_else(|_| PathBuf::from(".hcom"))
-            });
+        let hcom_dir = crate::config::hcom_dir();
 
         let config = load_config(&hcom_dir);
         let state = load_state(&hcom_dir);
@@ -5147,6 +5141,14 @@ impl eframe::App for HcomDashboardApp {
             self.state.canvas_zoom = Some(zoom);
             self.state.canvas_pan_x = Some(pan.x);
             self.state.canvas_pan_y = Some(pan.y);
+            self.mark_view_dirty();
+        }
+        // Maximized flag and normal size, restored at the next start.
+        let (maximized, inner) = ctx.input(|i| (i.viewport().maximized, i.viewport().inner_rect));
+        if self
+            .state
+            .record_window(maximized, inner.map(|r| [r.width(), r.height()]))
+        {
             self.mark_view_dirty();
         }
         let pointer_down = ctx.input(|i| i.pointer.any_down());
