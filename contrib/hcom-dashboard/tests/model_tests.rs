@@ -12718,6 +12718,59 @@ fn test_task_77_69_resume_and_fork_availability() {
     }
 }
 
+/// A running agent's Sessions header says Resume is off; its Resume buttons
+/// stay disabled; a stopped agent has no such line (TASK-77.83).
+#[test]
+fn test_task_77_83_sessions_header_explains_resume_off() {
+    use hcom_dashboard::app::RESUME_OFF_TEXT;
+    use hcom_dashboard::config::DashboardConfig;
+    use hcom_dashboard::sessions::SessionInfo;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut run = task_77_52_runner(ctx.clone());
+    let now = chrono::Utc::now().timestamp() as u64;
+    let session = SessionInfo {
+        start_ts: now - 1200,
+        end_ts: Some(now - 600),
+        session_id: "sid-1".into(),
+        transcript_size: Some(10),
+        tool: "claude".into(),
+        ..Default::default()
+    };
+    for (agent, running) in [("agent_alpha", true), ("cat_beta", false)] {
+        let row = app
+            .table_rows
+            .iter()
+            .find(|r| r.agent == agent)
+            .unwrap()
+            .clone();
+        assert_eq!(row.is_running, running);
+        app.select_table_row(&row);
+        app.select_detail_tab("Sessions");
+        // Let the mock's empty session list arrive first.
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(20));
+            run(&mut app, vec![]);
+        }
+        app.sessions_content = Some((
+            app.selected_agent_name().unwrap(),
+            app.selection_generation,
+            Ok(vec![session.clone()]),
+        ));
+        run(&mut app, vec![]);
+        let out = run(&mut app, vec![]);
+        let shown = out.shapes.iter().any(
+            |c| matches!(&c.shape, egui::Shape::Text(t) if t.galley.text() == RESUME_OFF_TEXT),
+        );
+        assert_eq!(shown, running, "{agent}");
+        let resume = widget_rects(&out, "Resume");
+        assert_eq!(resume.len(), 1, "{agent}");
+        assert_eq!(resume[0].1, running, "Resume disabled only while running");
+    }
+}
+
 /// The Resume/Fork dialog names its primary button after the action, shows a
 /// one-line hint and a live command preview (`--dir` only after a change,
 /// the prompt as `"…"`); Tab goes prompt → primary → Cancel (TASK-77.82).

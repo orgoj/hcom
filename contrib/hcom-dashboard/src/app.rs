@@ -525,6 +525,9 @@ where
     format!("{start_text} – {end_text}")
 }
 
+/// Sessions header line while the agent runs (TASK-77.83).
+pub const RESUME_OFF_TEXT: &str = "agent is running — Resume is off (Fork works)";
+
 /// One-line hint of the Resume (`r`) or Fork (`f`) dialog (TASK-77.82).
 pub fn session_dialog_hint(sub: &str) -> &'static str {
     if sub == "r" {
@@ -2574,6 +2577,9 @@ impl HcomDashboardApp {
             shown.len(),
             sessions.len()
         ));
+        if agent_running {
+            ui.weak(RESUME_OFF_TEXT);
+        }
         let mut restore = false;
         if let Some(r) = &self.graph_restore {
             ui.horizontal_wrapped(|ui| {
