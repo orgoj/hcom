@@ -10973,7 +10973,7 @@ fn test_task_77_54_action_error_shows_only_for_its_agent() {
     let mut run = task_77_52_runner(ctx.clone());
     let banner = |out: &egui::FullOutput| {
         out.shapes.iter().any(
-            |c| matches!(&c.shape, egui::Shape::Text(t) if t.galley.text().starts_with("⚠ Screen")),
+            |c| matches!(&c.shape, egui::Shape::Text(t) if t.galley.text().starts_with("⚠ Kill")),
         )
     };
     let select = |app: &mut hcom_dashboard::app::HcomDashboardApp, id: &str| {
@@ -10988,7 +10988,7 @@ fn test_task_77_54_action_error_shows_only_for_its_agent() {
     select(&mut app, "inst_alpha_1");
     app.set_action_error(
         Some("inst_alpha_1"),
-        "Screen for 'inst_alpha_1' failed: gone".into(),
+        "Kill 'inst_alpha_1' failed: gone".into(),
     );
     let out = run(&mut app, vec![]);
     assert!(banner(&out), "shown for its agent");
@@ -12640,4 +12640,93 @@ fn test_task_77_69_sessions_tab_resume_fork_transcript() {
     // The user picking the tab returns it to the live transcript.
     app.select_detail_tab("Transcript");
     assert_eq!(app.session_transcript, None);
+}
+
+/// Escape dismisses the detail panel error unless a dialog or a focused
+/// text field owns the key (TASK-77.70).
+#[test]
+fn test_task_77_70_escape_dismisses_the_error_banner() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let row = app.table_rows[0].clone();
+    app.select_table_row(&row);
+    run(&mut app, vec![]);
+    let esc = || task_77_52_key(egui::Key::Escape, egui::Modifiers::NONE);
+
+    app.set_action_error(Some("inst_alpha_1"), "Kill 'inst_alpha_1' failed: x".into());
+    run(&mut app, vec![esc()]);
+    assert_eq!(app.action_error, None, "Escape dismisses");
+
+    // An open dialog keeps Escape (it closes the dialog, not the error).
+    app.set_action_error(Some("inst_alpha_1"), "boom".into());
+    app.show_send_dialog = true;
+    run(&mut app, vec![]);
+    run(&mut app, vec![esc()]);
+    run(&mut app, vec![]);
+    assert!(!app.show_send_dialog);
+    assert_eq!(app.action_error.as_deref(), Some("boom"));
+
+    // A focused text field keeps Escape too.
+    run(&mut app, vec![egui::Event::Text("/".into())]);
+    run(&mut app, vec![]);
+    assert!(ctx.text_edit_focused(), "search field focused");
+    run(&mut app, vec![esc()]);
+    assert_eq!(app.action_error.as_deref(), Some("boom"));
+    run(&mut app, vec![]);
+    run(&mut app, vec![esc()]);
+    assert_eq!(app.action_error, None, "Escape without focus dismisses");
+}
+
+/// A successful load drops the failed-load error of the same kind and agent;
+/// other errors stay (TASK-77.70).
+#[test]
+fn test_task_77_70_successful_load_clears_its_stale_error() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let row = app.table_rows[0].clone();
+    app.select_table_row(&row);
+    run(&mut app, vec![]);
+    let settle = |app: &mut hcom_dashboard::app::HcomDashboardApp,
+                  run: &mut dyn FnMut(
+        &mut hcom_dashboard::app::HcomDashboardApp,
+        Vec<egui::Event>,
+    ) -> egui::FullOutput| {
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(20));
+            run(app, vec![]);
+        }
+    };
+
+    for (tab, kind) in [
+        ("Screen", "Screen"),
+        ("Transcript", "Transcript"),
+        ("Events", "Events"),
+        ("Sessions", "Sessions"),
+    ] {
+        settle(&mut app, &mut run);
+        let err = format!("{kind} for 'inst_alpha_1' failed: not started");
+        app.set_action_error(Some("inst_alpha_1"), err);
+        app.select_detail_tab(tab);
+        settle(&mut app, &mut run);
+        assert_eq!(app.action_error, None, "{tab} success clears its error");
+    }
+
+    // Another kind or another agent stays.
+    settle(&mut app, &mut run);
+    for (agent, err) in [
+        ("inst_alpha_1", "Kill 'inst_alpha_1' failed: x"),
+        ("inst_alpha_1", "Events for 'inst_alpha_1' failed: x"),
+        ("other", "Screen for 'other' failed: x"),
+    ] {
+        app.set_action_error(Some(agent), err.into());
+        app.select_detail_tab("Screen");
+        settle(&mut app, &mut run);
+        assert_eq!(app.action_error.as_deref(), Some(err));
+    }
 }

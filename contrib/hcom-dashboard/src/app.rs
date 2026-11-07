@@ -414,6 +414,9 @@ pub struct HcomDashboardApp {
     /// A text field had the keyboard when the frame began: a single-line
     /// field drops focus on Enter before the table reads the key.
     text_focus_at_frame_start: bool,
+    /// A text field had the keyboard when the last frame ended: egui drops
+    /// the focus on Escape before this frame runs.
+    text_focus_last_frame: bool,
 }
 
 /// Sessions tab content: (agent, generation, sessions or load error).
@@ -648,6 +651,7 @@ impl HcomDashboardApp {
             send_text: String::new(),
             inject_input_has_focus: false,
             text_focus_at_frame_start: false,
+            text_focus_last_frame: false,
             last_resolved_theme: None,
             desktop_theme: desktop_config_dir().and_then(|dir| desktop_theme(&dir)),
         };
@@ -756,6 +760,7 @@ impl HcomDashboardApp {
             send_text: String::new(),
             inject_input_has_focus: false,
             text_focus_at_frame_start: false,
+            text_focus_last_frame: false,
             last_resolved_theme: None,
             desktop_theme: None,
         }
@@ -1122,6 +1127,20 @@ impl HcomDashboardApp {
             .map(str::to_string)
             .or_else(|| self.selected_row_id.clone());
         self.action_error = Some(msg);
+    }
+
+    /// Drops the error `<kind> for '<agent>' failed…` once such a load
+    /// succeeded (e.g. a Screen of an agent that was still starting).
+    pub fn clear_stale_error(&mut self, kind: &str, agent: &str) {
+        let prefix = format!("{kind} for '{agent}' failed");
+        if self.action_error_agent.as_deref() == Some(agent)
+            && self
+                .action_error
+                .as_ref()
+                .is_some_and(|e| e.starts_with(&prefix))
+        {
+            self.action_error = None;
+        }
     }
 
     /// The action error of the selected agent, if any.
@@ -3513,6 +3532,16 @@ impl eframe::App for HcomDashboardApp {
                     .any(|e| matches!(e, egui::Event::Text(t) if t == "/"))
             });
 
+        // Escape dismisses the error banner unless a dialog, a context menu
+        // or a text field (focused at the end of the last frame) owns the key.
+        if !self.modal_at_frame_start
+            && self.context_menu.is_none()
+            && !self.text_focus_last_frame
+            && self.shown_action_error().is_some()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.action_error = None;
+        }
         if clear_search && !self.inject_input_has_focus {
             self.search_query.clear();
         }
@@ -3615,6 +3644,7 @@ impl eframe::App for HcomDashboardApp {
                         if accept_generation_result(self.selection_generation, generation) {
                             match content {
                                 Ok(text) => {
+                                    self.clear_stale_error("Transcript", &agent);
                                     self.loaded_transcript = Some((agent.clone(), text.clone()));
                                     self.transcript_content = Some((agent, generation, text));
                                 }
@@ -3635,6 +3665,7 @@ impl eframe::App for HcomDashboardApp {
                         if accept_generation_result(self.selection_generation, generation) {
                             match content {
                                 Ok(text) => {
+                                    self.clear_stale_error("Screen", &agent);
                                     self.screen_content = Some((agent, generation, text));
                                 }
                                 Err(e) => {
@@ -3654,6 +3685,7 @@ impl eframe::App for HcomDashboardApp {
                         if accept_generation_result(self.selection_generation, generation) {
                             match content {
                                 Ok(text) => {
+                                    self.clear_stale_error("Events", &agent);
                                     self.events_content = Some((agent, generation, text));
                                 }
                                 Err(e) => {
@@ -3671,9 +3703,12 @@ impl eframe::App for HcomDashboardApp {
                         sessions,
                     } => {
                         if accept_generation_result(self.selection_generation, generation) {
-                            if let Err(e) = &sessions {
-                                let msg = format!("Sessions for '{}' failed: {}", agent, e);
-                                self.set_action_error(Some(&agent), msg);
+                            match &sessions {
+                                Ok(_) => self.clear_stale_error("Sessions", &agent),
+                                Err(e) => {
+                                    let msg = format!("Sessions for '{}' failed: {}", agent, e);
+                                    self.set_action_error(Some(&agent), msg);
+                                }
                             }
                             self.sessions_content = Some((agent, generation, sessions));
                         }
@@ -4912,7 +4947,11 @@ impl eframe::App for HcomDashboardApp {
                     if let Some(err) = self.shown_action_error() {
                         ui.horizontal_wrapped(|ui| {
                             ui.colored_label(Color32::from_rgb(231, 76, 60), format!("⚠ {}", err));
-                            if ui.small_button("✖").clicked() {
+                            if ui
+                                .small_button("✖")
+                                .on_hover_text("Dismiss (Esc)")
+                                .clicked()
+                            {
                                 dismiss_err = true;
                             }
                         });
@@ -5115,6 +5154,7 @@ impl eframe::App for HcomDashboardApp {
 
         // S3: Periodic repaint so timer and refresh tick even when idle with no input
         ctx.request_repaint_after(Duration::from_millis(500));
+        self.text_focus_last_frame = ctx.text_edit_focused();
     }
 
     fn on_exit(&mut self) {
