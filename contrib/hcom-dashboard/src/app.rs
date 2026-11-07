@@ -2563,12 +2563,7 @@ impl HcomDashboardApp {
                 });
             }
             if ui.button("Transcript").clicked() {
-                self.dispatch_action(ActionRequest::Transcript {
-                    agent: agent_name.clone(),
-                    generation: self.selection_generation,
-                    last_lines: 30,
-                    flags: self.transcript_flags(),
-                });
+                self.select_detail_tab("Transcript");
             }
             // Destructive action last, set apart from the others.
             ui.add_space(KILL_GAP);
@@ -2623,20 +2618,6 @@ impl HcomDashboardApp {
                     ui.end_row();
                 }
             });
-
-        // Loaded Transcript View
-        if let Some((ref tr_agent, _, ref text)) = self.transcript_content
-            && tr_agent == &agent_name
-        {
-            ui.add_space(8.0);
-            ui.separator();
-            ui.label(RichText::new("Recent Transcript:").strong());
-            egui::ScrollArea::vertical()
-                .max_height(250.0)
-                .show(ui, |ui| {
-                    ui.monospace(text);
-                });
-        }
     }
 
     fn render_screen_tab(&mut self, ui: &mut egui::Ui) {
@@ -5711,13 +5692,9 @@ impl eframe::App for HcomDashboardApp {
                                 });
                                 close_menu = true;
                             }
+                            // Right-click selected this node.
                             if ui.button("View Transcript").clicked() {
-                                self.dispatch_action(ActionRequest::Transcript {
-                                    agent: agent_name.clone(),
-                                    generation: self.selection_generation,
-                                    last_lines: 30,
-                                    flags: self.transcript_flags(),
-                                });
+                                self.select_detail_tab("Transcript");
                                 close_menu = true;
                             }
                             let pin_label =

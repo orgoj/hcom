@@ -14574,3 +14574,62 @@ fn test_task_77_89_summary_loads_tabs_and_shows_metrics() {
     assert_eq!(v[2], "…");
     assert_eq!(v[3], "— (stopped)");
 }
+
+#[test]
+fn test_task_77_91_summary_has_no_transcript_block() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut run = task_77_52_runner(ctx.clone());
+    let rows = app.table_rows.clone();
+    app.select_detail_tab("Summary");
+    app.select_table_row(&rows[0]);
+    app.state.show_table = false;
+    for _ in 0..5 {
+        std::thread::sleep(Duration::from_millis(20));
+        run(&mut app, vec![]);
+    }
+    app.transcript_content = Some((
+        "inst_alpha_1".into(),
+        app.selection_generation,
+        "Recent conversation (1 exchange, 1 of 1) - @inst_alpha_1:\n\n[1] USER: marker-text\n"
+            .into(),
+    ));
+    let out = run(&mut app, vec![]);
+    let texts: Vec<String> = out
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert!(texts.iter().any(|t| t == "Transcript:"), "metric row");
+    assert!(
+        !texts.iter().any(|t| t.contains("marker-text")),
+        "{texts:?}"
+    );
+
+    // Quick Actions `Transcript` opens the Transcript tab.
+    let p = widget_rects(&out, "Transcript")
+        .into_iter()
+        .map(|(r, _)| r)
+        .find(|r| r.min.y > 100.0)
+        .expect("Quick Actions Transcript button")
+        .center();
+    run(&mut app, vec![egui::Event::PointerMoved(p)]);
+    for pressed in [true, false] {
+        run(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: p,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+    assert_eq!(app.state.detail_tab, "Transcript");
+}
