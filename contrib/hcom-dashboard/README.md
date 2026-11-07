@@ -31,7 +31,7 @@ Native Rust GUI for visualizing and managing `hcom` agents, instances, and messa
 `~/.hcom/dashboard.json` (same keys as `contrib/hcom-gui`'s `gui.json`). If it is missing or its syntax is corrupt, built-in defaults are used.
 
 ### State Persistence
-User layout preferences (whether the window is maximized and its last normal size, restored at the next start; table and detail panel visibility, active detail tab, table height and detail panel width as window fractions, active filters, sort order, layout mode, the message window span and limit, zoom, pan, and the positions of pinned nodes) are saved to:
+User layout preferences (whether the window is maximized and its last normal size, restored at the next start; a window manager that ignores the maximized flag of a new window is asked again once the window is up, and the saved flag stays until the window reports maximized or 2 s pass; table and detail panel visibility, active detail tab, table height and detail panel width as window fractions, active filters, sort order, layout mode, the message window span and limit, zoom, pan, and the positions of pinned nodes) are saved to:
 ```
 ~/.hcom/dashboard-state.json
 ```

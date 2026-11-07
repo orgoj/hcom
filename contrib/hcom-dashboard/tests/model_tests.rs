@@ -13434,6 +13434,90 @@ fn test_task_77_71_app_records_maximized_viewport() {
     assert!(app.state.window_maximized);
 }
 
+/// Started maximized: the app asks the window manager to maximize once and
+/// keeps `window_maximized = true` until the window reports it (or 2 s
+/// pass); afterwards a real unmaximize is recorded (TASK-77.86).
+#[test]
+fn test_task_77_86_start_maximized_survives_first_frames() {
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+
+    let frame_at = |app: &mut HcomDashboardApp,
+                    ctx: &egui::Context,
+                    time: f64,
+                    maximized: bool|
+     -> egui::FullOutput {
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0))),
+            time: Some(time),
+            ..Default::default()
+        };
+        let vp = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+        vp.maximized = Some(maximized);
+        vp.inner_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0)));
+        let mut out = ctx.run_ui(input, |ui| eframe::App::ui(app, ui, &mut frame));
+        out.textures_delta.clear();
+        out
+    };
+    let asks_maximize = |out: &egui::FullOutput| {
+        out.viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .is_some_and(|v| {
+                v.commands
+                    .iter()
+                    .any(|c| matches!(c, egui::ViewportCommand::Maximized(true)))
+            })
+    };
+    let state = DashboardState {
+        window_maximized: true,
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+
+    // The WM maximizes after the request: state stays true throughout.
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        state.clone(),
+        dir.path().into(),
+    );
+    let ctx = egui::Context::default();
+    assert!(asks_maximize(&frame_at(&mut app, &ctx, 0.0, false)));
+    assert!(
+        !asks_maximize(&frame_at(&mut app, &ctx, 0.1, false)),
+        "asked once"
+    );
+    assert!(
+        app.state.window_maximized,
+        "not overwritten before the WM reports"
+    );
+    frame_at(&mut app, &ctx, 0.5, true);
+    assert!(app.state.window_maximized);
+    assert_eq!(app.pending_maximize, None);
+    // A later unmaximize by the user is recorded.
+    frame_at(&mut app, &ctx, 1.0, false);
+    assert!(!app.state.window_maximized);
+
+    // The WM never maximizes: after 2 s the real state is recorded.
+    let mut app =
+        HcomDashboardApp::new_for_test(DashboardConfig::default(), state, dir.path().into());
+    let ctx = egui::Context::default();
+    frame_at(&mut app, &ctx, 0.0, false);
+    frame_at(&mut app, &ctx, 1.9, false);
+    assert!(app.state.window_maximized);
+    frame_at(&mut app, &ctx, 2.1, false);
+    assert!(!app.state.window_maximized);
+
+    // Not maximized at start: nothing is asked.
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
+        dir.path().into(),
+    );
+    let ctx = egui::Context::default();
+    assert!(!asks_maximize(&frame_at(&mut app, &ctx, 0.0, false)));
+}
+
 /// Two handoffs in a row chain three sessions (TASK-77.75).
 #[test]
 fn test_task_77_75_handoff_chain() {

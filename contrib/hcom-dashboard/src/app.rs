@@ -429,6 +429,10 @@ pub struct HcomDashboardApp {
     /// A text field had the keyboard when the last frame ended: egui drops
     /// the focus on Escape before this frame runs.
     text_focus_last_frame: bool,
+    /// Started maximized: until the window reports maximized (or the
+    /// deadline in egui time passes) the app asks for it and does not record
+    /// `window_maximized = false` (TASK-77.86). Deadline 0 = not yet set.
+    pub pending_maximize: Option<f64>,
 }
 
 /// Consecutive equal lines as one line with their count (Log tab).
@@ -781,10 +785,12 @@ impl HcomDashboardApp {
             inject_input_has_focus: false,
             text_focus_at_frame_start: false,
             text_focus_last_frame: false,
+            pending_maximize: None,
             last_resolved_theme: None,
             desktop_theme: desktop_config_dir().and_then(|dir| desktop_theme(&dir)),
         };
         app.apply_persisted_view();
+        app.pending_maximize = app.state.window_maximized.then_some(0.0);
 
         // Dispatch initial table data reload and stats reload
         app.dispatch_action(ActionRequest::ReloadTableData);
@@ -794,6 +800,7 @@ impl HcomDashboardApp {
 
     pub fn new_for_test(config: DashboardConfig, state: DashboardState, hcom_dir: PathBuf) -> Self {
         let window_span = state.window_span_secs;
+        let pending_maximize = state.window_maximized.then_some(0.0);
         Self {
             graph: AgentGraph::new(),
             layout: {
@@ -895,6 +902,7 @@ impl HcomDashboardApp {
             inject_input_has_focus: false,
             text_focus_at_frame_start: false,
             text_focus_last_frame: false,
+            pending_maximize,
             last_resolved_theme: None,
             desktop_theme: None,
         }
@@ -5605,10 +5613,23 @@ impl eframe::App for HcomDashboardApp {
             self.mark_view_dirty();
         }
         // Maximized flag and normal size, restored at the next start.
-        let (maximized, inner) = ctx.input(|i| (i.viewport().maximized, i.viewport().inner_rect));
-        if self
-            .state
-            .record_window(maximized, inner.map(|r| [r.width(), r.height()]))
+        let (maximized, inner, time) =
+            ctx.input(|i| (i.viewport().maximized, i.viewport().inner_rect, i.time));
+        // Some window managers ignore the maximized flag of a new window:
+        // ask again once it is up, and record nothing until it reports
+        // maximized or 2 s pass (TASK-77.86).
+        if let Some(until) = self.pending_maximize {
+            if maximized == Some(true) || (until > 0.0 && time > until) {
+                self.pending_maximize = None;
+            } else if until == 0.0 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+                self.pending_maximize = Some(time + 2.0);
+            }
+        }
+        if self.pending_maximize.is_none()
+            && self
+                .state
+                .record_window(maximized, inner.map(|r| [r.width(), r.height()]))
         {
             self.mark_view_dirty();
         }
