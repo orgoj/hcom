@@ -683,6 +683,22 @@ fn wrap_group<R>(ui: &mut egui::Ui, salt: &str, add: impl FnOnce(&mut egui::Ui) 
     ui.ctx().data_mut(|d| d.insert_temp(id, w));
 }
 
+/// Accent color of top bar section labels, readable in both themes.
+pub fn section_label_color(dark_mode: bool) -> Color32 {
+    if dark_mode {
+        Color32::from_rgb(120, 170, 255)
+    } else {
+        Color32::from_rgb(30, 90, 190)
+    }
+}
+
+/// A top bar section label (`VIEW`): uppercase accent text, so it reads as the
+/// title of the controls after it, not as one of them.
+fn section_label(ui: &mut egui::Ui, text: &str) {
+    let color = section_label_color(ui.visuals().dark_mode);
+    ui.label(RichText::new(text.to_uppercase()).color(color));
+}
+
 pub fn format_last_limit(n: usize) -> String {
     if n == 0 {
         "no limit".to_string()
@@ -2191,7 +2207,7 @@ impl HcomDashboardApp {
 
     fn render_window_bar(&mut self, ui: &mut egui::Ui, palette: &ThemePalette) {
         let now = chrono::Utc::now();
-        ui.label("Window:");
+        section_label(ui, "Window");
 
         // 1. Presets
         for (label, preset) in WINDOW_PRESETS {
@@ -2337,7 +2353,7 @@ impl HcomDashboardApp {
 
         // 5. Last N limit
         let mut limit = self.msg_window.last_n.unwrap_or(0);
-        ui.label("Last:");
+        section_label(ui, "Last");
         let resp = ui
             .add(
                 egui::DragValue::new(&mut limit)
@@ -4556,7 +4572,7 @@ impl eframe::App for HcomDashboardApp {
                 wrap_group(ui, "filter", |ui| {
                     // Search query: fixed width that fits its placeholder.
                     let hint = "Search agent, dir, tool... (/ to focus)";
-                    ui.label("Filter:");
+                    section_label(ui, "Filter");
                     let search = ui.add(
                         egui::TextEdit::singleline(&mut self.search_query)
                             .hint_text(hint)
@@ -4614,7 +4630,7 @@ impl eframe::App for HcomDashboardApp {
                 ui.separator();
 
                 wrap_group(ui, "view", |ui| {
-                    ui.label("View:");
+                    section_label(ui, "View");
                     let current_view = self.state.effective_view_mode();
                     if ui
                         .selectable_label(current_view == ViewMode::Both, "Both (F4)")
@@ -4650,7 +4666,7 @@ impl eframe::App for HcomDashboardApp {
 
                 // Layout mode
                 wrap_group(ui, "layout", |ui| {
-                    ui.label("Layout:");
+                    section_label(ui, "Layout");
                     for (mode, label) in [
                         (LayoutMode::Hierarchy, "Hierarchy"),
                         (LayoutMode::Cluster, "Cluster"),
@@ -4673,7 +4689,7 @@ impl eframe::App for HcomDashboardApp {
 
                 // Edge layers and the message arrow width metric
                 wrap_group(ui, "edges", |ui| {
-                    ui.label("Edges:");
+                    section_label(ui, "Edges");
                     let mut edges_changed = false;
                     for (flag, label, hint) in [
                         (
@@ -4701,7 +4717,7 @@ impl eframe::App for HcomDashboardApp {
                             edges_changed = true;
                         }
                     }
-                    ui.label("Width:");
+                    section_label(ui, "Width");
                     for (bytes, label, hint) in [
                         (false, "Count", "Message arrow width by message count"),
                         (true, "Bytes", "Message arrow width by message text bytes"),

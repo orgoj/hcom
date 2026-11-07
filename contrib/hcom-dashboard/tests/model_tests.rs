@@ -14903,3 +14903,43 @@ fn test_task_77_92_growing_tabs_stick_to_bottom() {
         );
     }
 }
+
+/// Top bar section labels are uppercase accent text in both themes;
+/// the old `View:` style is gone (TASK-77.93).
+#[test]
+fn test_task_77_93_top_bar_section_labels_use_accent() {
+    use hcom_dashboard::config::{DashboardConfig, ThemePreference};
+
+    for (pref, dark) in [
+        (ThemePreference::Light, false),
+        (ThemePreference::Dark, true),
+    ] {
+        let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+        app.state.theme = Some(pref);
+        let ctx = egui::Context::default();
+        let mut run = task_77_52_runner(ctx.clone());
+        run(&mut app, vec![]);
+        let out = run(&mut app, vec![]);
+        let want = hcom_dashboard::app::section_label_color(dark);
+        for label in [
+            "FILTER", "VIEW", "LAYOUT", "EDGES", "WIDTH", "WINDOW", "LAST",
+        ] {
+            let format = out
+                .shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if t.galley.text() == label => {
+                        Some(t.galley.job.sections[0].format.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{label} shown (dark={dark})"));
+            assert_eq!(format.color, want, "{label} dark={dark}");
+        }
+        assert!(
+            !out.shapes.iter().any(|c| matches!(&c.shape,
+                egui::Shape::Text(t) if t.galley.text() == "View:")),
+            "old label still shown"
+        );
+    }
+}
