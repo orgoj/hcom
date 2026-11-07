@@ -21,6 +21,17 @@ pub enum ActionRequest {
         generation: u64,
         last_lines: usize,
     },
+    /// Transcript file of one session of `agent` (Sessions tab).
+    SessionTranscript {
+        agent: String,
+        generation: u64,
+        path: String,
+    },
+    /// Sessions of `agent` for the Sessions tab.
+    Sessions {
+        agent: String,
+        generation: u64,
+    },
     Screen {
         agent: String,
         generation: u64,
@@ -63,6 +74,11 @@ pub enum ActionResult {
         agent: String,
         generation: u64,
         content: Result<String, String>,
+    },
+    SessionsLoaded {
+        agent: String,
+        generation: u64,
+        sessions: Result<Vec<crate::sessions::SessionInfo>, String>,
     },
     ScreenLoaded {
         agent: String,
@@ -364,6 +380,84 @@ impl ActionRunner for SystemActionRunner {
                     agent,
                     generation,
                     content: res,
+                })
+            }
+            ActionRequest::SessionTranscript {
+                agent,
+                generation,
+                path,
+            } => {
+                let res = self.run_command_bounded(
+                    "hcom",
+                    &["transcript", "--path", &path, "--last", "100"],
+                    NO_STDOUT_LIMIT,
+                    4096,
+                    None,
+                );
+                Some(ActionResult::TranscriptLoaded {
+                    agent,
+                    generation,
+                    content: res,
+                })
+            }
+            ActionRequest::Sessions { agent, generation } => {
+                let life = self.run_command_bounded(
+                    "hcom",
+                    &[
+                        "events", "--type", "life", "--agent", &agent, "--full", "--last", "100000",
+                    ],
+                    16 * 1024 * 1024,
+                    4096,
+                    None,
+                );
+                let msgs = self.run_command_bounded(
+                    "hcom",
+                    &[
+                        "events",
+                        "--type",
+                        "message",
+                        "--participant",
+                        &agent,
+                        "--full",
+                        "--last",
+                        "100000",
+                    ],
+                    16 * 1024 * 1024,
+                    4096,
+                    None,
+                );
+                let live = self
+                    .run_command_bounded("hcom", &["list", "--json"], 1024 * 1024, 4096, None)
+                    .ok()
+                    .and_then(|out| {
+                        serde_json::from_str::<Vec<crate::table_data::LiveInstanceItem>>(&out).ok()
+                    })
+                    .and_then(|items| {
+                        items
+                            .into_iter()
+                            .find(|i| i.name == agent && i.status.as_deref() != Some("stopped"))
+                    })
+                    .map(|i| crate::sessions::LiveSession {
+                        session_id: i.session_id.unwrap_or_default(),
+                        transcript_path: i.transcript_path.unwrap_or_default(),
+                        tool: i.tool.unwrap_or_default(),
+                        directory: i.directory.unwrap_or_default(),
+                    });
+                let sessions = life.and_then(|life| {
+                    let msgs = msgs?;
+                    let now = chrono::Utc::now().timestamp() as u64;
+                    let mut list =
+                        crate::sessions::parse_sessions(&agent, &life, &msgs, live.as_ref(), now);
+                    for s in list.iter_mut().filter(|s| !s.transcript_path.is_empty()) {
+                        s.transcript_size =
+                            std::fs::metadata(&s.transcript_path).ok().map(|m| m.len());
+                    }
+                    Ok(list)
+                });
+                Some(ActionResult::SessionsLoaded {
+                    agent,
+                    generation,
+                    sessions,
                 })
             }
             ActionRequest::Screen { agent, generation } => {

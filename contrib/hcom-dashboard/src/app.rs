@@ -348,6 +348,11 @@ pub struct HcomDashboardApp {
     pub screen_content: Option<(String, u64, String)>,
     pub transcript_content: Option<(String, u64, String)>,
     pub events_content: Option<(String, u64, String)>,
+    /// Sessions tab: (agent, generation, sessions or load error).
+    pub sessions_content: SessionsContent,
+    /// Transcript tab shows this session file of the agent instead of its
+    /// live transcript (Sessions tab Transcript button).
+    pub session_transcript: Option<(String, String)>,
     pub command_logs: Vec<String>,
     /// Log lines already checked for a new error, and whether one arrived
     /// while another tab was open: a red dot on the Log tab (TASK-77.64).
@@ -386,6 +391,9 @@ pub struct HcomDashboardApp {
     pub start_initial_reasoning: String,
     pub start_resume: bool,
     pub start_prompt: String,
+    /// Start dialog for `hcom r` / `hcom f` (subcommand, session id) of a
+    /// Sessions tab row instead of `hcom agent`.
+    pub start_session: Option<(&'static str, String)>,
     /// Start dialog suggestions: installed CLIs, catalog models.
     pub start_cli_choices: Vec<String>,
     pub start_model_choices: Vec<String>,
@@ -407,6 +415,13 @@ pub struct HcomDashboardApp {
     /// field drops focus on Enter before the table reads the key.
     text_focus_at_frame_start: bool,
 }
+
+/// Sessions tab content: (agent, generation, sessions or load error).
+pub type SessionsContent = Option<(
+    String,
+    u64,
+    Result<Vec<crate::sessions::SessionInfo>, String>,
+)>;
 
 /// (window, last_event_id, edge_count, live second or 0 for a fixed end).
 type WindowCacheKey = (MessageWindow, u64, usize, i64);
@@ -596,6 +611,8 @@ impl HcomDashboardApp {
             screen_content: None,
             transcript_content: None,
             events_content: None,
+            sessions_content: None,
+            session_transcript: None,
             command_logs: Vec::new(),
             log_checked: 0,
             log_error_mark: false,
@@ -619,6 +636,7 @@ impl HcomDashboardApp {
             start_initial_reasoning: String::new(),
             start_resume: false,
             start_prompt: String::new(),
+            start_session: None,
             start_cli_choices: Vec::new(),
             start_model_choices: Vec::new(),
             start_dir_pick: None,
@@ -701,6 +719,8 @@ impl HcomDashboardApp {
             screen_content: None,
             transcript_content: None,
             events_content: None,
+            sessions_content: None,
+            session_transcript: None,
             command_logs: Vec::new(),
             log_checked: 0,
             log_error_mark: false,
@@ -724,6 +744,7 @@ impl HcomDashboardApp {
             start_initial_reasoning: String::new(),
             start_resume: false,
             start_prompt: String::new(),
+            start_session: None,
             start_cli_choices: Vec::new(),
             start_model_choices: Vec::new(),
             start_dir_pick: None,
@@ -925,6 +946,30 @@ impl HcomDashboardApp {
         if !self.state.show_side_panel {
             return;
         }
+        // Sessions and a session transcript exist for stopped agents too.
+        let selected = self.selected_agent_name();
+        if self.state.detail_tab == "Sessions"
+            && let Some(agent) = selected.clone()
+        {
+            self.dispatch_action(ActionRequest::Sessions {
+                agent,
+                generation: gen_id,
+            });
+            return;
+        }
+        if self.state.detail_tab == "Transcript"
+            && let Some((agent, path)) = self.session_transcript.clone()
+        {
+            if selected.as_ref() == Some(&agent) {
+                self.dispatch_action(ActionRequest::SessionTranscript {
+                    agent,
+                    generation: gen_id,
+                    path,
+                });
+                return;
+            }
+            self.session_transcript = None;
+        }
         let row_opt = self.selected_row();
         let is_running = row_opt
             .as_ref()
@@ -965,6 +1010,7 @@ impl HcomDashboardApp {
 
     /// Shows the detail panel on `tab_name` and loads its content.
     pub fn select_detail_tab(&mut self, tab_name: &str) {
+        self.session_transcript = None;
         self.state.detail_tab = tab_name.to_string();
         self.state.show_side_panel = true;
         self.save_state();
@@ -1114,6 +1160,13 @@ impl HcomDashboardApp {
                 }
                 ActionRequest::SpawnDetached { cmd, .. } => {
                     self.pending_action = Some(format!("Spawning {}...", cmd.join(" ")));
+                }
+                ActionRequest::SessionTranscript { agent, .. } => {
+                    self.pending_action =
+                        Some(format!("Loading session transcript for {}...", agent));
+                }
+                ActionRequest::Sessions { agent, .. } => {
+                    self.pending_action = Some(format!("Loading sessions for {}...", agent));
                 }
                 ActionRequest::ReloadTableData => {}
                 ActionRequest::ReloadStats => {}
@@ -1518,6 +1571,7 @@ impl HcomDashboardApp {
                 .unwrap_or_else(|| r.to_string())
         };
         self.start_agent_name = row.agent.clone();
+        self.start_session = None;
         self.start_instance_name.clear();
         self.start_initial_dir = row.directory.clone();
         self.start_initial_cli = pick(cat.map(|c| &c.cli), &row.cli);
@@ -1550,6 +1604,19 @@ impl HcomDashboardApp {
     /// its flag, an untouched `<agent>__` name counts as empty, and resume is
     /// `--continue` when another CLI is chosen.
     pub fn start_command(&self) -> Vec<String> {
+        if let Some((sub, sid)) = &self.start_session {
+            // `hcom r|f <session id>`: dir only when changed, prompt when set.
+            let mut cmd = vec!["hcom".to_string(), sub.to_string(), sid.clone()];
+            let dir = self.start_dir.trim();
+            if !dir.is_empty() && dir != self.start_initial_dir.trim() {
+                cmd.extend(["--dir".into(), dir.to_string()]);
+            }
+            let prompt = self.start_prompt.trim();
+            if !prompt.is_empty() {
+                cmd.extend(["--hcom-prompt".into(), prompt.to_string()]);
+            }
+            return cmd;
+        }
         let agent = &self.start_agent_name;
         let answer = |v: &str, prefill: &str| -> String {
             let v = v.trim();
@@ -2332,6 +2399,166 @@ impl HcomDashboardApp {
         });
     }
 
+    /// Sessions of the selected agent within the message window, newest
+    /// first, with Resume, Fork and Transcript (TASK-77.69).
+    fn render_sessions_tab(&mut self, ui: &mut egui::Ui) {
+        let Some(agent) = self.selected_agent_name() else {
+            ui.weak("No agent selected");
+            return;
+        };
+        let sessions = match &self.sessions_content {
+            Some((a, _, Ok(list))) if *a == agent => list.clone(),
+            Some((a, _, Err(e))) if *a == agent => {
+                ui.colored_label(Color32::from_rgb(231, 76, 60), format!("Error: {e}"));
+                return;
+            }
+            _ => {
+                ui.weak(format!("Loading sessions for {agent}..."));
+                return;
+            }
+        };
+        let now_dt = chrono::Utc::now();
+        let now = now_dt.timestamp().max(0) as u64;
+        let (start, end) = match self.current_message_range(now_dt) {
+            MessageRange::Live { span_secs } => {
+                (span_secs.map(|s| now.saturating_sub(s.max(0) as u64)), None)
+            }
+            MessageRange::Fixed { start, end } => (
+                start.map(|s| s.timestamp().max(0) as u64),
+                Some(end.timestamp().max(0) as u64),
+            ),
+        };
+        let agent_running = self.selected_row().is_some_and(|r| r.is_running);
+        let shown: Vec<&crate::sessions::SessionInfo> = sessions
+            .iter()
+            .filter(|s| s.overlaps(start, end, now))
+            .collect();
+        ui.weak(format!(
+            "{} sessions in the time window ({} total)",
+            shown.len(),
+            sessions.len()
+        ));
+        let mut action: Option<(&'static str, crate::sessions::SessionInfo)> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("sessions_scroll_tab")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (i, s) in shown.iter().enumerate() {
+                    ui.push_id(i, |ui| {
+                        ui.separator();
+                        let fmt = |ts: u64, f: &str| {
+                            chrono::DateTime::from_timestamp(ts as i64, 0)
+                                .map(|d| d.with_timezone(&chrono::Local).format(f).to_string())
+                                .unwrap_or_default()
+                        };
+                        let until = match s.end_ts {
+                            Some(e) => fmt(e, "%m-%d %H:%M"),
+                            None => "running".into(),
+                        };
+                        let duration = crate::table_data::format_age(
+                            s.end_ts.unwrap_or(now).saturating_sub(s.start_ts),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "{} – {}  ({})",
+                                fmt(s.start_ts, "%m-%d %H:%M"),
+                                until,
+                                duration
+                            ))
+                            .strong(),
+                        );
+                        ui.label(format!("launched by: {}", s.launcher));
+                        if !s.end_reason.is_empty() {
+                            ui.label(format!("ended: {}", s.end_reason));
+                        }
+                        let size = s
+                            .transcript_size
+                            .map(crate::sessions::format_size)
+                            .unwrap_or_else(|| "transcript missing".into());
+                        let sid: String = s.session_id.chars().take(8).collect();
+                        ui.label(format!(
+                            "{} · {} · session {}",
+                            if s.tool.is_empty() { "?" } else { &s.tool },
+                            size,
+                            if sid.is_empty() { "-" } else { &sid }
+                        ));
+                        if !s.directory.is_empty() {
+                            ui.weak(&s.directory);
+                        }
+                        let partners = if s.partners.is_empty() {
+                            "none".to_string()
+                        } else {
+                            s.partners
+                                .iter()
+                                .map(|p| format!("{} ↑{} ↓{}", p.name, p.sent, p.received))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        };
+                        ui.label(format!("partners: {partners}"));
+                        ui.horizontal(|ui| {
+                            let resume = s.can_resume(agent_running);
+                            let r = ui.add_enabled(resume.is_ok(), egui::Button::new("Resume"));
+                            if let Err(why) = &resume {
+                                r.clone().on_disabled_hover_text(why);
+                            }
+                            if r.clicked() {
+                                action = Some(("r", (*s).clone()));
+                            }
+                            let fork = s.can_fork();
+                            let f = ui.add_enabled(fork.is_ok(), egui::Button::new("Fork"));
+                            if let Err(why) = &fork {
+                                f.clone().on_disabled_hover_text(why);
+                            }
+                            if f.clicked() {
+                                action = Some(("f", (*s).clone()));
+                            }
+                            let has_tr = s.transcript_size.is_some();
+                            let t = ui.add_enabled(has_tr, egui::Button::new("Transcript"));
+                            if !has_tr {
+                                t.clone()
+                                    .on_disabled_hover_text("transcript not found on disk");
+                            }
+                            if t.clicked() {
+                                action = Some(("t", (*s).clone()));
+                            }
+                        });
+                    });
+                }
+            });
+        match action {
+            Some(("t", s)) => self.show_session_transcript(&agent, &s.transcript_path),
+            Some((sub, s)) => self.open_session_dialog(&agent, sub, &s),
+            None => {}
+        }
+    }
+
+    /// Transcript tab with the transcript file of one session of `agent`.
+    pub fn show_session_transcript(&mut self, agent: &str, path: &str) {
+        self.transcript_content = None;
+        self.state.detail_tab = "Transcript".into();
+        self.state.show_side_panel = true;
+        self.save_state();
+        self.session_transcript = Some((agent.to_string(), path.to_string()));
+        self.on_selection_changed();
+    }
+
+    /// Start dialog for `hcom <sub> <session id>` (`r` resume, `f` fork) of
+    /// a session of `agent`, its dir prefilled with the session's dir.
+    pub fn open_session_dialog(
+        &mut self,
+        agent: &str,
+        sub: &'static str,
+        session: &crate::sessions::SessionInfo,
+    ) {
+        self.start_agent_name = agent.to_string();
+        self.start_session = Some((sub, session.session_id.clone()));
+        self.start_initial_dir = session.directory.clone();
+        self.start_dir = session.directory.clone();
+        self.start_prompt.clear();
+        self.start_dir_pick = None;
+        self.show_start_dialog = true;
+    }
+
     /// Tab row and content of the right detail panel.
     fn render_detail_tabs(
         &mut self,
@@ -2357,6 +2584,7 @@ impl HcomDashboardApp {
                 "Report (F9)",
                 "Screen (F5)",
                 "Transcript (F6)",
+                "Sessions",
                 "Events (F7)",
                 "Log (F8)",
                 "Config",
@@ -2405,12 +2633,25 @@ impl HcomDashboardApp {
                     .selected_row()
                     .map(|r| r.is_running && !r.instance.is_empty())
                     .unwrap_or(false);
+                let session_path = self
+                    .session_transcript
+                    .as_ref()
+                    .filter(|(a, _)| agent.as_ref() == Some(a))
+                    .map(|(_, p)| p.clone());
+                if let Some(path) = &session_path {
+                    ui.horizontal(|ui| {
+                        ui.weak(format!("Session transcript: {path}"));
+                        if ui.small_button("Back to Sessions").clicked() {
+                            self.select_detail_tab("Sessions");
+                        }
+                    });
+                }
                 egui::ScrollArea::both()
                     .id_salt("transcript_scroll_tab")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if let Some(ref selected) = agent {
-                            if !is_running {
+                            if !is_running && session_path.is_none() {
                                 ui.weak(format!(
                                     "Agent '{}' is stopped. Transcript is only available for running agents.",
                                     selected
@@ -2431,6 +2672,9 @@ impl HcomDashboardApp {
                             ui.weak("No agent selected");
                         }
                     });
+            }
+            "Sessions" => {
+                self.render_sessions_tab(ui);
             }
             "Events" => {
                 let agent = self.selected_agent_name();
@@ -3421,6 +3665,19 @@ impl eframe::App for HcomDashboardApp {
                             }
                         }
                     }
+                    ActionResult::SessionsLoaded {
+                        agent,
+                        generation,
+                        sessions,
+                    } => {
+                        if accept_generation_result(self.selection_generation, generation) {
+                            if let Err(e) = &sessions {
+                                let msg = format!("Sessions for '{}' failed: {}", agent, e);
+                                self.set_action_error(Some(&agent), msg);
+                            }
+                            self.sessions_content = Some((agent, generation, sessions));
+                        }
+                    }
                     ActionResult::KillFinished { agent, result } => {
                         if let Err(e) = result {
                             let msg = format!("Kill '{}' failed: {}", agent, e);
@@ -4328,35 +4585,47 @@ impl eframe::App for HcomDashboardApp {
                 }
             }
             const FIELD_W: f32 = 320.0;
-            let (_, escape) = show_modal(&ctx, &format!("Start {agent}"), |ui| {
+            let session = self.start_session.clone();
+            let title = match &session {
+                Some((sub, sid)) => format!(
+                    "{} {agent} · session {}",
+                    if *sub == "r" { "Resume" } else { "Fork" },
+                    sid.chars().take(8).collect::<String>()
+                ),
+                None => format!("Start {agent}"),
+            };
+            let (_, escape) = show_modal(&ctx, &title, |ui| {
                 egui::Grid::new("start_dialog_grid")
                     .num_columns(2)
                     .spacing([8.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("resume");
-                        let resume = ui.checkbox(&mut self.start_resume, "");
-                        if just_opened {
-                            resume.request_focus();
-                        }
-                        ui.end_row();
+                        if session.is_none() {
+                            ui.label("resume");
+                            let resume = ui.checkbox(&mut self.start_resume, "");
+                            if just_opened {
+                                resume.request_focus();
+                            }
+                            ui.end_row();
 
-                        // Clone convention: "<agent>__" on focus; left
-                        // unchanged it counts as empty.
-                        ui.label("name");
-                        let out = egui::TextEdit::singleline(&mut self.start_instance_name)
-                            .desired_width(FIELD_W)
-                            .show(ui);
-                        if out.response.gained_focus() && self.start_instance_name.is_empty() {
-                            self.start_instance_name = format!("{agent}__");
-                            let end =
-                                egui::text::CCursor::new(self.start_instance_name.chars().count());
-                            let mut state = out.state;
-                            state
-                                .cursor
-                                .set_char_range(Some(egui::text::CCursorRange::one(end)));
-                            state.store(ui.ctx(), out.response.id);
+                            // Clone convention: "<agent>__" on focus; left
+                            // unchanged it counts as empty.
+                            ui.label("name");
+                            let out = egui::TextEdit::singleline(&mut self.start_instance_name)
+                                .desired_width(FIELD_W)
+                                .show(ui);
+                            if out.response.gained_focus() && self.start_instance_name.is_empty() {
+                                self.start_instance_name = format!("{agent}__");
+                                let end = egui::text::CCursor::new(
+                                    self.start_instance_name.chars().count(),
+                                );
+                                let mut state = out.state;
+                                state
+                                    .cursor
+                                    .set_char_range(Some(egui::text::CCursorRange::one(end)));
+                                state.store(ui.ctx(), out.response.id);
+                            }
+                            ui.end_row();
                         }
-                        ui.end_row();
 
                         ui.label("dir");
                         ui.horizontal(|ui| {
@@ -4388,51 +4657,56 @@ impl eframe::App for HcomDashboardApp {
                         });
                         ui.end_row();
 
-                        ui.label("cli");
-                        egui::ComboBox::from_id_salt("start_cli")
-                            .width(FIELD_W)
-                            .selected_text(self.start_cli.clone())
-                            .show_ui(ui, |ui| {
-                                for c in &self.start_cli_choices {
-                                    ui.selectable_value(&mut self.start_cli, c.clone(), c);
-                                }
-                            });
-                        ui.end_row();
-
-                        // Editable: any value, the menu holds suggestions.
-                        let suggest = |ui: &mut egui::Ui,
-                                       value: &mut String,
-                                       choices: &[String]| {
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(value).desired_width(FIELD_W - 28.0),
-                                );
-                                ui.menu_button("▾", |ui| {
-                                    for c in choices {
-                                        if ui.selectable_label(value == c, c).clicked() {
-                                            *value = c.clone();
-                                            ui.close();
-                                        }
+                        if session.is_none() {
+                            ui.label("cli");
+                            egui::ComboBox::from_id_salt("start_cli")
+                                .width(FIELD_W)
+                                .selected_text(self.start_cli.clone())
+                                .show_ui(ui, |ui| {
+                                    for c in &self.start_cli_choices {
+                                        ui.selectable_value(&mut self.start_cli, c.clone(), c);
                                     }
                                 });
-                            });
-                        };
-                        ui.label("model");
-                        suggest(ui, &mut self.start_model, &self.start_model_choices);
-                        ui.end_row();
+                            ui.end_row();
 
-                        ui.label("reasoning");
-                        let levels: Vec<String> =
-                            REASONING_LEVELS.iter().map(|s| s.to_string()).collect();
-                        suggest(ui, &mut self.start_reasoning, &levels);
-                        ui.end_row();
+                            // Editable: any value, the menu holds suggestions.
+                            let suggest =
+                                |ui: &mut egui::Ui, value: &mut String, choices: &[String]| {
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::TextEdit::singleline(value)
+                                                .desired_width(FIELD_W - 28.0),
+                                        );
+                                        ui.menu_button("▾", |ui| {
+                                            for c in choices {
+                                                if ui.selectable_label(value == c, c).clicked() {
+                                                    *value = c.clone();
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
+                                    });
+                                };
+                            ui.label("model");
+                            suggest(ui, &mut self.start_model, &self.start_model_choices);
+                            ui.end_row();
+
+                            ui.label("reasoning");
+                            let levels: Vec<String> =
+                                REASONING_LEVELS.iter().map(|s| s.to_string()).collect();
+                            suggest(ui, &mut self.start_reasoning, &levels);
+                            ui.end_row();
+                        }
 
                         ui.label("prompt");
-                        ui.add(
+                        let prompt = ui.add(
                             egui::TextEdit::multiline(&mut self.start_prompt)
                                 .desired_width(FIELD_W)
                                 .desired_rows(6),
                         );
+                        if just_opened && session.is_some() {
+                            prompt.request_focus();
+                        }
                         ui.end_row();
                     });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -4458,7 +4732,10 @@ impl eframe::App for HcomDashboardApp {
                     .and_then(|i| cmd.get(i + 1))
                     .unwrap_or(&self.start_agent_name)
                     .clone();
-                self.select_next = Some((instance, self.selected_row_id.clone()));
+                // A fork gets a new name, unknown here.
+                if session.as_ref().is_none_or(|(sub, _)| *sub == "r") {
+                    self.select_next = Some((instance, self.selected_row_id.clone()));
+                }
                 self.dispatch_action(ActionRequest::RunCommand { cmd, cwd });
                 self.show_start_dialog = false;
             } else if close {

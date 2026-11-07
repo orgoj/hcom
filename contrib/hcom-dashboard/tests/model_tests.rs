@@ -1443,6 +1443,18 @@ impl ActionRunner for MockActionRunner {
                 generation,
                 content: Ok(self.transcript_result.clone()),
             }),
+            ActionRequest::SessionTranscript {
+                agent, generation, ..
+            } => Some(ActionResult::TranscriptLoaded {
+                agent,
+                generation,
+                content: Ok(self.transcript_result.clone()),
+            }),
+            ActionRequest::Sessions { agent, generation } => Some(ActionResult::SessionsLoaded {
+                agent,
+                generation,
+                sessions: Ok(Vec::new()),
+            }),
             ActionRequest::Screen { agent, generation } => Some(ActionResult::ScreenLoaded {
                 agent,
                 generation,
@@ -12185,4 +12197,447 @@ fn test_task_77_64_log_tab_marks_a_new_error() {
     app.select_detail_tab("Screen");
     let out = run(&mut app, vec![]);
     assert_eq!(log_tab(&out).text(), "Log (F8)");
+}
+
+/// Life and message event lines in `hcom events --full` shape (TASK-77.69).
+fn task_77_69_life(id: u64, ts: &str, agent: &str, data: serde_json::Value) -> String {
+    serde_json::json!({"id": id, "ts": ts, "instance": agent, "type": "life", "data": data})
+        .to_string()
+}
+
+fn task_77_69_msg(id: u64, ts: &str, from: &str, to: &[&str]) -> String {
+    serde_json::json!({
+        "id": id, "ts": ts, "instance": from, "type": "message",
+        "data": {"from": from, "delivered_to": to, "text": "x"}
+    })
+    .to_string()
+}
+
+fn task_77_69_stopped(sid: &str, transcript: &str, tool: &str) -> serde_json::Value {
+    serde_json::json!({
+        "action": "stopped", "by": "cli", "reason": "killed",
+        "snapshot": {"session_id": sid, "transcript_path": transcript,
+                     "tool": tool, "directory": "/work/a"}
+    })
+}
+
+/// Sessions are built from the agent's life events: launcher from
+/// `ready.by` (user for user/unknown), `handoff` after a handoff event, end
+/// reason and session data from the `stopped` snapshot, the running session
+/// from `hcom list`; partners count messages inside each session only.
+#[test]
+fn test_task_77_69_parse_sessions_from_events() {
+    use hcom_dashboard::sessions::{LiveSession, Partner, parse_sessions};
+    use serde_json::json;
+
+    let a = "agent_a";
+    let life = [
+        task_77_69_life(
+            1,
+            "2026-11-07T08:00:00+00:00",
+            a,
+            json!({"action": "created", "by": "unknown"}),
+        ),
+        task_77_69_life(
+            2,
+            "2026-11-07T08:00:05+00:00",
+            a,
+            json!({"action": "ready", "by": "user"}),
+        ),
+        task_77_69_life(
+            3,
+            "2026-11-07T09:00:00+00:00",
+            a,
+            task_77_69_stopped("sid-1", "/t/1.jsonl", "claude"),
+        ),
+        task_77_69_life(
+            4,
+            "2026-11-07T10:00:00+00:00",
+            a,
+            json!({"action": "created", "by": "user"}),
+        ),
+        task_77_69_life(
+            5,
+            "2026-11-07T10:00:05+00:00",
+            a,
+            json!({"action": "ready", "by": "cca_manager"}),
+        ),
+        task_77_69_life(
+            6,
+            "2026-11-07T11:00:00+00:00",
+            a,
+            json!({"action": "handoff", "by": a}),
+        ),
+        task_77_69_life(
+            7,
+            "2026-11-07T11:00:01+00:00",
+            a,
+            task_77_69_stopped("sid-2", "/t/2.jsonl", "codex"),
+        ),
+        task_77_69_life(
+            8,
+            "2026-11-07T11:00:02+00:00",
+            a,
+            json!({"action": "created", "by": "user"}),
+        ),
+        task_77_69_life(
+            9,
+            "2026-11-07T11:00:06+00:00",
+            a,
+            json!({"action": "ready", "by": "user"}),
+        ),
+        // Another agent's event is ignored.
+        task_77_69_life(
+            10,
+            "2026-11-07T11:30:00+00:00",
+            "other",
+            json!({"action": "created"}),
+        ),
+    ]
+    .join("\n");
+    let msgs = [
+        task_77_69_msg(20, "2026-11-07T08:10:00", a, &["bob", "carl"]),
+        task_77_69_msg(21, "2026-11-07T08:20:00", "bob", &[a]),
+        task_77_69_msg(22, "2026-11-07T08:30:00", a, &["bob"]),
+        // Between sessions: counted nowhere.
+        task_77_69_msg(23, "2026-11-07T09:30:00", "bob", &[a]),
+        task_77_69_msg(24, "2026-11-07T10:30:00", "carl", &[a, "bob"]),
+        // Not addressed to the agent.
+        task_77_69_msg(25, "2026-11-07T10:31:00", "carl", &["bob"]),
+        task_77_69_msg(26, "2026-11-07T11:10:00", a, &["dan"]),
+    ]
+    .join("\n");
+    let live = LiveSession {
+        session_id: "sid-3".into(),
+        transcript_path: "/t/3.jsonl".into(),
+        tool: "claude".into(),
+        directory: "/work/live".into(),
+    };
+    let now = hcom_dashboard::table_data::parse_event_ts("2026-11-07T12:00:00");
+    let ts = hcom_dashboard::table_data::parse_event_ts;
+    let s = parse_sessions(a, &life, &msgs, Some(&live), now);
+    assert_eq!(s.len(), 3);
+
+    // Newest first: the running handoff session.
+    assert_eq!(s[0].launcher, "handoff");
+    assert_eq!(s[0].end_ts, None);
+    assert_eq!(s[0].session_id, "sid-3");
+    assert_eq!(s[0].directory, "/work/live");
+    assert_eq!(
+        s[0].partners,
+        vec![Partner {
+            name: "dan".into(),
+            sent: 1,
+            received: 0
+        }]
+    );
+
+    assert_eq!(s[1].launcher, "cca_manager");
+    assert_eq!(s[1].start_ts, ts("2026-11-07T10:00:00"));
+    assert_eq!(s[1].end_ts, Some(ts("2026-11-07T11:00:01")));
+    assert_eq!(s[1].end_reason, "killed (cli)");
+    assert_eq!(
+        (s[1].session_id.as_str(), s[1].tool.as_str()),
+        ("sid-2", "codex")
+    );
+    assert_eq!(
+        s[1].partners,
+        vec![Partner {
+            name: "carl".into(),
+            sent: 0,
+            received: 1
+        }]
+    );
+
+    assert_eq!(s[2].launcher, "user");
+    assert_eq!(s[2].transcript_path, "/t/1.jsonl");
+    assert_eq!(
+        s[2].partners,
+        vec![
+            Partner {
+                name: "bob".into(),
+                sent: 2,
+                received: 1
+            },
+            Partner {
+                name: "carl".into(),
+                sent: 1,
+                received: 0
+            },
+        ]
+    );
+
+    // Without `hcom list` data the running session has no session id.
+    let s = parse_sessions(a, &life, &msgs, None, now);
+    assert_eq!(s[0].session_id, "");
+}
+
+/// A session overlaps the window when it runs at any moment of it; a
+/// running session lasts until now.
+#[test]
+fn test_task_77_69_session_window_overlap() {
+    use hcom_dashboard::sessions::SessionInfo;
+
+    let s = SessionInfo {
+        start_ts: 100,
+        end_ts: Some(200),
+        ..Default::default()
+    };
+    assert!(s.overlaps(None, None, 1000));
+    assert!(s.overlaps(Some(150), Some(160), 1000));
+    assert!(s.overlaps(Some(200), None, 1000));
+    assert!(!s.overlaps(Some(201), None, 1000));
+    assert!(!s.overlaps(None, Some(99), 1000));
+    let running = SessionInfo {
+        start_ts: 100,
+        ..Default::default()
+    };
+    assert!(running.overlaps(Some(900), None, 1000));
+    assert!(!running.overlaps(Some(1001), None, 1000));
+}
+
+/// Resume needs a stopped agent, a session id, a transcript on disk and a
+/// tool that resumes by id; Fork the same except the running check.
+#[test]
+fn test_task_77_69_resume_and_fork_availability() {
+    use hcom_dashboard::sessions::SessionInfo;
+
+    let ok = SessionInfo {
+        session_id: "sid".into(),
+        transcript_size: Some(10),
+        tool: "claude".into(),
+        ..Default::default()
+    };
+    assert_eq!(ok.can_resume(false), Ok(()));
+    assert_eq!(ok.can_fork(), Ok(()));
+    assert_eq!(ok.can_resume(true), Err("the agent is running".into()));
+    assert_eq!(ok.can_fork(), Ok(()), "fork works while the agent runs");
+
+    let no_sid = SessionInfo {
+        session_id: String::new(),
+        ..ok.clone()
+    };
+    assert_eq!(
+        no_sid.can_resume(false),
+        Err("no session id recorded".into())
+    );
+    assert_eq!(no_sid.can_fork(), Err("no session id recorded".into()));
+
+    let gone = SessionInfo {
+        transcript_size: None,
+        ..ok.clone()
+    };
+    assert_eq!(
+        gone.can_resume(false),
+        Err("transcript not found on disk".into())
+    );
+    assert_eq!(gone.can_fork(), Err("transcript not found on disk".into()));
+
+    let gemini = SessionInfo {
+        tool: "gemini".into(),
+        ..ok.clone()
+    };
+    assert_eq!(gemini.can_resume(false), Ok(()));
+    assert!(gemini.can_fork().is_err());
+    let pi = SessionInfo {
+        tool: "pi".into(),
+        ..ok.clone()
+    };
+    assert!(pi.can_resume(false).is_err());
+    assert!(pi.can_fork().is_err());
+    for tool in ["codex", "opencode", "kilo"] {
+        let s = SessionInfo {
+            tool: tool.into(),
+            ..ok.clone()
+        };
+        assert_eq!(
+            (s.can_resume(false), s.can_fork()),
+            (Ok(()), Ok(())),
+            "{tool}"
+        );
+    }
+}
+
+/// The Sessions tab lists the window's sessions of a stopped agent; Resume
+/// and Fork open the Start dialog for `hcom r|f <session id>` (dir only when
+/// changed, prompt when set); Transcript shows the session file.
+#[test]
+fn test_task_77_69_sessions_tab_resume_fork_transcript() {
+    use hcom_dashboard::config::DashboardConfig;
+    use hcom_dashboard::sessions::SessionInfo;
+
+    let (mut app, recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut run = task_77_52_runner(ctx.clone());
+    let row = app
+        .table_rows
+        .iter()
+        .find(|r| r.agent == "cat_beta")
+        .unwrap()
+        .clone();
+    app.select_table_row(&row);
+    app.select_detail_tab("Sessions");
+    run(&mut app, vec![]);
+    assert!(
+        recorded.lock().unwrap().iter().any(|r| matches!(
+            r,
+            ActionRequest::Sessions { agent, .. } if agent == "cat_beta"
+        )),
+        "a stopped agent loads its sessions"
+    );
+
+    let now = chrono::Utc::now().timestamp() as u64;
+    let session = |start: u64, sid: &str| SessionInfo {
+        start_ts: start,
+        end_ts: Some(start + 600),
+        launcher: "user".into(),
+        session_id: sid.into(),
+        transcript_path: format!("/t/{sid}.jsonl"),
+        transcript_size: Some(2048),
+        tool: "claude".into(),
+        directory: "/work/beta".into(),
+        ..Default::default()
+    };
+    let generation = app.selection_generation;
+    app.sessions_content = Some((
+        "cat_beta".into(),
+        generation,
+        Ok(vec![
+            session(now - 1200, "sid-new"),
+            session(now - 3 * 86400, "sid-old"),
+        ]),
+    ));
+    app.set_message_window(Some(3600), None);
+    run(&mut app, vec![]);
+    let out = run(&mut app, vec![]);
+    let texts: Vec<String> = out
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t == "1 sessions in the time window (2 total)"),
+        "{texts:?}"
+    );
+    assert!(texts.iter().any(|t| t.contains("session sid-new")));
+    assert!(!texts.iter().any(|t| t.contains("session sid-old")));
+
+    let click = |app: &mut hcom_dashboard::app::HcomDashboardApp,
+                 run: &mut dyn FnMut(
+        &mut hcom_dashboard::app::HcomDashboardApp,
+        Vec<egui::Event>,
+    ) -> egui::FullOutput,
+                 label: &str| {
+        let out = run(app, vec![]);
+        let p = widget_rect(&out, label)
+            .unwrap_or_else(|| panic!("{label}"))
+            .center();
+        run(app, vec![egui::Event::PointerMoved(p)]);
+        for pressed in [true, false] {
+            run(
+                app,
+                vec![egui::Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        run(app, vec![]);
+    };
+
+    click(&mut app, &mut run, "Resume");
+    assert!(app.show_start_dialog);
+    assert_eq!(app.start_command(), ["hcom", "r", "sid-new"]);
+    app.start_prompt = "go on".into();
+    assert_eq!(
+        app.start_command(),
+        ["hcom", "r", "sid-new", "--hcom-prompt", "go on"]
+    );
+    app.start_dir = "/elsewhere".into();
+    assert_eq!(
+        app.start_command(),
+        [
+            "hcom",
+            "r",
+            "sid-new",
+            "--dir",
+            "/elsewhere",
+            "--hcom-prompt",
+            "go on"
+        ]
+    );
+    run(
+        &mut app,
+        vec![task_77_52_key(egui::Key::Enter, egui::Modifiers::NONE)],
+    );
+    run(&mut app, vec![]);
+    assert!(!app.show_start_dialog);
+    let last_cmd = |recorded: &Arc<Mutex<Vec<ActionRequest>>>| {
+        recorded.lock().unwrap().iter().rev().find_map(|r| match r {
+            ActionRequest::RunCommand { cmd, .. } => Some(cmd.clone()),
+            _ => None,
+        })
+    };
+    assert_eq!(
+        last_cmd(&recorded).unwrap(),
+        [
+            "hcom",
+            "r",
+            "sid-new",
+            "--dir",
+            "/elsewhere",
+            "--hcom-prompt",
+            "go on"
+        ]
+    );
+
+    // Fork: same dialog, `hcom f`, fresh prompt and dir.
+    app.sessions_content = Some((
+        "cat_beta".into(),
+        app.selection_generation,
+        Ok(vec![session(now - 1200, "sid-new")]),
+    ));
+    click(&mut app, &mut run, "Fork");
+    assert!(app.show_start_dialog);
+    assert_eq!(app.start_command(), ["hcom", "f", "sid-new"]);
+    app.show_start_dialog = false;
+    run(&mut app, vec![]);
+
+    // A Start dialog of a catalog row is `hcom agent` again.
+    app.open_start_dialog(&row);
+    assert_eq!(app.start_command()[..3], ["hcom", "agent", "cat_beta"]);
+    app.show_start_dialog = false;
+    run(&mut app, vec![]);
+
+    click(&mut app, &mut run, "Transcript");
+    assert_eq!(app.state.detail_tab, "Transcript");
+    assert!(
+        recorded.lock().unwrap().iter().any(|r| matches!(
+            r,
+            ActionRequest::SessionTranscript { agent, path, .. }
+                if agent == "cat_beta" && path == "/t/sid-new.jsonl"
+        )),
+        "the session file is loaded for a stopped agent"
+    );
+    for _ in 0..5 {
+        std::thread::sleep(Duration::from_millis(20));
+        run(&mut app, vec![]);
+    }
+    let out = run(&mut app, vec![]);
+    let shown = out.shapes.iter().any(|c| {
+        matches!(&c.shape,
+        egui::Shape::Text(t) if t.galley.text() == "Session transcript: /t/sid-new.jsonl")
+    });
+    assert!(shown);
+    // The user picking the tab returns it to the live transcript.
+    app.select_detail_tab("Transcript");
+    assert_eq!(app.session_transcript, None);
 }

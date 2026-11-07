@@ -5,6 +5,7 @@ pub mod config;
 pub mod idle;
 pub mod layout;
 pub mod model;
+pub mod sessions;
 pub mod source;
 pub mod sync;
 pub mod table_data;

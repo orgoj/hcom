@@ -273,7 +273,7 @@ Dashboard in Rust (`egui`/`eframe`) visualizing running `hcom` agents:
   - Top status bar with agent counts by state, message stats, zoom reset and zoom percentage.
 - Layout and selection:
   - Toolbar layout selector: `Both (F4)` (graph + agent table), `Graph` (canvas only), and `Table` (table only). Persisted in `~/.hcom/dashboard-state.json` (`view_mode`); configuration in `~/.hcom/dashboard.json`.
-  - Detail panel tabs: `Summary`, `Report (F9)`, `Screen (F5)`, `Transcript (F6)`, `Events (F7)`, `Log (F8)`, `Config`, and `Legend`. When an agent is stopped, `Screen`, `Transcript`, and `Events` link to `Config` to inspect catalog attributes from `agents.json`.
+  - Detail panel tabs: `Summary`, `Report (F9)`, `Screen (F5)`, `Transcript (F6)`, `Sessions`, `Events (F7)`, `Log (F8)`, `Config`, and `Legend`. When an agent is stopped, `Screen`, `Transcript`, and `Events` link to `Config` to inspect catalog attributes from `agents.json`.
   - Message time window: interactive two-handle slider (dragging start and end handles, with boundary snapping to All and Live) and direct text input (relative spans like `1h`, `15m`, `all`, or absolute intervals like `12:00 - 13:00`, `2026-11-03 12:00 - 2026-11-03 13:00`). Invalid text is highlighted in red leaving the interval untouched.
   - Unified selection: clicking a node or table row synchronizes selection across canvas, table, and detail panel. Double-clicking a node attaches to the agent. Clicking an edge selects the relationship and clears agent selection; clicking empty canvas clears selection.
 

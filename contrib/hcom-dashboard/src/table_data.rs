@@ -137,6 +137,8 @@ pub struct LiveInstanceItem {
     #[serde(default)]
     pub transcript_path: Option<String>,
     #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
     pub launch_context: Option<LiveLaunchContext>,
 }
 
