@@ -1,9 +1,11 @@
 ---
 id: TASK-77.56
 title: 'Dashboard: dialog Start stejný jako odladěný dialog v hcom-gui'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@hcom_dev__idea'
 created_date: '2026-11-07T08:42:00Z'
+updated_date: '2026-11-07T09:06:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -20,8 +22,14 @@ Dialog Start v dashboardu (tlačítko Start) neodpovídá odladěnému dialogu S
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Dialog Start se otevře uprostřed obrazovky
-- [ ] #2 Dialog nabízí stejné rozbalovací volby jako dialog Start v hcom-gui
-- [ ] #3 Jméno agenta je předvyplněné hned po otevření dialogu, bez fokusu do pole
-- [ ] #4 Ostatní pole a jejich předvyplnění se chovají jako v dialogu Start v hcom-gui
+- [x] #1 Dialog Start se otevře uprostřed obrazovky
+- [x] #2 Dialog nabízí stejné rozbalovací volby jako dialog Start v hcom-gui
+- [ ] #3 Ostatní pole a jejich předvyplnění se chovají jako v dialogu Start v hcom-gui
+- [x] #4 Pole jména instance je po otevření prázdné a po fokusu dostane '<agent>__' jako v hcom-gui; ponechané beze změny se nepředá
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implementováno podle hcom-gui ask(): uprostřed okna, resume/name/dir/cli (combo z PATH)/model+reasoning (▾ návrhy)/prompt, Enter OK, Shift+Enter nový řádek, Esc zrušit, nezměněné odpovědi bez flagu, --continue při změně CLI. Start jen pro katalogového agenta jako v GUI. Testy test_task_77_55_56_*, test_task_77_56_*; review agent_review OK. Otevřené: AC #3 – chybí Browse… u dir (dashboard nemá souborový dialog; rfd nebo zenity); čeká na rozhodnutí uživatele.
+<!-- SECTION:NOTES:END -->

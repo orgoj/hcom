@@ -1,9 +1,11 @@
 ---
 id: TASK-77.52
 title: 'Dashboard: klávesové zkratky aplikací z horní lišty (open_with key) nefungují'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@hcom_dev__idea'
 created_date: '2026-11-07T08:10:00Z'
+updated_date: '2026-11-07T09:06:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -20,6 +22,12 @@ V ~/.hcom/dashboard.json mají položky open_with klíč key (repos=g, gitg=j, g
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Stisk klávesy key položky open_with spustí tuto aplikaci pro vybraného agenta, stejně jako klik v liště
-- [ ] #2 Zkratka nespustí aplikaci, když má fokus textové pole
+- [x] #1 Stisk klávesy key položky open_with spustí tuto aplikaci pro vybraného agenta, stejně jako klik v liště
+- [x] #2 Zkratka nespustí aplikaci, když má fokus textové pole
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+open_with key je psaný znak (jako /), spustí položku pro vybraného agenta jako tlačítko; ne v textovém poli ani s otevřeným dialogem. Test test_task_77_52_open_with_key_runs_the_app_like_its_button, review agent_review OK.
+<!-- SECTION:FINAL_SUMMARY:END -->

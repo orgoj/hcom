@@ -10614,3 +10614,465 @@ fn test_task_77_51_slash_focuses_the_search_field() {
     assert_eq!(app.search_query, "/");
     assert!(ctx.text_edit_focused());
 }
+
+/// App with the mock action runner and two rows: running `inst_alpha_1`
+/// (agent `agent_alpha`) and stopped catalog agent `cat_beta`.
+fn task_77_52_app(
+    config: hcom_dashboard::config::DashboardConfig,
+) -> (
+    hcom_dashboard::app::HcomDashboardApp,
+    Arc<Mutex<Vec<ActionRequest>>>,
+    tempfile::TempDir,
+) {
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::DashboardState;
+    use hcom_dashboard::table_data::{CatalogAgentItem, TableRow};
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = DashboardState {
+        columns: vec!["instance".into(), "agent".into()],
+        sort_col: Some("agent".into()),
+        ..Default::default()
+    };
+    let mut app = HcomDashboardApp::new_for_test(config, state, dir.path().to_path_buf());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    app.action_worker = Some(ActionWorkerHandle::new(MockActionRunner {
+        recorded: recorded.clone(),
+        fail_attach: false,
+        transcript_result: String::new(),
+    }));
+    app.table_rows = vec![
+        TableRow {
+            agent: "agent_alpha".into(),
+            instance: "inst_alpha_1".into(),
+            is_running: true,
+            status: "active".into(),
+            directory: "/work/alpha".into(),
+            ..Default::default()
+        },
+        TableRow {
+            agent: "cat_beta".into(),
+            is_running: false,
+            status: "stopped".into(),
+            directory: "/work/beta".into(),
+            cli: "claude".into(),
+            catalog: Some(CatalogAgentItem {
+                name: "cat_beta".into(),
+                cli: Some("codex".into()),
+                model: Some("gpt-5".into()),
+                reasoning: Some("high".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ];
+    app.sync_graph_from_table_rows();
+    (app, recorded, dir)
+}
+
+fn task_77_52_runner(
+    ctx: egui::Context,
+) -> impl FnMut(&mut hcom_dashboard::app::HcomDashboardApp, Vec<egui::Event>) -> egui::FullOutput {
+    use eframe::App;
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut time = 0.0;
+    move |app, events| {
+        time += 0.05;
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        out.textures_delta.clear();
+        out
+    }
+}
+
+fn task_77_52_key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers,
+    }
+}
+
+/// Clicks the search field so it has the keyboard.
+fn task_77_52_focus_search(
+    ctx: &egui::Context,
+    app: &mut hcom_dashboard::app::HcomDashboardApp,
+    run: &mut impl FnMut(
+        &mut hcom_dashboard::app::HcomDashboardApp,
+        Vec<egui::Event>,
+    ) -> egui::FullOutput,
+) {
+    let out = run(app, vec![]);
+    let field = out
+        .shapes
+        .iter()
+        .find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text().starts_with("Search agent") => {
+                Some(Rect::from_min_size(t.pos, t.galley.size()))
+            }
+            _ => None,
+        })
+        .expect("search field text");
+    let f = Pos2::new(field.left() + 4.0, field.center().y);
+    let press = |pressed| egui::Event::PointerButton {
+        pos: f,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    run(app, vec![egui::Event::PointerMoved(f)]);
+    run(app, vec![press(true)]);
+    run(app, vec![press(false)]);
+    assert!(ctx.text_edit_focused(), "search field has focus");
+}
+
+#[test]
+fn test_task_77_52_open_with_key_runs_the_app_like_its_button() {
+    use hcom_dashboard::config::{DashboardConfig, OpenWithAction};
+
+    let config = DashboardConfig {
+        open_with: vec![OpenWithAction {
+            label: "repos".into(),
+            cmd: vec!["repo-gui".into()],
+            cwd: Some("{dir}".into()),
+            key: Some("g".into()),
+            if_exists: None,
+        }],
+        ..Default::default()
+    };
+    let (mut app, recorded, _dir) = task_77_52_app(config);
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let spawns = || {
+        std::thread::sleep(Duration::from_millis(50));
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                matches!(r, ActionRequest::SpawnDetached { cmd, cwd }
+                    if cmd == &vec!["repo-gui".to_string()]
+                        && cwd.as_deref() == Some("/work/alpha"))
+            })
+            .count()
+    };
+    let g = || vec![egui::Event::Text("g".into())];
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+
+    // No selected agent: the button is disabled, the key does nothing.
+    run(&mut app, g());
+    assert_eq!(spawns(), 0, "no selection");
+
+    app.selected_row_id = Some("inst_alpha_1".into());
+    run(&mut app, vec![]);
+    run(&mut app, g());
+    assert_eq!(spawns(), 1, "the key runs the app for the selected agent");
+
+    // Another character does nothing.
+    run(&mut app, vec![egui::Event::Text("x".into())]);
+    assert_eq!(spawns(), 1);
+
+    // An open dialog keeps the keyboard.
+    app.confirm_kill_target = Some("inst_alpha_1".into());
+    run(&mut app, g());
+    app.confirm_kill_target = None;
+    assert_eq!(spawns(), 1, "dialog open");
+
+    // In a text field the key is ordinary input.
+    task_77_52_focus_search(&ctx, &mut app, &mut run);
+    run(&mut app, g());
+    run(&mut app, vec![]);
+    assert_eq!(spawns(), 1, "text field keeps the key");
+    assert_eq!(app.search_query, "g");
+}
+
+#[test]
+fn test_task_77_53_alt_arrows_select_rows_wherever_the_keyboard_is() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let alt = egui::Modifiers::ALT;
+    let down = |m| vec![task_77_52_key(egui::Key::ArrowDown, m)];
+    let up = |m| vec![task_77_52_key(egui::Key::ArrowUp, m)];
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    app.selected_row_id = Some("inst_alpha_1".into());
+    app.canvas.selected_node = app.graph.get_node_index("inst_alpha_1");
+    run(&mut app, vec![]);
+
+    // The search field has the keyboard. Alt+Down / Alt+Up select the next
+    // / previous row like a click.
+    task_77_52_focus_search(&ctx, &mut app, &mut run);
+    run(&mut app, down(alt));
+    assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+    assert_eq!(
+        app.canvas.selected_node,
+        app.graph.get_node_index("cat_beta"),
+        "the graph follows"
+    );
+    assert!(app.state.show_side_panel, "the detail panel shows it");
+    assert!(ctx.text_edit_focused(), "the field keeps the keyboard");
+    run(&mut app, up(alt));
+    assert_eq!(app.selected_row_id.as_deref(), Some("inst_alpha_1"));
+
+    // Plain arrows leave the selection alone while a text field has the
+    // keyboard (egui may move the focus on).
+    run(&mut app, down(egui::Modifiers::NONE));
+    assert_eq!(app.selected_row_id.as_deref(), Some("inst_alpha_1"));
+
+    // Without a focused text field Alt+arrows act too.
+    ctx.memory_mut(|m| m.stop_text_input());
+    run(&mut app, vec![]);
+    run(&mut app, down(alt));
+    assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+}
+
+#[test]
+fn test_task_77_54_action_error_shows_only_for_its_agent() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let banner = |out: &egui::FullOutput| {
+        out.shapes.iter().any(
+            |c| matches!(&c.shape, egui::Shape::Text(t) if t.galley.text().starts_with("⚠ Screen")),
+        )
+    };
+    let select = |app: &mut hcom_dashboard::app::HcomDashboardApp, id: &str| {
+        let row = app
+            .table_rows
+            .iter()
+            .find(|r| r.instance == id || (r.instance.is_empty() && r.agent == id))
+            .cloned()
+            .unwrap();
+        app.select_table_row(&row);
+    };
+    select(&mut app, "inst_alpha_1");
+    app.set_action_error(
+        Some("inst_alpha_1"),
+        "Screen for 'inst_alpha_1' failed: gone".into(),
+    );
+    let out = run(&mut app, vec![]);
+    assert!(banner(&out), "shown for its agent");
+
+    select(&mut app, "cat_beta");
+    let out = run(&mut app, vec![]);
+    assert!(!banner(&out), "not shown for another agent");
+    assert_eq!(app.shown_action_error(), None);
+
+    select(&mut app, "inst_alpha_1");
+    let out = run(&mut app, vec![]);
+    assert!(banner(&out), "shown again for its agent");
+
+    // An error without an agent belongs to the agent selected when it came.
+    app.set_action_error(None, "Command failed: x".into());
+    assert_eq!(app.action_error_agent.as_deref(), Some("inst_alpha_1"));
+    select(&mut app, "cat_beta");
+    assert_eq!(app.shown_action_error(), None);
+}
+
+#[test]
+fn test_task_77_55_56_start_dialog_like_hcom_gui() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let none = egui::Modifiers::NONE;
+    let enter = |m| vec![task_77_52_key(egui::Key::Enter, m)];
+    let press = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: none,
+    };
+    let text_rect = |out: &egui::FullOutput, s: &str| {
+        out.shapes.iter().find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text() == s => {
+                Some((Rect::from_min_size(t.pos, t.galley.size()), c.clip_rect))
+            }
+            _ => None,
+        })
+    };
+    let commands = || {
+        std::thread::sleep(Duration::from_millis(50));
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|r| match r {
+                ActionRequest::RunCommand { cmd, cwd } => Some((cmd.clone(), cwd.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+
+    // Double-click on the stopped catalog agent opens the dialog.
+    let p = app.table_row_bands[1].center();
+    run(&mut app, vec![egui::Event::PointerMoved(p)]);
+    for pressed in [true, false, true, false] {
+        run(&mut app, vec![press(p, pressed)]);
+    }
+    // The window sizes itself in its first frames.
+    for _ in 0..4 {
+        run(&mut app, vec![]);
+    }
+    let out = run(&mut app, vec![]);
+    assert!(app.show_start_dialog, "double-click opens Start");
+    assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+    // Prefilled from the catalog entry, the name empty.
+    assert_eq!(app.start_agent_name, "cat_beta");
+    assert_eq!(app.start_instance_name, "");
+    assert_eq!(app.start_cli, "codex");
+    assert_eq!(app.start_model, "gpt-5");
+    assert_eq!(app.start_reasoning, "high");
+    assert_eq!(app.start_dir, "/work/beta");
+    assert!(app.start_cli_choices.contains(&"codex".to_string()));
+    assert_eq!(app.start_model_choices, vec!["gpt-5".to_string()]);
+    // Centered on the window.
+    let (_, win) = text_rect(&out, "Start cat_beta").expect("dialog shown");
+    assert!(
+        (win.center().x - 800.0).abs() < 2.0 && (win.center().y - 350.0).abs() < 2.0,
+        "centered: {win:?}"
+    );
+    // The fields of contrib/hcom-gui, with a menu for each suggestion list.
+    for label in [
+        "name",
+        "dir",
+        "cli",
+        "model",
+        "reasoning",
+        "prompt",
+        "OK",
+        "Cancel",
+    ] {
+        assert!(text_rect(&out, label).is_some(), "{label}");
+    }
+    assert!(
+        out.shapes
+            .iter()
+            .filter(|c| matches!(&c.shape, egui::Shape::Text(t) if t.galley.text() == "▾"))
+            .count()
+            >= 2,
+        "model and reasoning suggestion menus"
+    );
+
+    // Focus on the name field prefills "<agent>__".
+    let (name_label, _) = text_rect(&out, "name").unwrap();
+    let field = Pos2::new(name_label.right() + 60.0, name_label.center().y);
+    run(&mut app, vec![egui::Event::PointerMoved(field)]);
+    run(&mut app, vec![press(field, true)]);
+    run(&mut app, vec![press(field, false)]);
+    run(&mut app, vec![]);
+    assert!(ctx.text_edit_focused());
+    assert_eq!(app.start_instance_name, "cat_beta__");
+
+    // Untouched answers pass no flag; Enter in the dialog runs it.
+    run(&mut app, enter(none));
+    run(&mut app, vec![]);
+    assert!(!app.show_start_dialog);
+    assert_eq!(
+        commands(),
+        vec![(
+            vec!["hcom".to_string(), "agent".into(), "cat_beta".into()],
+            Some("/work/beta".to_string())
+        )]
+    );
+    ctx.memory_mut(|m| m.stop_text_input());
+    run(&mut app, vec![]);
+
+    // Enter on the selected stopped row opens it again; Escape cancels.
+    run(&mut app, enter(none));
+    run(&mut app, vec![]);
+    assert!(app.show_start_dialog, "Enter opens Start");
+    assert_eq!(commands().len(), 1, "the opening Enter does not press OK");
+    run(&mut app, vec![task_77_52_key(egui::Key::Escape, none)]);
+    assert!(!app.show_start_dialog, "Escape cancels");
+    assert_eq!(commands().len(), 1);
+
+    // A running agent still attaches on Enter.
+    app.selected_row_id = Some("inst_alpha_1".into());
+    run(&mut app, vec![]);
+    run(&mut app, enter(none));
+    run(&mut app, vec![]);
+    assert!(!app.show_start_dialog);
+}
+
+#[test]
+fn test_task_77_56_start_command_drops_unchanged_answers() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let row = app.table_rows[1].clone();
+    app.open_start_dialog(&row);
+    assert_eq!(app.start_command(), vec!["hcom", "agent", "cat_beta"]);
+
+    // The untouched clone prefix counts as empty; resume stays --resume.
+    app.start_instance_name = "cat_beta__".into();
+    app.start_resume = true;
+    assert_eq!(
+        app.start_command(),
+        vec!["hcom", "agent", "cat_beta", "--resume"]
+    );
+
+    // Changed answers pass their flags; another CLI resumes with --continue.
+    app.start_instance_name = "cat_beta__x".into();
+    app.start_dir = "/other".into();
+    app.start_cli = "claude".into();
+    app.start_model = "opus".into();
+    app.start_reasoning = "max".into();
+    app.start_prompt = " do it \n".into();
+    assert_eq!(
+        app.start_command(),
+        vec![
+            "hcom",
+            "agent",
+            "cat_beta",
+            "--continue",
+            "--as",
+            "cat_beta__x",
+            "--dir",
+            "/other",
+            "--cli",
+            "claude",
+            "--model",
+            "opus",
+            "--reasoning",
+            "max",
+            "--hcom-prompt",
+            "do it",
+        ]
+    );
+}
+
+#[test]
+fn test_task_77_56_installed_clis_lists_executables_on_path_and_the_current_one() {
+    use hcom_dashboard::app::installed_clis;
+
+    let bin = tempfile::tempdir().unwrap();
+    std::fs::write(bin.path().join("cursor-agent"), "").unwrap();
+    std::fs::write(bin.path().join("claude"), "").unwrap();
+    let path = std::env::join_paths([bin.path()]).unwrap();
+    assert_eq!(
+        installed_clis("grok", Some(&path)),
+        vec!["claude", "cursor", "grok"]
+    );
+    assert_eq!(installed_clis("", None), Vec::<String>::new());
+}

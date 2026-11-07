@@ -31,6 +31,40 @@ pub const DEFAULT_SPLIT_FRAC: f32 = 0.3;
 pub const KILL_GAP: f32 = 16.0;
 const SPLIT_HANDLE_WIDTH: f32 = 6.0;
 
+/// hcom CLI key -> executable, offered in the Start dialog when on PATH
+/// (same list as contrib/hcom-gui).
+pub const CLI_BINARIES: &[(&str, &str)] = &[
+    ("claude", "claude"),
+    ("codex", "codex"),
+    ("gemini", "gemini"),
+    ("opencode", "opencode"),
+    ("kilo", "kilo"),
+    ("agy", "agy"),
+    ("cursor", "cursor-agent"),
+    ("kimi", "kimi"),
+    ("pi", "pi"),
+    ("omp", "omp"),
+    ("copilot", "copilot"),
+    ("hermes", "hermes"),
+    ("qoder", "qodercli"),
+    ("grok", "grok"),
+];
+
+/// Suggestions for the Start dialog's reasoning field; any text is accepted.
+pub const REASONING_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// CLIs whose executable is in one of the `path` directories, plus `current`.
+pub fn installed_clis(current: &str, path: Option<&std::ffi::OsStr>) -> Vec<String> {
+    let dirs: Vec<PathBuf> = path
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
+    CLI_BINARIES
+        .iter()
+        .filter(|(cli, exe)| *cli == current || dirs.iter().any(|d| d.join(exe).is_file()))
+        .map(|(cli, _)| cli.to_string())
+        .collect()
+}
+
 /// Panel size in px for a window fraction, at least `min` and leaving `keep`
 /// px of `avail` for the canvas; `min` wins in a tiny or minimized window.
 pub fn split_px(frac: f32, window: f32, min: f32, avail: f32, keep: f32) -> f32 {
@@ -212,6 +246,8 @@ pub struct HcomDashboardApp {
     pub action_worker: Option<ActionWorkerHandle>,
     pub pending_action: Option<String>,
     pub action_error: Option<String>,
+    /// Agent (row id) the action error belongs to; None: shown for every agent.
+    pub action_error_agent: Option<String>,
     pub confirm_kill_target: Option<String>,
     pub confirm_restart_target: Option<(String, Vec<String>)>,
     pub confirm_kill_group: Option<Vec<String>>,
@@ -302,6 +338,9 @@ pub struct HcomDashboardApp {
     pub start_initial_reasoning: String,
     pub start_resume: bool,
     pub start_prompt: String,
+    /// Start dialog suggestions: installed CLIs, catalog models.
+    pub start_cli_choices: Vec<String>,
+    pub start_model_choices: Vec<String>,
 
     pub show_send_dialog: bool,
     pub send_target: String,
@@ -455,6 +494,7 @@ impl HcomDashboardApp {
             action_worker,
             pending_action: None,
             action_error: None,
+            action_error_agent: None,
             confirm_kill_target: None,
             confirm_restart_target: None,
             confirm_kill_group: None,
@@ -521,6 +561,8 @@ impl HcomDashboardApp {
             start_initial_reasoning: String::new(),
             start_resume: false,
             start_prompt: String::new(),
+            start_cli_choices: Vec::new(),
+            start_model_choices: Vec::new(),
             show_send_dialog: false,
             send_target: String::new(),
             send_text: String::new(),
@@ -551,6 +593,7 @@ impl HcomDashboardApp {
             action_worker: None,
             pending_action: None,
             action_error: None,
+            action_error_agent: None,
             confirm_kill_target: None,
             confirm_restart_target: None,
             confirm_kill_group: None,
@@ -617,6 +660,8 @@ impl HcomDashboardApp {
             start_initial_reasoning: String::new(),
             start_resume: false,
             start_prompt: String::new(),
+            start_cli_choices: Vec::new(),
+            start_model_choices: Vec::new(),
             show_send_dialog: false,
             send_target: String::new(),
             send_text: String::new(),
@@ -955,6 +1000,22 @@ impl HcomDashboardApp {
         }
     }
 
+    /// Shows `msg` in the detail panel of `agent`, or of the selected agent
+    /// when the error names none.
+    pub fn set_action_error(&mut self, agent: Option<&str>, msg: String) {
+        self.action_error_agent = agent
+            .map(str::to_string)
+            .or_else(|| self.selected_row_id.clone());
+        self.action_error = Some(msg);
+    }
+
+    /// The action error of the selected agent, if any.
+    pub fn shown_action_error(&self) -> Option<&String> {
+        self.action_error.as_ref().filter(|_| {
+            self.action_error_agent.is_none() || self.action_error_agent == self.selected_row_id
+        })
+    }
+
     pub fn dispatch_action(&mut self, req: ActionRequest) {
         if let Some(ref worker) = self.action_worker {
             match &req {
@@ -991,7 +1052,7 @@ impl HcomDashboardApp {
             }
             if let Err(e) = worker.try_send(req.clone()) {
                 self.pending_action = None;
-                self.action_error = Some(e);
+                self.set_action_error(None, e);
                 match req {
                     ActionRequest::ReloadTableData => self.table_reload_in_flight = false,
                     ActionRequest::ReloadStats => self.stats_reload_in_flight = false,
@@ -1097,9 +1158,19 @@ impl HcomDashboardApp {
             .and_then(|id| rows.iter().position(|r| target_of(r) == id));
         // Up/Down move the selection in the shown order, unless a text field
         // has the keyboard; the moved row is scrolled into view below. Enter
-        // attaches the selected row like a double-click.
+        // attaches the selected row like a double-click. Alt+Up/Down act
+        // wherever the keyboard is.
+        let alt_key = |k: egui::Key| {
+            ui.input(|i| {
+                i.events.iter().any(|e| {
+                    matches!(e, egui::Event::Key { key, pressed: true, modifiers, .. }
+                        if *key == k && modifiers.alt)
+                })
+            })
+        };
+        let (alt_down, alt_up) = (alt_key(egui::Key::ArrowDown), alt_key(egui::Key::ArrowUp));
         let (down, up, enter) = if ui.ctx().text_edit_focused() {
-            (false, false, false)
+            (alt_down, alt_up, false)
         } else {
             ui.input(|i| {
                 (
@@ -1259,13 +1330,20 @@ impl HcomDashboardApp {
         if let Some(i) = clicked_row {
             self.select_table_row(&rows[i]);
         }
-        // Like a double-click on the graph node; only a running agent has a
-        // terminal to attach to.
-        if let Some(row) = attach_row.map(|i| &rows[i]).filter(|r| r.is_running) {
-            self.select_table_row(row);
-            let agent = target_of(row);
-            let custom_cmd = self.resolve_attach_cmd(Some(row), &agent);
-            self.dispatch_action(ActionRequest::Attach { agent, custom_cmd });
+        // Like a double-click on the graph node: a running agent attaches,
+        // a stopped catalog agent opens the Start dialog.
+        if let Some(row) = attach_row.map(|i| &rows[i]) {
+            if row.is_running {
+                self.select_table_row(row);
+                let agent = target_of(row);
+                let custom_cmd = self.resolve_attach_cmd(Some(row), &agent);
+                self.dispatch_action(ActionRequest::Attach { agent, custom_cmd });
+            } else if !row.agent.is_empty() {
+                self.select_table_row(row);
+                // The opening Enter must not also press OK in the dialog.
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+                self.open_start_dialog(row);
+            }
         }
     }
 
@@ -1283,6 +1361,91 @@ impl HcomDashboardApp {
         self.canvas.selected_node = self.graph.get_node_index(name);
         self.canvas.selected_edge = None;
         self.on_selection_changed();
+    }
+
+    /// Opens the Start dialog for the catalog agent of `row`, prefilled from
+    /// its catalog entry like contrib/hcom-gui; the name stays empty until
+    /// the field gets focus.
+    pub fn open_start_dialog(&mut self, row: &TableRow) {
+        let cat = row.catalog.as_ref();
+        let pick = |c: Option<&Option<String>>, r: &str| {
+            c.and_then(|v| v.clone())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| r.to_string())
+        };
+        self.start_agent_name = row.agent.clone();
+        self.start_instance_name.clear();
+        self.start_initial_dir = row.directory.clone();
+        self.start_initial_cli = pick(cat.map(|c| &c.cli), &row.cli);
+        self.start_initial_model = pick(cat.map(|c| &c.model), &row.model);
+        self.start_initial_reasoning = pick(cat.map(|c| &c.reasoning), &row.reasoning);
+        self.start_dir = self.start_initial_dir.clone();
+        self.start_cli = self.start_initial_cli.clone();
+        self.start_model = self.start_initial_model.clone();
+        self.start_reasoning = self.start_initial_reasoning.clone();
+        self.start_resume = false;
+        self.start_prompt.clear();
+        self.start_cli_choices =
+            installed_clis(&self.start_cli, std::env::var_os("PATH").as_deref());
+        let mut models: Vec<String> = self
+            .table_rows
+            .iter()
+            .filter_map(|r| r.catalog.as_ref()?.model.clone())
+            .filter(|m| !m.is_empty())
+            .collect();
+        models.sort();
+        models.dedup();
+        self.start_model_choices = models;
+        self.show_start_dialog = true;
+    }
+
+    /// `hcom agent <agent>` with the Start dialog answers; like
+    /// contrib/hcom-gui, an empty answer or one equal to its prefill drops
+    /// its flag, an untouched `<agent>__` name counts as empty, and resume is
+    /// `--continue` when another CLI is chosen.
+    pub fn start_command(&self) -> Vec<String> {
+        let agent = &self.start_agent_name;
+        let answer = |v: &str, prefill: &str| -> String {
+            let v = v.trim();
+            if v == prefill.trim() {
+                String::new()
+            } else {
+                v.to_string()
+            }
+        };
+        let cli = answer(&self.start_cli, &self.start_initial_cli);
+        let mut cmd = vec!["hcom".to_string(), "agent".into(), agent.clone()];
+        if self.start_resume {
+            cmd.push(
+                if cli.is_empty() {
+                    "--resume"
+                } else {
+                    "--continue"
+                }
+                .into(),
+            );
+        }
+        let name = answer(&self.start_instance_name, &format!("{agent}__"));
+        for (flag, value) in [
+            ("--as", name),
+            ("--dir", answer(&self.start_dir, &self.start_initial_dir)),
+            ("--cli", cli),
+            (
+                "--model",
+                answer(&self.start_model, &self.start_initial_model),
+            ),
+            (
+                "--reasoning",
+                answer(&self.start_reasoning, &self.start_initial_reasoning),
+            ),
+            ("--hcom-prompt", self.start_prompt.trim().to_string()),
+        ] {
+            if !value.is_empty() {
+                cmd.push(flag.into());
+                cmd.push(value);
+            }
+        }
+        cmd
     }
 
     fn render_report_view(&self, ui: &mut egui::Ui, row: &TableRow) {
@@ -2946,7 +3109,7 @@ impl eframe::App for HcomDashboardApp {
                     ActionResult::AttachFinished { agent, result } => {
                         if let Err(e) = result {
                             let msg = format!("Attach to '{}' failed: {}", agent, e);
-                            self.action_error = Some(msg.clone());
+                            self.set_action_error(Some(&agent), msg.clone());
                             self.command_logs.push(format!("[ERROR] {}", msg));
                         } else {
                             self.command_logs
@@ -2966,7 +3129,7 @@ impl eframe::App for HcomDashboardApp {
                         }
                         Err(e) => {
                             let msg = format!("Inject to '{}' failed: {}", agent, e);
-                            self.action_error = Some(msg.clone());
+                            self.set_action_error(Some(&agent), msg.clone());
                             self.command_logs.push(format!("[ERROR] {}", msg));
                         }
                     },
@@ -2983,7 +3146,7 @@ impl eframe::App for HcomDashboardApp {
                                 }
                                 Err(e) => {
                                     let msg = format!("Transcript for '{}' failed: {}", agent, e);
-                                    self.action_error = Some(msg.clone());
+                                    self.set_action_error(Some(&agent), msg.clone());
                                     self.transcript_content =
                                         Some((agent, generation, format!("Error: {}", e)));
                                 }
@@ -3002,7 +3165,7 @@ impl eframe::App for HcomDashboardApp {
                                 }
                                 Err(e) => {
                                     let msg = format!("Screen for '{}' failed: {}", agent, e);
-                                    self.action_error = Some(msg.clone());
+                                    self.set_action_error(Some(&agent), msg.clone());
                                     self.screen_content =
                                         Some((agent, generation, format!("Error: {}", e)));
                                 }
@@ -3021,7 +3184,7 @@ impl eframe::App for HcomDashboardApp {
                                 }
                                 Err(e) => {
                                     let msg = format!("Events for '{}' failed: {}", agent, e);
-                                    self.action_error = Some(msg.clone());
+                                    self.set_action_error(Some(&agent), msg.clone());
                                     self.events_content =
                                         Some((agent, generation, format!("Error: {}", e)));
                                 }
@@ -3031,7 +3194,7 @@ impl eframe::App for HcomDashboardApp {
                     ActionResult::KillFinished { agent, result } => {
                         if let Err(e) = result {
                             let msg = format!("Kill '{}' failed: {}", agent, e);
-                            self.action_error = Some(msg.clone());
+                            self.set_action_error(Some(&agent), msg.clone());
                             self.command_logs.push(format!("[ERROR] {}", msg));
                         } else {
                             self.command_logs
@@ -3047,7 +3210,7 @@ impl eframe::App for HcomDashboardApp {
                         }
                         Err(e) => {
                             let msg = format!("Kill group failed: {}", e);
-                            self.action_error = Some(msg.clone());
+                            self.set_action_error(None, msg.clone());
                             self.command_logs.push(format!("[ERROR] {}", msg));
                         }
                     },
@@ -3058,7 +3221,7 @@ impl eframe::App for HcomDashboardApp {
                         }
                         Err(e) => {
                             let msg = format!("Command failed: {}", e);
-                            self.action_error = Some(msg.clone());
+                            self.set_action_error(None, msg.clone());
                             self.command_logs.push(format!("[ERROR] {}", msg));
                         }
                     },
@@ -3069,7 +3232,7 @@ impl eframe::App for HcomDashboardApp {
                         }
                         Err(e) => {
                             let msg = format!("Spawn '{}' failed: {}", cmd.join(" "), e);
-                            self.action_error = Some(msg.clone());
+                            self.set_action_error(None, msg.clone());
                             self.command_logs.push(format!("[ERROR] {}", msg));
                         }
                     },
@@ -3453,42 +3616,14 @@ impl eframe::App for HcomDashboardApp {
                     .map(|r| !r.directory.is_empty())
                     .unwrap_or(false);
 
-                // Start button
-                if ui.button("Start...").clicked() {
-                    if let Some(r) = selected_row_opt.as_ref() {
-                        self.start_agent_name = r.agent.clone();
-                        self.start_instance_name = if !r.agent.is_empty() {
-                            format!("{}__", r.agent)
-                        } else {
-                            String::new()
-                        };
-                        self.start_model = r.model.clone();
-                        self.start_initial_model = r.model.clone();
-                        self.start_reasoning = r.reasoning.clone();
-                        self.start_initial_reasoning = r.reasoning.clone();
-                        self.start_dir = r.directory.clone();
-                        self.start_initial_dir = r.directory.clone();
-                        self.start_cli = if !r.cli.is_empty() {
-                            r.cli.clone()
-                        } else {
-                            "claude".into()
-                        };
-                        self.start_initial_cli = self.start_cli.clone();
-                    } else {
-                        self.start_agent_name.clear();
-                        self.start_instance_name.clear();
-                        self.start_model.clear();
-                        self.start_initial_model.clear();
-                        self.start_reasoning.clear();
-                        self.start_initial_reasoning.clear();
-                        self.start_dir.clear();
-                        self.start_initial_dir.clear();
-                        self.start_cli = "claude".into();
-                        self.start_initial_cli.clear();
-                    }
-                    self.start_resume = false;
-                    self.start_prompt.clear();
-                    self.show_start_dialog = true;
+                // Start button: a catalog agent, like contrib/hcom-gui.
+                let start_row = selected_row_opt.as_ref().filter(|r| !r.agent.is_empty());
+                if ui
+                    .add_enabled(start_row.is_some(), egui::Button::new("Start..."))
+                    .clicked()
+                    && let Some(r) = start_row
+                {
+                    self.open_start_dialog(r);
                 }
 
                 // Send button
@@ -3516,6 +3651,26 @@ impl eframe::App for HcomDashboardApp {
                 }
 
                 ui.separator();
+
+                // An open_with `key` is a typed character, like "/" for the
+                // search field: not while a text field has the keyboard or a
+                // dialog or menu is open.
+                let typed: Vec<String> = if self.text_focus_at_frame_start
+                    || ui.ctx().text_edit_focused()
+                    || self.overlay_open()
+                {
+                    Vec::new()
+                } else {
+                    ui.input(|i| {
+                        i.events
+                            .iter()
+                            .filter_map(|e| match e {
+                                egui::Event::Text(t) => Some(t.clone()),
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                };
 
                 // Open with buttons
                 for item in &self.config.open_with {
@@ -3584,7 +3739,12 @@ impl eframe::App for HcomDashboardApp {
                     };
 
                     let btn = ui.add_enabled(has_selected_dir, egui::Button::new(&label));
-                    if btn.clicked() {
+                    let key_hit = has_selected_dir
+                        && item
+                            .key
+                            .as_ref()
+                            .is_some_and(|k| typed.iter().any(|t| t == k));
+                    if btn.clicked() || key_hit {
                         match replace_placeholders_vec(&item.cmd, &ctx) {
                             Ok(cmd) => {
                                 let cwd = item
@@ -3595,6 +3755,8 @@ impl eframe::App for HcomDashboardApp {
                                     Some(ActionRequest::SpawnDetached { cmd, cwd });
                             }
                             Err(e) => {
+                                // set_action_error(None, e); the loop borrows self.config.
+                                self.action_error_agent = self.selected_row_id.clone();
                                 self.action_error = Some(e);
                             }
                         }
@@ -3775,8 +3937,10 @@ impl eframe::App for HcomDashboardApp {
                         if ui.button("Confirm Kill").clicked() {
                             if let Some(node) = self.graph.get_agent(target) {
                                 if node.status == AgentStatus::Stopped {
-                                    self.action_error =
-                                        Some(format!("Agent '{}' is already stopped", target));
+                                    self.set_action_error(
+                                        Some(target),
+                                        format!("Agent '{}' is already stopped", target),
+                                    );
                                 } else {
                                     self.dispatch_action(ActionRequest::Kill {
                                         agent: target.clone(),
@@ -3869,118 +4033,124 @@ impl eframe::App for HcomDashboardApp {
                 });
         }
 
-        // Start Dialog
+        // Start Dialog: the fields, suggestions and keys of contrib/hcom-gui,
+        // centered on the window.
         if self.show_start_dialog {
-            egui::Window::new("Start Agent")
+            let agent = self.start_agent_name.clone();
+            // Enter (not Shift+Enter) launches, Escape cancels; consumed
+            // before the prompt field would take Enter as a newline.
+            let (mut launch, mut close) = ui.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                )
+            });
+            const FIELD_W: f32 = 320.0;
+            egui::Window::new(format!("Start {agent}"))
                 .collapsible(false)
                 .resizable(false)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .fixed_pos(ui.ctx().content_rect().center())
                 .show(ui.ctx(), |ui| {
-                    ui.label("Catalog Agent:");
-                    if ui
-                        .text_edit_singleline(&mut self.start_agent_name)
-                        .changed()
-                        && !self.start_agent_name.is_empty()
-                    {
-                        self.start_instance_name = format!("{}__", self.start_agent_name);
-                    }
-                    ui.label("Instance Name (optional, default auto):");
-                    ui.text_edit_singleline(&mut self.start_instance_name);
+                    egui::Grid::new("start_dialog_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("resume");
+                            ui.checkbox(&mut self.start_resume, "");
+                            ui.end_row();
 
-                    ui.label("CLI Tool:");
-                    ui.text_edit_singleline(&mut self.start_cli);
-
-                    ui.label("Model (optional):");
-                    ui.text_edit_singleline(&mut self.start_model);
-
-                    ui.label("Reasoning (optional):");
-                    ui.text_edit_singleline(&mut self.start_reasoning);
-
-                    ui.label("Working Directory (optional):");
-                    ui.text_edit_singleline(&mut self.start_dir);
-
-                    ui.checkbox(&mut self.start_resume, "Resume session (--resume)");
-
-                    ui.label("Prompt (optional):");
-                    ui.text_edit_multiline(&mut self.start_prompt);
-
-                    ui.horizontal(|ui| {
-                        if ui.button("Launch").clicked() {
-                            let mut cmd = vec!["hcom".into()];
-                            if !self.start_agent_name.is_empty() {
-                                cmd.push("agent".into());
-                                cmd.push(self.start_agent_name.clone());
-                            } else if !self.start_cli.is_empty() {
-                                cmd.push("1".into());
-                                cmd.push(self.start_cli.clone());
-                            } else {
-                                cmd.push("1".into());
-                                cmd.push("claude".into());
+                            // Clone convention: "<agent>__" on focus; left
+                            // unchanged it counts as empty.
+                            ui.label("name");
+                            let out = egui::TextEdit::singleline(&mut self.start_instance_name)
+                                .desired_width(FIELD_W)
+                                .show(ui);
+                            if out.response.gained_focus() && self.start_instance_name.is_empty() {
+                                self.start_instance_name = format!("{agent}__");
+                                let end = egui::text::CCursor::new(
+                                    self.start_instance_name.chars().count(),
+                                );
+                                let mut state = out.state;
+                                state
+                                    .cursor
+                                    .set_char_range(Some(egui::text::CCursorRange::one(end)));
+                                state.store(ui.ctx(), out.response.id);
                             }
+                            ui.end_row();
 
-                            if self.start_resume {
-                                cmd.push("--resume".into());
-                            }
+                            ui.label("dir");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.start_dir)
+                                    .desired_width(FIELD_W),
+                            );
+                            ui.end_row();
 
-                            let auto_prefix = format!("{}__", self.start_agent_name);
-                            let inst_trimmed = self.start_instance_name.trim();
-                            if !inst_trimmed.is_empty() && inst_trimmed != auto_prefix {
-                                cmd.push("--as".into());
-                                cmd.push(inst_trimmed.to_string());
-                            }
+                            ui.label("cli");
+                            egui::ComboBox::from_id_salt("start_cli")
+                                .width(FIELD_W)
+                                .selected_text(self.start_cli.clone())
+                                .show_ui(ui, |ui| {
+                                    for c in &self.start_cli_choices {
+                                        ui.selectable_value(&mut self.start_cli, c.clone(), c);
+                                    }
+                                });
+                            ui.end_row();
 
-                            if !self.start_dir.trim().is_empty()
-                                && (self.start_dir != self.start_initial_dir
-                                    || self.start_agent_name.is_empty())
-                            {
-                                cmd.push("--dir".into());
-                                cmd.push(self.start_dir.trim().to_string());
-                            }
+                            // Editable: any value, the menu holds suggestions.
+                            let suggest =
+                                |ui: &mut egui::Ui, value: &mut String, choices: &[String]| {
+                                    ui.horizontal(|ui| {
+                                        ui.add(
+                                            egui::TextEdit::singleline(value)
+                                                .desired_width(FIELD_W - 28.0),
+                                        );
+                                        ui.menu_button("▾", |ui| {
+                                            for c in choices {
+                                                if ui.selectable_label(value == c, c).clicked() {
+                                                    *value = c.clone();
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
+                                    });
+                                };
+                            ui.label("model");
+                            suggest(ui, &mut self.start_model, &self.start_model_choices);
+                            ui.end_row();
 
-                            if !self.start_agent_name.is_empty() {
-                                if !self.start_cli.trim().is_empty()
-                                    && self.start_cli != self.start_initial_cli
-                                {
-                                    cmd.push("--cli".into());
-                                    cmd.push(self.start_cli.trim().to_string());
-                                }
+                            ui.label("reasoning");
+                            let levels: Vec<String> =
+                                REASONING_LEVELS.iter().map(|s| s.to_string()).collect();
+                            suggest(ui, &mut self.start_reasoning, &levels);
+                            ui.end_row();
 
-                                if !self.start_model.trim().is_empty()
-                                    && self.start_model != self.start_initial_model
-                                {
-                                    cmd.push("--model".into());
-                                    cmd.push(self.start_model.trim().to_string());
-                                }
-
-                                if !self.start_reasoning.trim().is_empty()
-                                    && self.start_reasoning != self.start_initial_reasoning
-                                {
-                                    cmd.push("--reasoning".into());
-                                    cmd.push(self.start_reasoning.trim().to_string());
-                                }
-                            }
-
-                            if !self.start_prompt.trim().is_empty() {
-                                cmd.push("--hcom-prompt".into());
-                                cmd.push(self.start_prompt.trim().to_string());
-                            }
-
-                            let launch_dir = if !self.start_dir.trim().is_empty() {
-                                Some(self.start_dir.clone())
-                            } else {
-                                None
-                            };
-
-                            self.dispatch_action(ActionRequest::RunCommand {
-                                cmd,
-                                cwd: launch_dir,
-                            });
-                            self.show_start_dialog = false;
-                        }
+                            ui.label("prompt");
+                            ui.add(
+                                egui::TextEdit::multiline(&mut self.start_prompt)
+                                    .desired_width(FIELD_W)
+                                    .desired_rows(6),
+                            );
+                            ui.end_row();
+                        });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.button("Cancel").clicked() {
-                            self.show_start_dialog = false;
+                            close = true;
+                        }
+                        if ui.button("OK").clicked() {
+                            launch = true;
                         }
                     });
                 });
+            if launch {
+                let cmd = self.start_command();
+                let dir = self.start_dir.trim();
+                let cwd = (!dir.is_empty()).then(|| dir.to_string());
+                self.dispatch_action(ActionRequest::RunCommand { cmd, cwd });
+                self.show_start_dialog = false;
+            } else if close {
+                self.show_start_dialog = false;
+            }
         }
 
         // Send Dialog
@@ -4058,7 +4228,7 @@ impl eframe::App for HcomDashboardApp {
                     // Error banner
                     let mut dismiss_err = false;
                     // Wrapped: a long unwrapped line would push the fixed-width panel off screen.
-                    if let Some(ref err) = self.action_error {
+                    if let Some(err) = self.shown_action_error() {
                         ui.horizontal_wrapped(|ui| {
                             ui.colored_label(Color32::from_rgb(231, 76, 60), format!("⚠ {}", err));
                             if ui.small_button("✖").clicked() {
