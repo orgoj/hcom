@@ -2,6 +2,7 @@ pub mod action;
 pub mod app;
 pub mod canvas;
 pub mod config;
+pub mod icon;
 pub mod idle;
 pub mod layout;
 pub mod model;

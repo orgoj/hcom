@@ -12,7 +12,8 @@ fn main() -> Result<()> {
         .with_inner_size(size)
         .with_maximized(maximized)
         .with_min_inner_size([600.0, 400.0])
-        .with_title("hcom-dashboard");
+        .with_title("hcom-dashboard")
+        .with_icon(std::sync::Arc::new(hcom_dashboard::icon::icon_data()));
     if let Some(pos) = pos {
         viewport = viewport.with_position(pos);
     }

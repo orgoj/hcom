@@ -14943,3 +14943,33 @@ fn test_task_77_93_top_bar_section_labels_use_accent() {
         );
     }
 }
+
+/// The window icon is a 64×64 RGBA rounded square with transparent
+/// corners and the three node rings in CLI colors (TASK-77.94).
+#[test]
+fn test_task_77_94_window_icon() {
+    use hcom_dashboard::icon::{NODES, SIZE, icon_data};
+
+    let icon = icon_data();
+    assert_eq!((icon.width, icon.height), (SIZE, SIZE));
+    assert_eq!(icon.rgba.len(), (SIZE * SIZE * 4) as usize);
+    let px = |x: u32, y: u32| {
+        let i = ((y * SIZE + x) * 4) as usize;
+        [
+            icon.rgba[i],
+            icon.rgba[i + 1],
+            icon.rgba[i + 2],
+            icon.rgba[i + 3],
+        ]
+    };
+    for (x, y) in [(0, 0), (SIZE - 1, 0), (0, SIZE - 1), (SIZE - 1, SIZE - 1)] {
+        assert_eq!(px(x, y)[3], 0, "corner {x},{y}");
+    }
+    assert_eq!(px(SIZE / 2, SIZE / 2)[3], 255);
+    for ((cx, cy), ring) in NODES {
+        // Middle of the ring band (radius 6..10).
+        let p = px((cx + 8.0) as u32, cy as u32);
+        assert_eq!(&p[..3], &ring, "ring at {cx},{cy}");
+        assert_eq!(p[3], 255);
+    }
+}
