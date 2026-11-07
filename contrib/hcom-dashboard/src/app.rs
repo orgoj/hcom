@@ -419,6 +419,18 @@ pub struct HcomDashboardApp {
     text_focus_last_frame: bool,
 }
 
+/// Consecutive equal lines as one line with their count (Log tab).
+pub fn collapse_repeats(lines: &[String]) -> Vec<(&str, usize)> {
+    let mut out: Vec<(&str, usize)> = Vec::new();
+    for line in lines {
+        match out.last_mut() {
+            Some((last, n)) if *last == line.as_str() => *n += 1,
+            _ => out.push((line, 1)),
+        }
+    }
+    out
+}
+
 /// Sessions tab content: (agent, generation, sessions or load error).
 pub type SessionsContent = Option<(
     String,
@@ -2432,15 +2444,7 @@ impl HcomDashboardApp {
         };
         let now_dt = chrono::Utc::now();
         let now = now_dt.timestamp().max(0) as u64;
-        let (start, end) = match self.current_message_range(now_dt) {
-            MessageRange::Live { span_secs } => {
-                (span_secs.map(|s| now.saturating_sub(s.max(0) as u64)), None)
-            }
-            MessageRange::Fixed { start, end } => (
-                start.map(|s| s.timestamp().max(0) as u64),
-                Some(end.timestamp().max(0) as u64),
-            ),
-        };
+        let (start, end) = self.window_bounds(now_dt);
         let agent_running = self.selected_row().is_some_and(|r| r.is_running);
         let shown: Vec<&crate::sessions::SessionInfo> = sessions
             .iter()
@@ -2471,6 +2475,9 @@ impl HcomDashboardApp {
                         let duration = crate::table_data::format_age(
                             s.end_ts.unwrap_or(now).saturating_sub(s.start_ts),
                         );
+                        if !s.title.is_empty() {
+                            ui.label(RichText::new(&s.title).strong());
+                        }
                         ui.label(
                             RichText::new(format!(
                                 "{} – {}  ({})",
@@ -2483,6 +2490,13 @@ impl HcomDashboardApp {
                         ui.label(format!("launched by: {}", s.launcher));
                         if !s.end_reason.is_empty() {
                             ui.label(format!("ended: {}", s.end_reason));
+                        }
+                        let short = |id: &str| id.chars().take(8).collect::<String>();
+                        if !s.handoff_from.is_empty() {
+                            ui.label(format!("continues from session {}", short(&s.handoff_from)));
+                        }
+                        if !s.handoff_to.is_empty() {
+                            ui.label(format!("handed off to session {}", short(&s.handoff_to)));
                         }
                         let size = s
                             .transcript_size
@@ -2534,14 +2548,54 @@ impl HcomDashboardApp {
                             if t.clicked() {
                                 action = Some(("t", (*s).clone()));
                             }
+                            if ui.button("Show in graph").clicked() {
+                                action = Some(("g", (*s).clone()));
+                            }
                         });
                     });
                 }
             });
         match action {
             Some(("t", s)) => self.show_session_transcript(&agent, &s.transcript_path),
+            Some(("g", s)) => self.show_session_in_graph(&s),
             Some((sub, s)) => self.open_session_dialog(&agent, sub, &s),
             None => {}
+        }
+    }
+
+    /// Start and end (None = unbounded) of the message window, in seconds.
+    pub fn window_bounds(
+        &self,
+        now_dt: chrono::DateTime<chrono::Utc>,
+    ) -> (Option<u64>, Option<u64>) {
+        let now = now_dt.timestamp().max(0) as u64;
+        match self.current_message_range(now_dt) {
+            MessageRange::Live { span_secs } => {
+                (span_secs.map(|s| now.saturating_sub(s.max(0) as u64)), None)
+            }
+            MessageRange::Fixed { start, end } => (
+                start.map(|s| s.timestamp().max(0) as u64),
+                Some(end.timestamp().max(0) as u64),
+            ),
+        }
+    }
+
+    /// Sets the message window to the interval of `session`; a running
+    /// session gets a live window from its start.
+    pub fn show_session_in_graph(&mut self, session: &crate::sessions::SessionInfo) {
+        let now = chrono::Utc::now();
+        let at = |ts: u64| chrono::DateTime::from_timestamp(ts as i64, 0).unwrap_or(now);
+        let range = match session.end_ts {
+            Some(end) => MessageRange::Fixed {
+                start: Some(at(session.start_ts)),
+                end: at(end.max(session.start_ts + 1)),
+            },
+            None => MessageRange::Live {
+                span_secs: Some((now.timestamp() - session.start_ts as i64).max(1)),
+            },
+        };
+        if self.apply_message_range(range, now).is_ok() {
+            self.save_state();
         }
     }
 
@@ -2735,7 +2789,12 @@ impl HcomDashboardApp {
                         if self.command_logs.is_empty() {
                             ui.weak("No command log entries.");
                         } else {
-                            for line in &self.command_logs {
+                            for (line, count) in collapse_repeats(&self.command_logs) {
+                                let line = if count > 1 {
+                                    format!("{line} (×{count})")
+                                } else {
+                                    line.to_string()
+                                };
                                 if line.starts_with("[ERROR]") {
                                     ui.colored_label(Color32::from_rgb(231, 76, 60), line);
                                 } else if line.starts_with("[OK]") {
@@ -3824,13 +3883,16 @@ impl eframe::App for HcomDashboardApp {
         // Collect all table rows and apply filters
         let all_rows = self.get_all_rows();
         let total_count = all_rows.len();
+        // Running only: running now or at some time of the message window.
+        let (w_start, w_end) = self.window_bounds(chrono::Utc::now());
         let mut filtered_rows: Vec<TableRow> = all_rows
             .iter()
+            .filter(|&r| !self.state.running_only || r.ran_in(w_start, w_end))
             .filter(|&r| {
                 filter_row(
                     r,
                     &self.search_query,
-                    self.state.running_only,
+                    false,
                     self.state.blocked_only,
                     self.state.hide_disabled,
                     self.state.hide_adhoc,

@@ -160,6 +160,9 @@ pub trait ActionRunner: Send + Sync {
     fn cancel(&self) {}
 }
 
+/// Claude session titles by transcript path: (file size, title).
+type TitleCache = std::collections::HashMap<String, (u64, Option<String>)>;
+
 type GitStatusCache = Arc<Mutex<std::collections::HashMap<String, (Instant, String, String)>>>;
 
 /// `max_stdout` for output read in full (Events, Transcript, Screen tabs).
@@ -170,6 +173,8 @@ pub struct SystemActionRunner {
     active_child: Arc<Mutex<Option<Child>>>,
     git_cache: GitStatusCache,
     usage_cache: Arc<Mutex<crate::usage::UsageCache>>,
+    /// Claude session titles by transcript path: (file size, title).
+    title_cache: Arc<Mutex<TitleCache>>,
     /// Time limit of `run_command_bounded` (30 s).
     pub command_timeout: Duration,
 }
@@ -186,6 +191,7 @@ impl SystemActionRunner {
             active_child: Arc::new(Mutex::new(None)),
             git_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
             usage_cache: Arc::default(),
+            title_cache: Arc::default(),
             command_timeout: Duration::from_secs(30),
         }
     }
@@ -448,9 +454,32 @@ impl ActionRunner for SystemActionRunner {
                     let now = chrono::Utc::now().timestamp() as u64;
                     let mut list =
                         crate::sessions::parse_sessions(&agent, &life, &msgs, live.as_ref(), now);
+                    let codex = std::env::var_os("HOME")
+                        .map(|h| std::path::PathBuf::from(h).join(".codex/session_index.jsonl"))
+                        .and_then(|p| std::fs::read_to_string(p).ok())
+                        .map(|t| crate::sessions::codex_titles(&t))
+                        .unwrap_or_default();
+                    let mut cache = self.title_cache.lock().unwrap();
                     for s in list.iter_mut().filter(|s| !s.transcript_path.is_empty()) {
                         s.transcript_size =
                             std::fs::metadata(&s.transcript_path).ok().map(|m| m.len());
+                        if s.tool == "codex" {
+                            s.title = codex.get(&s.session_id).cloned().unwrap_or_default();
+                        } else if s.tool == "claude"
+                            && let Some(size) = s.transcript_size
+                        {
+                            // Read again only when the transcript grew.
+                            let entry = cache.entry(s.transcript_path.clone()).or_default();
+                            if entry.0 != size || size == 0 {
+                                *entry = (
+                                    size,
+                                    std::fs::read_to_string(&s.transcript_path)
+                                        .ok()
+                                        .and_then(|t| crate::sessions::claude_title(&t)),
+                                );
+                            }
+                            s.title = entry.1.clone().unwrap_or_default();
+                        }
                     }
                     Ok(list)
                 });

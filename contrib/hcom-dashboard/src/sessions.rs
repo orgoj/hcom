@@ -29,6 +29,12 @@ pub struct SessionInfo {
     pub directory: String,
     /// Most messages first.
     pub partners: Vec<Partner>,
+    /// Session id this one continues by handoff (empty: none).
+    pub handoff_from: String,
+    /// Session id that continued this one by handoff (empty: none).
+    pub handoff_to: String,
+    /// Claude /rename or AI title, Codex thread name (empty: none).
+    pub title: String,
 }
 
 /// The running session as `hcom list --json` reports it.
@@ -128,10 +134,14 @@ pub fn parse_sessions(
                 });
                 cur.end_ts = Some(ts);
                 let (reason, by) = (field("reason"), field("by"));
-                cur.end_reason = match (reason.is_empty(), by.is_empty()) {
-                    (false, false) => format!("{reason} ({by})"),
-                    (false, true) => reason,
-                    _ => by,
+                cur.end_reason = if handoff {
+                    "handoff".into()
+                } else {
+                    match (reason.is_empty(), by.is_empty()) {
+                        (false, false) => format!("{reason} ({by})"),
+                        (false, true) => reason,
+                        _ => by,
+                    }
                 };
                 cur.session_id = snap_field("session_id");
                 cur.transcript_path = snap_field("transcript_path");
@@ -150,6 +160,13 @@ pub fn parse_sessions(
             cur.directory = l.directory.clone();
         }
         sessions.push(cur);
+    }
+    // A handoff session continues the one before it.
+    for i in 1..sessions.len() {
+        if sessions[i].launcher == "handoff" {
+            sessions[i].handoff_from = sessions[i - 1].session_id.clone();
+            sessions[i - 1].handoff_to = sessions[i].session_id.clone();
+        }
     }
     for cur in sessions.iter_mut() {
         if cur.launcher.is_empty() {
@@ -252,4 +269,35 @@ impl SessionInfo {
     pub fn can_fork(&self) -> Result<(), String> {
         self.launchable(FORK_TOOLS)
     }
+}
+
+/// Title in a Claude transcript: the last `/rename` (`custom-title`), else
+/// the last `ai-title`.
+pub fn claude_title(transcript: &str) -> Option<String> {
+    let (mut custom, mut ai): (Option<String>, Option<String>) = (None, None);
+    for line in transcript.lines().filter(|l| l.contains("-title\"")) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let (slot, key) = match v.get("type").and_then(Value::as_str) {
+            Some("custom-title") => (&mut custom, "customTitle"),
+            Some("ai-title") => (&mut ai, "aiTitle"),
+            _ => continue,
+        };
+        if let Some(t) = v.get(key).and_then(Value::as_str).filter(|t| !t.is_empty()) {
+            *slot = Some(t.to_string());
+        }
+    }
+    custom.or(ai)
+}
+
+/// Codex thread names by session id from `~/.codex/session_index.jsonl`
+/// (a later row wins).
+pub fn codex_titles(index: &str) -> std::collections::HashMap<String, String> {
+    index
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .map(|v| (s(v.get("id")), s(v.get("thread_name"))))
+        .filter(|(id, name)| !id.is_empty() && !name.is_empty())
+        .collect()
 }

@@ -1,9 +1,11 @@
 ---
 id: TASK-77.75
 title: 'Dashboard Sessions: řetězec handoffů'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@hcom_dev__idea'
 created_date: '2026-11-07T14:59:00Z'
+updated_date: '2026-11-07T15:05:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77

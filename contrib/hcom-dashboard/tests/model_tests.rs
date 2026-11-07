@@ -12335,7 +12335,15 @@ fn test_task_77_69_parse_sessions_from_events() {
     assert_eq!(s[1].launcher, "cca_manager");
     assert_eq!(s[1].start_ts, ts("2026-11-07T10:00:00"));
     assert_eq!(s[1].end_ts, Some(ts("2026-11-07T11:00:01")));
-    assert_eq!(s[1].end_reason, "killed (cli)");
+    // Ended by a handoff (TASK-77.75), continued by the running session.
+    assert_eq!(s[1].end_reason, "handoff");
+    assert_eq!(s[1].handoff_to, "sid-3");
+    assert_eq!(s[0].handoff_from, "sid-2");
+    assert_eq!(s[2].end_reason, "killed (cli)");
+    assert_eq!(
+        (s[2].handoff_from.as_str(), s[2].handoff_to.as_str()),
+        ("", "")
+    );
     assert_eq!(
         (s[1].session_id.as_str(), s[1].tool.as_str()),
         ("sid-2", "codex")
@@ -12757,14 +12765,14 @@ fn test_task_77_71_window_state_is_remembered() {
     );
 
     let dir = tempfile::tempdir().unwrap();
-    save_state(dir.path(), &s);
+    save_state(dir.path(), &s).unwrap();
     let loaded = load_state(dir.path());
     assert_eq!(loaded.start_viewport(), ([1400.0, 900.0], true));
 
     // Unmaximized again: the normal size, not maximized.
     let mut s = loaded;
     assert!(s.record_window(Some(false), Some([1000.0, 700.0])));
-    save_state(dir.path(), &s);
+    save_state(dir.path(), &s).unwrap();
     assert_eq!(
         load_state(dir.path()).start_viewport(),
         ([1000.0, 700.0], false)
@@ -12772,7 +12780,7 @@ fn test_task_77_71_window_state_is_remembered() {
 
     // A saved size below the minimum window falls back to the default.
     s.window_size = Some([100.0, 50.0]);
-    save_state(dir.path(), &s);
+    save_state(dir.path(), &s).unwrap();
     assert_eq!(load_state(dir.path()).start_viewport().0, [1200.0, 800.0]);
 }
 
@@ -12794,4 +12802,269 @@ fn test_task_77_71_app_records_maximized_viewport() {
     let mut out = ctx.run_ui(input, |ui| eframe::App::ui(&mut app, ui, &mut frame));
     out.textures_delta.clear();
     assert!(app.state.window_maximized);
+}
+
+/// Two handoffs in a row chain three sessions (TASK-77.75).
+#[test]
+fn test_task_77_75_handoff_chain() {
+    use hcom_dashboard::sessions::parse_sessions;
+    use serde_json::json;
+
+    let a = "agent_a";
+    let created = |id, ts: &str| task_77_69_life(id, ts, a, json!({"action": "created"}));
+    let handoff = |id, ts: &str| task_77_69_life(id, ts, a, json!({"action": "handoff", "by": a}));
+    let stopped =
+        |id, ts: &str, sid| task_77_69_life(id, ts, a, task_77_69_stopped(sid, "/t", "claude"));
+    let life = [
+        created(1, "2026-11-07T08:00:00"),
+        handoff(2, "2026-11-07T09:00:00"),
+        stopped(3, "2026-11-07T09:00:01", "s1"),
+        created(4, "2026-11-07T09:00:02"),
+        handoff(5, "2026-11-07T10:00:00"),
+        stopped(6, "2026-11-07T10:00:01", "s2"),
+        created(7, "2026-11-07T10:00:02"),
+        stopped(8, "2026-11-07T11:00:00", "s3"),
+    ]
+    .join("\n");
+    let s = parse_sessions(a, &life, "", None, 0);
+    let chain: Vec<(&str, &str, &str, &str)> = s
+        .iter()
+        .map(|x| {
+            (
+                x.session_id.as_str(),
+                x.handoff_from.as_str(),
+                x.handoff_to.as_str(),
+                x.end_reason.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        chain,
+        [
+            ("s3", "s2", "", "killed (cli)"),
+            ("s2", "s1", "s3", "handoff"),
+            ("s1", "", "s2", "handoff"),
+        ]
+    );
+    assert_eq!(s[0].launcher, "handoff");
+    assert_eq!(s[2].launcher, "user");
+}
+
+/// Session title: last /rename before the AI title, the last one wins;
+/// Codex thread names by id (TASK-77.72).
+#[test]
+fn test_task_77_72_session_titles() {
+    use hcom_dashboard::sessions::{claude_title, codex_titles};
+
+    let line =
+        |t: &str, k: &str, v: &str| format!(r#"{{"type":"{t}","{k}":"{v}","sessionId":"x"}}"#);
+    let ai1 = line("ai-title", "aiTitle", "First AI");
+    let ai2 = line("ai-title", "aiTitle", "Later AI");
+    let c1 = line("custom-title", "customTitle", "Renamed");
+    let c2 = line("custom-title", "customTitle", "Renamed again");
+    let user = r#"{"type":"user","message":"mentions -title\" in text"}"#;
+    assert_eq!(
+        claude_title(&[ai1.clone(), ai2.clone(), user.into()].join("\n")).as_deref(),
+        Some("Later AI")
+    );
+    assert_eq!(
+        claude_title(&[c1, ai1.clone(), c2, ai2].join("\n")).as_deref(),
+        Some("Renamed again"),
+        "a /rename beats the AI title"
+    );
+    assert_eq!(claude_title(user), None);
+    assert_eq!(claude_title(""), None);
+
+    let index = [
+        r#"{"id":"a","thread_name":"Old","updated_at":"1"}"#,
+        r#"{"id":"b","thread_name":"Bee","updated_at":"2"}"#,
+        r#"{"id":"a","thread_name":"New","updated_at":"3"}"#,
+        r#"{"id":"c","thread_name":"","updated_at":"4"}"#,
+        "not json",
+    ]
+    .join("\n");
+    let t = codex_titles(&index);
+    assert_eq!(t.get("a").map(String::as_str), Some("New"));
+    assert_eq!(t.get("b").map(String::as_str), Some("Bee"));
+    assert!(!t.contains_key("c"));
+}
+
+/// Show in graph sets the message window to a session's interval; a
+/// running session gets a live window from its start (TASK-77.73).
+#[test]
+fn test_task_77_73_show_session_in_graph() {
+    use hcom_dashboard::config::DashboardConfig;
+    use hcom_dashboard::model::MessageRange;
+    use hcom_dashboard::sessions::SessionInfo;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let now = chrono::Utc::now();
+    let now_s = now.timestamp() as u64;
+    // A message older than the session keeps the fixed end from clamping.
+    app.graph
+        .apply_message_event(&hcom_dashboard::model::MessageEvent {
+            id: 1,
+            ts: now - chrono::Duration::hours(5),
+            instance: "inst_alpha_1".into(),
+            data: hcom_dashboard::model::MessageData {
+                from: "inst_alpha_1".into(),
+                delivered_to: vec!["cat_beta".into()],
+                mentions: vec![],
+                intent: None,
+                reply_to: None,
+                text: "x".into(),
+            },
+        });
+    let ended = SessionInfo {
+        start_ts: now_s - 3 * 3600,
+        end_ts: Some(now_s - 2 * 3600),
+        ..Default::default()
+    };
+    app.show_session_in_graph(&ended);
+    match app.current_message_range(now) {
+        MessageRange::Fixed { start, end } => {
+            assert_eq!(start.unwrap().timestamp() as u64, ended.start_ts);
+            assert_eq!(end.timestamp() as u64, ended.end_ts.unwrap());
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(app.window_bounds(now), (Some(ended.start_ts), ended.end_ts));
+
+    let running = SessionInfo {
+        start_ts: now_s - 600,
+        ..Default::default()
+    };
+    app.show_session_in_graph(&running);
+    let MessageRange::Live { span_secs } = app.current_message_range(now) else {
+        panic!("live expected");
+    };
+    assert!((600..=602).contains(&span_secs.unwrap()), "{span_secs:?}");
+}
+
+/// Equal consecutive Log lines collapse into one with a count (TASK-77.74).
+#[test]
+fn test_task_77_74_log_collapses_repeats() {
+    use hcom_dashboard::app::collapse_repeats;
+
+    let lines: Vec<String> = ["[ERROR] a", "[ERROR] a", "[ERROR] a", "[OK] b", "[ERROR] a"]
+        .map(String::from)
+        .to_vec();
+    assert_eq!(
+        collapse_repeats(&lines),
+        [("[ERROR] a", 3), ("[OK] b", 1), ("[ERROR] a", 1)]
+    );
+    assert!(collapse_repeats(&[]).is_empty());
+}
+
+/// The Log tab shows a repeated line once with its count.
+#[test]
+fn test_task_77_74_log_tab_shows_count() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    app.select_detail_tab("Log");
+    for _ in 0..6 {
+        app.command_logs.push("[ERROR] Failed to fetch".into());
+    }
+    run(&mut app, vec![]);
+    let out = run(&mut app, vec![]);
+    let texts: Vec<String> = out
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+            _ => None,
+        })
+        .filter(|t| t.contains("Failed to fetch"))
+        .collect();
+    assert_eq!(texts, ["[ERROR] Failed to fetch (×6)"]);
+}
+
+/// Running only keeps agents that ran at any time of the message window,
+/// and the running ones (TASK-77.76).
+#[test]
+fn test_task_77_76_running_only_follows_the_window() {
+    use hcom_dashboard::table_data::{TableRow, compute_event_stats};
+    use serde_json::json;
+
+    let life = [
+        task_77_69_life(
+            1,
+            "2026-11-07T08:00:00",
+            "early",
+            json!({"action": "created"}),
+        ),
+        task_77_69_life(
+            2,
+            "2026-11-07T09:00:00",
+            "early",
+            json!({"action": "stopped"}),
+        ),
+        task_77_69_life(
+            3,
+            "2026-11-07T10:00:00",
+            "late",
+            json!({"action": "created"}),
+        ),
+        task_77_69_life(
+            4,
+            "2026-11-07T11:00:00",
+            "late",
+            json!({"action": "stopped"}),
+        ),
+        // No stop event: only its start counts.
+        task_77_69_life(
+            5,
+            "2026-11-07T07:00:00",
+            "lost",
+            json!({"action": "created"}),
+        ),
+    ]
+    .join("\n");
+    let stats = compute_event_stats(&life, "", &Default::default(), 0);
+    let ts = hcom_dashboard::table_data::parse_event_ts;
+    assert_eq!(
+        stats["early"].run_intervals,
+        [(ts("2026-11-07T08:00:00"), Some(ts("2026-11-07T09:00:00")))]
+    );
+    let mut rows: Vec<TableRow> = ["early", "late", "lost", "never"]
+        .iter()
+        .map(|n| TableRow {
+            instance: n.to_string(),
+            ..Default::default()
+        })
+        .collect();
+    rows.push(TableRow {
+        instance: "live".into(),
+        is_running: true,
+        ..Default::default()
+    });
+    hcom_dashboard::table_data::apply_event_stats(&mut rows, &stats);
+    let ran = |start: &str, end: &str| -> Vec<String> {
+        rows.iter()
+            .filter(|r| r.ran_in(Some(ts(start)), Some(ts(end))))
+            .map(|r| r.instance.clone())
+            .collect()
+    };
+    assert_eq!(
+        ran("2026-11-07T08:30:00", "2026-11-07T08:40:00"),
+        ["early", "live"]
+    );
+    assert_eq!(
+        ran("2026-11-07T09:00:00", "2026-11-07T10:00:00"),
+        ["early", "late", "live"]
+    );
+    assert_eq!(ran("2026-11-07T12:00:00", "2026-11-07T13:00:00"), ["live"]);
+    assert_eq!(
+        ran("2026-11-07T06:00:00", "2026-11-07T07:30:00"),
+        ["lost", "live"]
+    );
+    let all: Vec<&str> = rows
+        .iter()
+        .filter(|r| r.ran_in(None, None))
+        .map(|r| r.instance.as_str())
+        .collect();
+    assert_eq!(all, ["early", "late", "lost", "live"], "All: any session");
 }

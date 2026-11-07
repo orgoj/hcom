@@ -275,6 +275,7 @@ pub fn build_table_rows(
             last_start_text: String::new(),
             stops_summary: String::new(),
             failed_count: None,
+            run_intervals: Vec::new(),
             status_values,
             groups,
             launch_context: live.launch_context.clone(),
@@ -335,6 +336,7 @@ pub fn build_table_rows(
                 last_start_text: String::new(),
                 stops_summary: String::new(),
                 failed_count: None,
+                run_intervals: Vec::new(),
                 status_values,
                 groups: cat.groups.clone(),
                 launch_context: None,
@@ -496,6 +498,10 @@ pub struct TableRow {
     pub last_start_text: String,
     pub stops_summary: String,
     pub failed_count: Option<u64>,
+    /// Session intervals (start, stop; None = no stop event) from life
+    /// events, for the Running only filter in a time window.
+    #[serde(default)]
+    pub run_intervals: Vec<(u64, Option<u64>)>,
     pub status_values: HashMap<String, String>,
     pub groups: Vec<String>,
     pub launch_context: Option<LiveLaunchContext>,
@@ -552,6 +558,7 @@ impl TableRow {
             last_start_text: String::new(),
             stops_summary: String::new(),
             failed_count: None,
+            run_intervals: Vec::new(),
             status_values: HashMap::new(),
             groups: Vec::new(),
             launch_context: None,
@@ -565,6 +572,17 @@ impl TableRow {
     /// running instance by its status (active, blocked, error), else
     /// needs_user from the Idle column, else a disabled or stopped catalog
     /// agent; other running rows keep the default color.
+    /// Running now, or a session overlaps `[start, end]` (None = unbounded).
+    /// Of a session without a stop event of a stopped agent only its start
+    /// counts.
+    pub fn ran_in(&self, start: Option<u64>, end: Option<u64>) -> bool {
+        self.is_running
+            || self.run_intervals.iter().any(|&(s, e)| {
+                let e = e.unwrap_or(s);
+                start.is_none_or(|w| e >= w) && end.is_none_or(|w| s <= w)
+            })
+    }
+
     pub fn row_state(&self) -> Option<RowState> {
         match self.status.as_str() {
             "active" => return Some(RowState::Active),
@@ -837,6 +855,8 @@ pub struct EventStatsEntry {
     pub launcher: Option<String>,
     /// Event ids of this instance's `created` events, ascending.
     pub session_starts: Vec<u64>,
+    /// (start, stop) seconds of each session; None while no `stopped`.
+    pub run_intervals: Vec<(u64, Option<u64>)>,
 }
 
 /// `batch_launched.by` values that mean the user launched the session.
@@ -895,6 +915,12 @@ pub fn compute_event_stats(
         match action {
             "created" => {
                 entry.starts += 1;
+                if let Some(last) = entry.run_intervals.last_mut()
+                    && last.1.is_none()
+                {
+                    last.1 = Some(ts_sec);
+                }
+                entry.run_intervals.push((ts_sec, None));
                 if let Some(id) = e.get("id").and_then(|i| i.as_u64()) {
                     entry.session_starts.push(id);
                 }
@@ -930,6 +956,11 @@ pub fn compute_event_stats(
             }
             "stopped" => {
                 entry.stops += 1;
+                if let Some(last) = entry.run_intervals.last_mut()
+                    && last.1.is_none()
+                {
+                    last.1 = Some(ts_sec);
+                }
                 if let Some(start_ts) = opened.remove(&name) {
                     entry.runtime_seconds += ts_sec.saturating_sub(start_ts);
                 }
@@ -1004,6 +1035,7 @@ pub fn apply_event_stats(rows: &mut [TableRow], stats: &HashMap<String, EventSta
             r.stops_summary = format!("{}/{}", st.stops, st.failed);
             r.failed_count = Some(st.failed);
             r.launcher = st.launcher.clone();
+            r.run_intervals = st.run_intervals.clone();
         }
     }
 }
