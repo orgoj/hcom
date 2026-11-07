@@ -1282,6 +1282,19 @@ fn test_layout_frame_budget_deadline_enforced_and_resumes() {
     // Set a strict deadline: 200 microseconds
     layout.max_step_duration = Duration::from_micros(200);
 
+    // Planning the resting positions keeps the deadline too.
+    let start = std::time::Instant::now();
+    let motion0 = layout.step(&graph, 0.016);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(15),
+        "Planning step must respect max_step_duration deadline, took {:?}",
+        elapsed
+    );
+    assert!(!layout.is_sleeping && motion0 > 0.0);
+
+    // The live simulation (while a node is dragged) is time-sliced.
+    layout.dragging = true;
     let start = std::time::Instant::now();
     let motion1 = layout.step(&graph, 0.016);
     let elapsed = start.elapsed();
@@ -1354,6 +1367,18 @@ fn test_layout_large_graph_frame_budget_enforced_during_forces_init() {
     // Tight deadline: 100 microseconds so repulsion and integration get sliced across frames
     layout.max_step_duration = Duration::from_micros(100);
 
+    // Planning the resting positions keeps the deadline too.
+    let start = std::time::Instant::now();
+    let _ = layout.step(&graph, 0.016);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(5),
+        "Planning step with 1500 nodes must respect max_step_duration clamp, took {:?}",
+        elapsed
+    );
+
+    // The live simulation (while a node is dragged) is time-sliced.
+    layout.dragging = true;
     let start = std::time::Instant::now();
     let _ = layout.step(&graph, 0.016);
     let elapsed = start.elapsed();
@@ -5893,12 +5918,14 @@ fn test_layout_moves_smoothly_at_start_and_while_dragging() {
         let boss = graph.get_node_index("boss").unwrap();
         let from = layout.nodes[&boss].pos;
         let mut frames = vec![snap(&layout)];
+        layout.dragging = true;
         for f in 0..150 {
             let p = from + Vec2::new(4.0 * f as f32, 0.0);
             layout.set_node_pos(boss, p, true);
             layout.step(&graph, 1.0 / 60.0);
             frames.push(snap(&layout));
         }
+        layout.dragging = false;
         let drag = jitter(&frames);
         eprintln!("{mode:?}: start {start:?}, drag {drag:?}");
         assert!(
@@ -5912,6 +5939,83 @@ fn test_layout_moves_smoothly_at_start_and_while_dragging() {
             start.1,
             drag.1
         );
+    }
+}
+
+/// Outside a drag every node moves straight to its computed resting
+/// position: at start and after a dragged node is released, the distance of
+/// each node to its final position never grows (no overshoot, no
+/// back-and-forth) and the layout comes to rest there (TASK-77.60).
+#[test]
+fn test_layout_moves_monotonically_to_rest_at_start_and_after_release() {
+    use hcom_dashboard::layout::LayoutMode;
+    fn settle_frames(
+        layout: &mut GraphLayout,
+        graph: &AgentGraph,
+        order: &[petgraph::stable_graph::NodeIndex],
+    ) -> Vec<Vec<Pos2>> {
+        let snap = |l: &GraphLayout| order.iter().map(|i| l.nodes[i].pos).collect::<Vec<_>>();
+        let mut frames = vec![snap(layout)];
+        for _ in 0..2000 {
+            layout.step(graph, 1.0 / 60.0);
+            frames.push(snap(layout));
+            if layout.is_sleeping {
+                break;
+            }
+        }
+        frames
+    }
+    fn assert_monotone(frames: &[Vec<Pos2>], what: &str) {
+        let last = frames.last().unwrap();
+        for w in frames.windows(2) {
+            for (k, (p0, p1)) in w[0].iter().zip(&w[1]).enumerate() {
+                let (d0, d1) = (p0.distance(last[k]), p1.distance(last[k]));
+                assert!(
+                    d1 <= d0 + 1e-3,
+                    "{what}: node {k} moved away from its rest position ({d0} -> {d1} px)"
+                );
+            }
+        }
+        assert_eq!(jitter(frames).0, 0, "{what}: back-and-forth motion");
+    }
+    for mode in [LayoutMode::Cluster, LayoutMode::Hierarchy] {
+        let graph = realistic_layout_graph();
+        let mut layout = GraphLayout::new();
+        layout.mode = mode;
+        layout.max_step_duration = Duration::from_secs(1);
+        layout.sync_nodes(&graph);
+        let mut order: Vec<_> = layout.nodes.keys().copied().collect();
+        order.sort();
+
+        let frames = settle_frames(&mut layout, &graph, &order);
+        assert!(layout.is_sleeping, "{mode:?}: no rest after start");
+        assert_monotone(&frames, &format!("{mode:?} start"));
+
+        // Drag boss through the graph, then release it unpinned.
+        let boss = graph.get_node_index("boss").unwrap();
+        let from = layout.nodes[&boss].pos;
+        layout.dragging = true;
+        for f in 0..60 {
+            layout.set_node_pos(boss, from + Vec2::new(6.0 * f as f32, 0.0), true);
+            layout.step(&graph, 1.0 / 60.0);
+        }
+        let held = layout.nodes[&boss].pos;
+        layout.set_node_pos(boss, held, false);
+        layout.dragging = false;
+
+        let frames = settle_frames(&mut layout, &graph, &order);
+        assert!(layout.is_sleeping, "{mode:?}: no rest after release");
+        assert_monotone(&frames, &format!("{mode:?} release"));
+        assert!(
+            frames.len() > 2 && frames[0] != *frames.last().unwrap(),
+            "{mode:?}: nothing moved after release"
+        );
+        let rest = frames.last().unwrap().clone();
+        for _ in 0..30 {
+            layout.step(&graph, 1.0 / 60.0);
+        }
+        let after: Vec<Pos2> = order.iter().map(|i| layout.nodes[i].pos).collect();
+        assert_eq!(after, rest, "{mode:?}: nodes moved after coming to rest");
     }
 }
 
@@ -11394,5 +11498,31 @@ fn test_task_77_59_selected_row_moved_by_sorting_scrolls_into_view() {
         !visible(app.table_row_bands[idx]),
         "wheeled away stays: {:?}",
         app.table_row_bands[idx]
+    );
+}
+
+/// The app runs the layout live only while a node is dragged; after the
+/// release it plans the resting positions instead (TASK-77.60).
+#[test]
+fn test_task_77_60_layout_runs_live_only_while_a_node_is_dragged() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    assert!(!app.layout.dragging);
+    let idx = *app.layout.nodes.keys().next().expect("a node");
+    app.canvas.dragged_node = Some(idx);
+    run(&mut app, vec![]);
+    assert!(app.layout.dragging, "a dragged node runs the layout live");
+    // No button is held: the canvas released the node in that frame.
+    assert!(app.canvas.dragged_node.is_none());
+    run(&mut app, vec![]);
+    assert!(
+        !app.layout.dragging,
+        "a released node plans the rest positions"
     );
 }

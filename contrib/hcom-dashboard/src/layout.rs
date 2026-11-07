@@ -62,6 +62,13 @@ struct Spring {
 /// Duration of the eased move to a planned arrangement after a Reset or a
 /// mode switch.
 pub const TRANSITION_SECS: f32 = 4.0;
+/// Average speed (px/s) of the eased move to settled positions; smoothstep
+/// peaks at 1.5x, close to the live simulation's ~200 px/s.
+const SETTLE_SPEED: f32 = 120.0;
+/// Shortest eased move to settled positions.
+const SETTLE_MIN_SECS: f32 = 0.3;
+/// Step limit of a simulation that computes target positions.
+const PLAN_MAX_STEPS: u32 = 3000;
 
 /// Eased move of the unpinned nodes from `from` to `to`.
 #[derive(Debug, Clone)]
@@ -69,6 +76,19 @@ pub struct Transition {
     from: HashMap<NodeIndex, egui::Pos2>,
     to: HashMap<NodeIndex, egui::Pos2>,
     elapsed: f32,
+    duration: f32,
+    /// Move to an arrangement computed from scratch (Reset, mode switch); a
+    /// structural change re-plans it from scratch. Otherwise it is a move to
+    /// settled positions, and any wake cancels it.
+    reset: bool,
+}
+
+/// Simulation of a copy of the layout, time-sliced across frames, whose
+/// resting positions become the targets of an eased move.
+#[derive(Clone)]
+struct Plan {
+    sim: Box<GraphLayout>,
+    steps: u32,
 }
 
 #[derive(Clone)]
@@ -141,6 +161,11 @@ pub struct GraphLayout {
     /// Running eased move to a planned arrangement; replaces the simulation
     /// while it lasts.
     pub transition: Option<Transition>,
+    /// A node is being dragged: the simulation runs live. Otherwise an awake
+    /// layout computes its resting positions first (`plan`) and moves the
+    /// nodes there with a transition, so no node swings back and forth.
+    pub dragging: bool,
+    plan: Option<Plan>,
 }
 
 impl Default for GraphLayout {
@@ -195,6 +220,8 @@ impl GraphLayout {
             springs: Vec::new(),
             pinned_positions: HashMap::new(),
             transition: None,
+            dragging: false,
+            plan: None,
         }
     }
 
@@ -203,6 +230,7 @@ impl GraphLayout {
     pub fn set_mode(&mut self, mode: LayoutMode) {
         self.mode = mode;
         self.transition = None;
+        self.plan = None;
         self.reset_cursors();
         self.tree_key = None;
         self.is_sleeping = false;
@@ -308,6 +336,7 @@ impl GraphLayout {
     pub fn planned_positions(&self, graph: &AgentGraph) -> HashMap<NodeIndex, egui::Pos2> {
         let mut sim = self.clone();
         sim.transition = None;
+        sim.plan = None;
         sim.max_step_duration = std::time::Duration::from_secs(3600);
         sim.tree_key = None;
         sim.reset_cursors();
@@ -339,8 +368,8 @@ impl GraphLayout {
         sim.is_sleeping = false;
         sim.calm_steps = 0;
         sim.alpha = 1.0;
-        for _ in 0..3000 {
-            sim.step(graph, 1.0 / 60.0);
+        for _ in 0..PLAN_MAX_STEPS {
+            sim.simulate(graph, 1.0 / 60.0);
             if sim.is_sleeping {
                 break;
             }
@@ -387,12 +416,69 @@ impl GraphLayout {
         }
         let to = self.planned_positions(graph);
         let from = self.nodes.iter().map(|(i, p)| (*i, p.pos)).collect();
+        self.plan = None;
         self.transition = Some(Transition {
             from,
             to,
             elapsed: 0.0,
+            duration: TRANSITION_SECS,
+            reset: true,
         });
         self.is_sleeping = false;
+    }
+
+    /// Advances the simulation of the resting positions within the frame
+    /// budget, from the current positions, velocities and alpha. Once it
+    /// sleeps (or hits the step limit), the unpinned nodes start an eased
+    /// move there that lasts in proportion to the longest distance. The
+    /// visible nodes stand still meanwhile.
+    fn advance_plan(&mut self, graph: &AgentGraph) -> f32 {
+        let start = std::time::Instant::now();
+        if self.plan.is_none() {
+            let mut sim = self.clone();
+            sim.transition = None;
+            sim.dragging = false;
+            self.plan = Some(Plan {
+                sim: Box::new(sim),
+                steps: 0,
+            });
+        }
+        let plan = self.plan.as_mut().expect("plan was just created");
+        let mut this_frame = 0;
+        while !plan.sim.is_sleeping && plan.steps < PLAN_MAX_STEPS {
+            let left = self.max_step_duration.saturating_sub(start.elapsed());
+            // At least one (time-sliced) step per frame, so an exhausted
+            // budget still makes progress.
+            if left.is_zero() && this_frame > 0 {
+                return self.epsilon_sleep + 0.1;
+            }
+            plan.sim.max_step_duration = left;
+            plan.sim.simulate(graph, 1.0 / 60.0);
+            plan.steps += 1;
+            this_frame += 1;
+        }
+        let plan = self.plan.take().expect("plan exists");
+        self.alpha = plan.sim.alpha;
+        let mut from = HashMap::new();
+        let mut to = HashMap::new();
+        let mut longest = 0.0f32;
+        for (idx, phys) in &self.nodes {
+            if let Some(target) = plan.sim.nodes.get(idx)
+                && !phys.pinned
+            {
+                longest = longest.max(phys.pos.distance(target.pos));
+                from.insert(*idx, phys.pos);
+                to.insert(*idx, target.pos);
+            }
+        }
+        self.transition = Some(Transition {
+            from,
+            to,
+            elapsed: 0.0,
+            duration: (longest / SETTLE_SPEED).clamp(SETTLE_MIN_SECS, TRANSITION_SECS),
+            reset: false,
+        });
+        self.epsilon_sleep + 0.1
     }
 
     /// Advances the transition by `dt`: smoothstep from `from` to `to`, so
@@ -404,7 +490,7 @@ impl GraphLayout {
             return 0.0;
         };
         tr.elapsed += dt.clamp(0.0, 0.1);
-        let t = (tr.elapsed / TRANSITION_SECS).min(1.0);
+        let t = (tr.elapsed / tr.duration).min(1.0);
         let e = t * t * (3.0 - 2.0 * t);
         let mut motion = 0.0f32;
         for (idx, to) in &tr.to {
@@ -422,7 +508,7 @@ impl GraphLayout {
             self.is_sleeping = true;
             self.calm_steps = 0;
             // A later wake reheats gently instead of re-running the cooling.
-            self.alpha = self.alpha_min;
+            self.alpha = self.alpha.min(self.alpha_min);
             return motion;
         }
         motion.max(self.epsilon_sleep + 0.1)
@@ -580,8 +666,14 @@ impl GraphLayout {
         self.springs_key = None;
     }
 
-    /// Wakes the simulation and reheats it to at least `alpha_reheat`.
+    /// Wakes the simulation and reheats it to at least `alpha_reheat`. A
+    /// computed plan and a move to settled positions are stale: the nodes stop
+    /// where they are and the plan restarts from there.
     pub fn wake_up(&mut self) {
+        self.plan = None;
+        if self.transition.as_ref().is_some_and(|t| !t.reset) {
+            self.transition = None;
+        }
         self.is_sleeping = false;
         self.calm_steps = 0;
         self.alpha = self.alpha.max(self.alpha_reheat);
@@ -640,16 +732,31 @@ impl GraphLayout {
     /// 4. Collision separation (collision_i, collision_j)
     ///
     /// Cumulative budget shares: forces 55 %, integration 80 %, collision 100 %.
-    /// Manual mode does not simulate. The layout sleeps when the last complete
-    /// collision pass was clean and either motion stayed below the threshold
-    /// or alpha cooled below `alpha_min`.
+    /// Manual mode does not simulate. While a node is dragged the simulation
+    /// runs live (`simulate`); a Reset transition keeps running (the drag's
+    /// wakes cancel any other). Otherwise an awake layout plans its resting
+    /// positions and eases the nodes there.
     pub fn step(&mut self, graph: &AgentGraph, dt: f32) -> f32 {
         if self.mode == LayoutMode::Manual {
             return 0.0;
         }
+        if self.dragging && self.transition.is_none() {
+            self.plan = None;
+            return self.simulate(graph, dt);
+        }
         if self.transition.is_some() {
             return self.advance_transition(dt);
         }
+        if self.is_sleeping {
+            return 0.0;
+        }
+        self.advance_plan(graph)
+    }
+
+    /// One live simulation step. The layout sleeps when the last complete
+    /// collision pass was clean and either motion stayed below the threshold
+    /// or alpha cooled below `alpha_min`.
+    fn simulate(&mut self, graph: &AgentGraph, dt: f32) -> f32 {
         if self.is_sleeping {
             return 0.0;
         }
