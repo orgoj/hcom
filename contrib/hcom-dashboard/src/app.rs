@@ -2652,16 +2652,28 @@ impl HcomDashboardApp {
                         } else {
                             "running"
                         };
+                        // State first (right), the title truncated in the
+                        // rest, so a long title never widens the panel.
                         ui.horizontal(|ui| {
-                            if s.title.is_empty() {
-                                ui.weak(format!("session {}", short(&s.session_id)));
-                            } else {
-                                ui.label(RichText::new(&s.title).strong());
-                            }
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     ui.label(format!("{state} · {duration}"));
+                                    ui.with_layout(
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                            let title = if s.title.is_empty() {
+                                                RichText::new(format!(
+                                                    "session {}",
+                                                    short(&s.session_id)
+                                                ))
+                                                .weak()
+                                            } else {
+                                                RichText::new(&s.title).strong()
+                                            };
+                                            ui.add(egui::Label::new(title).truncate());
+                                        },
+                                    );
                                 },
                             );
                         });
@@ -2732,7 +2744,7 @@ impl HcomDashboardApp {
                                 .join(", ")
                         };
                         ui.label(format!("partners: {partners}"));
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             let resume = s.can_resume(agent_running);
                             let r = ui.add_enabled(resume.is_ok(), egui::Button::new("Resume"));
                             if let Err(why) = &resume {

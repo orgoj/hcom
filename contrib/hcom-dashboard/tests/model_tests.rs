@@ -12718,6 +12718,113 @@ fn test_task_77_69_resume_and_fork_availability() {
     }
 }
 
+/// At the minimum detail-panel width the Sessions tab wraps instead of
+/// widening the panel: every tab name, every Sessions line start and the
+/// Resume button lie inside the panel (TASK-77.84).
+#[test]
+fn test_task_77_84_min_width_detail_panel_not_clipped_left() {
+    use hcom_dashboard::config::{DashboardConfig, SIDE_PANEL_MIN_WIDTH};
+    use hcom_dashboard::sessions::{Partner, SessionInfo};
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    app.state.detail_width_px = Some(0.0);
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut run = task_77_52_runner(ctx.clone());
+    let now = chrono::Utc::now().timestamp() as u64;
+    let row = app
+        .table_rows
+        .iter()
+        .find(|r| r.agent == "cat_beta")
+        .unwrap()
+        .clone();
+    app.select_table_row(&row);
+    app.select_detail_tab("Sessions");
+    for _ in 0..5 {
+        std::thread::sleep(Duration::from_millis(20));
+        run(&mut app, vec![]);
+    }
+    let session = |i: u64, title: &str| SessionInfo {
+        start_ts: now - (i + 1) * 3600,
+        end_ts: (i > 0).then_some(now - (i + 1) * 3600 + 1800),
+        launcher: "wdt_manager_long_name".into(),
+        end_reason: "killed (cli)".into(),
+        session_id: format!("{i:08}-aaaa-bbbb"),
+        transcript_size: Some(615 * 1024),
+        tool: "claude".into(),
+        directory: "/work/a/very/long/directory/path/for/the/session".into(),
+        title: title.into(),
+        partners: vec![Partner {
+            name: "knowledge_with_long_name".into(),
+            sent: 1,
+            received: 2,
+        }],
+        handoff_from: if i == 0 {
+            format!("{:08}-x", 1)
+        } else {
+            String::new()
+        },
+        ..Default::default()
+    };
+    app.sessions_content = Some((
+        "cat_beta".into(),
+        app.selection_generation,
+        Ok(vec![
+            session(0, "OpenResty pilot na Cyrilu with a long title"),
+            session(1, ""),
+        ]),
+    ));
+    app.set_message_window(None, None);
+    run(&mut app, vec![]);
+    let out = run(&mut app, vec![]);
+    let left = 1600.0 - SIDE_PANEL_MIN_WIDTH;
+    let texts: Vec<(String, Rect)> = out
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Text(t) => Some((
+                t.galley.text().to_string(),
+                t.galley.rect.translate(t.pos.to_vec2()),
+            )),
+            _ => None,
+        })
+        .collect();
+    let in_panel: Vec<&(String, Rect)> = texts
+        .iter()
+        .filter(|(_, r)| r.right() > left + 1.0 && r.top() > 120.0)
+        .collect();
+    assert!(
+        in_panel.iter().any(|(t, _)| t.starts_with("OpenResty")),
+        "{in_panel:?}"
+    );
+    for (t, r) in &in_panel {
+        assert!(
+            r.left() >= left - 0.5,
+            "{t:?} starts left of the panel: {r:?}"
+        );
+        // Content fits the panel: nothing widens it past the window edge.
+        assert!(r.right() <= 1600.5, "{t:?} ends past the panel: {r:?}");
+    }
+    for (r, _) in widget_rects(&out, "Show in graph") {
+        assert!(r.right() <= 1600.5, "Show in graph {r:?}");
+    }
+    for tab in ["Summary", "Sessions", "Legend"] {
+        let (_, r) = texts
+            .iter()
+            .find(|(t, _)| t == tab)
+            .unwrap_or_else(|| panic!("{tab}"));
+        assert!(r.left() >= left - 0.5, "{tab}: {r:?}");
+    }
+    let resume = widget_rects(&out, "Resume");
+    assert_eq!(resume.len(), 2);
+    for (r, _) in resume {
+        assert!(
+            r.left() >= left - 0.5 && r.right() <= 1600.5,
+            "Resume {r:?}"
+        );
+    }
+}
+
 /// A running agent's Sessions header says Resume is off; its Resume buttons
 /// stay disabled; a stopped agent has no such line (TASK-77.83).
 #[test]
