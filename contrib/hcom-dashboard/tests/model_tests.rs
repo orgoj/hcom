@@ -3583,10 +3583,10 @@ fn test_hierarchy_with_many_lone_roots_fits_canvas_above_min_zoom() {
     let ctx = egui::Context::default();
     run_app_frames(&ctx, &mut app, 300);
     assert!(
-        app.layout.canvas_cells.0 < 62,
-        "canvas narrower than the top layer"
+        app.layout.tree_cells().0 < 62,
+        "reference area narrower than the top layer"
     );
-    // The first known canvas size placed the nodes on the wrapped rows.
+    // The nodes start on the wrapped rows.
     let off = app
         .layout
         .tree_targets
@@ -5646,6 +5646,61 @@ fn test_auto_fit_without_saved_view_shows_all_nodes_until_user_zooms() {
         app.canvas.zoom > fitted * 1.05,
         "no refit after the user zoom"
     );
+}
+
+#[test]
+fn test_canvas_resize_keeps_layout_zoom_and_centered_point() {
+    use hcom_dashboard::config::DashboardState;
+    let (_dir, mut app) = split_test_app(DashboardState {
+        layout_mode: "hierarchy".into(),
+        ..DashboardState::default()
+    });
+    let mut snaps = vec![
+        snap("root", None),
+        snap("kid_a", Some("root")),
+        snap("kid_b", Some("root")),
+    ];
+    snaps.extend((0..30).map(|i| snap(&format!("lone_{i:02}"), None)));
+    app.apply_persisted_view();
+    app.graph.apply_instance_snapshot(&snaps);
+    app.layout.sync_nodes(&app.graph);
+    let ctx = egui::Context::default();
+    run_app_frames(&ctx, &mut app, 3);
+    assert!(!app.auto_fit, "the start fit runs once");
+    // Let the start layout come to rest.
+    for _ in 0..200 {
+        if app.layout.is_sleeping && app.layout.transition.is_none() {
+            break;
+        }
+        run_app_frames(&ctx, &mut app, 10);
+    }
+    assert!(app.layout.is_sleeping && app.layout.transition.is_none());
+    let positions = |app: &hcom_dashboard::app::HcomDashboardApp| {
+        let mut v: Vec<_> = app.layout.nodes.iter().map(|(i, p)| (*i, p.pos)).collect();
+        v.sort_by_key(|(i, _)| *i);
+        v
+    };
+    let before = positions(&app);
+    let zoom = app.canvas.zoom;
+    let center_world = app
+        .canvas
+        .screen_to_world(app.canvas_rect.center(), app.canvas_rect);
+
+    // Window sizes step across many tree slots and layers.
+    for size in [
+        Vec2::new(700.0, 500.0),
+        Vec2::new(1600.0, 1000.0),
+        Vec2::new(900.0, 900.0),
+    ] {
+        run_app_events(&ctx, &mut app, size, vec![vec![]; 5]);
+        assert!(app.layout.transition.is_none(), "no re-layout at {size:?}");
+        assert_eq!(positions(&app), before, "nodes stay at {size:?}");
+        assert_eq!(app.canvas.zoom, zoom, "zoom stays at {size:?}");
+        let c = app
+            .canvas
+            .screen_to_world(app.canvas_rect.center(), app.canvas_rect);
+        assert!(c.distance(center_world) < 1e-3, "center stays at {size:?}");
+    }
 }
 
 #[test]

@@ -11,6 +11,9 @@ const GOLDEN_ANGLE: f32 = 2.399_963;
 const COLLISION_MARGIN: f32 = 1.0;
 /// Canvas size in tree cells when it is unknown: the Hierarchy never wraps.
 pub const NO_CANVAS: (usize, usize) = (usize::MAX, usize::MAX);
+/// Fixed reference area (world units) that bounds the Hierarchy top layer.
+/// The arrangement depends only on the graph, never on the window size.
+const TREE_REFERENCE_SIZE: egui::Vec2 = egui::vec2(1600.0, 900.0);
 
 #[derive(Debug, Clone)]
 pub struct NodePhysics {
@@ -149,9 +152,6 @@ pub struct GraphLayout {
     pub last_collision_pass_clean: bool,
 
     tree_key: Option<u64>,
-    /// Canvas size at zoom 1 in tree slots and layers; a top layer wider
-    /// than the canvas wraps its lone roots (see `tree_targets`).
-    pub canvas_cells: (usize, usize),
     pub tree_targets: HashMap<NodeIndex, egui::Pos2>,
     springs_key: Option<(usize, u64, usize, u64)>,
     springs: Vec<Spring>,
@@ -214,7 +214,6 @@ impl GraphLayout {
             collision_pass_clean: true,
             last_collision_pass_clean: false,
             tree_key: None,
-            canvas_cells: NO_CANVAS,
             tree_targets: HashMap::new(),
             springs_key: None,
             springs: Vec::new(),
@@ -560,7 +559,7 @@ impl GraphLayout {
         let key = structure_key(graph);
         if self.tree_key != Some(key) {
             self.tree_targets =
-                tree_targets(graph, self.h_layer, self.tree_slot(), self.canvas_cells);
+                tree_targets(graph, self.h_layer, self.tree_slot(), self.tree_cells());
             self.tree_key = Some(key);
         }
     }
@@ -570,46 +569,13 @@ impl GraphLayout {
         2.0 * self.collision_radius + 20.0
     }
 
-    /// Sets the canvas size (screen px, i.e. world units at zoom 1) that
-    /// bounds the Hierarchy top layer. A change of the size in tree slots and
-    /// layers recomputes the tree and wakes the layout in Hierarchy mode; a
-    /// non-positive or unknown size disables wrapping. The first known size
-    /// (at start, the nodes were placed for an unknown one) moves unpinned
-    /// nodes straight to their new targets; a later change moves them there
-    /// with a transition.
-    pub fn set_canvas_size(&mut self, graph: &AgentGraph, size: egui::Vec2) {
-        let cells = if size.is_finite() && size.x > 0.0 && size.y > 0.0 {
-            (
-                ((size.x / self.tree_slot()).floor() as usize).max(1),
-                ((size.y / self.h_layer).floor() as usize).max(1),
-            )
-        } else {
-            NO_CANVAS
-        };
-        if cells == self.canvas_cells {
-            return;
-        }
-        let first = self.canvas_cells == NO_CANVAS;
-        self.canvas_cells = cells;
-        if self.mode != LayoutMode::Hierarchy {
-            return;
-        }
-        self.tree_key = None;
-        self.wake_up();
-        self.alpha = 1.0;
-        if !first {
-            self.start_transition(graph);
-        } else {
-            self.refresh_tree_targets(graph);
-            for (idx, phys) in self.nodes.iter_mut() {
-                if let Some(t) = self.tree_targets.get(idx)
-                    && !phys.pinned
-                {
-                    phys.pos = *t;
-                    phys.vel = egui::Vec2::ZERO;
-                }
-            }
-        }
+    /// `TREE_REFERENCE_SIZE` in tree slots and layers: the area whose width
+    /// bounds the Hierarchy top layer (see `tree_targets`).
+    pub fn tree_cells(&self) -> (usize, usize) {
+        (
+            ((TREE_REFERENCE_SIZE.x / self.tree_slot()).floor() as usize).max(1),
+            ((TREE_REFERENCE_SIZE.y / self.h_layer).floor() as usize).max(1),
+        )
     }
 
     /// Rebuilds the aggregated springs when edges or message counts changed.

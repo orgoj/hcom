@@ -376,7 +376,8 @@ pub struct HcomDashboardApp {
     pub home_dir: Option<String>,
     /// Time of the last unsaved zoom/pan/panel width change.
     pub view_dirty_since: Option<Instant>,
-    /// Fit the view to the visible nodes every frame until the user changes it.
+    /// Fit the view to the visible nodes once, on the next canvas frame with
+    /// nodes; later canvas size changes keep zoom and the centered point.
     pub auto_fit: bool,
     /// A saved view was restored: turn on `auto_fit` if it shows no node.
     pub check_saved_view: bool,
@@ -3900,6 +3901,7 @@ impl HcomDashboardApp {
             && self.layout.mode != LayoutMode::Manual
             && !ui.input(|i| i.pointer.any_down())
         {
+            self.auto_fit = false;
             self.canvas.fit_to(&items, rect, 1.0);
         }
     }
@@ -4422,8 +4424,6 @@ impl eframe::App for HcomDashboardApp {
 
         // 3. Physics simulation step
         let dt = ctx.input(|i| i.stable_dt);
-        self.layout
-            .set_canvas_size(&self.graph, self.canvas_rect.size());
         self.layout.dragging = self.canvas.dragged_node.is_some();
         let motion = self.layout.step(&self.graph, dt);
         if motion > 0.0 || self.canvas.dragged_node.is_some() || self.pending_action.is_some() {
