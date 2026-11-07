@@ -469,32 +469,58 @@ pub const WINDOW_PRESETS: &[(&str, Option<i64>)] = &[
     ("All", None),
 ];
 
-/// Header text of the active window in UTC, e.g.
-/// `Range: 2026-11-01 14:05:00 – 15:05:00 UTC (live) · 37 msgs`.
+/// Header text of the active window in local time, e.g.
+/// `Range: 2026-11-01 14:05 – 15:05 (live) · 37 msgs`.
 pub fn format_window_range(
     window: &MessageWindow,
     now: chrono::DateTime<chrono::Utc>,
     msg_count: usize,
 ) -> String {
-    let (start, end) = window.bounds(now);
-    let start_text = match start {
-        Some(s) => s.format("%Y-%m-%d %H:%M:%S").to_string(),
-        None => "start of history".to_string(),
-    };
     let mode = if window.end.is_none() { " (live)" } else { "" };
     let limit = match window.last_n {
         Some(n) => format!(", newest {n}"),
         None => String::new(),
     };
-    let end_fmt = if start.is_some_and(|s| s.date_naive() == end.date_naive()) {
-        "%H:%M:%S"
-    } else {
-        "%Y-%m-%d %H:%M:%S"
-    };
     format!(
-        "Range: {start_text} – {} UTC{mode} · {msg_count} msgs{limit}",
-        end.format(end_fmt)
+        "Range: {}{mode} · {msg_count} msgs{limit}",
+        window_bounds_text(window, now, &chrono::Local)
     )
+}
+
+/// `start – end` of the window in `tz`; the end omits the date when it is
+/// the start's date, seconds show only when not 0. Tooltip of the Range
+/// header in UTC: `window_bounds_text(w, now, &Utc)` + ` UTC`.
+pub fn window_bounds_text<Tz: chrono::TimeZone>(
+    window: &MessageWindow,
+    now: chrono::DateTime<chrono::Utc>,
+    tz: &Tz,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let (start, end) = window.bounds(now);
+    let start_text = match start {
+        Some(s) => crate::model::format_wall_clock(s, tz),
+        None => "start of history".to_string(),
+    };
+    let same_day = start
+        .is_some_and(|s| s.with_timezone(tz).date_naive() == end.with_timezone(tz).date_naive());
+    let end_text = crate::model::format_wall_clock(end, tz);
+    let end_text = if same_day {
+        end_text[11..].to_string()
+    } else {
+        end_text
+    };
+    format!("{start_text} – {end_text}")
+}
+
+/// Session interval in whole minutes: start rounded down, end rounded up
+/// (at least one minute), so the window covers the whole session and the
+/// card shows the same minutes as the window (TASK-77.79).
+pub fn session_minutes(s: &crate::sessions::SessionInfo) -> (u64, Option<u64>) {
+    let start = s.start_ts - s.start_ts % 60;
+    let end = s.end_ts.map(|e| (e.div_ceil(60) * 60).max(start + 60));
+    (start, end)
 }
 
 /// Text of the `Last:` message limit: `no limit` for 0, else `N msgs`.
@@ -1950,11 +1976,11 @@ impl HcomDashboardApp {
             chrono::DateTime::from_timestamp(*end_ts as i64, 0).unwrap_or(chrono::Utc::now());
         response = response.on_hover_text(format!(
             "Range: {} to {}\nDrag left thumb: start time (drag to min for all)\nDrag right thumb: end time (drag to max for live)",
-            start_dt.format("%Y-%m-%d %H:%M:%S UTC"),
+            crate::model::format_wall_clock(start_dt, &chrono::Local),
             if self.msg_window.end.is_none() {
                 "now".into()
             } else {
-                format!("{}", end_dt.format("%Y-%m-%d %H:%M:%S UTC"))
+                crate::model::format_wall_clock(end_dt, &chrono::Local)
             }
         ));
 
@@ -2145,7 +2171,9 @@ impl HcomDashboardApp {
         };
         ui.separator();
         let text = format_window_range(&self.msg_window, now, msg_count);
-        ui.label(RichText::new(text).strong());
+        let utc = window_bounds_text(&self.msg_window, now, &chrono::Utc);
+        ui.label(RichText::new(text).strong())
+            .on_hover_text(format!("{utc} UTC"));
     }
 
     fn render_side_panel_summary(&mut self, ui: &mut egui::Ui, palette: &ThemePalette) {
@@ -2180,7 +2208,9 @@ impl HcomDashboardApp {
                     }
                     ui.label(format!(
                         "Last Active: {}",
-                        msg.last_timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+                        msg.last_timestamp
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M:%S")
                     ));
                     if let Some(ref intent) = msg.last_intent {
                         ui.label(format!("Last Intent: {}", intent));
@@ -2553,7 +2583,9 @@ impl HcomDashboardApp {
                                 .map(|d| d.with_timezone(&chrono::Local).format(f).to_string())
                                 .unwrap_or_default()
                         };
-                        let until = match s.end_ts {
+                        // Same minutes as the window Show in graph sets.
+                        let (start_min, end_min) = session_minutes(s);
+                        let until = match end_min {
                             Some(e) => fmt(e, "%m-%d %H:%M"),
                             None => "running".into(),
                         };
@@ -2566,7 +2598,7 @@ impl HcomDashboardApp {
                         ui.label(
                             RichText::new(format!(
                                 "{} – {}  ({})",
-                                fmt(s.start_ts, "%m-%d %H:%M"),
+                                fmt(start_min, "%m-%d %H:%M"),
                                 until,
                                 duration
                             ))
@@ -2672,13 +2704,14 @@ impl HcomDashboardApp {
     pub fn show_session_in_graph(&mut self, session: &crate::sessions::SessionInfo) {
         let now = chrono::Utc::now();
         let at = |ts: u64| chrono::DateTime::from_timestamp(ts as i64, 0).unwrap_or(now);
-        let range = match session.end_ts {
+        let (start_ts, end_ts) = session_minutes(session);
+        let range = match end_ts {
             Some(end) => MessageRange::Fixed {
-                start: Some(at(session.start_ts)),
-                end: at(end.max(session.start_ts + 1)),
+                start: Some(at(start_ts)),
+                end: at(end),
             },
             None => MessageRange::Live {
-                span_secs: Some((now.timestamp() - session.start_ts as i64).max(1)),
+                span_secs: Some((now.timestamp() - start_ts as i64).max(1)),
             },
         };
         let before = (self.current_message_range(now), self.sessions_scroll_y);
@@ -2697,13 +2730,13 @@ impl HcomDashboardApp {
                     })
                     .unwrap_or_default()
             };
-            let until = session.end_ts.map_or("running".into(), local);
+            let until = end_ts.map_or("running".into(), local);
             let id: String = session.session_id.chars().take(8).collect();
             self.graph_restore = Some(GraphRestore {
                 range,
                 scroll_y,
                 session_id: session.session_id.clone(),
-                label: format!("session {id} ({} – {until})", local(session.start_ts)),
+                label: format!("session {id} ({} – {until})", local(start_ts)),
                 shown: (self.current_message_range(now), self.msg_window.last_n),
             });
             self.save_state();

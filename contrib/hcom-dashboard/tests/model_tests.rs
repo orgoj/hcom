@@ -3282,18 +3282,36 @@ fn test_zero_count_edge_in_window_stays_selectable() {
 }
 
 #[test]
-fn test_format_window_range_uses_utc() {
-    use chrono::{Duration, TimeZone};
-    use hcom_dashboard::app::format_window_range;
+fn test_format_window_range_uses_local_time() {
+    use chrono::{Duration, FixedOffset, TimeZone};
+    use hcom_dashboard::app::{format_window_range, window_bounds_text};
     use hcom_dashboard::model::MessageWindow;
     let now = Utc.with_ymd_and_hms(2026, 11, 1, 15, 5, 0).unwrap();
     let w = MessageWindow {
         span_secs: Some(3600),
         ..Default::default()
     };
+    let plus2 = FixedOffset::east_opt(2 * 3600).unwrap();
+    assert_eq!(
+        window_bounds_text(&w, now, &plus2),
+        "2026-11-01 16:05 – 17:05"
+    );
+    assert_eq!(
+        window_bounds_text(&w, now, &Utc),
+        "2026-11-01 14:05 – 15:05"
+    );
+    // Late evening UTC is the next day in +02:00: the end keeps its date.
+    let late = Utc.with_ymd_and_hms(2026, 11, 1, 22, 30, 15).unwrap();
+    assert_eq!(
+        window_bounds_text(&w, late, &plus2),
+        "2026-11-01 23:30:15 – 2026-11-02 00:30:15"
+    );
     assert_eq!(
         format_window_range(&w, now, 37),
-        "Range: 2026-11-01 14:05:00 – 15:05:00 UTC (live) · 37 msgs"
+        format!(
+            "Range: {} (live) · 37 msgs",
+            window_bounds_text(&w, now, &chrono::Local)
+        )
     );
     let fixed = MessageWindow {
         span_secs: None,
@@ -3301,8 +3319,47 @@ fn test_format_window_range_uses_utc() {
         last_n: Some(10),
     };
     assert_eq!(
-        format_window_range(&fixed, now, 10),
-        "Range: start of history – 2026-11-01 14:05:00 UTC · 10 msgs, newest 10"
+        window_bounds_text(&fixed, now, &plus2),
+        "start of history – 2026-11-01 16:05"
+    );
+    assert!(format_window_range(&fixed, now, 10).ends_with(" · 10 msgs, newest 10"));
+}
+
+/// Window text without an offset is local wall-clock time and round-trips
+/// in a non-UTC zone (TASK-77.79).
+#[test]
+fn test_task_77_79_window_text_in_local_zone() {
+    use chrono::{FixedOffset, TimeZone};
+    use hcom_dashboard::model::{MessageRange, format_canonical_range_in, parse_time_range_in};
+    let plus2 = FixedOffset::east_opt(2 * 3600).unwrap();
+    let now = Utc.with_ymd_and_hms(2026, 11, 1, 15, 5, 0).unwrap();
+    let r = parse_time_range_in("12:00 - 13:30", now, &plus2).unwrap();
+    assert_eq!(
+        r,
+        MessageRange::Fixed {
+            start: Some(Utc.with_ymd_and_hms(2026, 11, 1, 10, 0, 0).unwrap()),
+            end: Utc.with_ymd_and_hms(2026, 11, 1, 11, 30, 0).unwrap(),
+        }
+    );
+    assert_eq!(
+        format_canonical_range_in(&r, now, &plus2),
+        "2026-11-01 12:00 - 2026-11-01 13:30"
+    );
+    let odd = MessageRange::Fixed {
+        start: None,
+        end: Utc.with_ymd_and_hms(2026, 11, 1, 11, 30, 7).unwrap(),
+    };
+    let text = format_canonical_range_in(&odd, now, &plus2);
+    assert_eq!(text, "all - 2026-11-01 13:30:07");
+    assert_eq!(parse_time_range_in(&text, now, &plus2).unwrap(), odd);
+    // Time-only input takes the local date: 00:30 in +02:00 at 22:45 UTC
+    // is the next local day.
+    let late = Utc.with_ymd_and_hms(2026, 11, 1, 22, 45, 0).unwrap();
+    assert_eq!(
+        parse_time_range_in("00:30 - now", late, &plus2).unwrap(),
+        MessageRange::Live {
+            span_secs: Some(15 * 60)
+        }
     );
 }
 
@@ -13032,14 +13089,17 @@ fn test_task_77_73_show_session_in_graph() {
         ..Default::default()
     };
     app.show_session_in_graph(&ended);
+    // Whole minutes around the session (TASK-77.79).
+    let (start_min, end_min) = hcom_dashboard::app::session_minutes(&ended);
+    assert!(start_min <= ended.start_ts && end_min.unwrap() >= ended.end_ts.unwrap());
     match app.current_message_range(now) {
         MessageRange::Fixed { start, end } => {
-            assert_eq!(start.unwrap().timestamp() as u64, ended.start_ts);
-            assert_eq!(end.timestamp() as u64, ended.end_ts.unwrap());
+            assert_eq!(start.unwrap().timestamp() as u64, start_min);
+            assert_eq!(end.timestamp() as u64, end_min.unwrap());
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(app.window_bounds(now), (Some(ended.start_ts), ended.end_ts));
+    assert_eq!(app.window_bounds(now), (Some(start_min), end_min));
 
     let running = SessionInfo {
         start_ts: now_s - 600,
@@ -13049,7 +13109,116 @@ fn test_task_77_73_show_session_in_graph() {
     let MessageRange::Live { span_secs } = app.current_message_range(now) else {
         panic!("live expected");
     };
-    assert!((600..=602).contains(&span_secs.unwrap()), "{span_secs:?}");
+    assert!((600..=662).contains(&span_secs.unwrap()), "{span_secs:?}");
+}
+
+/// The session card, the window text field and the Range header show the
+/// same local minutes after Show in graph; the Range tooltip has UTC
+/// (TASK-77.79).
+#[test]
+fn test_task_77_79_session_card_and_window_share_local_minutes() {
+    use hcom_dashboard::config::DashboardConfig;
+    use hcom_dashboard::model::MessageRange;
+    use hcom_dashboard::sessions::SessionInfo;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut run = task_77_52_runner(ctx.clone());
+    let now = chrono::Utc::now();
+    let now_s = now.timestamp() as u64;
+    app.graph
+        .apply_message_event(&hcom_dashboard::model::MessageEvent {
+            id: 1,
+            ts: now - chrono::Duration::days(1),
+            instance: "inst_alpha_1".into(),
+            data: hcom_dashboard::model::MessageData {
+                from: "inst_alpha_1".into(),
+                delivered_to: vec!["cat_beta".into()],
+                mentions: vec![],
+                intent: None,
+                reply_to: None,
+                text: "x".into(),
+            },
+        });
+    let row = app
+        .table_rows
+        .iter()
+        .find(|r| r.agent == "cat_beta")
+        .unwrap()
+        .clone();
+    app.select_table_row(&row);
+    app.select_detail_tab("Sessions");
+    run(&mut app, vec![]);
+    // Odd seconds on both ends; a session within one hour of the past.
+    let base = now_s - now_s % 3600 - 3 * 3600;
+    let session = SessionInfo {
+        start_ts: base + 125,
+        end_ts: Some(base + 1300 + 17),
+        launcher: "user".into(),
+        session_id: "sid-local".into(),
+        tool: "claude".into(),
+        ..Default::default()
+    };
+    app.sessions_content = Some((
+        "cat_beta".into(),
+        app.selection_generation,
+        Ok(vec![session.clone()]),
+    ));
+    app.apply_message_range(MessageRange::Live { span_secs: None }, now)
+        .unwrap();
+    app.show_session_in_graph(&session);
+
+    let local = |ts: u64, f: &str| {
+        chrono::DateTime::from_timestamp(ts as i64, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format(f)
+            .to_string()
+    };
+    let (s, e) = (base + 120, base + 1320);
+    assert_eq!(
+        app.time_range_text,
+        format!(
+            "{} - {}",
+            local(s, "%Y-%m-%d %H:%M"),
+            local(e, "%Y-%m-%d %H:%M")
+        )
+    );
+    run(&mut app, vec![]);
+    let out = run(&mut app, vec![]);
+    let texts: Vec<String> = out
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+            _ => None,
+        })
+        .collect();
+    let card = format!("{} – {}", local(s, "%m-%d %H:%M"), local(e, "%m-%d %H:%M"));
+    assert!(
+        texts.iter().any(|t| t.starts_with(&card)),
+        "{card} {texts:?}"
+    );
+    let header = format!(
+        "Range: {} – {} · ",
+        local(s, "%Y-%m-%d %H:%M"),
+        local(e, "%H:%M")
+    );
+    assert!(
+        texts.iter().any(|t| t.starts_with(&header)),
+        "{header} {texts:?}"
+    );
+    let utc = |ts: u64, f: &str| {
+        chrono::DateTime::from_timestamp(ts as i64, 0)
+            .unwrap()
+            .format(f)
+            .to_string()
+    };
+    assert_eq!(
+        hcom_dashboard::app::window_bounds_text(&app.msg_window, now, &chrono::Utc),
+        format!("{} – {}", utc(s, "%Y-%m-%d %H:%M"), utc(e, "%H:%M"))
+    );
 }
 
 /// After Show in graph the Sessions header offers Restore window, which

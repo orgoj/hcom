@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -322,10 +322,24 @@ pub enum MessageRange {
     },
 }
 
+/// Wall-clock time of `ndt` in `tz`; a time skipped by a DST change is an error,
+/// an ambiguous one takes the earlier instant.
+fn naive_in<Tz: TimeZone>(ndt: NaiveDateTime, tz: &Tz) -> Result<DateTime<Utc>, String> {
+    tz.from_local_datetime(&ndt)
+        .earliest()
+        .map(|d| normalize_second_precision(d.with_timezone(&Utc)))
+        .ok_or_else(|| format!("{ndt} does not exist in the local time zone"))
+}
+
 /// Parses an absolute timestamp string, supporting RFC3339, YYYY-MM-DD HH:MM:SS,
-/// YYYY-MM-DD HH:MM, and time-only HH:MM:SS / HH:MM (evaluated against `now` date in UTC).
+/// YYYY-MM-DD HH:MM, and time-only HH:MM:SS / HH:MM (on the date of `now`).
+/// Times without an offset are wall-clock times in `tz` (the local zone in the app).
 /// Result is normalized to whole seconds.
-fn parse_timestamp(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
+fn parse_timestamp<Tz: TimeZone>(
+    s: &str,
+    now: DateTime<Utc>,
+    tz: &Tz,
+) -> Result<DateTime<Utc>, String> {
     let s = s.trim();
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Ok(normalize_second_precision(dt.with_timezone(&Utc)));
@@ -337,13 +351,13 @@ fn parse_timestamp(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String>
         "%Y-%m-%dT%H:%M",
     ] {
         if let Ok(ndt) = NaiveDateTime::parse_from_str(s, fmt) {
-            return Ok(normalize_second_precision(ndt.and_utc()));
+            return naive_in(ndt, tz);
         }
     }
     for fmt in &["%H:%M:%S", "%H:%M"] {
         if let Ok(nt) = NaiveTime::parse_from_str(s, fmt) {
-            let ndt = now.date_naive().and_time(nt);
-            return Ok(normalize_second_precision(ndt.and_utc()));
+            let ndt = now.with_timezone(tz).date_naive().and_time(nt);
+            return naive_in(ndt, tz);
         }
     }
     Err(format!(
@@ -362,7 +376,18 @@ pub const MAX_DURATION_SECS: u64 = 100 * 365 * 86400; // 100 years
 ///   - `"<start> - <end>"` (start must be strictly before end)
 ///   - `"<start> - now"` (start strictly before now, switches to live with span)
 ///   - `"all - <end>"` (unbounded start up to fixed end)
+///
+/// Absolute times without an offset are local wall-clock times.
 pub fn parse_time_range(input: &str, now: DateTime<Utc>) -> Result<MessageRange, String> {
+    parse_time_range_in(input, now, &Local)
+}
+
+/// `parse_time_range` with wall-clock times in `tz`.
+pub fn parse_time_range_in<Tz: TimeZone>(
+    input: &str,
+    now: DateTime<Utc>,
+    tz: &Tz,
+) -> Result<MessageRange, String> {
     let s = input.trim();
     if s.is_empty() {
         return Err("Empty time range input".into());
@@ -390,7 +415,7 @@ pub fn parse_time_range(input: &str, now: DateTime<Utc>) -> Result<MessageRange,
         let start = if left.eq_ignore_ascii_case("all") {
             None
         } else {
-            Some(parse_timestamp(left, now)?)
+            Some(parse_timestamp(left, now, tz)?)
         };
 
         if right.eq_ignore_ascii_case("now") {
@@ -407,7 +432,7 @@ pub fn parse_time_range(input: &str, now: DateTime<Utc>) -> Result<MessageRange,
             }
         }
 
-        let end = parse_timestamp(right, now)?;
+        let end = parse_timestamp(right, now, tz)?;
         if let Some(st) = start
             && st >= end
         {
@@ -478,8 +503,34 @@ pub fn parse_time_range(input: &str, now: DateTime<Utc>) -> Result<MessageRange,
     })
 }
 
-/// Formats a `MessageRange` into its canonical string representation.
-pub fn format_canonical_range(range: &MessageRange, _now: DateTime<Utc>) -> String {
+/// Formats a `MessageRange` into its canonical string representation,
+/// absolute times in the local zone.
+pub fn format_canonical_range(range: &MessageRange, now: DateTime<Utc>) -> String {
+    format_canonical_range_in(range, now, &Local)
+}
+
+/// `YYYY-MM-DD HH:MM` in `tz`, with `:SS` only when the second is not 0.
+pub fn format_wall_clock<Tz: TimeZone>(dt: DateTime<Utc>, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let fmt = if dt.timestamp() % 60 == 0 {
+        "%Y-%m-%d %H:%M"
+    } else {
+        "%Y-%m-%d %H:%M:%S"
+    };
+    dt.with_timezone(tz).format(fmt).to_string()
+}
+
+/// `format_canonical_range` with absolute times in `tz`.
+pub fn format_canonical_range_in<Tz: TimeZone>(
+    range: &MessageRange,
+    _now: DateTime<Utc>,
+    tz: &Tz,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
     match range {
         MessageRange::Live { span_secs: None } => "all".to_string(),
         MessageRange::Live { span_secs: Some(s) } => {
@@ -497,7 +548,7 @@ pub fn format_canonical_range(range: &MessageRange, _now: DateTime<Utc>) -> Stri
             }
         }
         MessageRange::Fixed { start: None, end } => {
-            format!("all - {}", end.format("%Y-%m-%d %H:%M:%S"))
+            format!("all - {}", format_wall_clock(*end, tz))
         }
         MessageRange::Fixed {
             start: Some(s),
@@ -505,8 +556,8 @@ pub fn format_canonical_range(range: &MessageRange, _now: DateTime<Utc>) -> Stri
         } => {
             format!(
                 "{} - {}",
-                s.format("%Y-%m-%d %H:%M:%S"),
-                end.format("%Y-%m-%d %H:%M:%S")
+                format_wall_clock(*s, tz),
+                format_wall_clock(*end, tz)
             )
         }
     }
