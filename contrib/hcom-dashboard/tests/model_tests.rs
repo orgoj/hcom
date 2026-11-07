@@ -11850,3 +11850,163 @@ fn test_task_77_66_table_header_stays_on_top_while_scrolling() {
     run(&mut app, vec![press(false)]);
     assert_eq!(app.state.sort_col.as_deref(), Some("dir"));
 }
+
+/// Runner whose table reload returns the rows the test sets.
+struct TableRowsRunner {
+    inner: MockActionRunner,
+    rows: Arc<Mutex<Vec<hcom_dashboard::table_data::TableRow>>>,
+}
+
+impl ActionRunner for TableRowsRunner {
+    fn execute(&self, req: ActionRequest) -> Option<ActionResult> {
+        match req {
+            ActionRequest::ReloadTableData => Some(ActionResult::TableDataLoaded {
+                rows: self.rows.lock().unwrap().clone(),
+                catalog_groups: Vec::new(),
+                tool_groups: Vec::new(),
+            }),
+            other => self.inner.execute(other),
+        }
+    }
+}
+
+/// After Start from the dialog, with `--as` or without, the started
+/// instance's row (and graph node) is selected once a table reload shows
+/// it, unless another row was selected meanwhile (TASK-77.68).
+#[test]
+fn test_task_77_68_start_selects_the_started_instance() {
+    use hcom_dashboard::config::DashboardConfig;
+    use hcom_dashboard::table_data::TableRow;
+
+    let none = egui::Modifiers::NONE;
+    let press = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: none,
+    };
+    // Opens Start on cat_beta by a double-click, types `name` (empty: the
+    // name field is left alone) and presses Enter.
+    let start = |app: &mut hcom_dashboard::app::HcomDashboardApp,
+                 run: &mut dyn FnMut(
+        &mut hcom_dashboard::app::HcomDashboardApp,
+        Vec<egui::Event>,
+    ) -> egui::FullOutput,
+                 name: &str| {
+        let p = app.table_row_bands[1].center();
+        run(app, vec![egui::Event::PointerMoved(p)]);
+        for pressed in [true, false, true, false] {
+            run(app, vec![press(p, pressed)]);
+        }
+        for _ in 0..4 {
+            run(app, vec![]);
+        }
+        let out = run(app, vec![]);
+        assert!(app.show_start_dialog);
+        if !name.is_empty() {
+            let label = out
+                .shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if t.galley.text() == "name" => {
+                        Some(Rect::from_min_size(t.pos, t.galley.size()))
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let field = Pos2::new(label.right() + 60.0, label.center().y);
+            run(app, vec![egui::Event::PointerMoved(field)]);
+            run(app, vec![press(field, true)]);
+            run(app, vec![press(field, false)]);
+            run(app, vec![]);
+            run(app, vec![egui::Event::Text(name.into())]);
+        }
+        run(app, vec![task_77_52_key(egui::Key::Enter, none)]);
+        run(app, vec![]);
+        assert!(!app.show_start_dialog);
+    };
+    let instance = |name: &str| TableRow {
+        agent: "cat_beta".into(),
+        instance: name.into(),
+        is_running: true,
+        status: "listening".into(),
+        ..Default::default()
+    };
+
+    for (typed, started) in [("x", "cat_beta__x"), ("", "cat_beta")] {
+        let (mut app, recorded, _dir) = task_77_52_app(DashboardConfig::default());
+        let rows = Arc::new(Mutex::new(app.table_rows.clone()));
+        app.action_worker = Some(ActionWorkerHandle::new(TableRowsRunner {
+            inner: MockActionRunner {
+                recorded: recorded.clone(),
+                fail_attach: false,
+                transcript_result: String::new(),
+            },
+            rows: rows.clone(),
+        }));
+        let ctx = egui::Context::default();
+        let mut run = task_77_52_runner(ctx.clone());
+        for _ in 0..3 {
+            run(&mut app, vec![]);
+        }
+        start(&mut app, &mut run, typed);
+        let cmd = recorded.lock().unwrap().iter().find_map(|r| match r {
+            ActionRequest::RunCommand { cmd, .. } => Some(cmd.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            cmd.unwrap().contains(&"--as".to_string()),
+            !typed.is_empty(),
+            "{started}"
+        );
+        assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+
+        // A reload without the instance keeps the selection; one with it
+        // selects its row and graph node.
+        let reload = |app: &mut hcom_dashboard::app::HcomDashboardApp,
+                      run: &mut dyn FnMut(
+            &mut hcom_dashboard::app::HcomDashboardApp,
+            Vec<egui::Event>,
+        ) -> egui::FullOutput| {
+            app.dispatch_action(ActionRequest::ReloadTableData);
+            for _ in 0..5 {
+                std::thread::sleep(Duration::from_millis(20));
+                run(app, vec![]);
+            }
+        };
+        reload(&mut app, &mut run);
+        assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+        rows.lock().unwrap().push(instance(started));
+        reload(&mut app, &mut run);
+        assert_eq!(app.selected_row_id.as_deref(), Some(started), "{started}");
+        assert_eq!(app.canvas.selected_node, app.graph.get_node_index(started));
+    }
+
+    // Another row selected after the Start: the instance does not take over.
+    let (mut app, recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let rows = Arc::new(Mutex::new(app.table_rows.clone()));
+    app.action_worker = Some(ActionWorkerHandle::new(TableRowsRunner {
+        inner: MockActionRunner {
+            recorded,
+            fail_attach: false,
+            transcript_result: String::new(),
+        },
+        rows: rows.clone(),
+    }));
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    start(&mut app, &mut run, "y");
+    let first = app.table_rows[0].clone();
+    app.select_table_row(&first);
+    rows.lock().unwrap().push(instance("cat_beta__y"));
+    app.dispatch_action(ActionRequest::ReloadTableData);
+    for _ in 0..5 {
+        std::thread::sleep(Duration::from_millis(20));
+        run(&mut app, vec![]);
+    }
+    assert_eq!(app.selected_row_id.as_deref(), Some("inst_alpha_1"));
+    assert!(app.select_next.is_none());
+}

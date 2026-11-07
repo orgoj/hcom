@@ -356,6 +356,10 @@ pub struct HcomDashboardApp {
 
     // Dialogs
     pub selected_row_id: Option<String>,
+    /// Instance started from the Start dialog and the selection at that
+    /// moment: the instance row is selected once it appears, unless the
+    /// selection changed meanwhile or the command failed (TASK-77.68).
+    pub select_next: Option<(String, Option<String>)>,
     /// Data row (0-based) under the pointer in the last frame; painted as a
     /// weaker band than the selection.
     table_hover_row: Option<usize>,
@@ -590,6 +594,7 @@ impl HcomDashboardApp {
             screen_inject_text: String::new(),
             screen_inject_enter: true,
             selected_row_id: None,
+            select_next: None,
             table_hover_row: None,
             table_scrolled_id: None,
             table_row_bands: Vec::new(),
@@ -691,6 +696,7 @@ impl HcomDashboardApp {
             screen_inject_text: String::new(),
             screen_inject_enter: true,
             selected_row_id: None,
+            select_next: None,
             table_hover_row: None,
             table_scrolled_id: None,
             table_row_bands: Vec::new(),
@@ -1448,6 +1454,27 @@ impl HcomDashboardApp {
                 ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                 self.open_start_dialog(row);
             }
+        }
+    }
+
+    /// Selects the instance a Start launched once its row appears, unless
+    /// the selection changed since the launch (TASK-77.68).
+    pub fn select_started_instance(&mut self) {
+        let Some((instance, selected_at_launch)) = &self.select_next else {
+            return;
+        };
+        if self.selected_row_id != *selected_at_launch {
+            self.select_next = None;
+            return;
+        }
+        if let Some(row) = self
+            .table_rows
+            .iter()
+            .find(|r| r.instance == *instance)
+            .cloned()
+        {
+            self.select_next = None;
+            self.select_table_row(&row);
         }
     }
 
@@ -3379,6 +3406,7 @@ impl eframe::App for HcomDashboardApp {
                                 .push(format!("[OK] Command output:\n{}", out.trim()));
                         }
                         Err(e) => {
+                            self.select_next = None;
                             let msg = format!("Command failed: {}", e);
                             self.set_action_error(None, msg.clone());
                             self.command_logs.push(format!("[ERROR] {}", msg));
@@ -3408,6 +3436,7 @@ impl eframe::App for HcomDashboardApp {
                         self.update_idle(chrono::Utc::now().timestamp() as u64);
                         self.catalog_groups = catalog_groups;
                         self.tool_groups = tool_groups;
+                        self.select_started_instance();
                         self.on_selection_changed();
                     }
                     ActionResult::TableDataFailed { error } => {
@@ -4361,6 +4390,14 @@ impl eframe::App for HcomDashboardApp {
                 let cmd = self.start_command();
                 let dir = self.start_dir.trim();
                 let cwd = (!dir.is_empty()).then(|| dir.to_string());
+                // The instance is named by `--as`, else after the agent.
+                let instance = cmd
+                    .iter()
+                    .position(|a| a == "--as")
+                    .and_then(|i| cmd.get(i + 1))
+                    .unwrap_or(&self.start_agent_name)
+                    .clone();
+                self.select_next = Some((instance, self.selected_row_id.clone()));
                 self.dispatch_action(ActionRequest::RunCommand { cmd, cwd });
                 self.show_start_dialog = false;
             } else if close {
