@@ -29,6 +29,18 @@ pub const TABLE_PANEL_MIN_HEIGHT: f32 = 80.0;
 pub const DEFAULT_SPLIT_FRAC: f32 = 0.3;
 /// Extra gap before Kill in the agent panel's quick actions.
 pub const KILL_GAP: f32 = 16.0;
+/// Screen lines the Summary tab shows.
+pub const SUMMARY_SCREEN_LINES: usize = 8;
+
+/// The last `n` lines of a terminal screen, trailing blank lines left out.
+pub fn screen_tail(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let end = lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .map_or(0, |i| i + 1);
+    lines[end.saturating_sub(n)..end].join("\n")
+}
 const SPLIT_HANDLE_WIDTH: f32 = 6.0;
 
 /// hcom CLI key -> executable, offered in the Start dialog when on PATH
@@ -908,7 +920,8 @@ impl HcomDashboardApp {
         }
         let agent = row_opt.unwrap().instance;
         match self.state.detail_tab.as_str() {
-            "Screen" => {
+            // Summary shows the last lines of the screen (`screen_tail`).
+            "Screen" | "Summary" => {
                 self.dispatch_action(ActionRequest::Screen {
                     agent,
                     generation: gen_id,
@@ -2103,6 +2116,35 @@ impl HcomDashboardApp {
                 self.confirm_kill_target = Some(agent_name.clone());
             }
         });
+
+        // Last lines of a running instance's screen; the Screen tab has all.
+        let running_instance = self
+            .selected_row()
+            .filter(|r| r.is_running && !r.instance.is_empty())
+            .map(|r| r.instance);
+        if let Some(instance) = running_instance {
+            ui.add_space(8.0);
+            ui.separator();
+            ui.label(RichText::new("Screen:").strong());
+            match &self.screen_content {
+                Some((a, _, text)) if *a == instance => {
+                    egui::ScrollArea::horizontal()
+                        .id_salt("summary_screen_tail")
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(screen_tail(text, SUMMARY_SCREEN_LINES))
+                                        .monospace(),
+                                )
+                                .extend(),
+                            );
+                        });
+                }
+                _ => {
+                    ui.weak(format!("Loading screen for {instance}..."));
+                }
+            }
+        }
 
         // Loaded Transcript View
         if let Some((ref tr_agent, _, ref text)) = self.transcript_content

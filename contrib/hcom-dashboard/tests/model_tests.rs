@@ -11558,3 +11558,59 @@ fn test_task_77_61_selected_node_focus_dims_the_rest() {
     // A neighbour's other edges are not the selected node's edges.
     assert!(dims_edge(Some(n("a")), n("c"), n("b")));
 }
+
+/// Summary shows the last lines of a running instance's screen, without the
+/// trailing blank lines, and loads the screen like the Screen tab (TASK-77.67).
+#[test]
+fn test_task_77_67_summary_shows_the_screen_tail() {
+    use hcom_dashboard::app::{SUMMARY_SCREEN_LINES, screen_tail};
+    use hcom_dashboard::config::DashboardConfig;
+
+    assert_eq!(screen_tail("a\nb\nc\n\n  \n", 2), "b\nc");
+    assert_eq!(screen_tail("a\nb", 5), "a\nb");
+    assert_eq!(screen_tail("\n\n", 3), "");
+
+    let (mut app, recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    app.state.show_side_panel = true;
+    app.select_detail_tab("Summary");
+    app.selected_row_id = Some("inst_alpha_1".into());
+    app.canvas.selected_node = app.graph.get_node_index("inst_alpha_1");
+    app.on_selection_changed();
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    assert!(
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| matches!(r, ActionRequest::Screen { agent, .. } if agent == "inst_alpha_1")),
+        "Summary loads the screen"
+    );
+
+    let screen: Vec<String> = (0..20).map(|i| format!("screen line {i:02}")).collect();
+    app.screen_content = Some((
+        "inst_alpha_1".into(),
+        app.selection_generation,
+        screen.join("\n") + "\n\n",
+    ));
+    let out = run(&mut app, vec![]);
+    let texts: Vec<String> = out
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+            _ => None,
+        })
+        .collect();
+    let all = texts.join("\n");
+    assert!(all.contains("screen line 19"), "last line shown");
+    let first_shown = 20 - SUMMARY_SCREEN_LINES;
+    assert!(all.contains(&format!("screen line {first_shown:02}")));
+    assert!(
+        !all.contains(&format!("screen line {:02}", first_shown - 1)),
+        "only the last {SUMMARY_SCREEN_LINES} lines"
+    );
+}
