@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-07T12:01:00Z'
+updated_date: '2026-11-07T12:08:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -27,3 +28,9 @@ Uživatel: pravý panel Summary pořád nemá posledních několik řádků ze S
 - [ ] #3 Inject v Summary je buď přímo pod náhledem obrazovky, nebo je ze Summary odstraněný (podle rozhodnutí uživatele)
 - [ ] #4 Headless test ověří náhled v Summary
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Rozhodnutí uživatele: Inject zůstane v Summary přímo pod náhledem obrazovky (jako na terminálu), se stejným Enter checkboxem jako ve Screen.
+<!-- SECTION:NOTES:END -->
