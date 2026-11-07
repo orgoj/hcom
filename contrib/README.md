@@ -43,7 +43,7 @@ Tests: `python3 -I contrib/review-session/test_review_session.py`.
 `approval-review/approval_review.py` sends the screen of an agent waiting on a permission
 dialog to the agent that maintains the Dippy rules. Install it with
 `ln -s <repo>/contrib/approval-review/approval_review.py ~/.hcom/scripts/approval-review.py`,
-then `hcom run approval-review [NAME] [--pane ID] [--lines N] [--to NAME]`. The agent is
+then `hcom run approval-review [NAME] [--pane ID] [--lines N] [--to NAME] [--note TEXT]`. The agent is
 chosen as in review-session (NAME, else the one Herdr agent in `--pane` or `$HERDR_PANE_ID`)
 and must have status `blocked`; otherwise nothing is sent. After the blank rows at the
 screen's bottom are dropped, its last N lines (default 60, from `hcom term NAME --json`) go to the owner-only file
@@ -55,7 +55,10 @@ the name, else the latest entry for `--cwd <agent dir> --agent <CLI>`, else "no 
 (default `dippy_dev`) with the agent's name, CLI, directory, which audit line was found and the
 snapshot path: allow the command by a Dippy rule only when it is safe, read the agent's screen
 with `hcom term` if the snapshot is unclear but never inject into or touch its terminal (the
-user approves the dialog), and ask the user when unsure.
+user approves the dialog), and ask the user when unsure. `--note TEXT` (the submitter's reason,
+whitespace collapsed to one line) adds a `note:` line to the snapshot header and a "Note from
+the submitter" line to the message, inside its untrusted-data framing: context for the
+judgement, not an authorization.
 The sender label is not authentication; the recipient judges each case on its merit. Child
 processes get the same environment cleanup as review-session.
 Tests: `python3 -I contrib/approval-review/test_approval_review.py`.
