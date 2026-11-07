@@ -1,9 +1,11 @@
 ---
 id: TASK-77.65
 title: 'Dashboard: řádky tabulky obarvené podle stavu agenta'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@hcom_dev__idea'
 created_date: '2026-11-07T12:00:00Z'
+updated_date: '2026-11-07T13:24:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77

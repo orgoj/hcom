@@ -11614,3 +11614,104 @@ fn test_task_77_67_summary_shows_the_screen_tail() {
         "only the last {SUMMARY_SCREEN_LINES} lines"
     );
 }
+
+/// Table rows take hcom-gui's status colors: text color by row state in
+/// both themes, blocked bold, disabled struck through, the selected row in
+/// the selection text color (TASK-77.65).
+#[test]
+fn test_task_77_65_table_rows_colored_by_state() {
+    use hcom_dashboard::canvas::ThemePalette;
+    use hcom_dashboard::config::{DashboardConfig, ResolvedTheme, ThemePreference};
+    use hcom_dashboard::table_data::{RowState, TableRow};
+
+    let inst = |name: &str, status: &str, idle: &str| TableRow {
+        agent: name.into(),
+        instance: name.into(),
+        is_running: true,
+        status: status.into(),
+        idle: idle.into(),
+        ..Default::default()
+    };
+    let cat = |name: &str, disabled: bool| TableRow {
+        agent: name.into(),
+        is_disabled: disabled,
+        ..Default::default()
+    };
+    let cases = [
+        (inst("r_active", "active", ""), Some(RowState::Active)),
+        (
+            inst("r_blocked", "blocked", "needs_user"),
+            Some(RowState::Blocked),
+        ),
+        (inst("r_error", "error", ""), Some(RowState::Error)),
+        (
+            inst("r_needs", "listening", "needs_user"),
+            Some(RowState::NeedsUser),
+        ),
+        (inst("r_listen", "listening", "done"), None),
+        (cat("r_stopped", false), Some(RowState::Stopped)),
+        (cat("r_disabled", true), Some(RowState::Disabled)),
+    ];
+    for (row, want) in &cases {
+        assert_eq!(row.row_state(), *want, "{}", row.get_cell_value("agent"));
+    }
+
+    for (pref, resolved) in [
+        (ThemePreference::Light, ResolvedTheme::Light),
+        (ThemePreference::Dark, ResolvedTheme::Dark),
+    ] {
+        let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+        app.state.theme = Some(pref);
+        app.state.columns = vec!["agent".into()];
+        app.state.hide_disabled = false;
+        app.state.view_mode = Some(hcom_dashboard::config::ViewMode::TableOnly);
+        app.table_rows = cases.iter().map(|(r, _)| r.clone()).collect();
+        app.sync_graph_from_table_rows();
+        let ctx = egui::Context::default();
+        let mut run = task_77_52_runner(ctx.clone());
+        run(&mut app, vec![]);
+        let out = run(&mut app, vec![]);
+        let format = |name: &str| {
+            out.shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    egui::Shape::Text(t) if t.galley.text() == name => {
+                        Some(t.galley.job.sections[0].format.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{name} cell shown"))
+        };
+        let palette = ThemePalette::for_theme(resolved);
+        for (row, want) in &cases {
+            let name = row.get_cell_value("agent");
+            let f = format(&name);
+            match want {
+                Some(s) => assert_eq!(f.color, palette.row_state_color(*s), "{name} {resolved:?}"),
+                None => assert_ne!(f.color, palette.row_state_color(RowState::Active)),
+            }
+            assert_eq!(
+                f.strikethrough.width > 0.0,
+                *want == Some(RowState::Disabled),
+                "{name} strikethrough"
+            );
+        }
+        // The selected row keeps the selection text color.
+        app.selected_row_id = Some("r_active".into()); // instance id
+        let out = run(&mut app, vec![]);
+        let colors: Vec<_> = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == "r_active" => {
+                    Some(t.galley.job.sections[0].format.color)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            colors.contains(&ctx.global_style().visuals.selection.stroke.color),
+            "{colors:?}"
+        );
+    }
+}

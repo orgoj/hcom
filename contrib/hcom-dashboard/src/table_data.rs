@@ -394,6 +394,16 @@ pub const REPORT_FIELDS: &[&str] = &[
     "failed",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowState {
+    Active,
+    Blocked,
+    NeedsUser,
+    Error,
+    Stopped,
+    Disabled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TableRow {
     pub agent: String,
@@ -495,6 +505,28 @@ impl TableRow {
             model: String::new(),
             reasoning: String::new(),
             catalog: None,
+        }
+    }
+
+    /// The text color class of the row, as contrib/hcom-gui tags it: a
+    /// running instance by its status (active, blocked, error), else
+    /// needs_user from the Idle column, else a disabled or stopped catalog
+    /// agent; other running rows keep the default color.
+    pub fn row_state(&self) -> Option<RowState> {
+        match self.status.as_str() {
+            "active" => return Some(RowState::Active),
+            "blocked" => return Some(RowState::Blocked),
+            "error" => return Some(RowState::Error),
+            _ => {}
+        }
+        if self.idle == "needs_user" {
+            Some(RowState::NeedsUser)
+        } else if self.is_disabled {
+            Some(RowState::Disabled)
+        } else if self.instance.is_empty() && self.status.is_empty() {
+            Some(RowState::Stopped)
+        } else {
+            None
         }
     }
 

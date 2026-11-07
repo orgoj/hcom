@@ -142,6 +142,30 @@ impl ThemePalette {
         }
     }
 
+    /// Table row text color, contrib/hcom-gui's tag colors on a light
+    /// background, lighter shades of the same hues on a dark one.
+    pub fn row_state_color(&self, state: crate::table_data::RowState) -> Color32 {
+        use crate::table_data::RowState::*;
+        match self.resolved {
+            ResolvedTheme::Dark => match state {
+                Active => Color32::from_rgb(0x4A, 0xDE, 0x80),
+                Blocked => Color32::from_rgb(0xF5, 0x9E, 0x0B),
+                NeedsUser => Color32::from_rgb(0x60, 0xA5, 0xFA),
+                Error => Color32::from_rgb(0xF8, 0x71, 0x71),
+                Stopped => Color32::from_rgb(0x88, 0x88, 0x88),
+                Disabled => Color32::from_rgb(0x66, 0x66, 0x66),
+            },
+            ResolvedTheme::Light => match state {
+                Active => Color32::from_rgb(0x1A, 0x7F, 0x37),
+                Blocked => Color32::from_rgb(0xD9, 0x77, 0x06),
+                NeedsUser => Color32::from_rgb(0x25, 0x63, 0xEB),
+                Error => Color32::from_rgb(0xFF, 0x00, 0x00),
+                Stopped => Color32::from_rgb(0x88, 0x88, 0x88),
+                Disabled => Color32::from_rgb(0xAA, 0xAA, 0xAA),
+            },
+        }
+    }
+
     pub fn cli_color(&self, tool: Option<&str>) -> Color32 {
         let t = tool.map(|s| s.to_ascii_lowercase());
         match self.resolved {

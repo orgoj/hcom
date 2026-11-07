@@ -13,7 +13,7 @@ use crate::model::{
 };
 use crate::sync::BackgroundSync;
 use crate::table_data::{
-    DEFAULT_COLUMNS, REPORT_FIELDS, TableRow, filter_row, sort_rows, tooltip_lines,
+    DEFAULT_COLUMNS, REPORT_FIELDS, RowState, TableRow, filter_row, sort_rows, tooltip_lines,
 };
 use egui::{Color32, RichText};
 use petgraph::stable_graph::{EdgeIndex, NodeIndex};
@@ -1342,13 +1342,26 @@ impl HcomDashboardApp {
                         ui.end_row();
 
                         // Rows: plain truncated labels; the band is the row color.
+                        // Text colored by the row state like contrib/hcom-gui;
+                        // the selected row keeps the selection text color.
                         let selected_text = ui.visuals().selection.stroke.color;
+                        let palette = ThemePalette::for_theme(if ui.visuals().dark_mode {
+                            ResolvedTheme::Dark
+                        } else {
+                            ResolvedTheme::Light
+                        });
                         for (i, row) in rows.iter().enumerate() {
                             let mut span = egui::Rangef::NOTHING;
+                            let state = row.row_state();
                             for col in &columns {
                                 let mut text = RichText::new(row.get_cell_value(col));
                                 if Some(i) == selected_row {
                                     text = text.color(selected_text);
+                                } else if let Some(s) = state {
+                                    text = text.color(palette.row_state_color(s));
+                                }
+                                if state == Some(RowState::Disabled) {
+                                    text = text.strikethrough();
                                 }
                                 let resp = ui.add(
                                     egui::Label::new(text)
