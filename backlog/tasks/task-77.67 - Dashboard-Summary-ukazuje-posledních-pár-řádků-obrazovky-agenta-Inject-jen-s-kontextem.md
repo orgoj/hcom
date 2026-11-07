@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-07T12:01:00Z'
-updated_date: '2026-11-07T12:08:00Z'
+updated_date: '2026-11-07T12:11:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -25,7 +25,7 @@ Uživatel: pravý panel Summary pořád nemá posledních několik řádků ze S
 <!-- AC:BEGIN -->
 - [ ] #1 Summary běžící instance ukazuje posledních několik řádků obrazovky (hcom term), obnovovaných jako záložka Screen
 - [ ] #2 Instance bez obrazovky (stopped, bez PTY) ukáže místo náhledu krátkou poznámku nebo nic
-- [ ] #3 Inject v Summary je buď přímo pod náhledem obrazovky, nebo je ze Summary odstraněný (podle rozhodnutí uživatele)
+- [x] #3 Inject v Summary je buď přímo pod náhledem obrazovky, nebo je ze Summary odstraněný (podle rozhodnutí uživatele)
 - [ ] #4 Headless test ověří náhled v Summary
 <!-- AC:END -->
 
@@ -33,4 +33,6 @@ Uživatel: pravý panel Summary pořád nemá posledních několik řádků ze S
 
 <!-- SECTION:NOTES:BEGIN -->
 Rozhodnutí uživatele: Inject zůstane v Summary přímo pod náhledem obrazovky (jako na terminálu), se stejným Enter checkboxem jako ve Screen.
+
+Rozhodnutí uživatele změněno: nekomplikovat, Inject zůstává jen na záložce Screen, ze Summary odstraněn (commit s tímto záznamem). Test test_table_arrow_keys_select_rows_in_shown_order dřív omylem klikal do prázdného Inject pole v Summary místo vyhledávacího pole (to bylo při šířce 1000 px mimo okno); teď běží na 1600 px a hledá pole podle textu '_keep'. Otevřené: zda Summary má mít náhled posledních řádků obrazovky (AC #1, #2, #4).
 <!-- SECTION:NOTES:END -->

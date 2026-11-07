@@ -6305,7 +6305,7 @@ fn test_table_arrow_keys_select_rows_in_shown_order() {
     app.search_query = "_keep".into();
 
     let ctx = egui::Context::default();
-    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 700.0));
     let mut frame = eframe::Frame::_new_kittest();
     let mut time = 0.0;
     let mut run = |app: &mut HcomDashboardApp, events: Vec<egui::Event>| {
@@ -6374,7 +6374,7 @@ fn test_table_arrow_keys_select_rows_in_shown_order() {
         .shapes
         .iter()
         .find_map(|c| match &c.shape {
-            egui::Shape::Text(t) if t.galley.text().is_empty() || t.galley.text() == "_keep" => {
+            egui::Shape::Text(t) if t.galley.text() == "_keep" => {
                 Some(Rect::from_min_size(t.pos, t.galley.size()))
             }
             _ => None,

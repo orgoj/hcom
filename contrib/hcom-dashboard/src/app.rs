@@ -280,7 +280,6 @@ pub struct HcomDashboardApp {
     pub confirm_restart_target: Option<(String, Vec<String>)>,
     pub confirm_kill_group: Option<Vec<String>>,
     pub custom_cmd_confirm: Option<(String, Vec<String>, Option<String>)>,
-    pub inject_input: String,
     pub loaded_transcript: Option<(String, String)>,
     pub context_menu: Option<ContextMenuState>,
     pub context_menu_opened_this_frame: bool,
@@ -534,7 +533,6 @@ impl HcomDashboardApp {
             confirm_restart_target: None,
             confirm_kill_group: None,
             custom_cmd_confirm: None,
-            inject_input: String::new(),
             loaded_transcript: None,
             context_menu: None,
             context_menu_opened_this_frame: false,
@@ -645,7 +643,6 @@ impl HcomDashboardApp {
             check_saved_view: false,
             fit_requested: false,
             canvas_rect: egui::Rect::NOTHING,
-            inject_input: String::new(),
             loaded_transcript: None,
             hcom_dir,
             config,
@@ -2107,20 +2104,6 @@ impl HcomDashboardApp {
             }
         });
 
-        // Inject field
-        ui.add_space(6.0);
-        ui.label(RichText::new("Inject Prompt/Command:").strong());
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.inject_input);
-            if ui.button("Inject").clicked() && !self.inject_input.trim().is_empty() {
-                self.dispatch_action(ActionRequest::Inject {
-                    agent: agent_name.clone(),
-                    text: self.inject_input.clone(),
-                    enter: true,
-                });
-            }
-        });
-
         // Loaded Transcript View
         if let Some((ref tr_agent, _, ref text)) = self.transcript_content
             && tr_agent == &agent_name
@@ -3206,7 +3189,6 @@ impl eframe::App for HcomDashboardApp {
                     }
                     ActionResult::InjectFinished { agent, result } => match result {
                         Ok(()) => {
-                            self.inject_input.clear();
                             self.screen_inject_text.clear();
                             self.command_logs
                                 .push(format!("[OK] Injected to {}", agent));
