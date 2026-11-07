@@ -1,9 +1,11 @@
 ---
 id: TASK-77.82
 title: 'Dashboard: dialog Resume/Fork s pojmenovaným tlačítkem a náhledem příkazu'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@hcom_dev__idea'
 created_date: '2026-11-07T15:58:00Z'
+updated_date: '2026-11-07T16:44:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -20,6 +22,12 @@ UX review 2026-11-07 (F6, A8, Q4 potvrzeno). Dialogy Resume/Fork končí obecný
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Primární tlačítko dialogu zní Resume (u Fork: Fork) a náhled ukazuje hcom r <id> / hcom f <id>; --dir … se objeví až po změně dir
-- [ ] #2 Dialog ukazuje jednořádkovou nápovědu rozlišující Resume a Fork
+- [x] #1 Primární tlačítko dialogu zní Resume (u Fork: Fork) a náhled ukazuje hcom r <id> / hcom f <id>; --dir … se objeví až po změně dir
+- [x] #2 Dialog ukazuje jednořádkovou nápovědu rozlišující Resume a Fork
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Resume/Fork dialog: primary button named Resume/Fork (Start keeps OK), one-line hint (session_dialog_hint), live weak monospace preview (command_preview: prompt as "…", --dir only after a change), buttons right-aligned with primary before Cancel in the Tab order. README updated. Test test_task_77_82_session_dialog_button_hint_preview (never presses the primary button); gates green; agent_review OK.
+<!-- SECTION:FINAL_SUMMARY:END -->

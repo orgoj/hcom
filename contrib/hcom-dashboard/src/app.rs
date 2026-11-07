@@ -525,6 +525,26 @@ where
     format!("{start_text} – {end_text}")
 }
 
+/// One-line hint of the Resume (`r`) or Fork (`f`) dialog (TASK-77.82).
+pub fn session_dialog_hint(sub: &str) -> &'static str {
+    if sub == "r" {
+        "Continues this session in a new terminal."
+    } else {
+        "Starts a new session from this one; the original stays."
+    }
+}
+
+/// Command line shown in a dialog, the prompt replaced by `"…"`.
+pub fn command_preview(cmd: &[String]) -> String {
+    let mut out: Vec<&str> = Vec::with_capacity(cmd.len());
+    let mut prompt = false;
+    for arg in cmd {
+        out.push(if prompt { "\"…\"" } else { arg });
+        prompt = arg == "--hcom-prompt";
+    }
+    out.join(" ")
+}
+
 /// Session interval in whole minutes: start rounded down, end rounded up
 /// (at least one minute), so the window covers the whole session and the
 /// card shows the same minutes as the window (TASK-77.79).
@@ -4980,6 +5000,9 @@ impl eframe::App for HcomDashboardApp {
                 None => format!("Start {agent}"),
             };
             let (_, escape) = show_modal(&ctx, &title, |ui| {
+                if let Some((sub, _)) = &session {
+                    ui.weak(session_dialog_hint(sub));
+                }
                 egui::Grid::new("start_dialog_grid")
                     .num_columns(2)
                     .spacing([8.0, 6.0])
@@ -5094,12 +5117,32 @@ impl eframe::App for HcomDashboardApp {
                         }
                         ui.end_row();
                     });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Read-only preview of what Resume/Fork runs, live.
+                if session.is_some() {
+                    ui.label(
+                        RichText::new(command_preview(&self.start_command()))
+                            .monospace()
+                            .weak(),
+                    );
+                }
+                // Right-aligned, primary before Cancel in the Tab order.
+                let primary = match &session {
+                    Some((sub, _)) if *sub == "r" => "Resume",
+                    Some(_) => "Fork",
+                    None => "OK",
+                };
+                let button_w = |ui: &egui::Ui, t: &str| {
+                    body_text_width(ui, t) + 2.0 * ui.spacing().button_padding.x
+                };
+                let buttons_w =
+                    button_w(ui, primary) + button_w(ui, "Cancel") + ui.spacing().item_spacing.x;
+                ui.horizontal(|ui| {
+                    ui.add_space((ui.available_width() - buttons_w).max(0.0));
+                    if ui.button(primary).clicked() {
+                        launch = true;
+                    }
                     if ui.button("Cancel").clicked() {
                         close = true;
-                    }
-                    if ui.button("OK").clicked() {
-                        launch = true;
                     }
                 });
             });

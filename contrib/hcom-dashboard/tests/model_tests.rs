@@ -12718,6 +12718,106 @@ fn test_task_77_69_resume_and_fork_availability() {
     }
 }
 
+/// The Resume/Fork dialog names its primary button after the action, shows a
+/// one-line hint and a live command preview (`--dir` only after a change,
+/// the prompt as `"…"`); Tab goes prompt → primary → Cancel (TASK-77.82).
+#[test]
+fn test_task_77_82_session_dialog_button_hint_preview() {
+    use hcom_dashboard::config::DashboardConfig;
+    use hcom_dashboard::sessions::SessionInfo;
+
+    let (mut app, recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut run = task_77_52_runner(ctx.clone());
+    run(&mut app, vec![]);
+    let session = SessionInfo {
+        session_id: "sid-new".into(),
+        directory: "/work/beta".into(),
+        ..Default::default()
+    };
+    let texts = |out: &egui::FullOutput| -> Vec<String> {
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect()
+    };
+    let focused = |out: &egui::FullOutput| -> Option<String> {
+        let update = out.platform_output.accesskit_update.as_ref()?;
+        update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == update.focus)
+            .and_then(|(_, n)| n.label().map(str::to_string))
+    };
+
+    app.open_session_dialog("cat_beta", "r", &session);
+    run(&mut app, vec![]);
+    let out = run(&mut app, vec![]);
+    let t = texts(&out);
+    for s in [
+        "Continues this session in a new terminal.",
+        "hcom r sid-new",
+        "Resume",
+        "Cancel",
+    ] {
+        assert!(t.iter().any(|x| x == s), "{s} in {t:?}");
+    }
+    assert!(!t.iter().any(|x| x == "OK"), "{t:?}");
+    // Live preview: dir after a change, prompt hidden.
+    app.start_prompt = "secret text".into();
+    let out = run(&mut app, vec![]);
+    assert!(
+        texts(&out)
+            .iter()
+            .any(|x| x == "hcom r sid-new --hcom-prompt \"…\"")
+    );
+    app.start_dir = "/elsewhere".into();
+    let out = run(&mut app, vec![]);
+    assert!(
+        texts(&out)
+            .iter()
+            .any(|x| x == "hcom r sid-new --dir /elsewhere --hcom-prompt \"…\"")
+    );
+    // Tab order from the prompt: primary, then Cancel.
+    let tab = || task_77_52_key(egui::Key::Tab, egui::Modifiers::NONE);
+    run(&mut app, vec![tab()]);
+    let out = run(&mut app, vec![]);
+    assert_eq!(focused(&out).as_deref(), Some("Resume"));
+    run(&mut app, vec![tab()]);
+    let out = run(&mut app, vec![]);
+    assert_eq!(focused(&out).as_deref(), Some("Cancel"));
+    // Escape cancels without running anything.
+    run(
+        &mut app,
+        vec![task_77_52_key(egui::Key::Escape, egui::Modifiers::NONE)],
+    );
+    run(&mut app, vec![]);
+    assert!(!app.show_start_dialog);
+    assert!(
+        !recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| matches!(r, ActionRequest::RunCommand { .. }))
+    );
+
+    app.open_session_dialog("cat_beta", "f", &session);
+    run(&mut app, vec![]);
+    let out = run(&mut app, vec![]);
+    let t = texts(&out);
+    for s in [
+        "Starts a new session from this one; the original stays.",
+        "hcom f sid-new",
+        "Fork",
+    ] {
+        assert!(t.iter().any(|x| x == s), "{s} in {t:?}");
+    }
+}
+
 /// The Sessions tab lists the window's sessions of a stopped agent; Resume
 /// and Fork open the Start dialog for `hcom r|f <session id>` (dir only when
 /// changed, prompt when set); Transcript shows the session file.
