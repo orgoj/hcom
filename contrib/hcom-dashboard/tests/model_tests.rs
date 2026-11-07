@@ -13196,6 +13196,179 @@ fn test_task_77_73_show_session_in_graph() {
     assert!((600..=662).contains(&span_secs.unwrap()), "{span_secs:?}");
 }
 
+/// Compact session card at a 600 px detail panel: title or `session <id8>`
+/// first, one line per part (plus one per handoff link), directory with `~`;
+/// a handoff link scrolls to the other card and highlights it (TASK-77.81).
+#[test]
+fn test_task_77_81_compact_card_and_handoff_link() {
+    use hcom_dashboard::config::DashboardConfig;
+    use hcom_dashboard::model::MessageRange;
+    use hcom_dashboard::sessions::{Partner, SessionInfo};
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    app.state.detail_width_px = Some(600.0);
+    app.home_dir = Some("/home/u".into());
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut run = task_77_52_runner(ctx.clone());
+    let now_s = chrono::Utc::now().timestamp() as u64;
+    let row = app
+        .table_rows
+        .iter()
+        .find(|r| r.agent == "cat_beta")
+        .unwrap()
+        .clone();
+    app.select_table_row(&row);
+    app.select_detail_tab("Sessions");
+    run(&mut app, vec![]);
+    let id = |i: u64| format!("s{i:07}-rest-of-id");
+    let mut sessions: Vec<SessionInfo> = (0..12u64)
+        .map(|i| SessionInfo {
+            start_ts: now_s - (i + 1) * 7200,
+            end_ts: Some(now_s - (i + 1) * 7200 + 2820),
+            launcher: "wdt_mp2".into(),
+            end_reason: "killed (cli)".into(),
+            session_id: id(i),
+            tool: "claude".into(),
+            transcript_size: Some(615 * 1024),
+            directory: "/home/u/work/wdt/ansible-wdt".into(),
+            partners: vec![Partner {
+                name: "knowledge".into(),
+                sent: 1,
+                received: 1,
+            }],
+            ..Default::default()
+        })
+        .collect();
+    sessions[0].title = "OpenResty pilot na Cyrilu".into();
+    sessions[0].handoff_from = id(9);
+    sessions[9].handoff_to = id(0);
+    app.sessions_content = Some((
+        "cat_beta".into(),
+        app.selection_generation,
+        Ok(sessions.clone()),
+    ));
+    app.apply_message_range(MessageRange::Live { span_secs: None }, chrono::Utc::now())
+        .unwrap();
+    run(&mut app, vec![]);
+    let out = run(&mut app, vec![]);
+    let texts = |out: &egui::FullOutput| -> Vec<(String, Rect, usize)> {
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some((
+                    t.galley.text().to_string(),
+                    t.galley.rect.translate(t.pos.to_vec2()),
+                    t.galley.rows.len(),
+                )),
+                _ => None,
+            })
+            .collect()
+    };
+    let all = texts(&out);
+    let find = |all: &[(String, Rect, usize)], s: &str| {
+        all.iter()
+            .find(|(t, _, _)| t == s)
+            .cloned()
+            .unwrap_or_else(|| panic!("{s:?} not in {all:?}"))
+    };
+    // Card lines between the title and the buttons, each on one row.
+    let resumes = widget_rects(&out, "Resume");
+    let card_lines = |title: &str, resume_top: f32| {
+        let title_rect = find(&all, title).1;
+        let top = title_rect.top();
+        let mut rows: Vec<f32> = all
+            .iter()
+            .filter(|(_, r, _)| {
+                r.top() >= top - 1.0
+                    && r.top() < resume_top - 1.0
+                    && r.left() >= title_rect.left() - 1.0
+            })
+            .map(|(_, r, n)| {
+                assert_eq!(*n, 1, "{title}");
+                r.center().y.round()
+            })
+            .collect();
+        rows.dedup();
+        rows.len()
+    };
+    // Title, meta, handoff link, directory, partners.
+    assert_eq!(
+        card_lines("OpenResty pilot na Cyrilu", resumes[0].0.top()),
+        5
+    );
+    // Fallback title, meta, directory, partners.
+    assert_eq!(card_lines("session s0000001", resumes[1].0.top()), 4);
+    find(&all, "ended · 47m");
+    let start = |i: usize| {
+        chrono::DateTime::from_timestamp(session_minutes_start(&sessions[i]) as i64, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+    };
+    let meta1 = format!(
+        "{} – {} · launched by wdt_mp2 · ended killed (cli) · claude · 615 KB",
+        start(1).format("%m-%d %H:%M"),
+        chrono::DateTime::from_timestamp(
+            hcom_dashboard::app::session_minutes(&sessions[1])
+                .1
+                .unwrap() as i64,
+            0
+        )
+        .unwrap()
+        .with_timezone(&chrono::Local)
+        .format("%H:%M")
+    );
+    find(&all, &meta1);
+    find(&all, "~/work/wdt/ansible-wdt");
+    assert!(
+        all.iter()
+            .any(|(t, _, _)| t.ends_with(" · s0000000") && t.contains("launched by")),
+        "titled card ends its meta line with the id"
+    );
+
+    // The handoff link scrolls to session 9 and highlights it.
+    assert!(
+        !all.iter()
+            .any(|(t, _, _)| t == "handed off to session s0000000 ↗"),
+        "session 9 starts out of view"
+    );
+    let link = find(&all, "continues from session s0000009 ↗").1.center();
+    run(&mut app, vec![egui::Event::PointerMoved(link)]);
+    for pressed in [true, false] {
+        run(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos: link,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+    assert_eq!(app.sessions_jump.as_ref().map(|j| j.0.clone()), Some(id(9)));
+    let mut out = run(&mut app, vec![]);
+    for _ in 0..15 {
+        out = run(&mut app, vec![]);
+    }
+    let all = texts(&out);
+    find(&all, "handed off to session s0000000 ↗");
+    assert!(app.sessions_scroll_y > 0.0);
+    // Still highlighted (0.8 s after the click), with no further scroll pending.
+    assert_eq!(
+        app.sessions_jump.as_ref().map(|j| (j.0.clone(), j.2)),
+        Some((id(9), false))
+    );
+    // The highlight ends after 1.5 s.
+    for _ in 0..40 {
+        run(&mut app, vec![]);
+    }
+    assert!(app.sessions_jump.is_none());
+}
+
+fn session_minutes_start(s: &hcom_dashboard::sessions::SessionInfo) -> u64 {
+    hcom_dashboard::app::session_minutes(s).0
+}
+
 /// The session card, the window text field and the Range header show the
 /// same local minutes after Show in graph; the Range tooltip has UTC
 /// (TASK-77.79).
@@ -13279,7 +13452,7 @@ fn test_task_77_79_session_card_and_window_share_local_minutes() {
             _ => None,
         })
         .collect();
-    let card = format!("{} – {}", local(s, "%m-%d %H:%M"), local(e, "%m-%d %H:%M"));
+    let card = format!("{} – {}", local(s, "%m-%d %H:%M"), local(e, "%H:%M"));
     assert!(
         texts.iter().any(|t| t.starts_with(&card)),
         "{card} {texts:?}"

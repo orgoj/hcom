@@ -361,6 +361,9 @@ pub struct HcomDashboardApp {
     /// Sessions list scroll offset of the last frame, and one to apply.
     pub sessions_scroll_y: f32,
     pub sessions_scroll_to: Option<f32>,
+    /// Handoff link target: session id, highlight end (egui time) and
+    /// whether its card still has to be scrolled into view (TASK-77.81).
+    pub sessions_jump: Option<(String, f64, bool)>,
     pub command_logs: Vec<String>,
     /// Log lines already checked for a new error, and whether one arrived
     /// while another tab was open: a red dot on the Log tab (TASK-77.64).
@@ -703,6 +706,7 @@ impl HcomDashboardApp {
             graph_restore: None,
             sessions_scroll_y: 0.0,
             sessions_scroll_to: None,
+            sessions_jump: None,
             command_logs: Vec::new(),
             log_checked: 0,
             log_error_mark: false,
@@ -816,6 +820,7 @@ impl HcomDashboardApp {
             graph_restore: None,
             sessions_scroll_y: 0.0,
             sessions_scroll_to: None,
+            sessions_jump: None,
             command_logs: Vec::new(),
             log_checked: 0,
             log_error_mark: false,
@@ -2576,6 +2581,12 @@ impl HcomDashboardApp {
         } else if let Some(y) = self.sessions_scroll_to.take() {
             area = area.vertical_scroll_offset(y);
         }
+        let listed: std::collections::HashSet<&str> =
+            shown.iter().map(|s| s.session_id.as_str()).collect();
+        let home = self.home_dir.clone();
+        let time = ui.input(|i| i.time);
+        let mut jump = self.sessions_jump.take();
+        let mut new_jump: Option<String> = None;
         let scroll = area.show(ui, |ui| {
             for (i, s) in shown.iter().enumerate() {
                 ui.push_id(i, |ui| {
@@ -2590,57 +2601,100 @@ impl HcomDashboardApp {
                             .fill(ui.visuals().selection.bg_fill.gamma_multiply(0.35))
                             .inner_margin(4.0);
                     }
-                    card.show(ui, |ui| {
+                    // A handoff link target flashes for a moment.
+                    if jump
+                        .as_ref()
+                        .is_some_and(|(id, until, _)| *id == s.session_id && time < *until)
+                    {
+                        card = card
+                            .fill(ui.visuals().selection.bg_fill.gamma_multiply(0.7))
+                            .inner_margin(4.0);
+                    }
+                    let card_resp = card.show(ui, |ui| {
                         let fmt = |ts: u64, f: &str| {
                             chrono::DateTime::from_timestamp(ts as i64, 0)
                                 .map(|d| d.with_timezone(&chrono::Local).format(f).to_string())
                                 .unwrap_or_default()
                         };
-                        // Same minutes as the window Show in graph sets.
-                        let (start_min, end_min) = session_minutes(s);
-                        let until = match end_min {
-                            Some(e) => fmt(e, "%m-%d %H:%M"),
-                            None => "running".into(),
-                        };
+                        let short = |id: &str| id.chars().take(8).collect::<String>();
+                        // Line 1: title (or `session <id8>`), state and duration.
                         let duration = crate::table_data::format_age(
                             s.end_ts.unwrap_or(now).saturating_sub(s.start_ts),
                         );
-                        if !s.title.is_empty() {
-                            ui.label(RichText::new(&s.title).strong());
-                        }
-                        ui.label(
-                            RichText::new(format!(
-                                "{} – {}  ({})",
-                                fmt(start_min, "%m-%d %H:%M"),
-                                until,
-                                duration
-                            ))
-                            .strong(),
-                        );
-                        ui.label(format!("launched by: {}", s.launcher));
+                        let state = if s.end_ts.is_some() {
+                            "ended"
+                        } else {
+                            "running"
+                        };
+                        ui.horizontal(|ui| {
+                            if s.title.is_empty() {
+                                ui.weak(format!("session {}", short(&s.session_id)));
+                            } else {
+                                ui.label(RichText::new(&s.title).strong());
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(format!("{state} · {duration}"));
+                                },
+                            );
+                        });
+                        // Line 2: time, launcher, end reason, tool, size, id.
+                        // Same minutes as the window Show in graph sets.
+                        let (start_min, end_min) = session_minutes(s);
+                        let until = match end_min {
+                            Some(e) if fmt(e, "%m-%d") == fmt(start_min, "%m-%d") => {
+                                fmt(e, "%H:%M")
+                            }
+                            Some(e) => fmt(e, "%m-%d %H:%M"),
+                            None => "running".into(),
+                        };
+                        let mut meta = vec![
+                            format!("{} – {until}", fmt(start_min, "%m-%d %H:%M")),
+                            format!("launched by {}", s.launcher),
+                        ];
                         if !s.end_reason.is_empty() {
-                            ui.label(format!("ended: {}", s.end_reason));
+                            meta.push(format!("ended {}", s.end_reason));
                         }
-                        let short = |id: &str| id.chars().take(8).collect::<String>();
-                        if !s.handoff_from.is_empty() {
-                            ui.label(format!("continues from session {}", short(&s.handoff_from)));
+                        if !s.tool.is_empty() {
+                            meta.push(s.tool.clone());
                         }
-                        if !s.handoff_to.is_empty() {
-                            ui.label(format!("handed off to session {}", short(&s.handoff_to)));
+                        meta.push(
+                            s.transcript_size
+                                .map(crate::sessions::format_size)
+                                .unwrap_or_else(|| "transcript missing".into()),
+                        );
+                        if !s.title.is_empty() && !s.session_id.is_empty() {
+                            meta.push(short(&s.session_id));
                         }
-                        let size = s
-                            .transcript_size
-                            .map(crate::sessions::format_size)
-                            .unwrap_or_else(|| "transcript missing".into());
-                        let sid: String = s.session_id.chars().take(8).collect();
-                        ui.label(format!(
-                            "{} · {} · session {}",
-                            if s.tool.is_empty() { "?" } else { &s.tool },
-                            size,
-                            if sid.is_empty() { "-" } else { &sid }
-                        ));
+                        ui.label(meta.join(" · "));
+                        // Handoff chain: a link when the other card is listed.
+                        for (text, other) in [
+                            ("continues from session", &s.handoff_from),
+                            ("handed off to session", &s.handoff_to),
+                        ] {
+                            if other.is_empty() {
+                                continue;
+                            }
+                            let text = format!("{text} {}", short(other));
+                            if listed.contains(other.as_str()) {
+                                if ui
+                                    .link(format!("{text} ↗"))
+                                    .on_hover_text("Scroll to that session")
+                                    .clicked()
+                                {
+                                    new_jump = Some(other.clone());
+                                }
+                            } else {
+                                ui.label(text);
+                            }
+                        }
                         if !s.directory.is_empty() {
-                            ui.weak(&s.directory);
+                            ui.weak(crate::table_data::shorten_path(
+                                &s.directory,
+                                home.as_deref(),
+                                usize::MAX,
+                            ));
                         }
                         let partners = if s.partners.is_empty() {
                             "none".to_string()
@@ -2683,10 +2737,29 @@ impl HcomDashboardApp {
                             }
                         });
                     });
+                    if let Some((id, _, scroll)) = jump.as_mut()
+                        && *scroll
+                        && *id == s.session_id
+                    {
+                        ui.scroll_to_rect(card_resp.response.rect, Some(egui::Align::TOP));
+                        *scroll = false;
+                    }
                 });
             }
         });
         self.sessions_scroll_y = scroll.state.clamped_offset().y;
+        if let Some(id) = new_jump {
+            jump = Some((id, time + 1.5, true));
+        }
+        if let Some((_, until, _)) = &jump {
+            if time < *until {
+                ui.ctx()
+                    .request_repaint_after(Duration::from_secs_f64(*until - time));
+            } else {
+                jump = None;
+            }
+        }
+        self.sessions_jump = jump;
         match action {
             Some(("t", s)) => self.show_session_transcript(&agent, &s.transcript_path),
             Some(("g", s)) => self.show_session_in_graph(&s),
