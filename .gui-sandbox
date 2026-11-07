@@ -4,6 +4,12 @@ rw ~/.hcom
 ro ~/.claude/projects
 ro ~/.codex/sessions
 ro ~/.gemini/antigravity-cli
+# Catalogs imported by ~/.hcom/agents.json, read-only (a missing import fails the fetch).
+ro ~/work/ai/PROJECTS/cca/.hcom
+ro ~/work/wdt/ansible-wdt/.hcom
+ro ~/work/contimex/ansible-contimex/.hcom
+ro ~/work/proweb/ansible-proweb/.hcom
+ro ~/work/heca/cca-heca/.hcom
 pid host
 path ~/projects/hcom/target/release
 res 1280x900
