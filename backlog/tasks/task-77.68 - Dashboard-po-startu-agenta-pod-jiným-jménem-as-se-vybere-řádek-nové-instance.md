@@ -3,9 +3,11 @@ id: TASK-77.68
 title: >-
   Dashboard: po startu agenta pod jiným jménem (--as) se vybere řádek nové
   instance
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@hcom_dev__idea'
 created_date: '2026-11-07T13:22:00Z'
+updated_date: '2026-11-07T13:30:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
