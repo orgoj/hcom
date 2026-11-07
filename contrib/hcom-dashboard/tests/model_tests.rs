@@ -11715,3 +11715,138 @@ fn test_task_77_65_table_rows_colored_by_state() {
         );
     }
 }
+
+/// The table header stays at the top of the table while the rows scroll
+/// vertically, moves with the columns when they scroll horizontally, and
+/// still sorts on a click (TASK-77.66).
+#[test]
+fn test_task_77_66_table_header_stays_on_top_while_scrolling() {
+    use hcom_dashboard::config::DashboardConfig;
+    use hcom_dashboard::table_data::TableRow;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    app.state.columns = ["instance", "detail", "dir", "branch", "model", "cli"]
+        .map(String::from)
+        .to_vec();
+    app.state.sort_col = Some("instance".into());
+    app.state.view_mode = Some(hcom_dashboard::config::ViewMode::TableOnly);
+    app.table_rows = (0..60)
+        .map(|i| TableRow {
+            agent: "a".into(),
+            instance: format!("w{i:02}"),
+            is_running: true,
+            status: "listening".into(),
+            detail: "d".repeat(80),
+            directory: "p".repeat(80),
+            branch: "b".repeat(80),
+            model: "m".repeat(80),
+            cli: "c".repeat(80),
+            ..Default::default()
+        })
+        .collect();
+    app.sync_graph_from_table_rows();
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    let texts = |out: &egui::FullOutput| -> Vec<(String, Pos2)> {
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some((t.galley.text().to_string(), t.pos)),
+                _ => None,
+            })
+            .collect()
+    };
+    let find = |all: &[(String, Pos2)], pred: &dyn Fn(&str) -> bool| {
+        all.iter()
+            .filter(|(s, _)| pred(s))
+            .map(|(_, p)| *p)
+            .collect::<Vec<_>>()
+    };
+    let out = run(&mut app, vec![]);
+    let before = texts(&out);
+    let header0 = find(&before, &|s| s == "detail")[0];
+    assert!(
+        !find(&before, &|s| s == "w00").is_empty(),
+        "first row shown"
+    );
+
+    let wheel = |delta: Vec2, pos: Pos2| {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta,
+                modifiers: egui::Modifiers::NONE,
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Wheel,
+            },
+        ]
+    };
+    let at = app.table_row_bands[3].center();
+    run(&mut app, wheel(Vec2::new(0.0, -400.0), at));
+    for _ in 0..30 {
+        run(&mut app, vec![]);
+    }
+    let out = run(&mut app, vec![]);
+    let scrolled = texts(&out);
+    assert!(find(&scrolled, &|s| s == "w00").is_empty(), "rows scrolled");
+    let header = find(&scrolled, &|s| s == "detail");
+    assert_eq!(header.len(), 1, "one header: {header:?}");
+    assert!(
+        (header[0].y - header0.y).abs() < 1.0 && (header[0].x - header0.x).abs() < 1.0,
+        "header pinned at {header0:?}, got {header:?}"
+    );
+    // The header is painted after (over) the rows it covers.
+    let index = |pred: &dyn Fn(&str) -> bool| {
+        out.shapes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| match &c.shape {
+                egui::Shape::Text(t) if pred(t.galley.text()) => Some(i),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let last_cell = *index(&|s| s.len() == 3 && s.starts_with('w'))
+        .last()
+        .unwrap();
+    assert!(
+        index(&|s| s == "detail")[0] > last_cell,
+        "header over the rows"
+    );
+
+    // Horizontal scroll moves header and cells of a column together.
+    let cell = |all: &[(String, Pos2)]| find(all, &|s| s.starts_with("ppp"))[0].x;
+    let gap = find(&scrolled, &|s| s == "dir")[0].x - cell(&scrolled);
+    run(&mut app, wheel(Vec2::new(-300.0, 0.0), at));
+    for _ in 0..30 {
+        run(&mut app, vec![]);
+    }
+    let out = run(&mut app, vec![]);
+    let moved = texts(&out);
+    let header_x = find(&moved, &|s| s == "dir")[0].x;
+    assert!(
+        header_x < find(&scrolled, &|s| s == "dir")[0].x - 50.0,
+        "header scrolled left"
+    );
+    assert!(
+        (header_x - cell(&moved) - gap).abs() < 1.0,
+        "header over its column"
+    );
+
+    // A click on the pinned header still sorts.
+    let p = Pos2::new(header_x + 5.0, find(&moved, &|s| s == "dir")[0].y + 5.0);
+    let press = |pressed| egui::Event::PointerButton {
+        pos: p,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    run(&mut app, vec![egui::Event::PointerMoved(p)]);
+    run(&mut app, vec![press(true)]);
+    run(&mut app, vec![press(false)]);
+    assert_eq!(app.state.sort_col.as_deref(), Some("dir"));
+}

@@ -1317,6 +1317,7 @@ impl HcomDashboardApp {
                         attach_row = Some(i);
                     }
                 }
+                let mut header: Vec<(String, RichText, egui::Rect)> = Vec::new();
                 let grid = egui::Grid::new("agent_table_grid")
                     .with_row_color(row_color)
                     .min_col_width(60.0)
@@ -1335,9 +1336,11 @@ impl HcomDashboardApp {
                                     ""
                                 };
                             let text = RichText::new(format!("{}{}", col, sort_indicator)).strong();
-                            if ui.add(egui::Button::new(text).frame(false)).clicked() {
+                            let resp = ui.add(egui::Button::new(text.clone()).frame(false));
+                            if resp.clicked() {
                                 self.cycle_sort(col);
                             }
+                            header.push((col.clone(), text, resp.rect));
                         }
                         ui.end_row();
 
@@ -1384,8 +1387,39 @@ impl HcomDashboardApp {
                         }
                     });
                 grid_x = grid.response.rect.x_range();
+                // The header row scrolled out of view is drawn again at the
+                // top of the viewport, over the rows, at its column positions
+                // (so it follows horizontal scrolling).
+                let header_y = header
+                    .iter()
+                    .fold(egui::Rangef::NOTHING, |y, (_, _, r)| y.union(r.y_range()));
+                let header_h = if header.is_empty() {
+                    0.0
+                } else {
+                    header_y.span()
+                };
+                let top = ui.clip_rect().top();
+                if !header.is_empty() && top > header_y.min {
+                    ui.painter().rect_filled(
+                        egui::Rect::from_x_y_ranges(grid_x, top..=top + header_h + spacing_y),
+                        0.0,
+                        ui.visuals().panel_fill,
+                    );
+                    for (col, text, rect) in &header {
+                        let rect =
+                            egui::Rect::from_x_y_ranges(rect.x_range(), top..=top + header_h);
+                        if ui
+                            .put(rect, egui::Button::new(text.clone()).frame(false))
+                            .clicked()
+                        {
+                            self.cycle_sort(col);
+                        }
+                    }
+                }
+                // A row scrolled into view lands below the pinned header.
                 if let Some(span) = scroll_row.and_then(|k| row_spans.get(k)) {
-                    ui.scroll_to_rect(egui::Rect::from_x_y_ranges(grid_x, *span), None);
+                    let y = egui::Rangef::new(span.min - header_h - spacing_y, span.max);
+                    ui.scroll_to_rect(egui::Rect::from_x_y_ranges(grid_x, y), None);
                 }
             });
 
