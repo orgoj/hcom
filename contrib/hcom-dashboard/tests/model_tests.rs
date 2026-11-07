@@ -14796,3 +14796,110 @@ fn test_task_77_90_session_card_shows_launch_summary() {
         "{shown:?}"
     );
 }
+
+/// The text shape ending with `marker` and its clip rect, if painted.
+fn task_77_92_find(out: &egui::FullOutput, marker: &str) -> Option<(f32, Rect)> {
+    out.shapes.iter().find_map(|c| match &c.shape {
+        egui::Shape::Text(t) if t.galley.text().ends_with(marker) => {
+            Some((t.pos.y + t.galley.rect.bottom(), c.clip_rect))
+        }
+        _ => None,
+    })
+}
+
+/// Transcript, Events and Log keep their end in view like Screen; a user
+/// who scrolled up stays there, back at the end it sticks again
+/// (TASK-77.92).
+#[test]
+fn test_task_77_92_growing_tabs_stick_to_bottom() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let lines = |from: usize, to: usize| {
+        (from..to)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    for tab in ["Transcript", "Events", "Log"] {
+        let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+        let ctx = egui::Context::default();
+        let mut run = task_77_52_runner(ctx.clone());
+        let rows = app.table_rows.clone();
+        app.select_table_row(&rows[0]);
+        app.select_detail_tab(tab);
+        run(&mut app, vec![]);
+        let agent = "inst_alpha_1".to_string();
+        let set = |app: &mut hcom_dashboard::app::HcomDashboardApp, n: usize| {
+            let generation = app.selection_generation;
+            match tab {
+                "Transcript" => {
+                    app.transcript_content = Some((agent.clone(), generation, lines(0, n)))
+                }
+                "Events" => app.events_content = Some((agent.clone(), generation, lines(0, n))),
+                _ => app.command_logs = (0..n).map(|i| format!("line {i}")).collect(),
+            }
+        };
+        set(&mut app, 300);
+        let mut out = run(&mut app, vec![]);
+        for _ in 0..3 {
+            out = run(&mut app, vec![]);
+        }
+        let (bottom, clip) = task_77_92_find(&out, "line 299").unwrap_or_else(|| panic!("{tab}"));
+        assert!(
+            bottom <= clip.bottom() + 2.0 && bottom > clip.top(),
+            "{tab}: end not in view {bottom} {clip:?}"
+        );
+
+        // New content while at the end: still at the end.
+        set(&mut app, 320);
+        for _ in 0..3 {
+            out = run(&mut app, vec![]);
+        }
+        let (bottom, clip) = task_77_92_find(&out, "line 319").unwrap_or_else(|| panic!("{tab}"));
+        assert!(bottom <= clip.bottom() + 2.0, "{tab}: lost the end");
+
+        // Scrolled up: new content does not pull the view back.
+        let wheel = |dy: f32| egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, dy),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        };
+        run(
+            &mut app,
+            vec![egui::Event::PointerMoved(clip.center()), wheel(400.0)],
+        );
+        for _ in 0..10 {
+            run(&mut app, vec![]);
+        }
+        set(&mut app, 340);
+        for _ in 0..3 {
+            out = run(&mut app, vec![]);
+        }
+        if let Some((bottom, clip)) = task_77_92_find(&out, "line 339") {
+            assert!(
+                bottom > clip.bottom() + 2.0,
+                "{tab}: jumped back to the end"
+            );
+        }
+
+        // Back at the end: it sticks again.
+        run(
+            &mut app,
+            vec![egui::Event::PointerMoved(clip.center()), wheel(-100000.0)],
+        );
+        for _ in 0..60 {
+            run(&mut app, vec![]);
+        }
+        set(&mut app, 360);
+        for _ in 0..3 {
+            out = run(&mut app, vec![]);
+        }
+        let (bottom, clip) = task_77_92_find(&out, "line 359").unwrap_or_else(|| panic!("{tab}"));
+        assert!(
+            bottom <= clip.bottom() + 2.0,
+            "{tab}: did not stick again {bottom} {clip:?}"
+        );
+    }
+}

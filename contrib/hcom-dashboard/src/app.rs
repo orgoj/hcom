@@ -3223,6 +3223,7 @@ impl HcomDashboardApp {
                 egui::ScrollArea::both()
                     .id_salt("transcript_scroll_tab")
                     .auto_shrink([false, false])
+                    .stick_to_bottom(true)
                     .show(ui, |ui| {
                         if let Some(ref selected) = agent {
                             if !is_running && session_path.is_none() {
@@ -3259,6 +3260,7 @@ impl HcomDashboardApp {
                 egui::ScrollArea::both()
                     .id_salt("events_scroll_tab")
                     .auto_shrink([false, false])
+                    .stick_to_bottom(true)
                     .show(ui, |ui| {
                         if let Some(ref selected) = agent {
                             if !is_running {
@@ -3292,6 +3294,7 @@ impl HcomDashboardApp {
                 egui::ScrollArea::both()
                     .id_salt("command_logs_scroll")
                     .auto_shrink([false, false])
+                    .stick_to_bottom(true)
                     .show(ui, |ui| {
                         if self.command_logs.is_empty() {
                             ui.weak("No command log entries.");
