@@ -480,6 +480,31 @@ pub fn format_window_range(
 }
 
 /// Text of the `Last:` message limit: `no limit` for 0, else `N msgs`.
+/// Width of `text` in the body font, for text fields that must show it whole.
+fn body_text_width(ui: &egui::Ui, text: &str) -> f32 {
+    ui.painter()
+        .layout_no_wrap(
+            text.to_owned(),
+            egui::TextStyle::Body.resolve(ui.style()),
+            Color32::WHITE,
+        )
+        .size()
+        .x
+}
+
+/// A control group in a wrapping row: it starts a new row when its width
+/// from the previous frame no longer fits, so a group never splits.
+fn wrap_group<R>(ui: &mut egui::Ui, salt: &str, add: impl FnOnce(&mut egui::Ui) -> R) {
+    let id = egui::Id::unique(("wrap_group", salt));
+    let prev_w: Option<f32> = ui.ctx().data(|d| d.get_temp(id));
+    let at_row_start = ui.cursor().min.x <= ui.max_rect().min.x + 1.0;
+    if prev_w.is_some_and(|w| w > ui.available_size_before_wrap().x) && !at_row_start {
+        ui.end_row();
+    }
+    let w = ui.horizontal(add).response.rect.width();
+    ui.ctx().data_mut(|d| d.insert_temp(id, w));
+}
+
 pub fn format_last_limit(n: usize) -> String {
     if n == 0 {
         "no limit".to_string()
@@ -2014,9 +2039,11 @@ impl HcomDashboardApp {
 
         // 4. Text Input field for interval
         let text_edit_id = egui::Id::unique("time_range_text_edit");
+        // Wide enough for the whole range text, never truncated.
+        let text_w = body_text_width(ui, &self.time_range_text).max(140.0) + 8.0;
         let text_edit = egui::TextEdit::singleline(&mut self.time_range_text)
             .id(text_edit_id)
-            .desired_width(140.0)
+            .desired_width(text_w)
             .hint_text("e.g. 1h, 12:00 - 13:00, all");
 
         let prev_invalid = self.time_range_invalid;
@@ -3969,11 +3996,6 @@ impl eframe::App for HcomDashboardApp {
                 ui.separator();
                 ui.label(format!("Edges: {}", self.graph.graph.edge_count()));
 
-                if let Some(ref pending) = self.pending_action {
-                    ui.separator();
-                    ui.colored_label(palette.edge_selected, format!("⏳ {}", pending));
-                }
-
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Theme toggle (Auto / Light / Dark)
                     let current_pref = self.state.theme.unwrap_or_default();
@@ -4021,165 +4043,176 @@ impl eframe::App for HcomDashboardApp {
 
             ui.separator();
 
-            // Row 2: Panel toggles + Search Filter + Checkboxes + Count
-            ui.horizontal(|ui| {
-                ui.label("View:");
-                let current_view = self.state.effective_view_mode();
-                if ui
-                    .selectable_label(current_view == ViewMode::Both, "Both (F4)")
-                    .on_hover_text("Show both graph canvas and agent table")
-                    .clicked()
-                {
-                    self.set_view_mode(ViewMode::Both);
-                }
-                if ui
-                    .selectable_label(current_view == ViewMode::GraphOnly, "Graph")
-                    .on_hover_text("Show graph canvas only (hide table)")
-                    .clicked()
-                {
-                    self.set_view_mode(ViewMode::GraphOnly);
-                }
-                if ui
-                    .selectable_label(current_view == ViewMode::TableOnly, "Table")
-                    .on_hover_text("Show agent table only (hide graph canvas)")
-                    .clicked()
-                {
-                    self.set_view_mode(ViewMode::TableOnly);
-                }
-                if ui
-                    .selectable_label(self.state.show_side_panel, "Detail")
-                    .on_hover_text("Show or hide the agent detail panel")
-                    .clicked()
-                {
-                    self.toggle_detail_panel();
-                }
+            // Row 2: the filter group first (row 1 `Shown` is its result),
+            // then view settings. Each group wraps as a unit, never clipped.
+            ui.horizontal_wrapped(|ui| {
+                wrap_group(ui, "filter", |ui| {
+                    // Search query: fixed width that fits its placeholder.
+                    let hint = "Search agent, dir, tool... (/ to focus)";
+                    ui.label("Filter:");
+                    let search = ui.add(
+                        egui::TextEdit::singleline(&mut self.search_query)
+                            .hint_text(hint)
+                            .desired_width(body_text_width(ui, hint) + 8.0),
+                    );
+                    if focus_search {
+                        search.request_focus();
+                    }
+                    if ui.small_button("✖").clicked() {
+                        self.search_query.clear();
+                    }
+
+                    // Filter checkboxes
+                    let mut filter_changed = false;
+                    if ui
+                        .checkbox(&mut self.state.running_only, "Running only")
+                        .changed()
+                    {
+                        filter_changed = true;
+                    }
+                    if ui
+                        .checkbox(&mut self.state.blocked_only, "Blocked only")
+                        .changed()
+                    {
+                        filter_changed = true;
+                    }
+                    if ui
+                        .checkbox(&mut self.state.hide_disabled, "Hide disabled")
+                        .changed()
+                    {
+                        filter_changed = true;
+                    }
+                    if ui
+                        .checkbox(&mut self.state.hide_adhoc, "Hide ad-hoc")
+                        .changed()
+                    {
+                        filter_changed = true;
+                    }
+                    if ui
+                        .checkbox(&mut self.state.filter_table, "Filter table")
+                        .on_hover_text(
+                            "On: the table shows the same agents as the graph.\n\
+                         Off: the table shows every agent; the graph stays filtered.",
+                        )
+                        .changed()
+                    {
+                        filter_changed = true;
+                    }
+
+                    if filter_changed {
+                        self.save_state();
+                    }
+                });
+
+                ui.separator();
+
+                wrap_group(ui, "view", |ui| {
+                    ui.label("View:");
+                    let current_view = self.state.effective_view_mode();
+                    if ui
+                        .selectable_label(current_view == ViewMode::Both, "Both (F4)")
+                        .on_hover_text("Show both graph canvas and agent table")
+                        .clicked()
+                    {
+                        self.set_view_mode(ViewMode::Both);
+                    }
+                    if ui
+                        .selectable_label(current_view == ViewMode::GraphOnly, "Graph")
+                        .on_hover_text("Show graph canvas only (hide table)")
+                        .clicked()
+                    {
+                        self.set_view_mode(ViewMode::GraphOnly);
+                    }
+                    if ui
+                        .selectable_label(current_view == ViewMode::TableOnly, "Table")
+                        .on_hover_text("Show agent table only (hide graph canvas)")
+                        .clicked()
+                    {
+                        self.set_view_mode(ViewMode::TableOnly);
+                    }
+                    if ui
+                        .selectable_label(self.state.show_side_panel, "Detail")
+                        .on_hover_text("Show or hide the agent detail panel")
+                        .clicked()
+                    {
+                        self.toggle_detail_panel();
+                    }
+                });
 
                 ui.separator();
 
                 // Layout mode
-                ui.label("Layout:");
-                for (mode, label) in [
-                    (LayoutMode::Hierarchy, "Hierarchy"),
-                    (LayoutMode::Cluster, "Cluster"),
-                    (LayoutMode::Manual, "Manual"),
-                ] {
-                    if ui
-                        .selectable_label(self.layout.mode == mode, label)
-                        .clicked()
-                        && self.layout.mode != mode
-                    {
-                        self.layout.set_mode(mode);
-                        self.layout.start_transition(&self.graph);
-                        self.state.layout_mode = mode.as_str().to_string();
-                        self.save_state();
+                wrap_group(ui, "layout", |ui| {
+                    ui.label("Layout:");
+                    for (mode, label) in [
+                        (LayoutMode::Hierarchy, "Hierarchy"),
+                        (LayoutMode::Cluster, "Cluster"),
+                        (LayoutMode::Manual, "Manual"),
+                    ] {
+                        if ui
+                            .selectable_label(self.layout.mode == mode, label)
+                            .clicked()
+                            && self.layout.mode != mode
+                        {
+                            self.layout.set_mode(mode);
+                            self.layout.start_transition(&self.graph);
+                            self.state.layout_mode = mode.as_str().to_string();
+                            self.save_state();
+                        }
                     }
-                }
+                });
 
                 ui.separator();
 
                 // Edge layers and the message arrow width metric
-                ui.label("Edges:");
-                let mut edges_changed = false;
-                for (flag, label, hint) in [
-                    (
-                        &mut self.state.show_initiator_edges,
-                        "Start",
-                        "Arrows from the side that started each conversation",
-                    ),
-                    (
-                        &mut self.state.show_message_edges,
-                        "Msgs",
-                        "Message arrows, width by flow",
-                    ),
-                    (
-                        &mut self.state.show_spawn_edges,
-                        "Spawn",
-                        "Dashed spawn edges",
-                    ),
-                ] {
-                    if ui
-                        .selectable_label(*flag, label)
-                        .on_hover_text(hint)
-                        .clicked()
-                    {
-                        *flag = !*flag;
-                        edges_changed = true;
+                wrap_group(ui, "edges", |ui| {
+                    ui.label("Edges:");
+                    let mut edges_changed = false;
+                    for (flag, label, hint) in [
+                        (
+                            &mut self.state.show_initiator_edges,
+                            "Start",
+                            "Arrows from the side that started each conversation",
+                        ),
+                        (
+                            &mut self.state.show_message_edges,
+                            "Msgs",
+                            "Message arrows, width by flow",
+                        ),
+                        (
+                            &mut self.state.show_spawn_edges,
+                            "Spawn",
+                            "Dashed spawn edges",
+                        ),
+                    ] {
+                        if ui
+                            .selectable_label(*flag, label)
+                            .on_hover_text(hint)
+                            .clicked()
+                        {
+                            *flag = !*flag;
+                            edges_changed = true;
+                        }
                     }
-                }
-                ui.label("Width:");
-                for (bytes, label, hint) in [
-                    (false, "Count", "Message arrow width by message count"),
-                    (true, "Bytes", "Message arrow width by message text bytes"),
-                ] {
-                    if ui
-                        .selectable_label(self.state.edge_width_bytes == bytes, label)
-                        .on_hover_text(hint)
-                        .clicked()
-                        && self.state.edge_width_bytes != bytes
-                    {
-                        self.state.edge_width_bytes = bytes;
-                        edges_changed = true;
+                    ui.label("Width:");
+                    for (bytes, label, hint) in [
+                        (false, "Count", "Message arrow width by message count"),
+                        (true, "Bytes", "Message arrow width by message text bytes"),
+                    ] {
+                        if ui
+                            .selectable_label(self.state.edge_width_bytes == bytes, label)
+                            .on_hover_text(hint)
+                            .clicked()
+                            && self.state.edge_width_bytes != bytes
+                        {
+                            self.state.edge_width_bytes = bytes;
+                            edges_changed = true;
+                        }
                     }
-                }
-                if edges_changed {
-                    self.save_state();
-                }
-
-                ui.separator();
-
-                // Search query
-                ui.label("Filter:");
-                let search = ui.add(
-                    egui::TextEdit::singleline(&mut self.search_query)
-                        .hint_text("Search agent, dir, tool... (/ to focus)"),
-                );
-                if focus_search {
-                    search.request_focus();
-                }
-                if ui.small_button("✖").clicked() {
-                    self.search_query.clear();
-                }
-
-                // Filter checkboxes
-                let mut filter_changed = false;
-                if ui
-                    .checkbox(&mut self.state.running_only, "Running only")
-                    .changed()
-                {
-                    filter_changed = true;
-                }
-                if ui
-                    .checkbox(&mut self.state.blocked_only, "Blocked only")
-                    .changed()
-                {
-                    filter_changed = true;
-                }
-                if ui
-                    .checkbox(&mut self.state.hide_disabled, "Hide disabled")
-                    .changed()
-                {
-                    filter_changed = true;
-                }
-                if ui
-                    .checkbox(&mut self.state.hide_adhoc, "Hide ad-hoc")
-                    .changed()
-                {
-                    filter_changed = true;
-                }
-                if ui
-                    .checkbox(&mut self.state.filter_table, "Filter table")
-                    .on_hover_text(
-                        "On: the table shows the same agents as the graph.\n\
-                         Off: the table shows every agent; the graph stays filtered.",
-                    )
-                    .changed()
-                {
-                    filter_changed = true;
-                }
-
-                if filter_changed {
-                    self.save_state();
-                }
+                    if edges_changed {
+                        self.save_state();
+                    }
+                });
             });
 
             // Row 2b: Message time window (presets, custom span/limit, scrubber, range)
@@ -4513,6 +4546,12 @@ impl eframe::App for HcomDashboardApp {
                         crate::table_data::column_choices(&shown, &self.table_rows),
                         0,
                     ));
+                }
+
+                // Last, so a progress text never shifts other top-bar items.
+                if let Some(ref pending) = self.pending_action {
+                    ui.separator();
+                    ui.colored_label(palette.edge_selected, format!("⏳ {}", pending));
                 }
             });
 

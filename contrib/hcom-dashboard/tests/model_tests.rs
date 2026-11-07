@@ -4477,6 +4477,117 @@ fn test_kill_actions_are_separated_from_restart_attach_and_transcript() {
     );
 }
 
+/// TASK-77.77: the top bar wraps instead of clipping, the window field shows
+/// its whole text, and a progress text never moves other top-bar items.
+#[test]
+fn test_top_bar_wraps_and_keeps_controls_on_screen() {
+    use eframe::App;
+    use hcom_dashboard::config::DashboardState;
+
+    for (w, h) in [(1024.0, 640.0), (1280.0, 800.0)] {
+        let (_dir, mut app) = split_test_app(DashboardState::default());
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h));
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut render = |app: &mut hcom_dashboard::app::HcomDashboardApp| {
+            let mut out = None;
+            for _ in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                };
+                let mut o = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+                o.textures_delta.clear();
+                out = Some(o);
+            }
+            out.unwrap()
+        };
+
+        // The longest window text (two dates); invalid text is not resynced.
+        app.time_range_text = "2026-11-06 09:34:13 - 2026-11-07 11:09:00".into();
+        app.time_range_invalid = true;
+        let out = render(&mut app);
+        let one = |out: &egui::FullOutput, label: &str| {
+            let r = widget_rects(out, label);
+            assert_eq!(r.len(), 1, "{label:?} at {w}px");
+            r[0].0
+        };
+        let toolbar_bottom = one(&out, "Columns…").bottom();
+        for label in [
+            "Running only",
+            "Filter table",
+            "Blocked only",
+            "Hide ad-hoc",
+        ] {
+            let r = one(&out, label);
+            assert!(
+                r.left() >= 0.0 && r.right() <= w,
+                "{label:?} {r:?} at {w}px"
+            );
+        }
+        // No top-bar control reaches past the right edge.
+        let update = out.platform_output.accesskit_update.as_ref().unwrap();
+        for (_, node) in &update.nodes {
+            let Some(b) = node.bounds() else { continue };
+            if b.y1 as f32 <= toolbar_bottom && node.label().is_some() {
+                assert!(
+                    b.x1 as f32 <= w + 0.5,
+                    "{:?} cut at {w}px: {b:?}",
+                    node.label()
+                );
+            }
+        }
+
+        // The window field is wider than its text.
+        let text = app.time_range_text.clone();
+        // The text edit node is the widest node carrying the text.
+        let field = update
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.value() == Some(text.as_str()))
+            .filter_map(|(_, n)| n.bounds())
+            .max_by(|a, b| (a.x1 - a.x0).total_cmp(&(b.x1 - b.x0)))
+            .expect("window text field");
+        let mut text_w = 0.0;
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                text_w = ui
+                    .painter()
+                    .layout_no_wrap(
+                        text.clone(),
+                        egui::TextStyle::Body.resolve(ui.style()),
+                        Color32::WHITE,
+                    )
+                    .size()
+                    .x;
+            },
+        );
+        assert!(
+            (field.x1 - field.x0) as f32 > text_w,
+            "field {field:?} narrower than {text:?} ({text_w}) at {w}px"
+        );
+
+        // A progress text leaves every other top-bar item in place.
+        let before: Vec<Rect> = ["Fit", "Reset", "Running only", "Columns…"]
+            .iter()
+            .map(|l| one(&out, l))
+            .collect();
+        app.pending_action = Some("Loading sessions for a_long_agent_name...".into());
+        let out = render(&mut app);
+        for (l, r) in ["Fit", "Reset", "Running only", "Columns…"]
+            .iter()
+            .zip(before)
+        {
+            assert_eq!(one(&out, l).min, r.min, "{l:?} moved at {w}px");
+        }
+    }
+}
+
 #[test]
 fn test_context_menu_pins_and_unpins_node() {
     use eframe::App;
