@@ -337,6 +337,9 @@ pub struct HcomDashboardApp {
     pub last_table_refresh: Instant,
     pub last_stats_refresh: Instant,
     pub table_reload_in_flight: bool,
+    /// The last agent fetch failed: table and canvas show `AGENT_FETCH_FAILED_TEXT`
+    /// instead of an empty view (TASK-77.80).
+    pub agent_fetch_failed: bool,
     /// Idle column: listening periods and the one running idle_check.
     pub idle_periods: std::collections::HashMap<String, crate::idle::IdlePeriod>,
     pub idle_job: Option<crate::idle::IdleJob>,
@@ -468,6 +471,11 @@ pub const WINDOW_PRESETS: &[(&str, Option<i64>)] = &[
     ("24h", Some(86400)),
     ("All", None),
 ];
+
+/// Empty-state text of table and canvas after a failed agent fetch (TASK-77.80).
+pub const AGENT_FETCH_FAILED_TEXT: &str = "Agent data could not be loaded — see Log (F8)";
+/// Color of error text (Log `[ERROR]` lines, invalid input borders).
+const ERROR_TEXT_COLOR: Color32 = Color32::from_rgb(231, 76, 60);
 
 /// Header text of the active window in local time, e.g.
 /// `Range: 2026-11-01 14:05 – 15:05 (live) · 37 msgs`.
@@ -681,6 +689,7 @@ impl HcomDashboardApp {
             last_table_refresh: Instant::now() - Duration::from_secs(100), // trigger immediate load
             last_stats_refresh: Instant::now() - Duration::from_secs(100),
             table_reload_in_flight: true,
+            agent_fetch_failed: false,
             idle_periods: Default::default(),
             idle_job: None,
             idle_error: None,
@@ -793,6 +802,7 @@ impl HcomDashboardApp {
             last_table_refresh: Instant::now(),
             last_stats_refresh: Instant::now(),
             table_reload_in_flight: false,
+            agent_fetch_failed: false,
             idle_periods: Default::default(),
             idle_job: None,
             idle_error: None,
@@ -1558,6 +1568,9 @@ impl HcomDashboardApp {
                             row_spans.push(span);
                         }
                     });
+                if self.agent_fetch_failed && rows.is_empty() {
+                    ui.colored_label(ERROR_TEXT_COLOR, AGENT_FETCH_FAILED_TEXT);
+                }
                 grid_x = grid.response.rect.x_range();
                 // The header row scrolled out of view is drawn again at the
                 // top of the viewport, over the rows, at its column positions
@@ -3590,6 +3603,15 @@ impl HcomDashboardApp {
         {
             self.record_dragged_position(idx);
         }
+        if self.agent_fetch_failed && visible.is_empty() {
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                AGENT_FETCH_FAILED_TEXT,
+                egui::TextStyle::Body.resolve(ui.style()),
+                ERROR_TEXT_COLOR,
+            );
+        }
         self.handle_canvas_action(action);
         self.render_node_tooltip(ui.ctx(), response.rect);
         if let Some(text) = self.edge_tooltip_text() {
@@ -4003,6 +4025,7 @@ impl eframe::App for HcomDashboardApp {
                         tool_groups,
                     } => {
                         self.table_reload_in_flight = false;
+                        self.agent_fetch_failed = false;
                         crate::table_data::apply_event_stats(&mut rows, &self.cached_event_stats);
                         self.graph.node_styles = crate::table_data::node_styles_from_rows(&rows);
                         self.table_rows = rows;
@@ -4015,6 +4038,7 @@ impl eframe::App for HcomDashboardApp {
                     }
                     ActionResult::TableDataFailed { error } => {
                         self.table_reload_in_flight = false;
+                        self.agent_fetch_failed = true;
                         self.command_logs.push(format!("[ERROR] {}", error));
                     }
                     ActionResult::StatsLoaded { stats } => {

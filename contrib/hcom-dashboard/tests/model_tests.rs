@@ -12050,6 +12050,90 @@ impl ActionRunner for TableRowsRunner {
     }
 }
 
+/// Runner whose table reload fails while `fail` is set, else returns `rows`.
+struct FailingTableRunner {
+    inner: MockActionRunner,
+    fail: Arc<AtomicBool>,
+    rows: Vec<hcom_dashboard::table_data::TableRow>,
+}
+
+impl ActionRunner for FailingTableRunner {
+    fn execute(&self, req: ActionRequest) -> Option<ActionResult> {
+        match req {
+            ActionRequest::ReloadTableData if self.fail.load(Ordering::SeqCst) => {
+                Some(ActionResult::TableDataFailed {
+                    error: "Failed to fetch live/agent data: boom".into(),
+                })
+            }
+            ActionRequest::ReloadTableData => Some(ActionResult::TableDataLoaded {
+                rows: self.rows.clone(),
+                catalog_groups: Vec::new(),
+                tool_groups: Vec::new(),
+            }),
+            other => self.inner.execute(other),
+        }
+    }
+}
+
+/// A failed agent fetch with nothing to show puts the empty-state text in
+/// the table body and the canvas centre; the next successful fetch removes
+/// it (TASK-77.80).
+#[test]
+fn test_task_77_80_failed_fetch_shows_empty_state_text() {
+    use hcom_dashboard::app::{AGENT_FETCH_FAILED_TEXT, HcomDashboardApp};
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
+        dir.path().to_path_buf(),
+    );
+    let fail = Arc::new(AtomicBool::new(true));
+    app.action_worker = Some(ActionWorkerHandle::new(FailingTableRunner {
+        inner: MockActionRunner {
+            recorded: Arc::new(Mutex::new(Vec::new())),
+            fail_attach: false,
+            transcript_result: String::new(),
+        },
+        fail: fail.clone(),
+        rows: vec![TableRow {
+            agent: "agent_alpha".into(),
+            instance: "inst_alpha_1".into(),
+            is_running: true,
+            status: "active".into(),
+            ..Default::default()
+        }],
+    }));
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let mut reload = |app: &mut HcomDashboardApp| {
+        app.dispatch_action(ActionRequest::ReloadTableData);
+        let mut out = None;
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(20));
+            out = Some(run(app, vec![]));
+        }
+        out.unwrap()
+            .shapes
+            .iter()
+            .filter(|c| {
+                matches!(&c.shape, egui::Shape::Text(t)
+                    if t.galley.text() == AGENT_FETCH_FAILED_TEXT)
+            })
+            .count()
+    };
+    // Table body and canvas centre.
+    assert_eq!(reload(&mut app), 2);
+    assert!(app.agent_fetch_failed);
+    assert!(app.table_rows.is_empty());
+    fail.store(false, Ordering::SeqCst);
+    assert_eq!(reload(&mut app), 0);
+    assert!(!app.agent_fetch_failed);
+    assert_eq!(app.table_rows.len(), 1);
+}
+
 /// After Start from the dialog, with `--as` or without, the started
 /// instance's row (and graph node) is selected once a table reload shows
 /// it, unless another row was selected meanwhile (TASK-77.68).
