@@ -1,11 +1,11 @@
 ---
 id: TASK-77.86
 title: 'Dashboard: maximalizace se při startu neobnoví'
-status: In Progress
+status: Done
 assignee:
   - '@hcom_dev__idea'
 created_date: '2026-11-07T15:58:00Z'
-updated_date: '2026-11-07T17:16:00Z'
+updated_date: '2026-11-07T17:27:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -22,15 +22,9 @@ Vizuální kontrola 2026-11-07 (P5, navazuje na TASK-77.71). V gui-sandboxu: max
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Na desktopu uživatele se po maximalizaci, zavření a novém spuštění okno otevře maximalizované
+- [x] #1 Na desktopu uživatele se po maximalizaci, zavření a novém spuštění okno otevře maximalizované
 - [x] #2 První snímek po startu nepřepíše uložené window_maximized=true dřív, než WM maximalizaci nahlásí
 <!-- AC:END -->
-
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-User checks AC #1 on the desktop; then --check-ac 1, final summary, Done.
-<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
@@ -39,3 +33,9 @@ User 2026-11-07: on the user's desktop (X11, LXQt) the window does not reopen ma
 
 agent_review OK (tmp/knowledge/task-77.86-review.md). Committed and deployed; AC #1 waits for the user's desktop check (maximize, close, relaunch).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Root cause: the WM (user desktop X11/LXQt, also gui-sandbox) ignores the maximized flag of a new window and the first frame recorded window_maximized=false. pending_maximize asks once with ViewportCommand::Maximized(true) and records no window state until the viewport reports maximized or 2 s pass. User confirmed the window reopens maximized. Test test_task_77_86_start_maximized_survives_first_frames; agent_review OK.
+<!-- SECTION:FINAL_SUMMARY:END -->
