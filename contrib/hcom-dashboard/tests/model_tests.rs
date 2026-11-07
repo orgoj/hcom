@@ -14423,3 +14423,154 @@ fn test_task_77_88_transcript_full_detailed_toggles() {
         "the toggle reloads the session transcript"
     );
 }
+
+#[test]
+fn test_task_77_89_summary_metric_texts() {
+    use hcom_dashboard::app::{events_metric, log_metric, screen_metric, transcript_metric};
+
+    assert_eq!(screen_metric("a\nb\n\n  \n"), "2 lines, all shown");
+    let long: String = (0..20).map(|i| format!("l{i}\n")).collect();
+    assert_eq!(screen_metric(&long), "20 lines, last 8 shown");
+    assert_eq!(screen_metric("Error: boom"), "load failed");
+
+    let tr = "Recent conversation (2 exchanges, 1-2 of 9) - @a:\n\n[1] USER: x\nASSISTANT: y\n\nNote: Conversation text truncated. Use --full for full text.";
+    assert_eq!(
+        transcript_metric(tr),
+        "2 exchanges, 1-2 of 9 · 1 KB · truncated"
+    );
+    let full = "Recent conversation (1 exchange, 9 of 9) - @a:\n\n[9] USER: x\nASSISTANT: y\n";
+    assert_eq!(transcript_metric(full), "1 exchange, 9 of 9 · 1 KB");
+    assert_eq!(
+        transcript_metric("No exchanges found"),
+        "No exchanges found"
+    );
+    assert_eq!(transcript_metric("Error: x"), "load failed");
+
+    assert_eq!(events_metric("{\"a\":1}\n{\"b\":2}\n", 50), "2");
+    let many: String = (0..50).map(|_| "{}\n").collect();
+    assert_eq!(events_metric(&many, 50), "50 (latest 50 loaded)");
+    assert_eq!(events_metric("Error: x", 50), "load failed");
+
+    assert_eq!(
+        log_metric(&["[OK] a".into(), "[ERROR] b".into(), "c".into()]),
+        "3 lines, 1 error"
+    );
+}
+
+#[test]
+fn test_task_77_89_summary_loads_tabs_and_shows_metrics() {
+    use hcom_dashboard::config::DashboardConfig;
+    use hcom_dashboard::sessions::SessionInfo;
+
+    let (mut app, recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut run = task_77_52_runner(ctx.clone());
+    let rows = app.table_rows.clone();
+    app.select_detail_tab("Summary");
+    app.select_table_row(&rows[0]);
+    run(&mut app, vec![]);
+    std::thread::sleep(Duration::from_millis(100));
+    {
+        let rec = recorded.lock().unwrap();
+        let has = |f: &dyn Fn(&ActionRequest) -> bool| rec.iter().any(f);
+        assert!(has(
+            &|r| matches!(r, ActionRequest::Screen { agent, .. } if agent == "inst_alpha_1")
+        ));
+        assert!(has(
+            &|r| matches!(r, ActionRequest::Transcript { agent, .. } if agent == "inst_alpha_1")
+        ));
+        assert!(has(
+            &|r| matches!(r, ActionRequest::Events { agent, .. } if agent == "inst_alpha_1")
+        ));
+        assert!(has(
+            &|r| matches!(r, ActionRequest::Sessions { agent, .. } if agent == "inst_alpha_1")
+        ));
+    }
+
+    // Results that have not arrived show `…`.
+    let generation = app.selection_generation;
+    app.screen_content = None;
+    app.transcript_content = None;
+    app.events_content = None;
+    app.sessions_content = None;
+    let values = |app: &hcom_dashboard::app::HcomDashboardApp| {
+        app.summary_metrics()
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(values(&app)[..4], ["…", "…", "…", "…"]);
+
+    let now = chrono::Utc::now().timestamp() as u64;
+    let session = |start: u64, sid: &str| SessionInfo {
+        start_ts: start,
+        end_ts: Some(start + 600),
+        session_id: sid.into(),
+        ..Default::default()
+    };
+    let agent = "inst_alpha_1".to_string();
+    app.screen_content = Some((agent.clone(), generation, "x\ny\n".into()));
+    app.transcript_content = Some((
+        agent.clone(),
+        generation,
+        "Recent conversation (1 exchange, 3 of 3) - @inst_alpha_1:\n\n[3] USER: hi\n".into(),
+    ));
+    app.events_content = Some((agent.clone(), generation, "{}\n{}\n{}\n".into()));
+    app.sessions_content = Some((
+        agent.clone(),
+        generation,
+        Ok(vec![
+            session(now - 1200, "new"),
+            session(now - 3 * 86400, "old"),
+        ]),
+    ));
+    app.command_logs = vec!["[ERROR] x".into()];
+    app.set_message_window(Some(3600), None);
+    assert_eq!(
+        values(&app),
+        [
+            "2 lines, all shown",
+            "1 exchange, 3 of 3 · 1 KB",
+            "1 of 2 sessions in the time window",
+            "3",
+            "1 line, 1 error"
+        ]
+    );
+    // A wider window updates the Sessions metric.
+    app.set_message_window(None, None);
+    assert_eq!(values(&app)[2], "2 sessions");
+
+    // The panel shows the rows (under the screen tail: full panel height).
+    app.state.show_table = false;
+    run(&mut app, vec![]);
+    let out = run(&mut app, vec![]);
+    let texts: Vec<String> = out
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+            _ => None,
+        })
+        .collect();
+    for label in ["Screen:", "Transcript:", "Sessions:", "Events:", "Log:"] {
+        assert!(texts.iter().any(|t| t == label), "{label} in {texts:?}");
+    }
+
+    // A stopped agent loads its sessions; the live-only tabs show `—`.
+    recorded.lock().unwrap().clear();
+    app.select_table_row(&rows[1]);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| matches!(r, ActionRequest::Sessions { agent, .. } if agent == "cat_beta"))
+    );
+    let v = values(&app);
+    assert_eq!(v[0], "— (stopped)");
+    assert_eq!(v[1], "— (stopped)");
+    assert_eq!(v[2], "…");
+    assert_eq!(v[3], "— (stopped)");
+}

@@ -33,6 +33,8 @@ pub const DEFAULT_SPLIT_FRAC: f32 = 0.3;
 pub const KILL_GAP: f32 = 16.0;
 /// Screen lines the Summary tab shows.
 pub const SUMMARY_SCREEN_LINES: usize = 8;
+/// Events the Events tab (and the Summary metric) loads.
+pub const EVENTS_LAST_N: usize = 50;
 
 /// The last `n` lines of a terminal screen, trailing blank lines left out.
 pub fn screen_tail(text: &str, n: usize) -> String {
@@ -42,6 +44,77 @@ pub fn screen_tail(text: &str, n: usize) -> String {
         .rposition(|l| !l.trim().is_empty())
         .map_or(0, |i| i + 1);
     lines[end.saturating_sub(n)..end].join("\n")
+}
+
+/// Summary metric of a loaded panel text that failed to load.
+const LOAD_FAILED: &str = "load failed";
+
+/// Summary Screen metric: lines up to the last non-blank one and whether
+/// the Summary shows them all (TASK-77.89).
+pub fn screen_metric(text: &str) -> String {
+    if text.starts_with("Error: ") {
+        return LOAD_FAILED.into();
+    }
+    // The lines `screen_tail` keeps: up to the last non-blank one.
+    let n = screen_tail(text, usize::MAX).lines().count();
+    if n <= SUMMARY_SCREEN_LINES {
+        format!("{n} lines, all shown")
+    } else {
+        format!("{n} lines, last {SUMMARY_SCREEN_LINES} shown")
+    }
+}
+
+/// Summary Transcript metric from `hcom transcript` text: the exchange
+/// counts of its header, its size and whether hcom truncated it (its
+/// closing `Note:` line).
+pub fn transcript_metric(text: &str) -> String {
+    if text.starts_with("Error: ") {
+        return LOAD_FAILED.into();
+    }
+    let first = text.lines().next().unwrap_or("");
+    let Some(counts) = first
+        .strip_prefix("Recent conversation (")
+        .and_then(|s| s.split_once(')'))
+        .map(|(c, _)| c)
+    else {
+        return first.to_string();
+    };
+    let truncated = text
+        .lines()
+        .rfind(|l| !l.trim().is_empty())
+        .is_some_and(|l| l.starts_with("Note: "));
+    let kb = text.len().div_ceil(1024);
+    let mut out = format!("{counts} · {kb} KB");
+    if truncated {
+        out.push_str(" · truncated");
+    }
+    out
+}
+
+/// Summary Events metric: events loaded (`hcom events --last 50` prints
+/// one JSON object per line).
+pub fn events_metric(text: &str, last_n: usize) -> String {
+    if text.starts_with("Error: ") {
+        return LOAD_FAILED.into();
+    }
+    let n = text.lines().filter(|l| l.starts_with('{')).count();
+    if n >= last_n {
+        format!("{n} (latest {last_n} loaded)")
+    } else {
+        n.to_string()
+    }
+}
+
+/// Summary Log metric: command log lines and `[ERROR]` lines.
+pub fn log_metric(logs: &[String]) -> String {
+    let errors = logs.iter().filter(|l| l.starts_with("[ERROR]")).count();
+    let s = |n: usize| if n == 1 { "" } else { "s" };
+    format!(
+        "{} line{}, {errors} error{}",
+        logs.len(),
+        s(logs.len()),
+        s(errors)
+    )
 }
 const SPLIT_HANDLE_WIDTH: f32 = 6.0;
 
@@ -1071,6 +1144,48 @@ impl HcomDashboardApp {
         self.window_cache_key = Some(key);
     }
 
+    /// Summary metric rows of the other tabs for the selected agent
+    /// (TASK-77.89): `…` until loaded, `—` where a stopped agent has none.
+    pub fn summary_metrics(&self) -> Vec<(&'static str, String)> {
+        const PENDING: &str = "…";
+        let agent = self.selected_agent_name();
+        let instance = self
+            .selected_row()
+            .filter(|r| r.is_running && !r.instance.is_empty())
+            .map(|r| r.instance);
+        let loaded = |content: &Option<(String, u64, String)>, f: &dyn Fn(&str) -> String| match (
+            &instance, content,
+        ) {
+            (None, _) => "— (stopped)".to_string(),
+            (Some(i), Some((a, _, text))) if a == i => f(text),
+            _ => PENDING.to_string(),
+        };
+        let sessions = match (&agent, &self.sessions_content) {
+            (Some(agent), Some((a, _, Ok(list)))) if a == agent => {
+                let now_dt = chrono::Utc::now();
+                let now = now_dt.timestamp().max(0) as u64;
+                let (start, end) = self.window_bounds(now_dt);
+                let shown = list.iter().filter(|s| s.overlaps(start, end, now)).count();
+                sessions_header_text(shown, list.len())
+            }
+            (Some(agent), Some((a, _, Err(_)))) if a == agent => LOAD_FAILED.to_string(),
+            _ => PENDING.to_string(),
+        };
+        vec![
+            ("Screen", loaded(&self.screen_content, &screen_metric)),
+            (
+                "Transcript",
+                loaded(&self.transcript_content, &transcript_metric),
+            ),
+            ("Sessions", sessions),
+            (
+                "Events",
+                loaded(&self.events_content, &|t| events_metric(t, EVENTS_LAST_N)),
+            ),
+            ("Log", log_metric(&self.command_logs)),
+        ]
+    }
+
     /// `--full` / `--detailed` from the Transcript tab toggles.
     pub fn transcript_flags(&self) -> TranscriptFlags {
         TranscriptFlags {
@@ -1112,15 +1227,20 @@ impl HcomDashboardApp {
             return;
         }
         // Sessions and a session transcript exist for stopped agents too.
+        // Summary also loads Sessions, Transcript and Events for its
+        // metrics (TASK-77.89).
+        let summary = self.state.detail_tab == "Summary";
         let selected = self.selected_agent_name();
-        if self.state.detail_tab == "Sessions"
+        if (summary || self.state.detail_tab == "Sessions")
             && let Some(agent) = selected.clone()
         {
             self.dispatch_action(ActionRequest::Sessions {
                 agent,
                 generation: gen_id,
             });
-            return;
+            if !summary {
+                return;
+            }
         }
         if self.state.detail_tab == "Transcript"
             && let Some((agent, path, _)) = self.session_transcript.clone()
@@ -1148,30 +1268,28 @@ impl HcomDashboardApp {
             return;
         }
         let agent = row_opt.unwrap().instance;
-        match self.state.detail_tab.as_str() {
-            // Summary shows the last lines of the screen (`screen_tail`).
-            "Screen" | "Summary" => {
-                self.dispatch_action(ActionRequest::Screen {
-                    agent,
-                    generation: gen_id,
-                });
-            }
-            "Transcript" => {
-                self.dispatch_action(ActionRequest::Transcript {
-                    agent,
-                    generation: gen_id,
-                    last_lines: 100,
-                    flags: self.transcript_flags(),
-                });
-            }
-            "Events" => {
-                self.dispatch_action(ActionRequest::Events {
-                    agent,
-                    generation: gen_id,
-                    last_n: 50,
-                });
-            }
-            _ => {}
+        let tab = self.state.detail_tab.clone();
+        // Summary shows the last lines of the screen (`screen_tail`).
+        if summary || tab == "Screen" {
+            self.dispatch_action(ActionRequest::Screen {
+                agent: agent.clone(),
+                generation: gen_id,
+            });
+        }
+        if summary || tab == "Transcript" {
+            self.dispatch_action(ActionRequest::Transcript {
+                agent: agent.clone(),
+                generation: gen_id,
+                last_lines: 100,
+                flags: self.transcript_flags(),
+            });
+        }
+        if summary || tab == "Events" {
+            self.dispatch_action(ActionRequest::Events {
+                agent,
+                generation: gen_id,
+                last_n: EVENTS_LAST_N,
+            });
         }
     }
 
@@ -2490,6 +2608,21 @@ impl HcomDashboardApp {
                 }
             }
         }
+
+        // Metrics of the other tabs, under the screen tail (TASK-77.89).
+        ui.add_space(8.0);
+        ui.separator();
+        egui::Grid::new("summary_metrics_grid")
+            .num_columns(2)
+            .min_col_width(100.0)
+            .spacing([10.0, 4.0])
+            .show(ui, |ui| {
+                for (label, value) in self.summary_metrics() {
+                    ui.label(RichText::new(format!("{label}:")).weak());
+                    ui.label(value);
+                    ui.end_row();
+                }
+            });
 
         // Loaded Transcript View
         if let Some((ref tr_agent, _, ref text)) = self.transcript_content
