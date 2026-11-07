@@ -348,9 +348,10 @@ pub struct HcomDashboardApp {
     /// Data row (0-based) under the pointer in the last frame; painted as a
     /// weaker band than the selection.
     table_hover_row: Option<usize>,
-    /// Selection the table last scrolled to; a different selection (e.g. a
-    /// graph click) scrolls its row into view once.
-    table_scrolled_id: Option<String>,
+    /// Selection and its row index the table last scrolled to; another
+    /// selection (e.g. a graph click) or a move of the selected row (sort
+    /// order, a started agent) scrolls its row into view once.
+    table_scrolled_id: Option<(String, usize)>,
     /// Screen bands of the data rows in the last frame, full grid width.
     pub table_row_bands: Vec<egui::Rect>,
     pub show_start_dialog: bool,
@@ -1248,14 +1249,16 @@ impl HcomDashboardApp {
             }
             selected_row = Some(k);
         }
-        // A selection made elsewhere (graph) scrolls its row into view once,
-        // as soon as the table shows it.
-        let scroll_row = key_row
-            .or_else(|| selected_row.filter(|_| self.selected_row_id != self.table_scrolled_id));
+        // A selection made elsewhere (graph), or a selected row that moved
+        // (sort order, a started agent), scrolls into view once, as soon as
+        // the table shows it.
+        let shown = self.selected_row_id.clone().zip(selected_row);
+        let scroll_row =
+            key_row.or_else(|| selected_row.filter(|_| shown != self.table_scrolled_id));
         if self.selected_row_id.is_none() {
             self.table_scrolled_id = None;
-        } else if selected_row.is_some() {
-            self.table_scrolled_id = self.selected_row_id.clone();
+        } else if shown.is_some() {
+            self.table_scrolled_id = shown;
         }
         let hover_row = self.table_hover_row;
         // Grid row 0 is the header; data row i is grid row i + 1. The band

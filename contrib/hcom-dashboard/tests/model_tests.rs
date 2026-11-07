@@ -11307,3 +11307,92 @@ fn test_task_77_58_dialogs_are_modal() {
     run(&mut app, vec![]);
     assert!(!app.show_send_dialog, "Escape closes Send");
 }
+
+#[test]
+fn test_task_77_59_selected_row_moved_by_sorting_scrolls_into_view() {
+    use eframe::App;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = DashboardState {
+        columns: vec!["instance".into()],
+        sort_col: Some("instance".into()),
+        ..Default::default()
+    };
+    let mut app =
+        HcomDashboardApp::new_for_test(DashboardConfig::default(), state, dir.path().to_path_buf());
+    // The selected agent sorts first ("a_target")...
+    let mut names: Vec<String> = (0..60).map(|i| format!("w{i:02}")).collect();
+    names.push("a_target".into());
+    app.table_rows = names
+        .iter()
+        .map(|n| TableRow {
+            instance: n.clone(),
+            ..Default::default()
+        })
+        .collect();
+    app.sync_graph_from_table_rows();
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut time = 0.0;
+    let mut run = |app: &mut HcomDashboardApp, events: Vec<egui::Event>| {
+        time += 0.1;
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        ctx.run_ui(input, |ui| app.ui(ui, &mut frame))
+            .textures_delta
+            .clear();
+    };
+    let visible = |b: Rect| b.top() >= 0.0 && b.bottom() <= screen.bottom() + 1.0;
+    app.selected_row_id = Some("a_target".into());
+    for _ in 0..4 {
+        run(&mut app, vec![]);
+    }
+    assert!(visible(app.table_row_bands[0]), "first row shown");
+
+    // ...then the reversed sort order moves it last (out of view), the
+    // selection stays: the table follows it.
+    app.state.sort_reverse = true;
+    for _ in 0..12 {
+        run(&mut app, vec![]);
+    }
+    let idx = app.table_row_bands.len() - 1;
+    assert_eq!(idx, 60);
+    assert_eq!(app.selected_row_id.as_deref(), Some("a_target"));
+    assert!(
+        visible(app.table_row_bands[idx]),
+        "moved row scrolled into view: {:?}",
+        app.table_row_bands[idx]
+    );
+
+    // Unchanged position: the user's scroll stays.
+    let over_table = app.table_row_bands[idx].center();
+    let wheel = egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: Vec2::new(0.0, 5000.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    };
+    for _ in 0..4 {
+        run(
+            &mut app,
+            vec![egui::Event::PointerMoved(over_table), wheel.clone()],
+        );
+    }
+    for _ in 0..10 {
+        run(&mut app, vec![]);
+    }
+    assert!(
+        !visible(app.table_row_bands[idx]),
+        "wheeled away stays: {:?}",
+        app.table_row_bands[idx]
+    );
+}
