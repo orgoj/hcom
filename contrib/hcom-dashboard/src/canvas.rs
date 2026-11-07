@@ -807,7 +807,10 @@ impl CanvasView {
                 } else {
                     normal * (18.0 * self.zoom)
                 };
-            let color = palette.initiator_edge;
+            let color = fade(
+                palette.initiator_edge,
+                dims_edge(self.selected_node, ia, ib),
+            );
             let stroke = Stroke::new(4.0 * self.zoom.clamp(0.6, 2.2), color);
             let head = 12.0 * self.zoom;
             let (head_at_a, head_at_b) = initiator_heads(a, initiators);
@@ -915,16 +918,20 @@ impl CanvasView {
 
             let is_selected = self.selected_edge == Some(edge_id);
             let is_hovered = self.hovered_edge == Some(edge_id);
+            let dim = dims_edge(self.selected_node, source_idx, target_idx);
 
             match edge_ref.weight() {
                 EdgeKind::Spawn(_) => {
-                    let color = if is_selected {
-                        palette.edge_selected
-                    } else if is_hovered {
-                        palette.spawn_edge_hover
-                    } else {
-                        palette.spawn_edge
-                    };
+                    let color = fade(
+                        if is_selected {
+                            palette.edge_selected
+                        } else if is_hovered {
+                            palette.spawn_edge_hover
+                        } else {
+                            palette.spawn_edge
+                        },
+                        dim,
+                    );
                     let stroke = Stroke::new(
                         (if is_selected { 2.5 } else { 1.5 }) * self.zoom.clamp(0.5, 2.0),
                         color,
@@ -961,15 +968,25 @@ impl CanvasView {
                     let flashing = self
                         .flash_until
                         .contains_key(&(msg.from.clone(), msg.to.clone()));
-                    let color = if is_selected || flashing {
-                        palette.edge_selected
-                    } else if is_hovered {
-                        palette.message_edge_hover
-                    } else if inactive {
-                        palette.message_edge_idle
-                    } else {
-                        palette.message_edge
-                    };
+                    let color = fade(
+                        if is_selected || flashing {
+                            palette.edge_selected
+                        } else if is_hovered {
+                            palette.message_edge_hover
+                        } else if inactive {
+                            palette.message_edge_idle
+                        } else {
+                            palette.message_edge
+                        },
+                        dim,
+                    );
+                    let mut badge_palette = *palette;
+                    if dim {
+                        badge_palette.badge_fill = fade(palette.badge_fill, true);
+                        badge_palette.badge_stroke = fade(palette.badge_stroke, true);
+                        badge_palette.badge_text = fade(palette.badge_text, true);
+                    }
+                    let palette = &badge_palette;
                     let focus = [self.selected_node, self.hovered_node]
                         .iter()
                         .flatten()
@@ -1025,6 +1042,7 @@ impl CanvasView {
         if let Some(sel) = self.selected_node {
             forced_labels.extend(graph.graph.neighbors_undirected(sel));
         }
+        let focus = focus_nodes(graph, self.selected_node);
         let mut labels = Vec::new();
         let mut off_view = Vec::new();
         for (idx, phys) in &layout.nodes {
@@ -1125,11 +1143,21 @@ impl CanvasView {
                 );
             }
 
+            // Outside the focus of a selected node: veil the node and its rings.
+            let dim = focus.as_ref().is_some_and(|f| !f.contains(idx));
+            if dim {
+                painter.circle_filled(
+                    center,
+                    node_radius + 9.5 * self.zoom,
+                    bg_color.gamma_multiply(1.0 - FOCUS_DIM),
+                );
+            }
+
             // Agent name text, drawn after all nodes (5b)
             let galley = painter.layout_no_wrap(
                 node_data.name.clone(),
                 FontId::proportional(label_font_size(self.zoom)),
-                palette.node_text_primary,
+                fade(palette.node_text_primary, dim),
             );
             let label = label_rect(center, galley.size(), self.zoom);
             labels.push((
@@ -1172,6 +1200,36 @@ impl CanvasView {
         }
 
         (response, triggered_action)
+    }
+}
+
+/// Opacity left to the nodes, edges and labels outside the focus of a
+/// selected node.
+pub const FOCUS_DIM: f32 = 0.25;
+
+/// The selected node and its direct neighbours; `None` without a selected
+/// node. Everything else is dimmed while a node is selected.
+pub fn focus_nodes(
+    graph: &AgentGraph,
+    selected: Option<NodeIndex>,
+) -> Option<std::collections::HashSet<NodeIndex>> {
+    let sel = selected?;
+    let mut set: std::collections::HashSet<NodeIndex> =
+        graph.graph.neighbors_undirected(sel).collect();
+    set.insert(sel);
+    Some(set)
+}
+
+/// An edge is dimmed when a node is selected and it is not one of its edges.
+pub fn dims_edge(selected: Option<NodeIndex>, a: NodeIndex, b: NodeIndex) -> bool {
+    selected.is_some_and(|s| s != a && s != b)
+}
+
+fn fade(color: Color32, dim: bool) -> Color32 {
+    if dim {
+        color.gamma_multiply(FOCUS_DIM)
+    } else {
+        color
     }
 }
 

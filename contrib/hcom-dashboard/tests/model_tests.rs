@@ -11526,3 +11526,35 @@ fn test_task_77_60_layout_runs_live_only_while_a_node_is_dragged() {
         "a released node plans the rest positions"
     );
 }
+
+/// A selected node, its direct neighbours and its edges keep full color;
+/// every other node and edge is dimmed. Without a selection nothing is
+/// dimmed (TASK-77.61).
+#[test]
+fn test_task_77_61_selected_node_focus_dims_the_rest() {
+    use hcom_dashboard::canvas::{dims_edge, focus_nodes};
+    let mut graph = AgentGraph::new();
+    let snap: Vec<InstanceSnapshot> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|n| layout_snap(n, None))
+        .collect();
+    graph.apply_instance_snapshot(&snap);
+    let now = Utc::now();
+    for (id, (from, to)) in [("a", "b"), ("c", "b"), ("d", "e")].iter().enumerate() {
+        graph.apply_message_event(&window_msg(id as u64 + 1, now, from, to));
+    }
+    let n = |name: &str| graph.get_node_index(name).unwrap();
+
+    assert!(focus_nodes(&graph, None).is_none());
+    assert!(!dims_edge(None, n("d"), n("e")));
+
+    let focus = focus_nodes(&graph, Some(n("b"))).unwrap();
+    let mut names: Vec<_> = focus.iter().map(|i| graph.graph[*i].name.clone()).collect();
+    names.sort();
+    assert_eq!(names, ["a", "b", "c"]);
+    assert!(!dims_edge(Some(n("b")), n("a"), n("b")));
+    assert!(!dims_edge(Some(n("b")), n("b"), n("c")));
+    assert!(dims_edge(Some(n("b")), n("d"), n("e")));
+    // A neighbour's other edges are not the selected node's edges.
+    assert!(dims_edge(Some(n("a")), n("c"), n("b")));
+}
