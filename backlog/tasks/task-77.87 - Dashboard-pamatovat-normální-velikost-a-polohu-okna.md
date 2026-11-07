@@ -1,11 +1,11 @@
 ---
 id: TASK-77.87
 title: 'Dashboard: pamatovat normální velikost a polohu okna'
-status: In Progress
+status: Done
 assignee:
   - '@hcom_dev__idea'
 created_date: '2026-11-07T17:27:00Z'
-updated_date: '2026-11-07T17:34:00Z'
+updated_date: '2026-11-07T17:36:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -22,20 +22,20 @@ Uživatel 2026-11-07 po TASK-77.86: maximalizace se obnovuje, ale normální vel
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Okno zavřené nemaximalizované se při dalším startu otevře ve stejné velikosti a poloze
-- [ ] #2 Okno spuštěné maximalizované se po zrušení maximalizace vrátí do uložené normální velikosti a polohy
+- [x] #1 Okno zavřené nemaximalizované se při dalším startu otevře ve stejné velikosti a poloze
+- [x] #2 Okno spuštěné maximalizované se po zrušení maximalizace vrátí do uložené normální velikosti a polohy
 - [x] #3 Přechod mezi maximalizovaným a normálním stavem nepřepíše uloženou normální velikost a polohu velikostí maximalizovaného okna
 - [x] #4 Headless test pokrývá uložení, obnovení a přechodové snímky
 <!-- AC:END -->
-
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-User checks AC #1 (close normal, relaunch: same size and position) and AC #2 (start maximized, unmaximize: saved normal geometry); then --check-ac 1 2, final summary, Done.
-<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 agent_review OK (tmp/knowledge/task-77.87-review.md). Committed and deployed; AC #1 and #2 wait for the user's desktop check.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Normal window size and outer position are saved (window_pos) and restored at start (with_position); a normal geometry counts once it held for 0.5 s, so maximize transition frames no longer replace it. User confirmed both scenarios on the desktop (the first failed check ran a dashboard started before the deploy). Test test_task_77_87_normal_geometry_ignores_transition_frames; agent_review OK.
+<!-- SECTION:FINAL_SUMMARY:END -->
