@@ -384,6 +384,11 @@ pub struct DashboardState {
     pub detail_tab: String,
     #[serde(default = "default_true")]
     pub show_side_panel: bool,
+    /// Transcript tab toggles: load with `hcom transcript --full` / `--detailed`.
+    #[serde(default)]
+    pub transcript_full: bool,
+    #[serde(default)]
+    pub transcript_detailed: bool,
     #[serde(default = "default_columns")]
     pub columns: Vec<String>,
     #[serde(default)]
@@ -627,6 +632,8 @@ impl Default for DashboardState {
             sort_reverse: false,
             detail_tab: DEFAULT_DETAIL_TAB.into(),
             show_side_panel: true,
+            transcript_full: false,
+            transcript_detailed: false,
             columns: default_columns(),
             columns_known: Vec::new(),
             column_widths: HashMap::new(),

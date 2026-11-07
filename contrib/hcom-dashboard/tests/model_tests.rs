@@ -1559,6 +1559,7 @@ fn test_action_worker_async_dispatch_and_bounded_transcript() {
             agent: "test_agent".into(),
             generation: 1,
             last_lines: 10,
+            flags: Default::default(),
         })
         .unwrap();
 
@@ -1626,6 +1627,7 @@ fn test_action_worker_async_dispatch_and_bounded_transcript() {
             agent: "test_agent".into(),
             generation: 1,
             last_lines: 10,
+            flags: Default::default(),
         }
     );
     assert_eq!(
@@ -1937,13 +1939,13 @@ fn test_transcript_clamping_to_100() {
     assert_eq!(clamp_transcript_lines(100), 100);
     assert_eq!(clamp_transcript_lines(500), 100);
 
-    let argv_large = build_transcript_argv("agent_alpha", 500);
+    let argv_large = build_transcript_argv("agent_alpha", 500, Default::default());
     assert_eq!(
         argv_large,
         vec!["transcript", "agent_alpha", "--last", "100"]
     );
 
-    let argv_zero = build_transcript_argv("agent_beta", 0);
+    let argv_zero = build_transcript_argv("agent_beta", 0, Default::default());
     assert_eq!(argv_zero, vec!["transcript", "agent_beta", "--last", "1"]);
 
     let attach_argv = build_attach_argv("agent_gamma");
@@ -14299,4 +14301,125 @@ fn test_task_77_76_running_only_follows_the_window() {
         .map(|r| r.instance.as_str())
         .collect();
     assert_eq!(all, ["early", "late", "lost", "live"], "All: any session");
+}
+
+#[test]
+fn test_task_77_88_transcript_full_detailed_toggles() {
+    use hcom_dashboard::action::{
+        TranscriptFlags, build_session_transcript_argv, build_transcript_argv,
+    };
+    use hcom_dashboard::config::{DashboardConfig, load_state};
+    use hcom_dashboard::sessions::SessionInfo;
+
+    let both = TranscriptFlags {
+        full: true,
+        detailed: true,
+    };
+    assert_eq!(
+        build_transcript_argv("a", 100, both),
+        ["transcript", "a", "--last", "100", "--full", "--detailed"]
+    );
+    assert_eq!(
+        build_session_transcript_argv("/t/s.jsonl", both),
+        [
+            "transcript",
+            "--path",
+            "/t/s.jsonl",
+            "--last",
+            "100",
+            "--full",
+            "--detailed"
+        ]
+    );
+
+    let (mut app, recorded, dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut run = task_77_52_runner(ctx.clone());
+    let rows = app.table_rows.clone();
+    app.select_table_row(&rows[0]);
+    app.select_detail_tab("Transcript");
+    run(&mut app, vec![]);
+    std::thread::sleep(Duration::from_millis(50));
+    let last_flags = |recorded: &Arc<Mutex<Vec<ActionRequest>>>| {
+        recorded.lock().unwrap().iter().rev().find_map(|r| match r {
+            ActionRequest::Transcript { agent, flags, .. } => Some((agent.clone(), *flags)),
+            ActionRequest::SessionTranscript { agent, flags, .. } => {
+                Some((format!("session:{agent}"), *flags))
+            }
+            _ => None,
+        })
+    };
+    assert_eq!(
+        last_flags(&recorded).unwrap(),
+        ("inst_alpha_1".into(), TranscriptFlags::default())
+    );
+
+    let mut click = |app: &mut hcom_dashboard::app::HcomDashboardApp, label: &str| {
+        let out = run(app, vec![]);
+        let p = widget_rect(&out, label)
+            .unwrap_or_else(|| panic!("{label}"))
+            .center();
+        run(app, vec![egui::Event::PointerMoved(p)]);
+        for pressed in [true, false] {
+            run(
+                app,
+                vec![egui::Event::PointerButton {
+                    pos: p,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        run(app, vec![]);
+        // The mock runner records requests on the worker thread.
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    click(&mut app, "Full");
+    assert_eq!(
+        last_flags(&recorded).unwrap(),
+        (
+            "inst_alpha_1".into(),
+            TranscriptFlags {
+                full: true,
+                detailed: false
+            }
+        ),
+        "turning Full on reloads with --full"
+    );
+    click(&mut app, "Detailed");
+    assert_eq!(last_flags(&recorded).unwrap().1, both);
+    let saved = load_state(dir.path());
+    assert!(
+        saved.transcript_full && saved.transcript_detailed,
+        "persisted"
+    );
+
+    // A session transcript of the next agent uses the same flags.
+    let session = SessionInfo {
+        start_ts: 1000,
+        session_id: "sid-x".into(),
+        transcript_path: "/t/sid-x.jsonl".into(),
+        ..Default::default()
+    };
+    app.select_table_row(&rows[1]);
+    app.show_session_transcript("cat_beta", &session);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        last_flags(&recorded).unwrap(),
+        ("session:cat_beta".into(), both)
+    );
+    click(&mut app, "Full");
+    assert_eq!(
+        last_flags(&recorded).unwrap(),
+        (
+            "session:cat_beta".into(),
+            TranscriptFlags {
+                full: false,
+                detailed: true
+            }
+        ),
+        "the toggle reloads the session transcript"
+    );
 }

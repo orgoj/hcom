@@ -5,6 +5,24 @@ use std::sync::{Arc, Mutex};
 use std::thread::{JoinHandle, sleep, spawn};
 use std::time::{Duration, Instant};
 
+/// `hcom transcript` flags `--full` and `--detailed` (Transcript tab toggles).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TranscriptFlags {
+    pub full: bool,
+    pub detailed: bool,
+}
+
+impl TranscriptFlags {
+    fn push_args(self, argv: &mut Vec<String>) {
+        if self.full {
+            argv.push("--full".to_string());
+        }
+        if self.detailed {
+            argv.push("--detailed".to_string());
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionRequest {
     Attach {
@@ -20,12 +38,14 @@ pub enum ActionRequest {
         agent: String,
         generation: u64,
         last_lines: usize,
+        flags: TranscriptFlags,
     },
     /// Transcript file of one session of `agent` (Sessions tab).
     SessionTranscript {
         agent: String,
         generation: u64,
         path: String,
+        flags: TranscriptFlags,
     },
     /// Sessions of `agent` for the Sessions tab.
     Sessions {
@@ -125,13 +145,32 @@ pub fn clamp_transcript_lines(lines: usize) -> usize {
     lines.clamp(1, 100)
 }
 
-pub fn build_transcript_argv(agent: &str, last_lines: usize) -> Vec<String> {
-    vec![
+pub fn build_transcript_argv(
+    agent: &str,
+    last_lines: usize,
+    flags: TranscriptFlags,
+) -> Vec<String> {
+    let mut argv = vec![
         "transcript".to_string(),
         agent.to_string(),
         "--last".to_string(),
         clamp_transcript_lines(last_lines).to_string(),
-    ]
+    ];
+    flags.push_args(&mut argv);
+    argv
+}
+
+/// `hcom transcript --path <path> --last 100` for a session transcript file.
+pub fn build_session_transcript_argv(path: &str, flags: TranscriptFlags) -> Vec<String> {
+    let mut argv = vec![
+        "transcript".to_string(),
+        "--path".to_string(),
+        path.to_string(),
+        "--last".to_string(),
+        "100".to_string(),
+    ];
+    flags.push_args(&mut argv);
+    argv
 }
 
 pub fn build_attach_argv(agent: &str) -> Vec<String> {
@@ -378,8 +417,9 @@ impl ActionRunner for SystemActionRunner {
                 agent,
                 generation,
                 last_lines,
+                flags,
             } => {
-                let argv = build_transcript_argv(&agent, last_lines);
+                let argv = build_transcript_argv(&agent, last_lines, flags);
                 let argv_ref: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
                 let res = self.run_command_bounded("hcom", &argv_ref, NO_STDOUT_LIMIT, 4096, None);
                 Some(ActionResult::TranscriptLoaded {
@@ -392,14 +432,11 @@ impl ActionRunner for SystemActionRunner {
                 agent,
                 generation,
                 path,
+                flags,
             } => {
-                let res = self.run_command_bounded(
-                    "hcom",
-                    &["transcript", "--path", &path, "--last", "100"],
-                    NO_STDOUT_LIMIT,
-                    4096,
-                    None,
-                );
+                let argv = build_session_transcript_argv(&path, flags);
+                let argv_ref: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+                let res = self.run_command_bounded("hcom", &argv_ref, NO_STDOUT_LIMIT, 4096, None);
                 Some(ActionResult::TranscriptLoaded {
                     agent,
                     generation,

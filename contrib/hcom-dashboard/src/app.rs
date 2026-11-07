@@ -1,4 +1,6 @@
-use crate::action::{ActionRequest, ActionResult, ActionWorkerHandle, SystemActionRunner};
+use crate::action::{
+    ActionRequest, ActionResult, ActionWorkerHandle, SystemActionRunner, TranscriptFlags,
+};
 use crate::canvas::{CanvasAction, CanvasView, ThemePalette};
 use crate::config::{
     DEFAULT_DETAIL_WIDTH_PX, DETAIL_TABS, DashboardConfig, DashboardState, PlaceholderContext,
@@ -1069,6 +1071,14 @@ impl HcomDashboardApp {
         self.window_cache_key = Some(key);
     }
 
+    /// `--full` / `--detailed` from the Transcript tab toggles.
+    pub fn transcript_flags(&self) -> TranscriptFlags {
+        TranscriptFlags {
+            full: self.state.transcript_full,
+            detailed: self.state.transcript_detailed,
+        }
+    }
+
     pub fn selected_agent_name(&self) -> Option<String> {
         self.selected_row().map(|r| {
             if !r.instance.is_empty() {
@@ -1120,6 +1130,7 @@ impl HcomDashboardApp {
                     agent,
                     generation: gen_id,
                     path,
+                    flags: self.transcript_flags(),
                 });
                 return;
             }
@@ -1150,6 +1161,7 @@ impl HcomDashboardApp {
                     agent,
                     generation: gen_id,
                     last_lines: 100,
+                    flags: self.transcript_flags(),
                 });
             }
             "Events" => {
@@ -2437,6 +2449,7 @@ impl HcomDashboardApp {
                     agent: agent_name.clone(),
                     generation: self.selection_generation,
                     last_lines: 30,
+                    flags: self.transcript_flags(),
                 });
             }
             // Destructive action last, set apart from the others.
@@ -3061,6 +3074,22 @@ impl HcomDashboardApp {
                     .as_ref()
                     .filter(|(a, _, _)| agent.as_ref() == Some(a))
                     .map(|(_, p, l)| (p.clone(), l.clone()));
+                let mut flags_changed = false;
+                ui.horizontal_wrapped(|ui| {
+                    flags_changed |= ui
+                        .toggle_value(&mut self.state.transcript_full, "Full")
+                        .on_hover_text("Complete assistant responses (--full)")
+                        .changed();
+                    flags_changed |= ui
+                        .toggle_value(&mut self.state.transcript_detailed, "Detailed")
+                        .on_hover_text("Tool I/O, file edits, errors, token usage (--detailed)")
+                        .changed();
+                });
+                if flags_changed {
+                    self.save_state();
+                    self.transcript_content = None;
+                    self.on_selection_changed();
+                }
                 if let Some((path, label)) = &session_path {
                     ui.horizontal(|ui| {
                         ui.weak(label).on_hover_text(path);
@@ -5554,6 +5583,7 @@ impl eframe::App for HcomDashboardApp {
                                     agent: agent_name.clone(),
                                     generation: self.selection_generation,
                                     last_lines: 30,
+                                    flags: self.transcript_flags(),
                                 });
                                 close_menu = true;
                             }
