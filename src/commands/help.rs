@@ -239,7 +239,7 @@ const LIST_HELP: &[HelpEntry] = &[
         "",
         "  hooks_bound, process_bound, transcript_path, background_log_file,",
     ),
-    ("", "  launch_context"),
+    ("", "  launch_context, launch_args"),
     ("", ""),
     (
         "list [self|<name>]",

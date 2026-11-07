@@ -35,6 +35,8 @@ pub struct SessionInfo {
     pub handoff_to: String,
     /// Claude /rename or AI title, Codex thread name (empty: none).
     pub title: String,
+    /// Arguments hcom launched the CLI with (empty: none recorded).
+    pub launch_args: Vec<String>,
 }
 
 /// The running session as `hcom list --json` reports it.
@@ -44,6 +46,7 @@ pub struct LiveSession {
     pub transcript_path: String,
     pub tool: String,
     pub directory: String,
+    pub launch_args: Vec<String>,
 }
 
 /// Tools `hcom r <session-id>` and `hcom f <session-id>` accept.
@@ -147,6 +150,9 @@ pub fn parse_sessions(
                 cur.transcript_path = snap_field("transcript_path");
                 cur.tool = snap_field("tool");
                 cur.directory = snap_field("directory");
+                // Stored as a JSON array encoded in a string.
+                cur.launch_args =
+                    serde_json::from_str(&snap_field("launch_args")).unwrap_or_default();
                 sessions.push(cur);
             }
             _ => {}
@@ -158,6 +164,7 @@ pub fn parse_sessions(
             cur.transcript_path = l.transcript_path.clone();
             cur.tool = l.tool.clone();
             cur.directory = l.directory.clone();
+            cur.launch_args = l.launch_args.clone();
         }
         sessions.push(cur);
     }
@@ -268,6 +275,39 @@ impl SessionInfo {
     /// Why Fork is disabled, or Ok.
     pub fn can_fork(&self) -> Result<(), String> {
         self.launchable(FORK_TOOLS)
+    }
+
+    /// `codex · gpt-5 · medium`: the tool, then the model (`--model`, `-m`)
+    /// and reasoning effort (`--effort`, `-c model_reasoning_effort=...`)
+    /// from the launch arguments, each only when present.
+    pub fn launch_summary(&self) -> String {
+        let (mut model, mut effort) = (None, None);
+        let mut args = self.launch_args.iter();
+        while let Some(a) = args.next() {
+            let (flag, inline) = match a.split_once('=') {
+                Some((f, v)) if f.starts_with("--") => (f, Some(v.to_string())),
+                _ => (a.as_str(), None),
+            };
+            let mut value = || inline.clone().or_else(|| args.next().cloned());
+            match flag {
+                "--model" | "-m" => model = value(),
+                "--effort" => effort = value(),
+                "-c" | "--config" => {
+                    if let Some(v) = value()
+                        && let Some(e) = v.strip_prefix("model_reasoning_effort=")
+                    {
+                        effort = Some(e.trim_matches(['"', '\'']).to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        [Some(self.tool.clone()), model, effort]
+            .into_iter()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 }
 

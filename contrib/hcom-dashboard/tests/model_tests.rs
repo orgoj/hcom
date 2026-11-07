@@ -12566,6 +12566,7 @@ fn test_task_77_69_parse_sessions_from_events() {
         transcript_path: "/t/3.jsonl".into(),
         tool: "claude".into(),
         directory: "/work/live".into(),
+        launch_args: vec!["--model".into(), "opus".into()],
     };
     let now = hcom_dashboard::table_data::parse_event_ts("2026-11-07T12:00:00");
     let ts = hcom_dashboard::table_data::parse_event_ts;
@@ -13826,13 +13827,13 @@ fn test_task_77_81_compact_card_and_handoff_link() {
         rows.dedup();
         rows.len()
     };
-    // Title, meta, handoff link, directory, partners.
+    // Title, launch summary (TASK-77.90), meta, handoff link, directory, partners.
     assert_eq!(
         card_lines("OpenResty pilot na Cyrilu", resumes[0].0.top()),
-        5
+        6
     );
-    // Fallback title, meta, directory, partners.
-    assert_eq!(card_lines("session s0000001", resumes[1].0.top()), 4);
+    // Fallback title, launch summary, meta, directory, partners.
+    assert_eq!(card_lines("session s0000001", resumes[1].0.top()), 5);
     find(&all, "ended · 47m");
     let start = |i: usize| {
         chrono::DateTime::from_timestamp(session_minutes_start(&sessions[i]) as i64, 0)
@@ -13840,7 +13841,7 @@ fn test_task_77_81_compact_card_and_handoff_link() {
             .with_timezone(&chrono::Local)
     };
     let meta1 = format!(
-        "{} – {} · launched by wdt_mp2 · ended killed (cli) · claude · 615 KB",
+        "{} – {} · launched by wdt_mp2 · ended killed (cli) · 615 KB",
         start(1).format("%m-%d %H:%M"),
         chrono::DateTime::from_timestamp(
             hcom_dashboard::app::session_minutes(&sessions[1])
@@ -14632,4 +14633,166 @@ fn test_task_77_91_summary_has_no_transcript_block() {
         );
     }
     assert_eq!(app.state.detail_tab, "Transcript");
+}
+
+/// Launch arguments come from the `stopped` snapshot (a JSON array in a
+/// string) and, for the running session, from `hcom list`; the summary
+/// takes the model and effort from them (TASK-77.90).
+#[test]
+fn test_task_77_90_launch_args_and_summary() {
+    use hcom_dashboard::sessions::{LiveSession, SessionInfo, parse_sessions};
+    use serde_json::json;
+
+    let a = "agent_a";
+    let mut codex = task_77_69_stopped("sid-1", "/t/1.jsonl", "codex");
+    codex["snapshot"]["launch_args"] =
+        json!(r#"["--model","gpt-5.6-terra","-c","model_reasoning_effort=\"medium\""]"#);
+    let life = [
+        task_77_69_life(1, "2026-11-07T08:00:00", a, json!({"action": "created"})),
+        task_77_69_life(2, "2026-11-07T09:00:00", a, codex),
+        task_77_69_life(3, "2026-11-07T10:00:00", a, json!({"action": "created"})),
+        task_77_69_life(
+            4,
+            "2026-11-07T11:00:00",
+            a,
+            task_77_69_stopped("sid-2", "/t/2.jsonl", "claude"),
+        ),
+        task_77_69_life(5, "2026-11-07T12:00:00", a, json!({"action": "created"})),
+    ]
+    .join("\n");
+    let live = LiveSession {
+        session_id: "sid-3".into(),
+        tool: "claude".into(),
+        launch_args: vec![
+            "--add-dir".into(),
+            "/x".into(),
+            "--model=opus".into(),
+            "--effort".into(),
+            "high".into(),
+        ],
+        ..Default::default()
+    };
+    let now = hcom_dashboard::table_data::parse_event_ts("2026-11-07T13:00:00");
+    let s = parse_sessions(a, &life, "", Some(&live), now);
+    assert_eq!(s.len(), 3);
+    assert_eq!(s[0].launch_args, live.launch_args);
+    assert_eq!(s[0].launch_summary(), "claude · opus · high");
+    // No launch_args in the snapshot: only the CLI.
+    assert!(s[1].launch_args.is_empty());
+    assert_eq!(s[1].launch_summary(), "claude");
+    assert_eq!(
+        s[2].launch_args,
+        vec![
+            "--model",
+            "gpt-5.6-terra",
+            "-c",
+            "model_reasoning_effort=\"medium\""
+        ]
+    );
+    assert_eq!(s[2].launch_summary(), "codex · gpt-5.6-terra · medium");
+
+    let gemini = SessionInfo {
+        tool: "gemini".into(),
+        launch_args: vec!["-m".into(), "gemini-3-pro".into(), "-y".into()],
+        ..Default::default()
+    };
+    assert_eq!(gemini.launch_summary(), "gemini · gemini-3-pro");
+    assert_eq!(SessionInfo::default().launch_summary(), "");
+}
+
+/// The card's second line is the launch summary with the full arguments on
+/// hover; line 3 no longer repeats the CLI; without arguments no tooltip
+/// (TASK-77.90).
+#[test]
+fn test_task_77_90_session_card_shows_launch_summary() {
+    use hcom_dashboard::config::DashboardConfig;
+    use hcom_dashboard::model::MessageRange;
+    use hcom_dashboard::sessions::SessionInfo;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let now = chrono::Utc::now();
+    let now_s = now.timestamp() as u64;
+    let row = app
+        .table_rows
+        .iter()
+        .find(|r| r.agent == "cat_beta")
+        .unwrap()
+        .clone();
+    app.select_table_row(&row);
+    app.select_detail_tab("Sessions");
+    run(&mut app, vec![]);
+    let session = |sid: &str, args: Vec<&str>, start: u64| SessionInfo {
+        start_ts: start,
+        end_ts: Some(start + 600),
+        launcher: "user".into(),
+        session_id: sid.into(),
+        tool: "codex".into(),
+        launch_args: args.into_iter().map(String::from).collect(),
+        ..Default::default()
+    };
+    app.sessions_content = Some((
+        "cat_beta".into(),
+        app.selection_generation,
+        Ok(vec![
+            session(
+                "sid-args",
+                vec!["--model", "gpt-5", "-c", "model_reasoning_effort=\"low\""],
+                now_s - 3600,
+            ),
+            session("sid-none", vec![], now_s - 7200),
+        ]),
+    ));
+    app.apply_message_range(MessageRange::Live { span_secs: None }, now)
+        .unwrap();
+    let texts = |out: &egui::FullOutput| -> Vec<(String, Rect)> {
+        out.shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => {
+                    Some((t.galley.text().to_string(), t.visual_bounding_rect()))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    run(&mut app, vec![]);
+    let out = run(&mut app, vec![]);
+    let all = texts(&out);
+    let summaries: Vec<_> = all
+        .iter()
+        .filter(|(t, _)| t == "codex · gpt-5 · low" || t == "codex")
+        .collect();
+    assert_eq!(summaries.len(), 2, "{all:?}");
+    assert!(
+        !all.iter().any(|(t, _)| t.contains("· codex ·")),
+        "line 3 repeats the CLI: {all:?}"
+    );
+
+    let hover = |run: &mut dyn FnMut(
+        &mut hcom_dashboard::app::HcomDashboardApp,
+        Vec<egui::Event>,
+    ) -> egui::FullOutput,
+                 app: &mut hcom_dashboard::app::HcomDashboardApp,
+                 text: &str| {
+        let rect = summaries.iter().find(|(t, _)| t == text).unwrap().1;
+        let mut out = run(app, vec![egui::Event::PointerMoved(rect.center())]);
+        for _ in 0..20 {
+            out = run(app, vec![]);
+        }
+        texts(&out)
+    };
+    let shown = hover(&mut run, &mut app, "codex · gpt-5 · low");
+    assert!(
+        shown
+            .iter()
+            .any(|(t, _)| t == "--model gpt-5 -c model_reasoning_effort=\"low\""),
+        "{shown:?}"
+    );
+    let shown = hover(&mut run, &mut app, "codex");
+    assert!(
+        !shown.iter().any(|(t, _)| t.starts_with("--model")),
+        "{shown:?}"
+    );
 }

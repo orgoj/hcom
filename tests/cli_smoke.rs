@@ -375,6 +375,57 @@ fn list_json_empty() {
 }
 
 #[test]
+fn list_json_and_format_expose_launch_args() {
+    let h = Hcom::new();
+    let (code, _, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "init db: {stderr}");
+    let conn = rusqlite::Connection::open(h.path().join("hcom.db")).unwrap();
+    conn.execute(
+        "INSERT INTO instances (name, session_id, tool, directory, status, status_time, created_at, pid, launch_args) \
+         VALUES ('withargs', 's1', 'codex', '/tmp', 'listening', ?1, ?1, 999981, ?2), \
+                ('noargs', 's2', 'claude', '/tmp', 'listening', ?1, ?1, 999982, NULL)",
+        rusqlite::params![
+            chrono::Utc::now().timestamp(),
+            r#"["--model","gpt-5","-c","model_reasoning_effort=\"high\""]"#
+        ],
+    )
+    .unwrap();
+    drop(conn);
+
+    let (code, stdout, stderr) = h.run(["list", "--json"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    let list: serde_json::Value = serde_json::from_str(&stdout).expect("list json");
+    let args = |name: &str| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["base_name"] == name)
+            .unwrap_or_else(|| panic!("{name} missing: {stdout}"))["launch_args"]
+            .clone()
+    };
+    assert_eq!(
+        args("withargs"),
+        serde_json::json!(["--model", "gpt-5", "-c", "model_reasoning_effort=\"high\""])
+    );
+    assert_eq!(args("noargs"), serde_json::json!([]));
+
+    let (code, stdout, stderr) = h.run(["list", "--format", "{base_name} {launch_args}"]);
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(
+        stdout.contains(r#"withargs ["--model","gpt-5","#),
+        "stdout={stdout}"
+    );
+    assert!(stdout.contains("noargs []"), "stdout={stdout}");
+
+    let (code, stdout, _) = h.run(["list", "--help"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("launch_context, launch_args"),
+        "help={stdout}"
+    );
+}
+
+#[test]
 fn kill_json_reports_every_target() {
     let h = Hcom::new();
     let agent = h.start();

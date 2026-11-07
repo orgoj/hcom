@@ -2848,7 +2848,18 @@ impl HcomDashboardApp {
                                 },
                             );
                         });
-                        // Line 2: time, launcher, end reason, tool, size, id.
+                        // Line 2: CLI, model and effort; the full launch
+                        // arguments on hover.
+                        let summary = s.launch_summary();
+                        if !summary.is_empty() {
+                            let r = ui.add(
+                                egui::Label::new(RichText::new(summary).monospace()).truncate(),
+                            );
+                            if !s.launch_args.is_empty() {
+                                r.on_hover_text(s.launch_args.join(" "));
+                            }
+                        }
+                        // Line 3: time, launcher, end reason, size, id.
                         // Same minutes as the window Show in graph sets.
                         let (start_min, end_min) = session_minutes(s);
                         let until = match end_min {
@@ -2864,9 +2875,6 @@ impl HcomDashboardApp {
                         ];
                         if !s.end_reason.is_empty() {
                             meta.push(format!("ended {}", s.end_reason));
-                        }
-                        if !s.tool.is_empty() {
-                            meta.push(s.tool.clone());
                         }
                         meta.push(
                             s.transcript_size

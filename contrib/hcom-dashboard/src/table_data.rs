@@ -140,6 +140,8 @@ pub struct LiveInstanceItem {
     pub session_id: Option<String>,
     #[serde(default)]
     pub launch_context: Option<LiveLaunchContext>,
+    #[serde(default)]
+    pub launch_args: Option<Vec<String>>,
 }
 
 pub fn build_table_rows(

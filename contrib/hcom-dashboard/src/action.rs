@@ -485,6 +485,7 @@ impl ActionRunner for SystemActionRunner {
                         transcript_path: i.transcript_path.unwrap_or_default(),
                         tool: i.tool.unwrap_or_default(),
                         directory: i.directory.unwrap_or_default(),
+                        launch_args: i.launch_args.unwrap_or_default(),
                     });
                 let sessions = life.and_then(|life| {
                     let msgs = msgs?;

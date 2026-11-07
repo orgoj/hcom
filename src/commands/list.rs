@@ -378,6 +378,11 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
                 .filter(|s| !s.is_empty())
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or(serde_json::json!({}));
+            let launch_args: serde_json::Value = data
+                .launch_args
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(serde_json::json!([]));
 
             let payload = serde_json::json!({
                 "name": full_name,
@@ -401,6 +406,7 @@ pub fn cmd_list(db: &HcomDb, args: &ListArgs, ctx: Option<&CommandContext>) -> i
                 "hooks_bound": hooks_bound,
                 "process_bound": process_bound,
                 "launch_context": launch_context,
+                "launch_args": launch_args,
             });
             result_list.push(payload);
         }
