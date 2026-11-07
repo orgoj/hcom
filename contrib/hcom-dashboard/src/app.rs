@@ -53,6 +53,34 @@ pub const CLI_BINARIES: &[(&str, &str)] = &[
 /// Suggestions for the Start dialog's reasoning field; any text is accepted.
 pub const REASONING_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh", "max"];
 
+/// A modal dialog centered on the window with `title` on top: its backdrop
+/// blocks input to the rest of the app, so Tab and clicks stay inside.
+/// Returns the content's result and whether Escape asks to close it (not
+/// while a popup in it, e.g. a combo box, is open).
+pub fn show_modal<R>(
+    ctx: &egui::Context,
+    title: &str,
+    content: impl FnOnce(&mut egui::Ui) -> R,
+) -> (R, bool) {
+    let id = egui::Id::unique(("dashboard_modal", title));
+    let area = egui::Area::new(id)
+        .kind(egui::UiKind::Modal)
+        .sense(egui::Sense::hover())
+        .order(egui::Order::Foreground)
+        .interactable(true)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .fixed_pos(ctx.content_rect().center());
+    let resp = egui::Modal::new(id).area(area).show(ctx, |ui| {
+        ui.label(RichText::new(title).strong());
+        ui.separator();
+        content(ui)
+    });
+    let escape = resp.is_top_modal
+        && !resp.any_popup_open
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    (resp.inner, escape)
+}
+
 /// CLIs whose executable is in one of the `path` directories, plus `current`.
 pub fn installed_clis(current: &str, path: Option<&std::ffi::OsStr>) -> Vec<String> {
     let dirs: Vec<PathBuf> = path
@@ -343,6 +371,10 @@ pub struct HcomDashboardApp {
     pub start_model_choices: Vec<String>,
     /// Pending Browse… folder choice for the Start dialog dir.
     pub start_dir_pick: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
+    /// A modal dialog was open in the previous frame.
+    modal_was_open: bool,
+    /// A modal dialog was open when this frame started.
+    modal_at_frame_start: bool,
 
     pub show_send_dialog: bool,
     pub send_target: String,
@@ -566,6 +598,8 @@ impl HcomDashboardApp {
             start_cli_choices: Vec::new(),
             start_model_choices: Vec::new(),
             start_dir_pick: None,
+            modal_was_open: false,
+            modal_at_frame_start: false,
             show_send_dialog: false,
             send_target: String::new(),
             send_text: String::new(),
@@ -666,6 +700,8 @@ impl HcomDashboardApp {
             start_cli_choices: Vec::new(),
             start_model_choices: Vec::new(),
             start_dir_pick: None,
+            modal_was_open: false,
+            modal_at_frame_start: false,
             show_send_dialog: false,
             send_target: String::new(),
             send_text: String::new(),
@@ -1173,7 +1209,11 @@ impl HcomDashboardApp {
             })
         };
         let (alt_down, alt_up) = (alt_key(egui::Key::ArrowDown), alt_key(egui::Key::ArrowUp));
-        let (down, up, enter) = if ui.ctx().text_edit_focused() {
+        // A modal dialog open at frame start keeps the keyboard, also when
+        // its button (e.g. Cancel on Enter) closed it during this frame.
+        let (down, up, enter) = if self.modal_at_frame_start {
+            (false, false, false)
+        } else if ui.ctx().text_edit_focused() {
             (alt_down, alt_up, false)
         } else {
             ui.input(|i| {
@@ -2658,6 +2698,16 @@ impl HcomDashboardApp {
     }
 
     /// True while a dialog, confirmation or the canvas context menu is open.
+    /// A modal dialog is open: global keyboard shortcuts stay off.
+    pub fn modal_open(&self) -> bool {
+        self.confirm_kill_target.is_some()
+            || self.confirm_restart_target.is_some()
+            || self.confirm_kill_group.is_some()
+            || self.custom_cmd_confirm.is_some()
+            || self.show_start_dialog
+            || self.show_send_dialog
+    }
+
     pub fn overlay_open(&self) -> bool {
         self.context_menu.is_some()
             || self.confirm_kill_target.is_some()
@@ -3025,6 +3075,7 @@ impl eframe::App for HcomDashboardApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.text_focus_at_frame_start = ctx.text_edit_focused();
+        self.modal_at_frame_start = self.modal_open();
         let palette = self.apply_theme(&ctx);
         let window = ui.max_rect();
 
@@ -3064,7 +3115,8 @@ impl eframe::App for HcomDashboardApp {
 
         // "/" focuses the search field unless a text field has the keyboard.
         // The typed text, not the key, so every keyboard layout works.
-        let focus_search = !ctx.text_edit_focused()
+        let focus_search = !self.modal_at_frame_start
+            && !ctx.text_edit_focused()
             && ctx.input(|i| {
                 i.events
                     .iter()
@@ -3074,17 +3126,22 @@ impl eframe::App for HcomDashboardApp {
         if clear_search && !self.inject_input_has_focus {
             self.search_query.clear();
         }
-        if let Some(key) = fkey {
+        // A modal dialog keeps the keyboard: no global shortcuts.
+        if let Some(key) = fkey.filter(|_| !self.modal_at_frame_start) {
             self.apply_function_key(key);
         }
         // Alt+Left/Right select the previous/next detail tab wherever the
         // keyboard is; consumed so a text field does not also move its cursor.
-        let (alt_left, alt_right) = ctx.input_mut(|i| {
-            (
-                i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft),
-                i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowRight),
-            )
-        });
+        let (alt_left, alt_right) = if self.modal_at_frame_start {
+            (false, false)
+        } else {
+            ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowLeft),
+                    i.consume_key(egui::Modifiers::ALT, egui::Key::ArrowRight),
+                )
+            })
+        };
         if alt_left || alt_right {
             let cur = DETAIL_TABS
                 .iter()
@@ -3951,128 +4008,144 @@ impl eframe::App for HcomDashboardApp {
             }
         });
 
-        // 5. Confirmation Bars / Modals
+        // 5. Dialogs: modal, so Tab and clicks stay inside. The first frame
+        // of a dialog focuses its first input; confirmations focus Cancel.
+        let just_opened = self.modal_open() && !self.modal_was_open;
+        let ctx = ui.ctx().clone();
         if let Some(ref target) = self.confirm_kill_target.clone() {
-            egui::Window::new("Confirm Kill Agent")
-                .collapsible(false)
-                .resizable(false)
-                .show(ui.ctx(), |ui| {
-                    ui.colored_label(
-                        Color32::from_rgb(231, 76, 60),
-                        format!("Are you sure you want to kill agent '{}'?", target),
-                    );
-                    ui.horizontal(|ui| {
-                        if ui.button("Confirm Kill").clicked() {
-                            if let Some(node) = self.graph.get_agent(target) {
-                                if node.status == AgentStatus::Stopped {
-                                    self.set_action_error(
-                                        Some(target),
-                                        format!("Agent '{}' is already stopped", target),
-                                    );
-                                } else {
-                                    self.dispatch_action(ActionRequest::Kill {
-                                        agent: target.clone(),
-                                    });
-                                }
+            let (_, escape) = show_modal(&ctx, "Confirm Kill Agent", |ui| {
+                ui.colored_label(
+                    Color32::from_rgb(231, 76, 60),
+                    format!("Are you sure you want to kill agent '{}'?", target),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Confirm Kill").clicked() {
+                        if let Some(node) = self.graph.get_agent(target) {
+                            if node.status == AgentStatus::Stopped {
+                                self.set_action_error(
+                                    Some(target),
+                                    format!("Agent '{}' is already stopped", target),
+                                );
                             } else {
                                 self.dispatch_action(ActionRequest::Kill {
                                     agent: target.clone(),
                                 });
                             }
-                            self.confirm_kill_target = None;
+                        } else {
+                            self.dispatch_action(ActionRequest::Kill {
+                                agent: target.clone(),
+                            });
                         }
-                        if ui.button("Cancel").clicked() {
-                            self.confirm_kill_target = None;
-                        }
-                    });
+                        self.confirm_kill_target = None;
+                    }
+                    let cancel = ui.button("Cancel");
+                    if just_opened {
+                        cancel.request_focus();
+                    }
+                    if cancel.clicked() {
+                        self.confirm_kill_target = None;
+                    }
                 });
+            });
+            if escape {
+                self.confirm_kill_target = None;
+            }
         }
 
         if let Some((ref target, ref cmd)) = self.confirm_restart_target.clone() {
-            egui::Window::new("Confirm Restart Agent")
-                .collapsible(false)
-                .resizable(false)
-                .show(ui.ctx(), |ui| {
-                    ui.label(format!(
-                        "Restart agent '{}' via '{}'?",
-                        target,
-                        cmd.join(" ")
-                    ));
-                    ui.horizontal(|ui| {
-                        if ui.button("Confirm Restart").clicked() {
-                            self.dispatch_action(ActionRequest::RunCommand {
-                                cmd: cmd.clone(),
-                                cwd: None,
-                            });
-                            self.confirm_restart_target = None;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.confirm_restart_target = None;
-                        }
-                    });
+            let (_, escape) = show_modal(&ctx, "Confirm Restart Agent", |ui| {
+                ui.label(format!(
+                    "Restart agent '{}' via '{}'?",
+                    target,
+                    cmd.join(" ")
+                ));
+                ui.horizontal(|ui| {
+                    if ui.button("Confirm Restart").clicked() {
+                        self.dispatch_action(ActionRequest::RunCommand {
+                            cmd: cmd.clone(),
+                            cwd: None,
+                        });
+                        self.confirm_restart_target = None;
+                    }
+                    let cancel = ui.button("Cancel");
+                    if just_opened {
+                        cancel.request_focus();
+                    }
+                    if cancel.clicked() {
+                        self.confirm_restart_target = None;
+                    }
                 });
+            });
+            if escape {
+                self.confirm_restart_target = None;
+            }
         }
 
         if let Some(ref targets) = self.confirm_kill_group.clone() {
-            egui::Window::new("Confirm Kill Group")
-                .collapsible(false)
-                .resizable(false)
-                .show(ui.ctx(), |ui| {
-                    ui.colored_label(
-                        Color32::from_rgb(231, 76, 60),
-                        format!(
-                            "The following {} agents will be killed:\n{}",
-                            targets.len(),
-                            targets.join(", ")
-                        ),
-                    );
-                    ui.horizontal(|ui| {
-                        if ui.button("Confirm Kill Group").clicked() {
-                            self.dispatch_action(ActionRequest::KillGroup {
-                                agents: targets.clone(),
-                            });
-                            self.confirm_kill_group = None;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.confirm_kill_group = None;
-                        }
-                    });
+            let (_, escape) = show_modal(&ctx, "Confirm Kill Group", |ui| {
+                ui.colored_label(
+                    Color32::from_rgb(231, 76, 60),
+                    format!(
+                        "The following {} agents will be killed:\n{}",
+                        targets.len(),
+                        targets.join(", ")
+                    ),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Confirm Kill Group").clicked() {
+                        self.dispatch_action(ActionRequest::KillGroup {
+                            agents: targets.clone(),
+                        });
+                        self.confirm_kill_group = None;
+                    }
+                    let cancel = ui.button("Cancel");
+                    if just_opened {
+                        cancel.request_focus();
+                    }
+                    if cancel.clicked() {
+                        self.confirm_kill_group = None;
+                    }
                 });
+            });
+            if escape {
+                self.confirm_kill_group = None;
+            }
         }
 
         if let Some((ref label, ref cmd, ref cwd)) = self.custom_cmd_confirm.clone() {
-            egui::Window::new(format!("Confirm: {}", label))
-                .collapsible(false)
-                .resizable(false)
-                .show(ui.ctx(), |ui| {
-                    ui.label(format!("Run command:\n{}", cmd.join(" ")));
-                    ui.horizontal(|ui| {
-                        if ui.button("Execute").clicked() {
-                            self.dispatch_action(ActionRequest::RunCommand {
-                                cmd: cmd.clone(),
-                                cwd: cwd.clone(),
-                            });
-                            self.custom_cmd_confirm = None;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.custom_cmd_confirm = None;
-                        }
-                    });
+            let (_, escape) = show_modal(&ctx, &format!("Confirm: {}", label), |ui| {
+                ui.label(format!("Run command:\n{}", cmd.join(" ")));
+                ui.horizontal(|ui| {
+                    if ui.button("Execute").clicked() {
+                        self.dispatch_action(ActionRequest::RunCommand {
+                            cmd: cmd.clone(),
+                            cwd: cwd.clone(),
+                        });
+                        self.custom_cmd_confirm = None;
+                    }
+                    let cancel = ui.button("Cancel");
+                    if just_opened {
+                        cancel.request_focus();
+                    }
+                    if cancel.clicked() {
+                        self.custom_cmd_confirm = None;
+                    }
                 });
+            });
+            if escape {
+                self.custom_cmd_confirm = None;
+            }
         }
 
         // Start Dialog: the fields, suggestions and keys of contrib/hcom-gui,
         // centered on the window.
         if self.show_start_dialog {
             let agent = self.start_agent_name.clone();
-            // Enter (not Shift+Enter) launches, Escape cancels; consumed
-            // before the prompt field would take Enter as a newline.
-            let (mut launch, mut close) = ui.input_mut(|i| {
-                (
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
-                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
-                )
-            });
+            // Enter (not Shift+Enter) launches; consumed before the prompt
+            // field would take it as a newline. Escape cancels (show_modal).
+            let mut launch =
+                ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            let mut close = false;
             if let Some(rx) = &self.start_dir_pick {
                 match rx.try_recv() {
                     Ok(choice) => {
@@ -4090,125 +4163,125 @@ impl eframe::App for HcomDashboardApp {
                 }
             }
             const FIELD_W: f32 = 320.0;
-            egui::Window::new(format!("Start {agent}"))
-                .collapsible(false)
-                .resizable(false)
-                .pivot(egui::Align2::CENTER_CENTER)
-                .fixed_pos(ui.ctx().content_rect().center())
-                .show(ui.ctx(), |ui| {
-                    egui::Grid::new("start_dialog_grid")
-                        .num_columns(2)
-                        .spacing([8.0, 6.0])
-                        .show(ui, |ui| {
-                            ui.label("resume");
-                            ui.checkbox(&mut self.start_resume, "");
-                            ui.end_row();
+            let (_, escape) = show_modal(&ctx, &format!("Start {agent}"), |ui| {
+                egui::Grid::new("start_dialog_grid")
+                    .num_columns(2)
+                    .spacing([8.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("resume");
+                        let resume = ui.checkbox(&mut self.start_resume, "");
+                        if just_opened {
+                            resume.request_focus();
+                        }
+                        ui.end_row();
 
-                            // Clone convention: "<agent>__" on focus; left
-                            // unchanged it counts as empty.
-                            ui.label("name");
-                            let out = egui::TextEdit::singleline(&mut self.start_instance_name)
-                                .desired_width(FIELD_W)
-                                .show(ui);
-                            if out.response.gained_focus() && self.start_instance_name.is_empty() {
-                                self.start_instance_name = format!("{agent}__");
-                                let end = egui::text::CCursor::new(
-                                    self.start_instance_name.chars().count(),
-                                );
-                                let mut state = out.state;
-                                state
-                                    .cursor
-                                    .set_char_range(Some(egui::text::CCursorRange::one(end)));
-                                state.store(ui.ctx(), out.response.id);
+                        // Clone convention: "<agent>__" on focus; left
+                        // unchanged it counts as empty.
+                        ui.label("name");
+                        let out = egui::TextEdit::singleline(&mut self.start_instance_name)
+                            .desired_width(FIELD_W)
+                            .show(ui);
+                        if out.response.gained_focus() && self.start_instance_name.is_empty() {
+                            self.start_instance_name = format!("{agent}__");
+                            let end =
+                                egui::text::CCursor::new(self.start_instance_name.chars().count());
+                            let mut state = out.state;
+                            state
+                                .cursor
+                                .set_char_range(Some(egui::text::CCursorRange::one(end)));
+                            state.store(ui.ctx(), out.response.id);
+                        }
+                        ui.end_row();
+
+                        ui.label("dir");
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.start_dir)
+                                    .desired_width(FIELD_W - 76.0),
+                            );
+                            // The system folder chooser (xdg-desktop-portal),
+                            // in a thread so the window keeps drawing.
+                            let picking = self.start_dir_pick.is_some();
+                            if ui
+                                .add_enabled(!picking, egui::Button::new("Browse…"))
+                                .clicked()
+                            {
+                                let start = Some(self.start_dir.trim())
+                                    .filter(|d| !d.is_empty())
+                                    .map(PathBuf::from)
+                                    .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+                                let (tx, rx) = std::sync::mpsc::channel();
+                                std::thread::spawn(move || {
+                                    let mut dlg = rfd::FileDialog::new();
+                                    if let Some(d) = start {
+                                        dlg = dlg.set_directory(d);
+                                    }
+                                    let _ = tx.send(dlg.pick_folder());
+                                });
+                                self.start_dir_pick = Some(rx);
                             }
-                            ui.end_row();
+                        });
+                        ui.end_row();
 
-                            ui.label("dir");
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.start_dir)
-                                        .desired_width(FIELD_W - 76.0),
-                                );
-                                // The system folder chooser (xdg-desktop-portal),
-                                // in a thread so the window keeps drawing.
-                                let picking = self.start_dir_pick.is_some();
-                                if ui
-                                    .add_enabled(!picking, egui::Button::new("Browse…"))
-                                    .clicked()
-                                {
-                                    let start = Some(self.start_dir.trim())
-                                        .filter(|d| !d.is_empty())
-                                        .map(PathBuf::from)
-                                        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
-                                    let (tx, rx) = std::sync::mpsc::channel();
-                                    std::thread::spawn(move || {
-                                        let mut dlg = rfd::FileDialog::new();
-                                        if let Some(d) = start {
-                                            dlg = dlg.set_directory(d);
-                                        }
-                                        let _ = tx.send(dlg.pick_folder());
-                                    });
-                                    self.start_dir_pick = Some(rx);
+                        ui.label("cli");
+                        egui::ComboBox::from_id_salt("start_cli")
+                            .width(FIELD_W)
+                            .selected_text(self.start_cli.clone())
+                            .show_ui(ui, |ui| {
+                                for c in &self.start_cli_choices {
+                                    ui.selectable_value(&mut self.start_cli, c.clone(), c);
                                 }
                             });
-                            ui.end_row();
+                        ui.end_row();
 
-                            ui.label("cli");
-                            egui::ComboBox::from_id_salt("start_cli")
-                                .width(FIELD_W)
-                                .selected_text(self.start_cli.clone())
-                                .show_ui(ui, |ui| {
-                                    for c in &self.start_cli_choices {
-                                        ui.selectable_value(&mut self.start_cli, c.clone(), c);
+                        // Editable: any value, the menu holds suggestions.
+                        let suggest = |ui: &mut egui::Ui,
+                                       value: &mut String,
+                                       choices: &[String]| {
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(value).desired_width(FIELD_W - 28.0),
+                                );
+                                ui.menu_button("▾", |ui| {
+                                    for c in choices {
+                                        if ui.selectable_label(value == c, c).clicked() {
+                                            *value = c.clone();
+                                            ui.close();
+                                        }
                                     }
                                 });
-                            ui.end_row();
+                            });
+                        };
+                        ui.label("model");
+                        suggest(ui, &mut self.start_model, &self.start_model_choices);
+                        ui.end_row();
 
-                            // Editable: any value, the menu holds suggestions.
-                            let suggest =
-                                |ui: &mut egui::Ui, value: &mut String, choices: &[String]| {
-                                    ui.horizontal(|ui| {
-                                        ui.add(
-                                            egui::TextEdit::singleline(value)
-                                                .desired_width(FIELD_W - 28.0),
-                                        );
-                                        ui.menu_button("▾", |ui| {
-                                            for c in choices {
-                                                if ui.selectable_label(value == c, c).clicked() {
-                                                    *value = c.clone();
-                                                    ui.close();
-                                                }
-                                            }
-                                        });
-                                    });
-                                };
-                            ui.label("model");
-                            suggest(ui, &mut self.start_model, &self.start_model_choices);
-                            ui.end_row();
+                        ui.label("reasoning");
+                        let levels: Vec<String> =
+                            REASONING_LEVELS.iter().map(|s| s.to_string()).collect();
+                        suggest(ui, &mut self.start_reasoning, &levels);
+                        ui.end_row();
 
-                            ui.label("reasoning");
-                            let levels: Vec<String> =
-                                REASONING_LEVELS.iter().map(|s| s.to_string()).collect();
-                            suggest(ui, &mut self.start_reasoning, &levels);
-                            ui.end_row();
-
-                            ui.label("prompt");
-                            ui.add(
-                                egui::TextEdit::multiline(&mut self.start_prompt)
-                                    .desired_width(FIELD_W)
-                                    .desired_rows(6),
-                            );
-                            ui.end_row();
-                        });
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Cancel").clicked() {
-                            close = true;
-                        }
-                        if ui.button("OK").clicked() {
-                            launch = true;
-                        }
+                        ui.label("prompt");
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.start_prompt)
+                                .desired_width(FIELD_W)
+                                .desired_rows(6),
+                        );
+                        ui.end_row();
                     });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                    if ui.button("OK").clicked() {
+                        launch = true;
+                    }
                 });
+            });
+            if escape {
+                close = true;
+            }
             if launch {
                 let cmd = self.start_command();
                 let dir = self.start_dir.trim();
@@ -4222,34 +4295,38 @@ impl eframe::App for HcomDashboardApp {
 
         // Send Dialog
         if self.show_send_dialog {
-            egui::Window::new("Send Message")
-                .collapsible(false)
-                .resizable(false)
-                .show(ui.ctx(), |ui| {
-                    ui.label("Target Agent / Instance:");
-                    ui.text_edit_singleline(&mut self.send_target);
-                    ui.label("Message:");
-                    ui.text_edit_multiline(&mut self.send_text);
-                    ui.horizontal(|ui| {
-                        if ui.button("Send").clicked() && !self.send_target.trim().is_empty() {
-                            let cmd = vec![
-                                "hcom".into(),
-                                "send".into(),
-                                "-b".into(),
-                                format!("@{}", self.send_target.trim().trim_start_matches('@')),
-                                "--".into(),
-                                self.send_text.clone(),
-                            ];
-                            self.dispatch_action(ActionRequest::RunCommand { cmd, cwd: None });
-                            self.send_text.clear();
-                            self.show_send_dialog = false;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.show_send_dialog = false;
-                        }
-                    });
+            let (_, escape) = show_modal(&ctx, "Send Message", |ui| {
+                ui.label("Target Agent / Instance:");
+                ui.text_edit_singleline(&mut self.send_target);
+                ui.label("Message:");
+                let message = ui.text_edit_multiline(&mut self.send_text);
+                if just_opened {
+                    message.request_focus();
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Send").clicked() && !self.send_target.trim().is_empty() {
+                        let cmd = vec![
+                            "hcom".into(),
+                            "send".into(),
+                            "-b".into(),
+                            format!("@{}", self.send_target.trim().trim_start_matches('@')),
+                            "--".into(),
+                            self.send_text.clone(),
+                        ];
+                        self.dispatch_action(ActionRequest::RunCommand { cmd, cwd: None });
+                        self.send_text.clear();
+                        self.show_send_dialog = false;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.show_send_dialog = false;
+                    }
                 });
+            });
+            if escape {
+                self.show_send_dialog = false;
+            }
         }
+        self.modal_was_open = self.modal_open();
 
         // 6. Bottom agent table across the full window width. Declared before
         // the right panel, so the detail panel and the canvas sit above it.

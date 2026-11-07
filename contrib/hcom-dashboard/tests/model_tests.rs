@@ -5606,7 +5606,15 @@ fn test_context_menu_lifecycle_and_outside_clicks() {
     assert_eq!(app.context_menu.as_ref().unwrap().screen_pos, pos2);
 
     // 3. AC #2: Right click on empty canvas dismisses the context menu
-    let empty_pos = Pos2::new(100.0, 100.0);
+    // An empty canvas spot (100, 100 is the toolbar, where a click opened
+    // the Send dialog).
+    let empty_pos = app.canvas_rect.min + Vec2::new(10.0, 10.0);
+    assert!(app.layout.nodes.values().all(|n| {
+        app.canvas
+            .world_to_screen(n.pos, app.canvas_rect)
+            .distance(empty_pos)
+            > 60.0
+    }));
     run_app_events(
         &ctx,
         &mut app,
@@ -11154,4 +11162,148 @@ fn test_task_77_57_alt_left_right_switch_detail_tabs() {
     run(&mut app, right(alt));
     assert_eq!(app.state.detail_tab, DETAIL_TABS[last]);
     assert!(app.state.show_side_panel, "shown like a click on the tab");
+}
+
+#[test]
+fn test_task_77_58_dialogs_are_modal() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let none = egui::Modifiers::NONE;
+    let key = |k| vec![task_77_52_key(k, none)];
+    let dialog_rect = |out: &egui::FullOutput, title: &str| {
+        out.shapes
+            .iter()
+            .find_map(|c| match &c.shape {
+                egui::Shape::Text(t) if t.galley.text() == title => Some(c.clip_rect),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("dialog {title} shown"))
+    };
+    let focused_rect = |ctx: &egui::Context| {
+        let id = ctx.memory(|m| m.focused()).expect("a widget has focus");
+        ctx.read_response(id).expect("focused widget").rect
+    };
+    let settle = |app: &mut hcom_dashboard::app::HcomDashboardApp,
+                  run: &mut dyn FnMut(
+        &mut hcom_dashboard::app::HcomDashboardApp,
+        Vec<egui::Event>,
+    ) -> egui::FullOutput| {
+        for _ in 0..4 {
+            run(app, vec![]);
+        }
+        run(app, vec![])
+    };
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    let row = app.table_rows[1].clone();
+    app.select_table_row(&row);
+
+    // Start: the first field has focus and Tab stays inside the dialog.
+    app.open_start_dialog(&row);
+    let out = settle(&mut app, &mut run);
+    let dialog = dialog_rect(&out, "Start cat_beta");
+    assert!(
+        (dialog.center().x - 800.0).abs() < 2.0 && (dialog.center().y - 350.0).abs() < 2.0,
+        "centered: {dialog:?}"
+    );
+    assert!(
+        dialog.contains_rect(focused_rect(&ctx)),
+        "first field focused"
+    );
+    for n in 0..20 {
+        run(&mut app, key(egui::Key::Tab));
+        run(&mut app, vec![]);
+        let f = focused_rect(&ctx);
+        assert!(dialog.contains_rect(f), "Tab {n} left the dialog: {f:?}");
+    }
+    // Global shortcuts stay off: F5 does not switch the detail tab.
+    let tab = app.state.detail_tab.clone();
+    run(&mut app, key(egui::Key::F5));
+    assert_eq!(app.state.detail_tab, tab, "F5 blocked");
+    run(&mut app, key(egui::Key::Escape));
+    run(&mut app, vec![]);
+    assert!(!app.show_start_dialog, "Escape closes Start");
+
+    // A confirmation: Cancel has focus, clicks outside do nothing, Escape
+    // closes it without killing.
+    app.select_table_row(&app.table_rows[0].clone());
+    app.confirm_kill_target = Some("inst_alpha_1".into());
+    let out = settle(&mut app, &mut run);
+    dialog_rect(&out, "Confirm Kill Agent");
+    let cancel = out
+        .shapes
+        .iter()
+        .find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text() == "Cancel" => {
+                Some(Rect::from_min_size(t.pos, t.galley.size()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(focused_rect(&ctx).contains_rect(cancel), "Cancel focused");
+    let send = out
+        .shapes
+        .iter()
+        .find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text() == "Send..." => {
+                Some(Rect::from_min_size(t.pos, t.galley.size()).center())
+            }
+            _ => None,
+        })
+        .expect("Send button");
+    let press = |pressed| egui::Event::PointerButton {
+        pos: send,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: none,
+    };
+    run(&mut app, vec![egui::Event::PointerMoved(send)]);
+    run(&mut app, vec![press(true)]);
+    run(&mut app, vec![press(false)]);
+    run(&mut app, vec![]);
+    assert!(
+        !app.show_send_dialog,
+        "the toolbar under the dialog is blocked"
+    );
+    assert!(app.confirm_kill_target.is_some());
+    run(&mut app, key(egui::Key::Escape));
+    run(&mut app, vec![]);
+    assert!(app.confirm_kill_target.is_none(), "Escape closes it");
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        !recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| matches!(r, ActionRequest::Kill { .. })),
+        "nothing killed"
+    );
+    // Enter on the focused Cancel closes it; the table does not attach.
+    app.confirm_kill_target = Some("inst_alpha_1".into());
+    settle(&mut app, &mut run);
+    run(&mut app, key(egui::Key::Enter));
+    run(&mut app, vec![]);
+    assert!(app.confirm_kill_target.is_none(), "Enter on Cancel");
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        !recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| matches!(r, ActionRequest::Kill { .. } | ActionRequest::Attach { .. })),
+        "no kill, no attach"
+    );
+
+    // Send: the message field has focus; Escape closes it.
+    app.send_target = "inst_alpha_1".into();
+    app.show_send_dialog = true;
+    settle(&mut app, &mut run);
+    assert!(ctx.text_edit_focused(), "message field focused");
+    run(&mut app, key(egui::Key::Escape));
+    run(&mut app, vec![]);
+    assert!(!app.show_send_dialog, "Escape closes Send");
 }
