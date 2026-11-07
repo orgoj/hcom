@@ -341,6 +341,8 @@ pub struct HcomDashboardApp {
     /// Start dialog suggestions: installed CLIs, catalog models.
     pub start_cli_choices: Vec<String>,
     pub start_model_choices: Vec<String>,
+    /// Pending Browse… folder choice for the Start dialog dir.
+    pub start_dir_pick: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
 
     pub show_send_dialog: bool,
     pub send_target: String,
@@ -563,6 +565,7 @@ impl HcomDashboardApp {
             start_prompt: String::new(),
             start_cli_choices: Vec::new(),
             start_model_choices: Vec::new(),
+            start_dir_pick: None,
             show_send_dialog: false,
             send_target: String::new(),
             send_text: String::new(),
@@ -662,6 +665,7 @@ impl HcomDashboardApp {
             start_prompt: String::new(),
             start_cli_choices: Vec::new(),
             start_model_choices: Vec::new(),
+            start_dir_pick: None,
             show_send_dialog: false,
             send_target: String::new(),
             send_text: String::new(),
@@ -1385,6 +1389,8 @@ impl HcomDashboardApp {
         self.start_reasoning = self.start_initial_reasoning.clone();
         self.start_resume = false;
         self.start_prompt.clear();
+        // A folder chosen for an earlier dialog does not land in this one.
+        self.start_dir_pick = None;
         self.start_cli_choices =
             installed_clis(&self.start_cli, std::env::var_os("PATH").as_deref());
         let mut models: Vec<String> = self
@@ -4045,6 +4051,22 @@ impl eframe::App for HcomDashboardApp {
                     i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
                 )
             });
+            if let Some(rx) = &self.start_dir_pick {
+                match rx.try_recv() {
+                    Ok(choice) => {
+                        if let Some(dir) = choice {
+                            self.start_dir = dir.to_string_lossy().into_owned();
+                        }
+                        self.start_dir_pick = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        ui.ctx().request_repaint_after(Duration::from_millis(100));
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        self.start_dir_pick = None;
+                    }
+                }
+            }
             const FIELD_W: f32 = 320.0;
             egui::Window::new(format!("Start {agent}"))
                 .collapsible(false)
@@ -4080,10 +4102,33 @@ impl eframe::App for HcomDashboardApp {
                             ui.end_row();
 
                             ui.label("dir");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.start_dir)
-                                    .desired_width(FIELD_W),
-                            );
+                            ui.horizontal(|ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.start_dir)
+                                        .desired_width(FIELD_W - 76.0),
+                                );
+                                // The system folder chooser (xdg-desktop-portal),
+                                // in a thread so the window keeps drawing.
+                                let picking = self.start_dir_pick.is_some();
+                                if ui
+                                    .add_enabled(!picking, egui::Button::new("Browse…"))
+                                    .clicked()
+                                {
+                                    let start = Some(self.start_dir.trim())
+                                        .filter(|d| !d.is_empty())
+                                        .map(PathBuf::from)
+                                        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    std::thread::spawn(move || {
+                                        let mut dlg = rfd::FileDialog::new();
+                                        if let Some(d) = start {
+                                            dlg = dlg.set_directory(d);
+                                        }
+                                        let _ = tx.send(dlg.pick_folder());
+                                    });
+                                    self.start_dir_pick = Some(rx);
+                                }
+                            });
                             ui.end_row();
 
                             ui.label("cli");

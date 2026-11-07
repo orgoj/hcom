@@ -10962,6 +10962,7 @@ fn test_task_77_55_56_start_dialog_like_hcom_gui() {
         "prompt",
         "OK",
         "Cancel",
+        "Browse…",
     ] {
         assert!(text_rect(&out, label).is_some(), "{label}");
     }
@@ -11075,4 +11076,43 @@ fn test_task_77_56_installed_clis_lists_executables_on_path_and_the_current_one(
         vec!["claude", "cursor", "grok"]
     );
     assert_eq!(installed_clis("", None), Vec::<String>::new());
+}
+
+#[test]
+fn test_task_77_56_browse_choice_fills_dir() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let row = app.table_rows[1].clone();
+    app.open_start_dialog(&row);
+
+    // A cancelled chooser keeps the dir.
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.start_dir_pick = Some(rx);
+    tx.send(None).unwrap();
+    run(&mut app, vec![]);
+    assert_eq!(app.start_dir, "/work/beta");
+    assert!(app.start_dir_pick.is_none());
+
+    // A chosen folder fills it.
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.start_dir_pick = Some(rx);
+    run(&mut app, vec![]);
+    assert!(app.start_dir_pick.is_some(), "still waiting");
+    tx.send(Some(std::path::PathBuf::from("/picked"))).unwrap();
+    run(&mut app, vec![]);
+    assert_eq!(app.start_dir, "/picked");
+    assert!(app.start_dir_pick.is_none());
+    assert_eq!(
+        app.start_command(),
+        vec!["hcom", "agent", "cat_beta", "--dir", "/picked"]
+    );
+
+    // Reopening drops a pending choice of the earlier dialog.
+    let (_tx, rx) = std::sync::mpsc::channel();
+    app.start_dir_pick = Some(rx);
+    app.open_start_dialog(&row);
+    assert!(app.start_dir_pick.is_none());
 }
