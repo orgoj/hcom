@@ -2387,6 +2387,38 @@ fn test_dynamic_status_columns_extraction() {
 }
 
 #[test]
+fn test_task_77_101_status_status_shows_the_live_state_unless_listening() {
+    use hcom_dashboard::table_data::TableRow;
+
+    let mut row = TableRow {
+        agent: "tester".into(),
+        instance: "tester".into(),
+        is_running: true,
+        ..Default::default()
+    };
+    row.status_values.insert("status".into(), "WAITING".into());
+    row.status_values.insert("done".into(), "built it".into());
+
+    for state in ["active", "blocked"] {
+        row.status = state.into();
+        assert_eq!(row.get_cell_value("status:status"), state);
+        assert_eq!(
+            row.get_cell_value("status:done"),
+            "built it",
+            "other fields stay"
+        );
+    }
+    row.status = "listening".into();
+    assert_eq!(row.get_cell_value("status:status"), "WAITING", "listening");
+
+    // Stopped: the last STATUS it ended with.
+    row.is_running = false;
+    row.instance.clear();
+    row.status.clear();
+    assert_eq!(row.get_cell_value("status:status"), "WAITING");
+}
+
+#[test]
 fn test_worker_generation_counter_drops_stale_response() {
     struct PanelState {
         selection_generation: u64,
@@ -2686,7 +2718,9 @@ fn test_build_table_rows_merges_live_and_catalog() {
     assert_eq!(r1.status, "active");
     assert_eq!(r1.where_term, "herdr: ws1/tab2");
     assert_eq!(r1.branch, "main");
-    assert_eq!(r1.get_cell_value("status:status"), "DONE");
+    // An active agent shows its state in status:status (TASK-77.101).
+    assert_eq!(r1.status_values["status"], "DONE");
+    assert_eq!(r1.get_cell_value("status:status"), "active");
     assert_eq!(r1.get_cell_value("status:done"), "All tasks completed");
 
     // Row 2: temp_agent (adhoc)

@@ -605,6 +605,15 @@ impl TableRow {
 
     pub fn get_cell_value(&self, col_key: &str) -> String {
         if let Some(status_field) = col_key.strip_prefix("status:") {
+            // The STATUS of the last reply holds while the agent waits or
+            // after it stopped; a running agent at work shows its state.
+            if status_field == "status"
+                && self.is_running
+                && !self.status.is_empty()
+                && self.status != "listening"
+            {
+                return self.status.clone();
+            }
             return self
                 .status_values
                 .get(status_field)
