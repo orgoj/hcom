@@ -15541,7 +15541,56 @@ fn test_task_77_100_vanished_selected_row_hands_selection_to_its_index() {
     run(&mut app, vec![]);
     assert_eq!(app.selected_row_id.as_deref(), Some("ghost"));
 
+    // Kill of a catalog agent's instance: its stopped row takes the index and
+    // is skipped for the next row; at the end, for the previous one.
+    let stopped = |agent: &str| TableRow {
+        agent: agent.into(),
+        status: "stopped".into(),
+        ..Default::default()
+    };
+    let running = |agent: &str, instance: &str| TableRow {
+        agent: agent.into(),
+        instance: instance.into(),
+        is_running: true,
+        status: "active".into(),
+        ..Default::default()
+    };
+    app.table_rows = vec![
+        running("agent_alpha", "inst_alpha_1"),
+        running("beta", "inst_beta"),
+        running("gamma", "inst_gamma"),
+    ];
+    app.sync_graph_from_table_rows();
+    app.selected_row_id = Some("inst_alpha_1".into());
+    run(&mut app, vec![]);
+    app.table_rows[0] = stopped("agent_alpha");
+    app.sync_graph_from_table_rows();
+    run(&mut app, vec![]);
+    assert_eq!(
+        app.selected_row_id.as_deref(),
+        Some("inst_beta"),
+        "next row"
+    );
+    app.table_rows[1] = stopped("beta");
+    app.sync_graph_from_table_rows();
+    run(&mut app, vec![]);
+    assert_eq!(
+        app.selected_row_id.as_deref(),
+        Some("inst_gamma"),
+        "and the next"
+    );
+    app.table_rows[2] = stopped("gamma");
+    app.sync_graph_from_table_rows();
+    run(&mut app, vec![]);
+    assert_eq!(
+        app.selected_row_id.as_deref(),
+        Some("beta"),
+        "previous at the end"
+    );
+
     // While a started instance is awaited, the selection is not replaced.
+    app.table_rows.push(stopped("cat_beta"));
+    app.sync_graph_from_table_rows();
     app.selected_row_id = Some("cat_beta".into());
     run(&mut app, vec![]);
     app.select_next = Some(("cat_beta_1".into(), Some("cat_beta".into())));

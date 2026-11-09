@@ -469,9 +469,10 @@ pub struct HcomDashboardApp {
     /// selection (e.g. a graph click) or a move of the selected row (sort
     /// order, a started agent) scrolls its row into view once.
     table_scrolled_id: Option<(String, usize)>,
-    /// Selected row and its index in the shown order, last frame; a vanished
+    /// Selected row, its index in the shown order and its catalog agent,
+    /// last frame; a vanished
     /// selected row (e.g. after Kill) hands the selection to its index.
-    table_selected_at: Option<(String, usize)>,
+    table_selected_at: Option<(String, usize, String)>,
     /// Screen bands of the data rows in the last frame, full grid width.
     pub table_row_bands: Vec<egui::Rect>,
     pub show_start_dialog: bool,
@@ -1648,18 +1649,31 @@ impl HcomDashboardApp {
         // A selected row that vanished from the table (e.g. after Kill)
         // hands the selection to the row now at its index, like
         // contrib/hcom-gui; not while a started instance is awaited, and not
-        // for a selection the table never showed (a graph-only node).
+        // for a selection the table never showed (a graph-only node). The
+        // stopped row of the killed instance's own catalog agent, now at that
+        // index, is skipped for the next row (the previous one at the end).
         if selected_row.is_none()
             && self.select_next.is_none()
-            && let Some((id, index)) = &self.table_selected_at
+            && let Some((id, index, agent)) = &self.table_selected_at
             && self.selected_row_id.as_ref() == Some(id)
             && let Some(last) = rows.len().checked_sub(1)
         {
-            let k = (*index).min(last);
+            let mut k = (*index).min(last);
+            if !agent.is_empty() && rows[k].agent == *agent && rows[k].instance.is_empty() {
+                if k < last {
+                    k += 1;
+                } else {
+                    k = k.saturating_sub(1);
+                }
+            }
             self.select_table_row(&rows[k]);
             selected_row = Some(k);
         }
-        self.table_selected_at = self.selected_row_id.clone().zip(selected_row);
+        self.table_selected_at = self
+            .selected_row_id
+            .clone()
+            .zip(selected_row)
+            .map(|(id, i)| (id, i, rows[i].agent.clone()));
         // Up/Down move the selection in the shown order, unless a text field
         // has the keyboard; the moved row is scrolled into view below. Enter
         // attaches the selected row like a double-click. Alt+Up/Down act
