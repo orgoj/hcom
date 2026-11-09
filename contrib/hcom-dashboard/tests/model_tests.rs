@@ -15491,3 +15491,61 @@ fn test_task_77_99_home_end_and_page_keys_jump_in_the_table() {
     }
     assert_eq!(idx(&app), 59, "clamped at the bottom");
 }
+
+#[test]
+fn test_task_77_100_vanished_selected_row_hands_selection_to_its_index() {
+    use hcom_dashboard::config::DashboardConfig;
+    use hcom_dashboard::table_data::TableRow;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    // Shown order (sorted by agent): inst_alpha_1, cat_beta, inst_gamma.
+    app.table_rows.push(TableRow {
+        agent: "gamma".into(),
+        instance: "inst_gamma".into(),
+        is_running: true,
+        status: "active".into(),
+        ..Default::default()
+    });
+    app.sync_graph_from_table_rows();
+    let mut run = task_77_52_runner(egui::Context::default());
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    let remove = |app: &mut hcom_dashboard::app::HcomDashboardApp, id: &str| {
+        app.table_rows.retain(|r| r.instance != id && r.agent != id);
+        app.sync_graph_from_table_rows();
+    };
+
+    // The first row vanishes (Kill): the row now at its index is selected.
+    app.selected_row_id = Some("inst_alpha_1".into());
+    run(&mut app, vec![]);
+    remove(&mut app, "inst_alpha_1");
+    run(&mut app, vec![]);
+    assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+    assert_eq!(
+        app.canvas.selected_node,
+        app.graph.get_node_index("cat_beta"),
+        "the graph follows"
+    );
+
+    // The last row vanishes: the new last row is selected.
+    app.selected_row_id = Some("inst_gamma".into());
+    run(&mut app, vec![]);
+    remove(&mut app, "inst_gamma");
+    run(&mut app, vec![]);
+    assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+
+    // A selection the table never showed (graph-only node) stays.
+    app.selected_row_id = Some("ghost".into());
+    run(&mut app, vec![]);
+    run(&mut app, vec![]);
+    assert_eq!(app.selected_row_id.as_deref(), Some("ghost"));
+
+    // While a started instance is awaited, the selection is not replaced.
+    app.selected_row_id = Some("cat_beta".into());
+    run(&mut app, vec![]);
+    app.select_next = Some(("cat_beta_1".into(), Some("cat_beta".into())));
+    remove(&mut app, "cat_beta");
+    run(&mut app, vec![]);
+    assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+}

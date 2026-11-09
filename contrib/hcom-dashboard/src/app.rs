@@ -469,6 +469,9 @@ pub struct HcomDashboardApp {
     /// selection (e.g. a graph click) or a move of the selected row (sort
     /// order, a started agent) scrolls its row into view once.
     table_scrolled_id: Option<(String, usize)>,
+    /// Selected row and its index in the shown order, last frame; a vanished
+    /// selected row (e.g. after Kill) hands the selection to its index.
+    table_selected_at: Option<(String, usize)>,
     /// Screen bands of the data rows in the last frame, full grid width.
     pub table_row_bands: Vec<egui::Rect>,
     pub show_start_dialog: bool,
@@ -863,6 +866,7 @@ impl HcomDashboardApp {
             select_next: None,
             table_hover_row: None,
             table_scrolled_id: None,
+            table_selected_at: None,
             table_row_bands: Vec::new(),
             show_start_dialog: false,
             start_agent_name: String::new(),
@@ -985,6 +989,7 @@ impl HcomDashboardApp {
             select_next: None,
             table_hover_row: None,
             table_scrolled_id: None,
+            table_selected_at: None,
             table_row_bands: Vec::new(),
             show_start_dialog: false,
             start_agent_name: String::new(),
@@ -1640,6 +1645,21 @@ impl HcomDashboardApp {
             .selected_row_id
             .as_deref()
             .and_then(|id| rows.iter().position(|r| target_of(r) == id));
+        // A selected row that vanished from the table (e.g. after Kill)
+        // hands the selection to the row now at its index, like
+        // contrib/hcom-gui; not while a started instance is awaited, and not
+        // for a selection the table never showed (a graph-only node).
+        if selected_row.is_none()
+            && self.select_next.is_none()
+            && let Some((id, index)) = &self.table_selected_at
+            && self.selected_row_id.as_ref() == Some(id)
+            && let Some(last) = rows.len().checked_sub(1)
+        {
+            let k = (*index).min(last);
+            self.select_table_row(&rows[k]);
+            selected_row = Some(k);
+        }
+        self.table_selected_at = self.selected_row_id.clone().zip(selected_row);
         // Up/Down move the selection in the shown order, unless a text field
         // has the keyboard; the moved row is scrolled into view below. Enter
         // attaches the selected row like a double-click. Alt+Up/Down act
