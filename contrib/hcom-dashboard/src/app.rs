@@ -1668,6 +1668,30 @@ impl HcomDashboardApp {
                 )
             })
         };
+        // Home/End and PageUp/PageDown jump like the arrows, under the same
+        // conditions; a page is the rows the table panel shows.
+        let (home, end, page_up, page_down) =
+            if self.modal_at_frame_start || ui.ctx().text_edit_focused() {
+                (false, false, false, false)
+            } else {
+                ui.input(|i| {
+                    (
+                        i.key_pressed(egui::Key::Home),
+                        i.key_pressed(egui::Key::End),
+                        i.key_pressed(egui::Key::PageUp),
+                        i.key_pressed(egui::Key::PageDown),
+                    )
+                })
+            };
+        let row_pitch = self
+            .table_row_bands
+            .first()
+            .map(|b| b.height() + ui.spacing().item_spacing.y)
+            .unwrap_or(ui.spacing().interact_size.y)
+            .max(1.0);
+        let page = ((ui.available_height() / row_pitch) as usize)
+            .saturating_sub(2)
+            .max(1);
         // An open dialog keeps Enter for itself.
         let dialog_open = self.confirm_kill_target.is_some()
             || self.confirm_restart_target.is_some()
@@ -1681,6 +1705,10 @@ impl HcomDashboardApp {
         let last = rows.len().checked_sub(1);
         let key_row = match (down, up, selected_row, last) {
             (_, _, _, None) => None,
+            _ if home => Some(0),
+            (_, _, _, Some(l)) if end => Some(l),
+            (_, _, sel, Some(l)) if page_down => Some(sel.map_or(0, |i| (i + page).min(l))),
+            (_, _, sel, Some(l)) if page_up => Some(sel.map_or(l, |i| i.saturating_sub(page))),
             (true, false, Some(i), Some(l)) => Some((i + 1).min(l)),
             (true, false, None, Some(_)) => Some(0),
             (false, true, Some(i), Some(_)) => Some(i.saturating_sub(1)),
@@ -4820,11 +4848,75 @@ impl eframe::App for HcomDashboardApp {
                     .map(|r| !r.directory.is_empty())
                     .unwrap_or(false);
 
+                // Keyboard shortcuts (open_with keys, s/m/r, Delete, Ctrl+C)
+                // act like their button: not while a text field has the
+                // keyboard or a dialog or menu is open.
+                let shortcuts_on = !(self.text_focus_at_frame_start
+                    || ui.ctx().text_edit_focused()
+                    || self.overlay_open());
+                // An open_with `key` is a typed character, like "/" for the
+                // search field.
+                let typed: Vec<String> = if shortcuts_on {
+                    ui.input(|i| {
+                        i.events
+                            .iter()
+                            .filter_map(|e| match e {
+                                egui::Event::Text(t) => Some(t.clone()),
+                                _ => None,
+                            })
+                            .collect()
+                    })
+                } else {
+                    Vec::new()
+                };
+                // A built-in key yields to an open_with entry with the same key.
+                let builtin = |c: &str| {
+                    typed.iter().any(|t| t == c)
+                        && !self
+                            .config
+                            .open_with
+                            .iter()
+                            .any(|o| o.key.as_deref() == Some(c))
+                };
+                let (key_start, key_send, key_restart) = (builtin("s"), builtin("m"), builtin("r"));
+                let (key_kill, key_copy) = if shortcuts_on {
+                    ui.input(|i| {
+                        (
+                            i.key_pressed(egui::Key::Delete) && i.modifiers.is_none(),
+                            i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+                        )
+                    })
+                } else {
+                    (false, false)
+                };
+                // The typed key opens a dialog this frame; its focused field
+                // must not receive the character.
+                if key_start || key_send || key_restart {
+                    ui.input_mut(|i| {
+                        i.events.retain(|e| {
+                            !matches!(e, egui::Event::Text(t) if t == "s" || t == "m" || t == "r")
+                        })
+                    });
+                }
+                // Text selected with the mouse (e.g. in a detail tab) keeps
+                // Ctrl+C for itself.
+                let text_selected = ui
+                    .ctx()
+                    .plugin_opt::<egui::text_selection::LabelSelectionState>()
+                    .is_some_and(|p| p.lock().has_selection());
+                if key_copy
+                    && !text_selected
+                    && let Some(name) = selected_agent_opt.as_ref()
+                {
+                    ui.ctx().copy_text(name.clone());
+                }
+
                 // Start button: a catalog agent, like contrib/hcom-gui.
                 let start_row = selected_row_opt.as_ref().filter(|r| !r.agent.is_empty());
-                if ui
+                let start_btn = ui
                     .add_enabled(start_row.is_some(), egui::Button::new("Start..."))
-                    .clicked()
+                    .on_hover_text("Start the selected catalog agent (s)");
+                if (start_btn.clicked() || key_start)
                     && let Some(r) = start_row
                 {
                     self.open_start_dialog(r);
@@ -4842,7 +4934,9 @@ impl eframe::App for HcomDashboardApp {
 
                 if ui
                     .add_enabled(is_running, egui::Button::new("Send..."))
+                    .on_hover_text("Send a message to the selected agent (m)")
                     .clicked()
+                    || (key_send && is_running)
                 {
                     if let Some(ref r) = selected_row_opt {
                         self.send_target = if !r.instance.is_empty() {
@@ -4855,26 +4949,6 @@ impl eframe::App for HcomDashboardApp {
                 }
 
                 ui.separator();
-
-                // An open_with `key` is a typed character, like "/" for the
-                // search field: not while a text field has the keyboard or a
-                // dialog or menu is open.
-                let typed: Vec<String> = if self.text_focus_at_frame_start
-                    || ui.ctx().text_edit_focused()
-                    || self.overlay_open()
-                {
-                    Vec::new()
-                } else {
-                    ui.input(|i| {
-                        i.events
-                            .iter()
-                            .filter_map(|e| match e {
-                                egui::Event::Text(t) => Some(t.clone()),
-                                _ => None,
-                            })
-                            .collect()
-                    })
-                };
 
                 // Open with buttons
                 for item in &self.config.open_with {
@@ -5001,7 +5075,9 @@ impl eframe::App for HcomDashboardApp {
                     }
                     if ui
                         .add_enabled(can_restart, egui::Button::new("Restart"))
+                        .on_hover_text("Restart the selected agent (r)")
                         .clicked()
+                        || (key_restart && can_restart)
                     {
                         let target_instance = selected_row_opt
                             .as_ref()
@@ -5030,14 +5106,16 @@ impl eframe::App for HcomDashboardApp {
                 // Destructive actions: own group at the end of the row.
                 ui.separator();
                 if let Some(ref a) = selected_agent_opt
-                    && ui
+                    && (ui
                         .add_enabled(
                             is_running,
                             egui::Button::new(
                                 RichText::new("Kill").color(Color32::from_rgb(231, 76, 60)),
                             ),
                         )
+                        .on_hover_text("Kill the selected agent (Delete)")
                         .clicked()
+                        || (key_kill && is_running))
                 {
                     self.confirm_kill_target = Some(a.clone());
                 }

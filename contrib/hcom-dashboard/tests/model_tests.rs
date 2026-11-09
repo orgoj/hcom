@@ -15320,3 +15320,174 @@ fn test_task_77_94_window_icon() {
         assert_eq!(p[3], 255);
     }
 }
+
+#[test]
+fn test_task_77_99_action_keys_act_like_their_buttons() {
+    use hcom_dashboard::config::{DashboardConfig, OpenWithAction};
+
+    let (mut app, recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let text = |c: &str| vec![egui::Event::Text(c.into())];
+    let none = egui::Modifiers::NONE;
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+
+    // Stopped catalog agent: s opens Start, m (Send) and Delete (Kill) are off.
+    app.selected_row_id = Some("cat_beta".into());
+    run(&mut app, vec![]);
+    run(&mut app, text("m"));
+    run(&mut app, vec![task_77_52_key(egui::Key::Delete, none)]);
+    assert!(
+        !app.show_send_dialog,
+        "m: Send is disabled for a stopped agent"
+    );
+    assert!(
+        app.confirm_kill_target.is_none(),
+        "Delete: Kill is disabled"
+    );
+    run(&mut app, text("s"));
+    assert!(app.show_start_dialog, "s opens the Start dialog");
+    assert_eq!(app.start_agent_name, "cat_beta");
+    run(&mut app, vec![]);
+    assert!(
+        !app.start_instance_name.contains('s') && app.start_prompt.is_empty(),
+        "the key does not reach the dialog field: {:?}",
+        app.start_instance_name
+    );
+    app.show_start_dialog = false;
+
+    // Running agent: m, r and Delete open their dialogs.
+    app.selected_row_id = Some("inst_alpha_1".into());
+    run(&mut app, vec![]);
+    run(&mut app, text("m"));
+    assert!(app.show_send_dialog, "m opens Send");
+    assert_eq!(app.send_target, "inst_alpha_1");
+    run(&mut app, vec![]);
+    assert!(
+        app.send_text.is_empty(),
+        "the key does not reach the message"
+    );
+    app.show_send_dialog = false;
+    run(&mut app, vec![]);
+    run(&mut app, text("r"));
+    assert!(
+        app.confirm_restart_target.is_some(),
+        "r opens the Restart confirmation"
+    );
+    app.confirm_restart_target = None;
+    run(&mut app, vec![]);
+    run(&mut app, vec![task_77_52_key(egui::Key::Delete, none)]);
+    assert_eq!(app.confirm_kill_target.as_deref(), Some("inst_alpha_1"));
+
+    // An open dialog keeps the keyboard.
+    run(&mut app, text("m"));
+    assert!(!app.show_send_dialog, "dialog open");
+    app.confirm_kill_target = None;
+    run(&mut app, vec![]);
+
+    // Ctrl+C (egui's Copy event) copies the agent name.
+    let out = run(&mut app, vec![egui::Event::Copy]);
+    assert!(
+        out.platform_output
+            .commands
+            .contains(&egui::OutputCommand::CopyText("inst_alpha_1".into())),
+        "{:?}",
+        out.platform_output.commands
+    );
+
+    // In a text field the key is ordinary input.
+    task_77_52_focus_search(&ctx, &mut app, &mut run);
+    run(&mut app, text("m"));
+    run(&mut app, vec![task_77_52_key(egui::Key::Delete, none)]);
+    run(&mut app, vec![]);
+    assert!(!app.show_send_dialog && app.confirm_kill_target.is_none());
+    assert_eq!(app.search_query, "m");
+    assert!(recorded.lock().unwrap().is_empty(), "no command ran");
+
+    // An open_with entry with the same key wins over the built-in one.
+    let config = DashboardConfig {
+        open_with: vec![OpenWithAction {
+            label: "shell".into(),
+            cmd: vec!["term".into()],
+            cwd: None,
+            key: Some("s".into()),
+            if_exists: None,
+        }],
+        ..Default::default()
+    };
+    let (mut app, recorded, _dir) = task_77_52_app(config);
+    let mut run = task_77_52_runner(egui::Context::default());
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    app.selected_row_id = Some("cat_beta".into());
+    run(&mut app, vec![]);
+    run(&mut app, text("s"));
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(!app.show_start_dialog, "the configured key wins");
+    assert!(
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| matches!(r, ActionRequest::SpawnDetached { cmd, .. } if cmd == &vec!["term".to_string()]))
+    );
+}
+
+#[test]
+fn test_task_77_99_home_end_and_page_keys_jump_in_the_table() {
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = DashboardState {
+        columns: vec!["instance".into()],
+        sort_col: Some("instance".into()),
+        ..Default::default()
+    };
+    let mut app =
+        HcomDashboardApp::new_for_test(DashboardConfig::default(), state, dir.path().to_path_buf());
+    let names: Vec<String> = (0..60).map(|i| format!("w{i:02}")).collect();
+    let snaps: Vec<_> = names.iter().map(|n| snap(n, None)).collect();
+    app.graph.apply_instance_snapshot(&snaps);
+    app.table_rows = names
+        .iter()
+        .map(|n| TableRow {
+            instance: n.clone(),
+            ..Default::default()
+        })
+        .collect();
+    let mut run = task_77_52_runner(egui::Context::default());
+    let key = |k| vec![task_77_52_key(k, egui::Modifiers::NONE)];
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    let idx = |app: &HcomDashboardApp| {
+        let id = app.selected_row_id.clone().unwrap();
+        names.iter().position(|n| *n == id).unwrap()
+    };
+
+    run(&mut app, key(egui::Key::End));
+    assert_eq!(idx(&app), 59, "End selects the last row");
+    run(&mut app, key(egui::Key::Home));
+    assert_eq!(idx(&app), 0, "Home selects the first row");
+    run(&mut app, vec![]);
+    run(&mut app, key(egui::Key::PageDown));
+    let page = idx(&app);
+    assert!(page > 1 && page < 59, "PageDown moves by a page: {page}");
+    run(&mut app, key(egui::Key::PageDown));
+    assert_eq!(idx(&app), (2 * page).min(59));
+    run(&mut app, key(egui::Key::PageUp));
+    assert_eq!(idx(&app), page, "PageUp moves back by a page");
+    for _ in 0..5 {
+        run(&mut app, key(egui::Key::PageUp));
+    }
+    assert_eq!(idx(&app), 0, "clamped at the top");
+    for _ in 0..30 {
+        run(&mut app, key(egui::Key::PageDown));
+    }
+    assert_eq!(idx(&app), 59, "clamped at the bottom");
+}
