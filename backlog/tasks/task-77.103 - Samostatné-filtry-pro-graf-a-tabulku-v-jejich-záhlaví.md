@@ -1,10 +1,10 @@
 ---
 id: TASK-77.103
 title: Samostatné filtry pro graf a tabulku v jejich záhlaví
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-09T21:15:00Z'
-updated_date: '2026-11-09T21:35:00Z'
+updated_date: '2026-11-09T21:44:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -44,4 +44,6 @@ Open questions for the user: (1) table without WINDOW: Running only = running no
 User answers: (1) table Running only = running now, no WINDOW; (2) each panel its own search field; (3) Filter table checkbox removed; (4) Kill group Filtered (N) uses the table filter; (5) / focuses the table search; (6) graph filter strip above the canvas, table filter strip above the column header, FILTER group leaves top bar row 2; (7) a table selection hidden in the graph stays selected, the graph just does not highlight it.
 
 Implemented: PanelFilter (search + 4 checkboxes) as state graph_filter / table_filter, search text persisted too; old flat fields and filter_table dropped without migration (no fallbacks before numbered releases). Each strip ends with its own Shown N / M; the top bar row 1 count moved into the strips. Alt+X clears the table search. Graph-only view has no table strip, so / does nothing there. Review: agent_review.
+
+User checked in the app: OK.
 <!-- SECTION:NOTES:END -->
