@@ -395,7 +395,6 @@ pub struct HcomDashboardApp {
     /// Key of the windowed edge counts held in `canvas.edge_counts`.
     window_cache_key: Option<WindowCacheKey>,
     pub selection_generation: u64,
-    pub search_query: String,
     pub last_resolved_theme: Option<ResolvedTheme>,
     /// Theme from the desktop config files, used when eframe reports none.
     pub desktop_theme: Option<egui::Theme>,
@@ -720,14 +719,59 @@ pub fn format_last_limit(n: usize) -> String {
     }
 }
 
+/// A panel filter strip: `<TITLE>`, search field, filter checkboxes and the
+/// panel's `Shown N / M`. Returns true when the filter changed; `focus`
+/// gives the search field the keyboard.
+fn filter_strip(
+    ui: &mut egui::Ui,
+    title: &str,
+    hint: &str,
+    filter: &mut crate::config::PanelFilter,
+    running_help: &str,
+    (shown, total): (usize, usize),
+    focus: bool,
+) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        section_label(ui, title);
+        // Fixed width that fits its placeholder.
+        let search = ui.add(
+            egui::TextEdit::singleline(&mut filter.search)
+                .hint_text(hint)
+                .desired_width(body_text_width(ui, hint) + 8.0),
+        );
+        if focus {
+            search.request_focus();
+        }
+        changed |= search.changed();
+        if ui.small_button("✖").clicked() && !filter.search.is_empty() {
+            filter.search.clear();
+            changed = true;
+        }
+        changed |= ui
+            .checkbox(&mut filter.running_only, "Running only")
+            .on_hover_text(running_help)
+            .changed();
+        changed |= ui
+            .checkbox(&mut filter.blocked_only, "Blocked only")
+            .changed();
+        changed |= ui
+            .checkbox(&mut filter.hide_disabled, "Hide disabled")
+            .changed();
+        changed |= ui.checkbox(&mut filter.hide_adhoc, "Hide ad-hoc").changed();
+        let (count_text, count_help) = format_agent_count(shown, total);
+        ui.label(count_text).on_hover_text(count_help);
+    });
+    changed
+}
+
 /// Header agent count and its tooltip.
 pub fn format_agent_count(shown: usize, total: usize) -> (String, &'static str) {
     (
         format!("Shown {shown} / {total}"),
-        "Shown: agents the search and filters let through (graph, and the table \
-         while Filter table is on).\n\
+        "Shown: agents this panel's search and filters let through.\n\
          Total: every known agent, i.e. hcom instances and catalog agents, \
-         filtered or not; the status counts cover the total.",
+         filtered or not; the status counts in the top bar cover the total.",
     )
 }
 
@@ -827,7 +871,6 @@ impl HcomDashboardApp {
             window_cache_key: None,
             state,
             selection_generation: 0,
-            search_query: String::new(),
             time_range_text: format_canonical_range(
                 &match window_span {
                     None => MessageRange::Live { span_secs: None },
@@ -951,7 +994,6 @@ impl HcomDashboardApp {
             window_cache_key: None,
             state,
             selection_generation: 0,
-            search_query: String::new(),
             time_range_text: format_canonical_range(
                 &match window_span {
                     None => MessageRange::Live { span_secs: None },
@@ -1631,6 +1673,43 @@ impl HcomDashboardApp {
                 self.idle_job = Some(crate::idle::IdleJob::start(batch));
             }
         }
+    }
+
+    /// The graph filter strip above the canvas.
+    fn graph_filter_strip(&mut self, ui: &mut egui::Ui, count: (usize, usize)) {
+        if filter_strip(
+            ui,
+            "Graph filter",
+            "Search graph: agent, dir, tool...",
+            &mut self.state.graph_filter,
+            "Agents running now or at any time of the message window",
+            count,
+            false,
+        ) {
+            self.save_state();
+        }
+    }
+
+    /// The table filter strip above the column header, then the table.
+    fn render_filtered_table(
+        &mut self,
+        ui: &mut egui::Ui,
+        rows: &[TableRow],
+        count: (usize, usize),
+        focus_search: bool,
+    ) {
+        if filter_strip(
+            ui,
+            "Table filter",
+            "Search agent, dir, tool... (/ to focus)",
+            &mut self.state.table_filter,
+            "Agents running now (the message window does not apply)",
+            count,
+            focus_search,
+        ) {
+            self.save_state();
+        }
+        self.render_table(ui, rows);
     }
 
     fn render_table(&mut self, ui: &mut egui::Ui, rows: &[TableRow]) {
@@ -4295,8 +4374,13 @@ impl eframe::App for HcomDashboardApp {
         {
             self.restore_graph_window();
         }
-        if clear_search && !self.inject_input_has_focus {
-            self.search_query.clear();
+        // Alt+X clears the table search, the one `/` focuses.
+        if clear_search
+            && !self.inject_input_has_focus
+            && !self.state.table_filter.search.is_empty()
+        {
+            self.state.table_filter.search.clear();
+            self.save_state();
         }
         // A modal dialog keeps the keyboard: no global shortcuts.
         if let Some(key) = fkey.filter(|_| !self.modal_at_frame_start) {
@@ -4579,48 +4663,51 @@ impl eframe::App for HcomDashboardApp {
         // Collect all table rows and apply filters
         let all_rows = self.get_all_rows();
         let total_count = all_rows.len();
-        // Running only: running now or at some time of the message window.
+        // Graph and table each have their own filter. Graph Running only:
+        // running now or at some time of the message window; table Running
+        // only: running now.
         let (w_start, w_end) = self.window_bounds(chrono::Utc::now());
-        let mut filtered_rows: Vec<TableRow> = all_rows
+        let gf = &self.state.graph_filter;
+        let graph_rows: Vec<TableRow> = all_rows
             .iter()
-            .filter(|&r| !self.state.running_only || r.ran_in(w_start, w_end))
+            .filter(|&r| !gf.running_only || r.ran_in(w_start, w_end))
             .filter(|&r| {
                 filter_row(
                     r,
-                    &self.search_query,
+                    &gf.search,
                     false,
-                    self.state.blocked_only,
-                    self.state.hide_disabled,
-                    self.state.hide_adhoc,
+                    gf.blocked_only,
+                    gf.hide_disabled,
+                    gf.hide_adhoc,
+                )
+            })
+            .cloned()
+            .collect();
+        let tf = &self.state.table_filter;
+        let mut table_rows: Vec<TableRow> = all_rows
+            .iter()
+            .filter(|&r| {
+                filter_row(
+                    r,
+                    &tf.search,
+                    tf.running_only,
+                    tf.blocked_only,
+                    tf.hide_disabled,
+                    tf.hide_adhoc,
                 )
             })
             .cloned()
             .collect();
         sort_rows(
-            &mut filtered_rows,
+            &mut table_rows,
             self.state.sort_col.as_deref().unwrap_or("instance"),
             self.state.sort_reverse,
             self.state.empty_last,
         );
-        let shown_count = filtered_rows.len();
-        // The table can show every agent (e.g. to start a stopped one) while
-        // the graph keeps following the search and filters.
-        let unfiltered_rows;
-        let table_rows: &[TableRow] = if self.state.filter_table {
-            &filtered_rows
-        } else {
-            let mut rows = all_rows.clone();
-            sort_rows(
-                &mut rows,
-                self.state.sort_col.as_deref().unwrap_or("instance"),
-                self.state.sort_reverse,
-                self.state.empty_last,
-            );
-            unfiltered_rows = rows;
-            &unfiltered_rows
-        };
+        let graph_count = (graph_rows.len(), total_count);
+        let table_count = (table_rows.len(), total_count);
 
-        let visible_node_indices = self.visible_nodes_for_rows(&filtered_rows);
+        let visible_node_indices = self.visible_nodes_for_rows(&graph_rows);
 
         // 4. Top Status & Toolbar Panel
         egui::Panel::top("top_status_bar").show(ui, |ui| {
@@ -4643,8 +4730,6 @@ impl eframe::App for HcomDashboardApp {
                     }
                 }
 
-                let (count_text, count_help) = format_agent_count(shown_count, total_count);
-                ui.label(count_text).on_hover_text(count_help);
                 ui.colored_label(
                     palette.status_color(&AgentStatus::Active),
                     format!("● {} active", active_count),
@@ -4712,69 +4797,8 @@ impl eframe::App for HcomDashboardApp {
 
             ui.separator();
 
-            // Row 2: the filter group first (row 1 `Shown` is its result),
-            // then view settings. Each group wraps as a unit, never clipped.
+            // Row 2: view settings. Each group wraps as a unit, never clipped.
             ui.horizontal_wrapped(|ui| {
-                wrap_group(ui, "filter", |ui| {
-                    // Search query: fixed width that fits its placeholder.
-                    let hint = "Search agent, dir, tool... (/ to focus)";
-                    section_label(ui, "Filter");
-                    let search = ui.add(
-                        egui::TextEdit::singleline(&mut self.search_query)
-                            .hint_text(hint)
-                            .desired_width(body_text_width(ui, hint) + 8.0),
-                    );
-                    if focus_search {
-                        search.request_focus();
-                    }
-                    if ui.small_button("✖").clicked() {
-                        self.search_query.clear();
-                    }
-
-                    // Filter checkboxes
-                    let mut filter_changed = false;
-                    if ui
-                        .checkbox(&mut self.state.running_only, "Running only")
-                        .changed()
-                    {
-                        filter_changed = true;
-                    }
-                    if ui
-                        .checkbox(&mut self.state.blocked_only, "Blocked only")
-                        .changed()
-                    {
-                        filter_changed = true;
-                    }
-                    if ui
-                        .checkbox(&mut self.state.hide_disabled, "Hide disabled")
-                        .changed()
-                    {
-                        filter_changed = true;
-                    }
-                    if ui
-                        .checkbox(&mut self.state.hide_adhoc, "Hide ad-hoc")
-                        .changed()
-                    {
-                        filter_changed = true;
-                    }
-                    if ui
-                        .checkbox(&mut self.state.filter_table, "Filter table")
-                        .on_hover_text(
-                            "On: the table shows the same agents as the graph.\n\
-                         Off: the table shows every agent; the graph stays filtered.",
-                        )
-                        .changed()
-                    {
-                        filter_changed = true;
-                    }
-
-                    if filter_changed {
-                        self.save_state();
-                    }
-                });
-
-                ui.separator();
-
                 wrap_group(ui, "view", |ui| {
                     section_label(ui, "View");
                     let current_view = self.state.effective_view_mode();
@@ -5172,7 +5196,7 @@ impl eframe::App for HcomDashboardApp {
                 }
 
                 // Kill Group button: disabled when no menu entry has a target.
-                let running_filtered: Vec<String> = filtered_rows
+                let running_filtered: Vec<String> = table_rows
                     .iter()
                     .filter(|r| r.is_running && !r.instance.is_empty())
                     .map(|r| r.instance.clone())
@@ -5760,7 +5784,7 @@ impl eframe::App for HcomDashboardApp {
             let table_resp = egui::Panel::bottom("agent_table_panel")
                 .exact_size(table_h)
                 .show(ui, |ui| {
-                    self.render_table(ui, table_rows);
+                    self.render_filtered_table(ui, &table_rows, table_count, focus_search);
                 });
             table_rect = Some(table_resp.response.rect);
         }
@@ -5808,10 +5832,11 @@ impl eframe::App for HcomDashboardApp {
         // 8. Central panel: graph canvas or full table
         egui::CentralPanel::default().show(ui, |ui| match mode {
             ViewMode::Both | ViewMode::GraphOnly => {
+                self.graph_filter_strip(ui, graph_count);
                 self.show_canvas(ui, &visible_node_indices, &palette);
             }
             ViewMode::TableOnly => {
-                self.render_table(ui, table_rows);
+                self.render_filtered_table(ui, &table_rows, table_count, focus_search);
             }
         });
 

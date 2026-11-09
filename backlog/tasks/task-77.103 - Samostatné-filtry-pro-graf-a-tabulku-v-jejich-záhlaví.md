@@ -1,10 +1,10 @@
 ---
 id: TASK-77.103
 title: Samostatné filtry pro graf a tabulku v jejich záhlaví
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-09T21:15:00Z'
-updated_date: '2026-11-09T21:21:00Z'
+updated_date: '2026-11-09T21:35:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -21,13 +21,13 @@ Požadavek uživatele: graf a tabulka mají každý svůj FILTER, umístěný v 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Graf a tabulka mají každý vlastní filtr (search, Running only, Blocked only, Hide disabled, Hide ad-hoc): graf v pruhu nad plátnem, tabulka v pruhu nad hlavičkou sloupců; skupina FILTER z 2. řádku top baru zmizí
-- [ ] #2 Oba filtry se ukládají v dashboard-state.json a po restartu platí
-- [ ] #3 Running only tabulky znamená běží teď, bez okna zpráv; graf dál používá okno
-- [ ] #4 Checkbox Filter table je zrušen; Kill group Filtered (N) bere agenty z filtru tabulky
-- [ ] #5 / fokusuje hledání tabulky
-- [ ] #6 Výběr agenta skrytého filtrem grafu zůstává (tabulka, detail), graf ho jen nezvýrazní
-- [ ] #7 README popisuje oba filtry
+- [x] #1 Graf a tabulka mají každý vlastní filtr (search, Running only, Blocked only, Hide disabled, Hide ad-hoc): graf v pruhu nad plátnem, tabulka v pruhu nad hlavičkou sloupců; skupina FILTER z 2. řádku top baru zmizí
+- [x] #2 Oba filtry se ukládají v dashboard-state.json a po restartu platí
+- [x] #3 Running only tabulky znamená běží teď, bez okna zpráv; graf dál používá okno
+- [x] #4 Checkbox Filter table je zrušen; Kill group Filtered (N) bere agenty z filtru tabulky
+- [x] #5 / fokusuje hledání tabulky
+- [x] #6 Výběr agenta skrytého filtrem grafu zůstává (tabulka, detail), graf ho jen nezvýrazní
+- [x] #7 README popisuje oba filtry
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -42,4 +42,6 @@ Požadavek uživatele: graf a tabulka mají každý svůj FILTER, umístěný v 
 Open questions for the user: (1) table without WINDOW: Running only = running now? (2) both filters full set incl. own search field, or search shared? (3) Filter table checkbox removed? (4) Kill group Filtered (N) uses the table filter? (5) / focuses which search? (6) graph header: new strip above the canvas, table header: strip above the table header row, placement to confirm. (7) graph hides an agent selected in the table: keep selection?
 
 User answers: (1) table Running only = running now, no WINDOW; (2) each panel its own search field; (3) Filter table checkbox removed; (4) Kill group Filtered (N) uses the table filter; (5) / focuses the table search; (6) graph filter strip above the canvas, table filter strip above the column header, FILTER group leaves top bar row 2; (7) a table selection hidden in the graph stays selected, the graph just does not highlight it.
+
+Implemented: PanelFilter (search + 4 checkboxes) as state graph_filter / table_filter, search text persisted too; old flat fields and filter_table dropped without migration (no fallbacks before numbered releases). Each strip ends with its own Shown N / M; the top bar row 1 count moved into the strips. Alt+X clears the table search. Graph-only view has no table strip, so / does nothing there. Review: agent_review.
 <!-- SECTION:NOTES:END -->

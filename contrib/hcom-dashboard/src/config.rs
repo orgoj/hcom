@@ -361,18 +361,12 @@ pub struct DashboardState {
     pub theme: Option<ThemePreference>,
     #[serde(default = "default_true")]
     pub show_table: bool,
+    /// Search and filters of the graph (strip above the canvas).
     #[serde(default)]
-    pub running_only: bool,
+    pub graph_filter: PanelFilter,
+    /// Search and filters of the table (strip above its column header).
     #[serde(default)]
-    pub blocked_only: bool,
-    #[serde(default = "default_true")]
-    pub hide_disabled: bool,
-    #[serde(default)]
-    pub hide_adhoc: bool,
-    /// The table follows the search and filters like the graph; off shows
-    /// every agent in the table (the graph stays filtered).
-    #[serde(default = "default_true")]
-    pub filter_table: bool,
+    pub table_filter: PanelFilter,
     #[serde(default = "default_true")]
     pub empty_last: bool,
     #[serde(default = "default_sort_col")]
@@ -424,6 +418,29 @@ pub struct DashboardState {
     /// Message arrow width by text bytes instead of message count.
     #[serde(default)]
     pub edge_width_bytes: bool,
+}
+
+/// Search text and filter checkboxes of one panel (graph or table).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PanelFilter {
+    pub search: String,
+    pub running_only: bool,
+    pub blocked_only: bool,
+    pub hide_disabled: bool,
+    pub hide_adhoc: bool,
+}
+
+impl Default for PanelFilter {
+    fn default() -> Self {
+        Self {
+            search: String::new(),
+            running_only: false,
+            blocked_only: false,
+            hide_disabled: true,
+            hide_adhoc: false,
+        }
+    }
 }
 
 /// A saved node position and when it was last stored (unix seconds).
@@ -622,11 +639,8 @@ impl Default for DashboardState {
             view_mode: Some(ViewMode::Both),
             theme: None,
             show_table: true,
-            running_only: false,
-            blocked_only: false,
-            hide_disabled: true,
-            hide_adhoc: false,
-            filter_table: true,
+            graph_filter: PanelFilter::default(),
+            table_filter: PanelFilter::default(),
             empty_last: true,
             sort_col: default_sort_col(),
             sort_reverse: false,

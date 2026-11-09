@@ -2117,7 +2117,7 @@ fn test_state_reads_and_saves_only_dashboard_state_json() {
 
     let mut state = load_state(hcom_dir);
     assert!(
-        !state.running_only,
+        !state.graph_filter.running_only,
         "gui-state.json and graph-state.json are not read"
     );
 
@@ -2529,7 +2529,7 @@ fn test_corrupt_config_logs_warning_and_uses_defaults() {
     let st = load_state(hcom_dir);
     assert!(st.show_table);
     assert_eq!(st.detail_tab, "Summary");
-    assert!(!st.running_only);
+    assert!(!st.graph_filter.running_only && !st.table_filter.running_only);
 }
 
 #[test]
@@ -4685,17 +4685,16 @@ fn test_top_bar_wraps_and_keeps_controls_on_screen() {
             r[0].0
         };
         let toolbar_bottom = one(&out, "Columns…").bottom();
-        for label in [
-            "Running only",
-            "Filter table",
-            "Blocked only",
-            "Hide ad-hoc",
-        ] {
-            let r = one(&out, label);
-            assert!(
-                r.left() >= 0.0 && r.right() <= w,
-                "{label:?} {r:?} at {w}px"
-            );
+        // The graph and table filter strips wrap inside their panels.
+        for label in ["Running only", "Blocked only", "Hide ad-hoc"] {
+            let rects = widget_rects(&out, label);
+            assert_eq!(rects.len(), 2, "{label:?} in both strips at {w}px");
+            for (r, _) in rects {
+                assert!(
+                    r.left() >= 0.0 && r.right() <= w,
+                    "{label:?} {r:?} at {w}px"
+                );
+            }
         }
         // No top-bar control reaches past the right edge.
         let update = out.platform_output.accesskit_update.as_ref().unwrap();
@@ -4744,16 +4743,13 @@ fn test_top_bar_wraps_and_keeps_controls_on_screen() {
         );
 
         // A progress text leaves every other top-bar item in place.
-        let before: Vec<Rect> = ["Fit", "Reset", "Running only", "Columns…"]
+        let before: Vec<Rect> = ["Fit", "Reset", "Both (F4)", "Columns…"]
             .iter()
             .map(|l| one(&out, l))
             .collect();
         app.pending_action = Some("Loading sessions for a_long_agent_name...".into());
         let out = render(&mut app);
-        for (l, r) in ["Fit", "Reset", "Running only", "Columns…"]
-            .iter()
-            .zip(before)
-        {
+        for (l, r) in ["Fit", "Reset", "Both (F4)", "Columns…"].iter().zip(before) {
             assert_eq!(one(&out, l).min, r.min, "{l:?} moved at {w}px");
         }
     }
@@ -6676,12 +6672,16 @@ fn test_table_row_selection_is_one_full_width_band() {
 
     // Headers: no button pill above the first row band.
     let pill = ctx.global_style().visuals.widgets.inactive.weak_bg_fill;
-    let header = Rect::from_x_y_ranges(b0.x_range(), (b0.top() - 30.0)..=(b0.top() - 4.0));
+    // The column header only: the table filter strip sits above it.
+    let header = Rect::from_x_y_ranges(b0.x_range(), (b0.top() - 20.0)..=(b0.top() - 4.0));
     let pills: Vec<_> = rects
         .iter()
         .filter(|(r, f)| *f == pill && r.intersects(header))
         .collect();
-    assert!(pills.is_empty(), "header has no pill: {pills:?}");
+    assert!(
+        pills.is_empty(),
+        "header has no pill: {pills:?} above {b0:?}"
+    );
 
     // Hovering the elided cell shows the full value in a tooltip.
     let full = "x".repeat(1000);
@@ -6738,7 +6738,7 @@ fn test_table_arrow_keys_select_rows_in_shown_order() {
             ..Default::default()
         })
         .collect();
-    app.search_query = "_keep".into();
+    app.state.table_filter.search = "_keep".into();
 
     let ctx = egui::Context::default();
     let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 700.0));
@@ -7571,8 +7571,8 @@ fn test_task_77_29_table_and_graph_node_parity_and_visible_projection() {
         "no second or Czech count"
     );
 
-    // Filter by running_only:
-    app.state.running_only = true;
+    // Filter the graph by running_only:
+    app.state.graph_filter.running_only = true;
     let running_rows: Vec<TableRow> = app
         .table_rows
         .iter()
@@ -10976,13 +10976,12 @@ fn test_task_77_11_new_live_messages_flash_their_edge_once() {
 }
 
 #[test]
-fn test_task_77_49_filter_table_toggle_and_graph_selection_scrolls_table() {
+fn test_task_77_49_103_table_filter_and_graph_selection_scrolls_table() {
     use eframe::App;
     use hcom_dashboard::app::HcomDashboardApp;
     use hcom_dashboard::config::{DashboardConfig, DashboardState, load_state};
     use hcom_dashboard::table_data::TableRow;
 
-    assert!(DashboardState::default().filter_table, "default: filtered");
     let dir = tempfile::tempdir().unwrap();
     let state = DashboardState {
         columns: vec!["instance".into()],
@@ -11002,7 +11001,8 @@ fn test_task_77_49_filter_table_toggle_and_graph_selection_scrolls_table() {
             ..Default::default()
         })
         .collect();
-    app.search_query = "_keep".into();
+    app.state.graph_filter.search = "_keep".into();
+    app.state.table_filter.search = "_keep".into();
 
     let ctx = egui::Context::default();
     let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0));
@@ -11022,15 +11022,23 @@ fn test_task_77_49_filter_table_toggle_and_graph_selection_scrolls_table() {
         }
     };
 
-    // Filtered: the table follows the search like the graph.
+    // The table follows its own search.
     run_events(&mut app, vec![]);
     assert_eq!(app.table_row_bands.len(), 60);
-    // Full: every agent in the table, the graph stays filtered.
-    app.state.filter_table = false;
+    // Without a table search every agent is in the table, the graph stays
+    // filtered by its own search (TASK-77.103).
+    app.state.table_filter.search.clear();
     run_events(&mut app, vec![]);
     assert_eq!(app.table_row_bands.len(), 61);
     let band = *app.table_row_bands.last().unwrap();
     assert!(band.top() > screen.bottom(), "last row starts out of view");
+    // A table row hidden in the graph stays selected; the graph does not
+    // highlight it.
+    app.selected_row_id = Some("zz_other".into());
+    app.canvas.selected_node = app.graph.get_node_index("zz_other");
+    run_events(&mut app, vec![]);
+    assert_eq!(app.selected_row_id.as_deref(), Some("zz_other"));
+    assert_eq!(app.canvas.selected_node, None);
 
     // Selecting a graph node far down the table scrolls its row into view.
     let target = "w59_keep";
@@ -11083,9 +11091,16 @@ fn test_task_77_49_filter_table_toggle_and_graph_selection_scrolls_table() {
         "reselected row scrolled into view again: {band:?}"
     );
 
-    // The toggle persists.
+    // Both filters persist.
+    app.state.graph_filter.running_only = true;
+    app.state.table_filter.hide_adhoc = true;
     app.save_state();
-    assert!(!load_state(dir.path()).filter_table);
+    let loaded = load_state(dir.path());
+    assert_eq!(loaded.graph_filter, app.state.graph_filter);
+    assert_eq!(loaded.table_filter, app.state.table_filter);
+    assert_eq!(loaded.graph_filter.search, "_keep");
+    assert!(DashboardState::default().graph_filter.hide_disabled);
+    assert!(DashboardState::default().table_filter.hide_disabled);
 }
 
 #[test]
@@ -11244,6 +11259,75 @@ fn test_task_77_50_table_row_double_click_or_enter_attaches() {
     assert_eq!(attaches("cat_beta"), 0, "stopped agent");
 }
 
+/// TASK-77.103: graph Running only follows the message window, table
+/// Running only means running now; each strip shows its own count.
+#[test]
+fn test_task_77_103_table_running_only_ignores_the_window() {
+    use eframe::App;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
+        dir.path().to_path_buf(),
+    );
+    let names = ["live", "earlier", "never"];
+    let snaps: Vec<_> = names.iter().map(|n| snap(n, None)).collect();
+    app.graph.apply_instance_snapshot(&snaps);
+    app.table_rows = names
+        .iter()
+        .map(|n| TableRow {
+            instance: n.to_string(),
+            is_running: *n == "live",
+            run_intervals: if *n == "earlier" {
+                vec![(1, Some(2))]
+            } else {
+                Vec::new()
+            },
+            ..Default::default()
+        })
+        .collect();
+    app.state.graph_filter.running_only = true;
+    app.state.table_filter.running_only = true;
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 800.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut out = None;
+    for _ in 0..3 {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        let mut o = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        o.textures_delta.clear();
+        out = Some(o);
+    }
+    let texts: Vec<String> = out
+        .unwrap()
+        .shapes
+        .iter()
+        .filter_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text().starts_with("Shown") => {
+                Some(t.galley.text().to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts.contains(&"Shown 2 / 3".to_string()),
+        "graph: {texts:?}"
+    );
+    assert!(
+        texts.contains(&"Shown 1 / 3".to_string()),
+        "table: {texts:?}"
+    );
+    assert_eq!(app.table_row_bands.len(), 1, "only the running agent");
+}
+
 #[test]
 fn test_task_77_51_slash_focuses_the_search_field() {
     use eframe::App;
@@ -11281,12 +11365,15 @@ fn test_task_77_51_slash_focuses_the_search_field() {
     run(&mut app, slash());
     run(&mut app, vec![]);
     assert!(ctx.text_edit_focused(), "/ focuses the search field");
-    assert_eq!(app.search_query, "", "the shortcut is not typed");
+    assert_eq!(
+        app.state.table_filter.search, "",
+        "the shortcut is not typed"
+    );
 
     // Inside the field, / is ordinary input.
     run(&mut app, slash());
     run(&mut app, vec![]);
-    assert_eq!(app.search_query, "/");
+    assert_eq!(app.state.table_filter.search, "/");
     assert!(ctx.text_edit_focused());
 }
 
@@ -11468,7 +11555,7 @@ fn test_task_77_52_open_with_key_runs_the_app_like_its_button() {
     run(&mut app, g());
     run(&mut app, vec![]);
     assert_eq!(spawns(), 1, "text field keeps the key");
-    assert_eq!(app.search_query, "g");
+    assert_eq!(app.state.table_filter.search, "g");
 }
 
 #[test]
@@ -12226,7 +12313,7 @@ fn test_task_77_65_table_rows_colored_by_state() {
         let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
         app.state.theme = Some(pref);
         app.state.columns = vec!["agent".into()];
-        app.state.hide_disabled = false;
+        app.state.table_filter.hide_disabled = false;
         app.state.view_mode = Some(hcom_dashboard::config::ViewMode::TableOnly);
         app.table_rows = cases.iter().map(|(r, _)| r.clone()).collect();
         app.sync_graph_from_table_rows();
@@ -15303,7 +15390,14 @@ fn test_task_77_93_top_bar_section_labels_use_accent() {
         let out = run(&mut app, vec![]);
         let want = hcom_dashboard::app::section_label_color(dark);
         for label in [
-            "FILTER", "VIEW", "LAYOUT", "EDGES", "WIDTH", "WINDOW", "LAST",
+            "GRAPH FILTER",
+            "TABLE FILTER",
+            "VIEW",
+            "LAYOUT",
+            "EDGES",
+            "WIDTH",
+            "WINDOW",
+            "LAST",
         ] {
             let format = out
                 .shapes
@@ -15437,7 +15531,7 @@ fn test_task_77_99_action_keys_act_like_their_buttons() {
     run(&mut app, vec![task_77_52_key(egui::Key::Delete, none)]);
     run(&mut app, vec![]);
     assert!(!app.show_send_dialog && app.confirm_kill_target.is_none());
-    assert_eq!(app.search_query, "m");
+    assert_eq!(app.state.table_filter.search, "m");
     assert!(recorded.lock().unwrap().is_empty(), "no command ran");
 
     // An open_with entry with the same key wins over the built-in one.
