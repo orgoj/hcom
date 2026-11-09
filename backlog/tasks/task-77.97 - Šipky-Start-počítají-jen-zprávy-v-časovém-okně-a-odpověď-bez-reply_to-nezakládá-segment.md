@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-09T06:44:00Z'
-updated_date: '2026-11-09T07:22:00Z'
+updated_date: '2026-11-09T07:42:00Z'
 labels:
   - bug
 dependencies: []
@@ -35,4 +35,6 @@ Edge vrstva Start (initiator arrows) bere celou historii zpráv bez ohledu na č
 Openery se hledají v celé historii (odpověď na request před oknem se pozná), počítají se jen ty v okně. Review agent_review OK; vědomá heuristika: první zpráva protistrany po dlouho nezodpovězeném requestu se bere jako odpověď. Čeká na kontrolu uživatelem.
 
 Uživatel: šipek málo. Příčina: snapshot ze sync vlákna nahradil graf a smazal session_starts, takže pár měl jediný segment od první zprávy mimo okno. adopt_synced_graph je přenáší (jako node_styles). Ověřeno na reálných datech dočasným testem: cca_manager→4× main, wdt_main→mp1/mp2/traffic atd.
+
+Uživatel: šipky naskočí se zpožděním (replay historie od nejstarší). Doplněn překryv Loading message history… N% uprostřed grafu do dosažení nejnovější zprávy z prvního stats loadu. Review OK.
 <!-- SECTION:NOTES:END -->

@@ -1486,6 +1486,7 @@ impl ActionRunner for MockActionRunner {
             }),
             ActionRequest::ReloadStats => Some(ActionResult::StatsLoaded {
                 stats: std::collections::HashMap::new(),
+                last_message_id: 0,
             }),
             ActionRequest::Shutdown => None,
         }
@@ -10175,6 +10176,31 @@ fn test_task_77_97_sync_snapshot_keeps_session_starts() {
         owned(&[("boss", 1)]),
         "today's start after the restart stays in the window"
     );
+}
+
+#[test]
+fn test_task_77_97_history_progress_until_replay_reaches_newest_message() {
+    use hcom_dashboard::config::DashboardState;
+    let (_dir, mut app) = split_test_app(DashboardState::default());
+    assert_eq!(app.history_progress(), None, "no stream in tests: loaded");
+
+    app.history_loaded = false;
+    assert_eq!(app.history_progress(), Some(0.0), "stats not loaded yet");
+    app.history_target = Some(100);
+    app.graph
+        .apply_message_event(&pair_msg(50, "alice", "bob", None, false));
+    assert_eq!(app.history_progress(), Some(0.5));
+    app.graph
+        .apply_message_event(&pair_msg(100, "alice", "bob", None, false));
+    assert_eq!(app.history_progress(), None);
+    // Loaded stays loaded (a later graph swap must not bring it back).
+    app.graph = AgentGraph::new();
+    assert_eq!(app.history_progress(), None);
+
+    // A database without messages: nothing to wait for.
+    app.history_loaded = false;
+    app.history_target = Some(0);
+    assert_eq!(app.history_progress(), None);
 }
 
 #[test]

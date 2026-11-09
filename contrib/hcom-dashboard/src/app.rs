@@ -421,6 +421,11 @@ pub struct HcomDashboardApp {
     pub idle_job: Option<crate::idle::IdleJob>,
     pub idle_error: Option<String>,
     pub stats_reload_in_flight: bool,
+    /// Newest message id when the first stats load finished: the message
+    /// history replay is complete once the graph reaches it.
+    pub history_target: Option<u64>,
+    /// Message history and session starts are loaded (Start arrows valid).
+    pub history_loaded: bool,
     pub cached_event_stats: std::collections::HashMap<String, crate::table_data::EventStatsEntry>,
 
     // Async panel contents (agent, generation, content)
@@ -837,6 +842,8 @@ impl HcomDashboardApp {
             idle_job: None,
             idle_error: None,
             stats_reload_in_flight: true,
+            history_target: None,
+            history_loaded: false,
             cached_event_stats: std::collections::HashMap::new(),
             screen_content: None,
             transcript_content: None,
@@ -889,6 +896,8 @@ impl HcomDashboardApp {
             desktop_theme: desktop_config_dir().and_then(|dir| desktop_theme(&dir)),
         };
         app.apply_persisted_view();
+        // Without a message stream there is no history to wait for.
+        app.history_loaded = app.sync.is_none();
         app.pending_maximize = app.state.window_maximized.then_some(0.0);
 
         // Dispatch initial table data reload and stats reload
@@ -955,6 +964,8 @@ impl HcomDashboardApp {
             idle_job: None,
             idle_error: None,
             stats_reload_in_flight: false,
+            history_target: None,
+            history_loaded: true,
             cached_event_stats: std::collections::HashMap::new(),
             screen_content: None,
             transcript_content: None,
@@ -1126,6 +1137,24 @@ impl HcomDashboardApp {
         self.refresh_window_counts(now);
         self.sync_time_range_text_from_window(now, true);
         Ok(())
+    }
+
+    /// Progress `0.0..=1.0` of the initial message history load, `None` once
+    /// the replay reached the newest message known at the first stats load.
+    pub fn history_progress(&mut self) -> Option<f32> {
+        if self.history_loaded {
+            return None;
+        }
+        // Stats (session starts and the target id) not loaded yet.
+        let Some(target) = self.history_target else {
+            return Some(0.0);
+        };
+        let loaded = self.graph.last_event_id;
+        if loaded >= target {
+            self.history_loaded = true;
+            return None;
+        }
+        Some(loaded as f32 / target as f32)
     }
 
     /// Replaces the graph with a snapshot from the sync thread. Node styles
@@ -3950,6 +3979,31 @@ impl HcomDashboardApp {
         let (response, action) =
             self.canvas
                 .show(ui, &self.graph, &mut self.layout, Some(visible), palette);
+        if let Some(progress) = self.history_progress() {
+            let text = format!(
+                "Loading message history… {:.0}%",
+                (progress * 100.0).min(99.0)
+            );
+            let font = egui::FontId::proportional(18.0);
+            let painter = ui.painter_at(rect);
+            let galley = painter.layout_no_wrap(text, font, palette.node_text_primary);
+            let bg = egui::Rect::from_center_size(rect.center(), galley.size())
+                .expand2(egui::vec2(16.0, 10.0));
+            painter.rect_filled(bg, 6.0, palette.node_fill);
+            painter.rect_stroke(
+                bg,
+                6.0,
+                egui::Stroke::new(1.0, palette.node_stroke),
+                egui::StrokeKind::Inside,
+            );
+            painter.galley(
+                bg.min + egui::vec2(16.0, 10.0),
+                galley,
+                palette.node_text_primary,
+            );
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(200));
+        }
         // The first user zoom, pan, node press or drag ends auto-fit.
         if view_before != (self.canvas.zoom, self.canvas.pan)
             || self.canvas.dragged_node.is_some()
@@ -4392,8 +4446,12 @@ impl eframe::App for HcomDashboardApp {
                         self.agent_fetch_failed = true;
                         self.command_logs.push(format!("[ERROR] {}", error));
                     }
-                    ActionResult::StatsLoaded { stats } => {
+                    ActionResult::StatsLoaded {
+                        stats,
+                        last_message_id,
+                    } => {
                         self.stats_reload_in_flight = false;
+                        self.history_target.get_or_insert(last_message_id);
                         self.cached_event_stats = stats;
                         crate::table_data::apply_event_stats(
                             &mut self.table_rows,

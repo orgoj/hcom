@@ -135,6 +135,8 @@ pub enum ActionResult {
     },
     StatsLoaded {
         stats: std::collections::HashMap<String, crate::table_data::EventStatsEntry>,
+        /// Id of the newest message event (0 without messages).
+        last_message_id: u64,
     },
     StatsFailed {
         error: String,
@@ -794,7 +796,27 @@ impl ActionRunner for SystemActionRunner {
                     &running_set,
                     now,
                 );
-                Some(ActionResult::StatsLoaded { stats })
+                let last_message_id = self
+                    .run_command_bounded(
+                        "hcom",
+                        &["events", "--type", "message", "--last", "1"],
+                        1024 * 1024,
+                        4096,
+                        None,
+                    )
+                    .ok()
+                    .and_then(|out| {
+                        let line = out.lines().next()?.to_string();
+                        serde_json::from_str::<serde_json::Value>(&line)
+                            .ok()?
+                            .get("id")?
+                            .as_u64()
+                    })
+                    .unwrap_or(0);
+                Some(ActionResult::StatsLoaded {
+                    stats,
+                    last_message_id,
+                })
             }
             ActionRequest::Shutdown => None,
         }

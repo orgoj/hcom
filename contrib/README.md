@@ -269,6 +269,7 @@ Dashboard in Rust (`egui`/`eframe`) visualizing running `hcom` agents:
   - Directed silver lines with arrow for spawn relationships (parent -> child).
   - Colored arrows with message count badge for message flows between agents. Bi-directional message flows use curved Bezier paths so arrows do not overlap.
   - Wide translucent `Start` arrows point away from the agent that started the conversation of a pair. The conversation splits into segments at every session start of either side; a segment's starter is the sender of its first message that is not a reply, an ack, or an answer to the peer's still open request. Only segments started inside the message time window count.
+  - After start the message history loads oldest first; until it reaches the newest message, `Loading message history… N%` sits in the middle of the canvas (counts and Start arrows are incomplete meanwhile).
 - Interactive canvas:
   - Zoom with mouse wheel (anchored to cursor position).
   - Pan by dragging the canvas background or using middle/secondary mouse buttons.
