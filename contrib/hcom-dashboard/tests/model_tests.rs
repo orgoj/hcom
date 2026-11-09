@@ -1145,6 +1145,83 @@ impl CommandExecutor for MockOverloadExecutor {
     }
 }
 
+/// Stream that replays `events_jsonl` and then stays open without output,
+/// like `hcom events --follow` after the history.
+struct MockIdleExecutor {
+    events_jsonl: String,
+}
+
+impl CommandExecutor for MockIdleExecutor {
+    fn run_command(&self, _argv: &[String]) -> Result<String> {
+        Ok("[]".into())
+    }
+
+    fn spawn_stream(&self, _argv: &[String]) -> Result<Box<dyn StreamHandle>> {
+        anyhow::bail!("unused")
+    }
+
+    fn spawn_stream_split(
+        &self,
+        _argv: &[String],
+    ) -> Result<(Box<dyn StreamReader>, Arc<dyn StreamKillHandle>)> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Idles after the lines until killed, then ends like a closed pipe.
+        struct IdleReader(std::vec::IntoIter<String>, Arc<AtomicBool>);
+        impl StreamReader for IdleReader {
+            fn next_line(&mut self, _cap: usize) -> Result<Option<String>> {
+                if let Some(l) = self.0.next() {
+                    return Ok(Some(l));
+                }
+                while !self.1.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(None)
+            }
+        }
+        struct IdleKill(Arc<AtomicBool>);
+        impl StreamKillHandle for IdleKill {
+            fn kill(&self) -> Result<()> {
+                self.0.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let killed = Arc::new(AtomicBool::new(false));
+        let lines: Vec<String> = self.events_jsonl.lines().map(String::from).collect();
+        Ok((
+            Box::new(IdleReader(lines.into_iter(), Arc::clone(&killed))),
+            Arc::new(IdleKill(killed)),
+        ))
+    }
+}
+
+#[test]
+fn test_task_77_97_idle_stream_publishes_the_replay_tail() {
+    // Three messages, the last one from a system sender the graph skips;
+    // far below the batch limit, and the stream then goes quiet.
+    let lines = [
+        r#"{"id":1,"instance":"a","ts":"2026-11-01T10:00:00Z","type":"message","data":{"from":"a","delivered_to":["b"],"text":"x"}}"#,
+        r#"{"id":2,"instance":"b","ts":"2026-11-01T10:00:01Z","type":"message","data":{"from":"b","delivered_to":["a"],"text":"y"}}"#,
+        r#"{"id":3,"instance":"sys_[hcom-launcher]","ts":"2026-11-01T10:00:02Z","type":"message","data":{"from":"[hcom-launcher]","mentions":["user"],"text":"ready"}}"#,
+    ]
+    .join("\n");
+    let worker = HcomSyncWorker::new(MockIdleExecutor {
+        events_jsonl: lines,
+    });
+    let sync = BackgroundSync::new(worker, 200, Duration::from_millis(16)).expect("sync start");
+    let start = std::time::Instant::now();
+    let mut last = 0;
+    while start.elapsed() < Duration::from_secs(3) && last < 3 {
+        if let Some(g) = sync.try_get_latest() {
+            last = g.last_event_id;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        last, 3,
+        "the replay tail is published while the stream idles"
+    );
+}
+
 #[test]
 fn test_overload_10k_events_throttled_coalescing() {
     // Generate 10,000 message events

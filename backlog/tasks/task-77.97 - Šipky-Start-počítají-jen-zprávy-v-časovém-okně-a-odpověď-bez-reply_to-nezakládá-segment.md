@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-11-09T06:44:00Z'
-updated_date: '2026-11-09T07:42:00Z'
+updated_date: '2026-11-09T09:29:00Z'
 labels:
   - bug
 dependencies: []
@@ -37,4 +37,6 @@ Openery se hledají v celé historii (odpověď na request před oknem se pozná
 Uživatel: šipek málo. Příčina: snapshot ze sync vlákna nahradil graf a smazal session_starts, takže pár měl jediný segment od první zprávy mimo okno. adopt_synced_graph je přenáší (jako node_styles). Ověřeno na reálných datech dočasným testem: cca_manager→4× main, wdt_main→mp1/mp2/traffic atd.
 
 Uživatel: šipky naskočí se zpožděním (replay historie od nejstarší). Doplněn překryv Loading message history… N% uprostřed grafu do dosažení nejnovější zprávy z prvního stats loadu. Review OK.
+
+Zaseknutí na 99 %: sync publikoval poslední dávku replaye až s další zprávou (blokující next_line) a nepočítal posun watermarku u přeskočených zpráv. Čtení přes vlákno + recv_timeout(cadence). Review OK; mock v testu opraven, zvednutí limitu test_overload odmítnuto (review:rejected task).
 <!-- SECTION:NOTES:END -->

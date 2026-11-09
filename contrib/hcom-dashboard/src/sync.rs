@@ -1,7 +1,7 @@
 use crate::model::AgentGraph;
 use crate::source::{
     CommandExecutor, DEFAULT_MAX_LINE_BYTES, HcomSyncWorker, StreamItem, StreamKillHandle,
-    StreamReader, build_messages_follow_cmd, parse_stream_line,
+    build_messages_follow_cmd, parse_stream_line,
 };
 use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -45,7 +45,7 @@ impl BackgroundSync {
                 published_count_clone.fetch_add(1, Ordering::Relaxed);
             }
 
-            let mut reader: Option<Box<dyn StreamReader>> = None;
+            let mut reader: Option<std::sync::mpsc::Receiver<Result<Option<String>>>> = None;
             let mut pending_events = 0usize;
             let mut last_publish = Instant::now();
 
@@ -64,9 +64,21 @@ impl BackgroundSync {
                 if reader.is_none() {
                     let cmd = build_messages_follow_cmd(local_graph.last_event_id);
                     match worker.executor.spawn_stream_split(&cmd) {
-                        Ok((r, k)) => {
+                        Ok((mut r, k)) => {
                             *kill_handle_clone.lock().unwrap() = Some(k);
-                            reader = Some(r);
+                            // Lines arrive over a channel so an idle stream
+                            // (replay done) still lets pending events publish.
+                            let (tx, rx) = std::sync::mpsc::sync_channel(4096);
+                            std::thread::spawn(move || {
+                                loop {
+                                    let item = r.next_line(DEFAULT_MAX_LINE_BYTES);
+                                    let end = !matches!(item, Ok(Some(_)));
+                                    if tx.send(item).is_err() || end {
+                                        break;
+                                    }
+                                }
+                            });
+                            reader = Some(rx);
                         }
                         Err(_) => {
                             // Backoff delay with shutdown checks
@@ -81,12 +93,34 @@ impl BackgroundSync {
                     }
                 }
 
-                if let Some(ref mut r) = reader {
-                    match r.next_line(DEFAULT_MAX_LINE_BYTES) {
+                if let Some(ref rx) = reader {
+                    let next = match rx.recv_timeout(cadence) {
+                        Ok(item) => item,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            if pending_events > 0 {
+                                publish_state(
+                                    &local_graph,
+                                    &shared_graph_clone,
+                                    &dirty_clone,
+                                    &published_count_clone,
+                                );
+                                pending_events = 0;
+                                last_publish = Instant::now();
+                            }
+                            continue;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(None),
+                    };
+                    match next {
                         Ok(Some(line)) => {
                             match parse_stream_line(&line) {
                                 StreamItem::Message(msg) => {
-                                    if local_graph.apply_message_event(&msg) {
+                                    // Skipped events (no valid sender or
+                                    // recipient) still move the watermark,
+                                    // which shows replay progress.
+                                    let before = local_graph.last_event_id;
+                                    local_graph.apply_message_event(&msg);
+                                    if local_graph.last_event_id != before {
                                         pending_events += 1;
                                     }
                                 }
