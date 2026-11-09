@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-09T19:16:00Z'
-updated_date: '2026-11-09T19:28:00Z'
+updated_date: '2026-11-09T19:33:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -27,6 +27,7 @@ Požadavek uživatele: výběr se drží jména (instance, jinak agent); když v
 - [x] #3 Výběr uzlu grafu, který v tabulce nebyl, se nenahrazuje
 - [x] #4 README popisuje chování
 - [x] #5 Je-li na indexu zastavený řádek téhož katalogového agenta, jehož instance zmizela, vybere se následující řádek (u posledního předchozí)
+- [x] #6 Řádek, který ztratí instanci (instance pojmenovaná jako katalogový agent, po Kill má stejné id), se počítá jako zmizelý; po Restartu výběr zůstává, dokud uživatel nevybere jiný řádek nebo řádek nezabije
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -37,4 +38,8 @@ render_table: table_selected_at (id, index) of the last frame; a vanished select
 User check: after Kill of a catalog agent its stopped row took the index and got selected; wrong, the next row is expected.
 
 Fix: table_selected_at carries the row's catalog agent; a stopped row of that agent at the index is skipped for the next row (previous at the end). Test extended; dashboard fmt, clippy, 252 tests green (budget test flaked once, passed on rerun, known per NOTES). Small change, no review.
+
+User check 2: Del kept the killed agent's row selected; cause: instance named like its catalog agent keeps the id after Kill. Fix: table_selected_at carries had_instance; a selected row that loses its instance counts as vanished; restart_keep (set on Confirm Restart, cleared on Confirm Kill or another selection) keeps a restarted row.
+
+Test extended (same-name instance, restart keep); dashboard fmt, clippy, 252 tests green.
 <!-- SECTION:NOTES:END -->

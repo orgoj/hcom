@@ -472,7 +472,10 @@ pub struct HcomDashboardApp {
     /// Selected row, its index in the shown order and its catalog agent,
     /// last frame; a vanished
     /// selected row (e.g. after Kill) hands the selection to its index.
-    table_selected_at: Option<(String, usize, String)>,
+    table_selected_at: Option<(String, usize, String, bool)>,
+    /// Restarted row id: keeps its selection while the instance is away,
+    /// until another row is selected or the row is killed.
+    pub restart_keep: Option<String>,
     /// Screen bands of the data rows in the last frame, full grid width.
     pub table_row_bands: Vec<egui::Rect>,
     pub show_start_dialog: bool,
@@ -868,6 +871,7 @@ impl HcomDashboardApp {
             table_hover_row: None,
             table_scrolled_id: None,
             table_selected_at: None,
+            restart_keep: None,
             table_row_bands: Vec::new(),
             show_start_dialog: false,
             start_agent_name: String::new(),
@@ -991,6 +995,7 @@ impl HcomDashboardApp {
             table_hover_row: None,
             table_scrolled_id: None,
             table_selected_at: None,
+            restart_keep: None,
             table_row_bands: Vec::new(),
             show_start_dialog: false,
             start_agent_name: String::new(),
@@ -1652,10 +1657,22 @@ impl HcomDashboardApp {
         // for a selection the table never showed (a graph-only node). The
         // stopped row of the killed instance's own catalog agent, now at that
         // index, is skipped for the next row (the previous one at the end).
-        if selected_row.is_none()
+        // An instance named like its catalog agent keeps the id after Kill:
+        // a selected row that loses its instance has vanished too. A
+        // restarted row keeps the selection while it is away.
+        let prev = self
+            .table_selected_at
+            .clone()
+            .filter(|(id, ..)| self.selected_row_id.as_ref() == Some(id));
+        let lost_instance = matches!((&prev, selected_row),
+            (Some((.., true)), Some(k)) if rows[k].instance.is_empty());
+        if self.restart_keep.is_some() && self.restart_keep != self.selected_row_id {
+            self.restart_keep = None;
+        }
+        if (selected_row.is_none() || lost_instance)
             && self.select_next.is_none()
-            && let Some((id, index, agent)) = &self.table_selected_at
-            && self.selected_row_id.as_ref() == Some(id)
+            && self.restart_keep.is_none()
+            && let Some((_, index, agent, _)) = &prev
             && let Some(last) = rows.len().checked_sub(1)
         {
             let mut k = (*index).min(last);
@@ -1673,7 +1690,7 @@ impl HcomDashboardApp {
             .selected_row_id
             .clone()
             .zip(selected_row)
-            .map(|(id, i)| (id, i, rows[i].agent.clone()));
+            .map(|(id, i)| (id, i, rows[i].agent.clone(), !rows[i].instance.is_empty()));
         // Up/Down move the selection in the shown order, unless a text field
         // has the keyboard; the moved row is scrolled into view below. Enter
         // attaches the selected row like a double-click. Alt+Up/Down act
@@ -5274,6 +5291,7 @@ impl eframe::App for HcomDashboardApp {
                 );
                 ui.horizontal(|ui| {
                     if ui.button("Confirm Kill").clicked() {
+                        self.restart_keep = None;
                         if let Some(node) = self.graph.get_agent(target) {
                             if node.status == AgentStatus::Stopped {
                                 self.set_action_error(
@@ -5315,6 +5333,7 @@ impl eframe::App for HcomDashboardApp {
                 ));
                 ui.horizontal(|ui| {
                     if ui.button("Confirm Restart").clicked() {
+                        self.restart_keep = self.selected_row_id.clone();
                         self.dispatch_action(ActionRequest::RunCommand {
                             cmd: cmd.clone(),
                             cwd: None,

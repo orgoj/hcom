@@ -15597,4 +15597,38 @@ fn test_task_77_100_vanished_selected_row_hands_selection_to_its_index() {
     remove(&mut app, "cat_beta");
     run(&mut app, vec![]);
     assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+    app.select_next = None;
+
+    // An instance named like its catalog agent keeps the id after Kill: the
+    // row that lost its instance is skipped for the next one.
+    app.table_rows = vec![
+        running("one", "one"),
+        running("two", "two"),
+        running("three", "three"),
+    ];
+    app.sync_graph_from_table_rows();
+    app.selected_row_id = Some("one".into());
+    run(&mut app, vec![]);
+    run(&mut app, vec![]);
+    app.table_rows[0] = stopped("one");
+    app.sync_graph_from_table_rows();
+    run(&mut app, vec![]);
+    // Sorted by agent: one (stopped), three, two.
+    assert_eq!(app.selected_row_id.as_deref(), Some("three"));
+
+    // A restarted row keeps the selection while its instance is away.
+    app.restart_keep = Some("three".into());
+    app.table_rows[2] = stopped("three");
+    app.sync_graph_from_table_rows();
+    run(&mut app, vec![]);
+    run(&mut app, vec![]);
+    assert_eq!(
+        app.selected_row_id.as_deref(),
+        Some("three"),
+        "restart keeps"
+    );
+    app.table_rows[2] = running("three", "three");
+    app.sync_graph_from_table_rows();
+    run(&mut app, vec![]);
+    assert_eq!(app.selected_row_id.as_deref(), Some("three"));
 }
