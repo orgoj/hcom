@@ -598,10 +598,22 @@ pub struct AgentGraph {
     pub node_styles: HashMap<String, NodeStyle>,
     /// Event ids of each instance's life `created` events (session starts).
     pub session_starts: HashMap<String, Vec<u64>>,
-    /// Who started the conversation of a pair, per `pair_key`; see
-    /// `refresh_initiators`.
+    /// Segment-opening messages of each pair, per `pair_key`, over the whole
+    /// retained history; see `refresh_initiators`.
+    openers: HashMap<(String, String), Vec<Opener>>,
+    /// Who started the conversation of a pair inside the current window.
     initiators: HashMap<(String, String), Vec<(String, usize)>>,
     initiators_dirty: bool,
+    /// Window (and live second) `initiators` were counted for.
+    initiators_key: Option<(MessageWindow, i64)>,
+}
+
+/// The message that opened a conversation segment.
+#[derive(Clone, Debug)]
+struct Opener {
+    id: u64,
+    ts: DateTime<Utc>,
+    from: String,
 }
 
 /// Unordered pair key: the two names in ascending order.
@@ -832,30 +844,74 @@ impl AgentGraph {
         }
     }
 
-    /// Recomputes the conversation initiators after messages or session
-    /// starts changed. The conversation of a pair splits into segments at
-    /// every session start of either side; a segment's initiator is the
-    /// sender of its first message that is neither a reply nor an ack.
+    /// `refresh_initiators_in` over all retained messages.
     pub fn refresh_initiators(&mut self) {
-        if !self.initiators_dirty {
+        self.refresh_initiators_in(&MessageWindow::default(), Utc::now());
+    }
+
+    /// Recomputes the conversation initiators after messages, session
+    /// starts or the window changed. The conversation of a pair splits into
+    /// segments at every session start of either side; a segment's initiator
+    /// is the sender of its first message that is neither a reply, an ack,
+    /// nor an answer to the peer's still open request. Segments are found
+    /// over the whole history; only those whose opening message lies in
+    /// `window` (same selection as `messages_in_window`) are counted.
+    pub fn refresh_initiators_in(&mut self, window: &MessageWindow, now: DateTime<Utc>) {
+        if self.initiators_dirty {
+            self.initiators_dirty = false;
+            self.initiators_key = None;
+            let pairs: std::collections::HashSet<(String, String)> = self
+                .message_edges
+                .keys()
+                .map(|(f, t)| pair_key(f, t))
+                .collect();
+            self.openers = pairs
+                .into_iter()
+                .filter_map(|(a, b)| {
+                    let found = self.compute_openers(&a, &b);
+                    (!found.is_empty()).then_some(((a, b), found))
+                })
+                .collect();
+        }
+        let live_second = if window.end.is_none() && !window.is_unfiltered() {
+            now.timestamp()
+        } else {
+            0
+        };
+        let key = (*window, live_second);
+        if self.initiators_key == Some(key) {
             return;
         }
-        self.initiators_dirty = false;
-        let pairs: std::collections::HashSet<(String, String)> = self
-            .message_edges
-            .keys()
-            .map(|(f, t)| pair_key(f, t))
-            .collect();
-        self.initiators = pairs
-            .into_iter()
-            .filter_map(|(a, b)| {
-                let found = self.compute_initiators(&a, &b);
-                (!found.is_empty()).then_some(((a, b), found))
+        self.initiators_key = Some(key);
+        // `last_n` selects across all edges, so only the selection knows.
+        let selected: Option<std::collections::HashSet<u64>> = window.last_n.map(|_| {
+            self.messages_in_window(window, now)
+                .into_iter()
+                .map(|(_, m)| m.id)
+                .collect()
+        });
+        let in_window = |o: &Opener| match &selected {
+            Some(ids) => ids.contains(&o.id),
+            None => window.contains(o.ts, now),
+        };
+        self.initiators = self
+            .openers
+            .iter()
+            .filter_map(|(pair, openers)| {
+                let mut counts: Vec<(String, usize)> = Vec::new();
+                for o in openers.iter().filter(|o| in_window(o)) {
+                    match counts.iter_mut().find(|(n, _)| *n == o.from) {
+                        Some((_, c)) => *c += 1,
+                        None => counts.push((o.from.clone(), 1)),
+                    }
+                }
+                counts.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
+                (!counts.is_empty()).then(|| (pair.clone(), counts))
             })
             .collect();
     }
 
-    fn compute_initiators(&self, a: &str, b: &str) -> Vec<(String, usize)> {
+    fn compute_openers(&self, a: &str, b: &str) -> Vec<Opener> {
         let mut messages: Vec<&StoredMessage> = [(a, b), (b, a)]
             .iter()
             .filter_map(|(f, t)| self.get_message_edge(f, t))
@@ -870,26 +926,37 @@ impl AgentGraph {
             .collect();
         bounds.sort_unstable();
 
-        let mut counts: Vec<(String, usize)> = Vec::new();
+        let mut openers = Vec::new();
         let mut done_segment = None;
+        // Sender of a request the other side has not answered yet: its next
+        // message is the answer, even without `reply_to` and across a
+        // session start (agents that restart per request).
+        let mut open_request: Option<&str> = None;
         for m in messages {
+            let answers = open_request.is_some_and(|asker| asker != m.from);
+            if answers {
+                open_request = None;
+            }
+            if m.intent.as_deref() == Some("request") {
+                open_request = Some(&m.from);
+            }
             let segment = bounds.partition_point(|&b| b < m.id);
-            if done_segment == Some(segment) || !m.opens_conversation() {
+            if done_segment == Some(segment) || answers || !m.opens_conversation() {
                 continue;
             }
             done_segment = Some(segment);
-            match counts.iter_mut().find(|(n, _)| *n == m.from) {
-                Some((_, c)) => *c += 1,
-                None => counts.push((m.from.clone(), 1)),
-            }
+            openers.push(Opener {
+                id: m.id,
+                ts: m.ts,
+                from: m.from.clone(),
+            });
         }
-        counts.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
-        counts
+        openers
     }
 
     /// Initiators of the conversation between `a` and `b` with their segment
     /// counts, most first; empty when no segment has one.
-    /// Valid after `refresh_initiators`.
+    /// Valid after `refresh_initiators_in`.
     pub fn initiators(&self, a: &str, b: &str) -> &[(String, usize)] {
         self.initiators
             .get(&pair_key(a, b))

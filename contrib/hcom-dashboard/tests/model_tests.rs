@@ -10076,6 +10076,76 @@ fn test_task_77_44_replies_and_acks_do_not_start_a_segment() {
 }
 
 #[test]
+fn test_task_77_97_answer_without_reply_to_after_restart_does_not_start_a_segment() {
+    // bin asks; knowledge restarts per request and answers with a plain
+    // inform (no reply_to): bin started both segments, knowledge none.
+    let msgs = [
+        pair_msg(10, "bin", "knowledge", Some("request"), false),
+        pair_msg(21, "knowledge", "bin", Some("inform"), false),
+        pair_msg(22, "bin", "knowledge", Some("request"), false),
+        pair_msg(31, "knowledge", "bin", Some("inform"), false),
+        // A later message of its own, nothing open: knowledge starts it.
+        pair_msg(41, "knowledge", "bin", Some("inform"), false),
+    ];
+    let g = initiator_graph(
+        &msgs,
+        &[("knowledge", 20), ("knowledge", 30), ("knowledge", 40)],
+    );
+    assert_eq!(
+        g.initiators("bin", "knowledge"),
+        owned(&[("bin", 2), ("knowledge", 1)])
+    );
+}
+
+#[test]
+fn test_task_77_97_initiators_count_only_segments_opened_inside_the_window() {
+    use hcom_dashboard::model::MessageWindow;
+    let now = Utc::now();
+    let at = |id: u64, from: &str, to: &str, hours_ago: i64, intent: &str| {
+        let mut m = pair_msg(id, from, to, Some(intent), false);
+        m.ts = now - chrono::Duration::hours(hours_ago);
+        m
+    };
+    let mut g = AgentGraph::new();
+    for m in [
+        at(10, "bin", "knowledge", 48, "request"),
+        at(11, "knowledge", "bin", 47, "inform"),
+        at(21, "alice", "bob", 2, "inform"),
+        at(31, "bob", "alice", 1, "request"),
+    ] {
+        g.apply_message_event(&m);
+    }
+    g.set_session_starts([("bob".to_string(), vec![30])].into_iter().collect());
+
+    g.refresh_initiators_in(&MessageWindow::default(), now);
+    assert_eq!(g.initiators("bin", "knowledge"), owned(&[("bin", 1)]));
+    assert_eq!(g.iter_initiators().count(), 2);
+
+    let six_hours = MessageWindow {
+        span_secs: Some(6 * 3600),
+        ..Default::default()
+    };
+    g.refresh_initiators_in(&six_hours, now);
+    assert!(
+        g.initiators("bin", "knowledge").is_empty(),
+        "old conversation outside the window"
+    );
+    assert_eq!(
+        g.initiators("alice", "bob"),
+        owned(&[("alice", 1), ("bob", 1)])
+    );
+
+    // last_n keeps only the newest message: bob's segment.
+    let last_one = MessageWindow {
+        last_n: Some(1),
+        ..Default::default()
+    };
+    g.refresh_initiators_in(&last_one, now);
+    assert_eq!(g.initiators("alice", "bob"), owned(&[("bob", 1)]));
+    assert_eq!(g.iter_initiators().count(), 1);
+}
+
+#[test]
 fn test_task_77_44_reply_to_parsed_from_stream_and_session_starts_from_life_events() {
     use hcom_dashboard::source::{StreamItem, parse_stream_line};
     use hcom_dashboard::table_data::compute_event_stats;
@@ -10137,7 +10207,7 @@ fn test_task_77_44_edge_detail_and_tooltip_name_the_initiators() {
         .collect();
     app.sync_graph_from_table_rows();
     app.graph
-        .apply_message_event(&pair_msg(10, "alice", "bob", Some("request"), false));
+        .apply_message_event(&pair_msg(10, "alice", "bob", Some("inform"), false));
     app.graph
         .apply_message_event(&pair_msg(21, "bob", "alice", Some("request"), false));
     app.graph

@@ -4414,7 +4414,8 @@ impl eframe::App for HcomDashboardApp {
             self.dispatch_action(action);
         }
 
-        self.graph.refresh_initiators();
+        self.graph
+            .refresh_initiators_in(&self.msg_window, chrono::Utc::now());
         self.canvas.layers = crate::canvas::EdgeLayers {
             initiator: self.state.show_initiator_edges,
             message: self.state.show_message_edges,
