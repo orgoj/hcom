@@ -1,11 +1,11 @@
 ---
 id: TASK-77.101
 title: Sloupec status:status ukazuje živý stav, mimo listening
-status: In Progress
+status: Done
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-09T20:29:00Z'
-updated_date: '2026-11-09T20:31:00Z'
+updated_date: '2026-11-09T20:58:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -33,3 +33,9 @@ Požadavek uživatele: status:status (STATUS z poslední odpovědi agenta, catal
 <!-- SECTION:NOTES:BEGIN -->
 get_cell_value: status:status of a running row whose status is set and not listening returns the status. Test test_task_77_101_*; test_build_table_rows_merges_live_and_catalog updated (active row now shows active). Dashboard fmt, clippy, 253 tests green. Small change, no review. Done after the user's check.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented, tested and accepted by the user in the running dashboard.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -1,11 +1,11 @@
 ---
 id: TASK-77.99
 title: Klávesové zkratky tabulky pro akce vybraného agenta
-status: In Progress
+status: Done
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-09T18:32:00Z'
-updated_date: '2026-11-09T18:43:00Z'
+updated_date: '2026-11-09T20:58:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -36,3 +36,9 @@ Implemented in contrib/hcom-dashboard/src/app.rs (toolbar shortcuts s/m/r/Delete
 
 agent_review approved without findings. Done after the user's check in the app.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented, tested and accepted by the user in the running dashboard.
+<!-- SECTION:FINAL_SUMMARY:END -->

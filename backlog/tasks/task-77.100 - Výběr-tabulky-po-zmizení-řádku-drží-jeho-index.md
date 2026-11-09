@@ -1,11 +1,11 @@
 ---
 id: TASK-77.100
 title: Výběr tabulky po zmizení řádku drží jeho index
-status: In Progress
+status: Done
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-09T19:16:00Z'
-updated_date: '2026-11-09T19:33:00Z'
+updated_date: '2026-11-09T20:58:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -43,3 +43,9 @@ User check 2: Del kept the killed agent's row selected; cause: instance named li
 
 Test extended (same-name instance, restart keep); dashboard fmt, clippy, 252 tests green.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented, tested and accepted by the user in the running dashboard.
+<!-- SECTION:FINAL_SUMMARY:END -->
