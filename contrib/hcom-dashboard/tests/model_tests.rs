@@ -10146,6 +10146,38 @@ fn test_task_77_97_initiators_count_only_segments_opened_inside_the_window() {
 }
 
 #[test]
+fn test_task_77_97_sync_snapshot_keeps_session_starts() {
+    use hcom_dashboard::config::DashboardState;
+    use hcom_dashboard::model::MessageWindow;
+    let now = Utc::now();
+    let msg = |id: u64, hours_ago: i64| {
+        let mut m = pair_msg(id, "boss", "main", Some("request"), false);
+        m.ts = now - chrono::Duration::hours(hours_ago);
+        m
+    };
+    let (_dir, mut app) = split_test_app(DashboardState::default());
+    app.graph
+        .set_session_starts([("main".to_string(), vec![20])].into_iter().collect());
+    // The sync thread's snapshot never has session starts.
+    let mut snapshot = AgentGraph::new();
+    snapshot.apply_message_event(&msg(10, 48));
+    snapshot.apply_message_event(&msg(21, 1));
+    app.adopt_synced_graph(snapshot);
+
+    assert_eq!(app.graph.session_starts["main"], vec![20]);
+    let six_hours = MessageWindow {
+        span_secs: Some(6 * 3600),
+        ..Default::default()
+    };
+    app.graph.refresh_initiators_in(&six_hours, now);
+    assert_eq!(
+        app.graph.initiators("boss", "main"),
+        owned(&[("boss", 1)]),
+        "today's start after the restart stays in the window"
+    );
+}
+
+#[test]
 fn test_task_77_44_reply_to_parsed_from_stream_and_session_starts_from_life_events() {
     use hcom_dashboard::source::{StreamItem, parse_stream_line};
     use hcom_dashboard::table_data::compute_event_stats;

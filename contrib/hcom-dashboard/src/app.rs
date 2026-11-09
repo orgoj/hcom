@@ -1128,6 +1128,23 @@ impl HcomDashboardApp {
         Ok(())
     }
 
+    /// Replaces the graph with a snapshot from the sync thread. Node styles
+    /// (table reloads) and session starts (stats reloads) are set only on
+    /// the app's graph, so they carry over.
+    pub fn adopt_synced_graph(&mut self, updated: AgentGraph) {
+        let styles = std::mem::take(&mut self.graph.node_styles);
+        let starts = std::mem::take(&mut self.graph.session_starts);
+        self.graph = updated;
+        self.graph.node_styles = styles;
+        self.graph.set_session_starts(starts);
+        self.sync_graph_from_table_rows();
+        // Edge indices may be reused in another order after a swap.
+        self.window_cache_key = None;
+        self.layout.invalidate_caches();
+        // sync_nodes wakes the layout only on a structural change.
+        self.layout.sync_nodes(&self.graph);
+    }
+
     /// Clamps the scrubber end to [oldest retained message, now] (live when
     /// there are no messages) and recomputes `canvas.edge_counts` only when
     /// the window, the event watermark, the edge set or the live second changed.
@@ -4183,21 +4200,12 @@ impl eframe::App for HcomDashboardApp {
         if let Some(ref sync) = self.sync
             && let Some(updated) = sync.try_get_latest()
         {
-            // Node styles come from table reloads, not from the sync snapshot.
-            let styles = std::mem::take(&mut self.graph.node_styles);
             // New messages flash their edge briefly, only in a Live window.
             if self.msg_window.end.is_none() {
                 let now = ctx.input(|i| i.time);
                 self.canvas.flash_new_messages(&self.graph, &updated, now);
             }
-            self.graph = updated;
-            self.graph.node_styles = styles;
-            self.sync_graph_from_table_rows();
-            // Edge indices may be reused in another order after a swap.
-            self.window_cache_key = None;
-            self.layout.invalidate_caches();
-            // sync_nodes wakes the layout only on a structural change.
-            self.layout.sync_nodes(&self.graph);
+            self.adopt_synced_graph(updated);
             ctx.request_repaint();
         }
 
