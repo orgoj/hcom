@@ -1,11 +1,11 @@
 ---
 id: TASK-77.102
 title: Konfigurovatelné pořadí řazení podle stavu (status:status)
-status: In Progress
+status: Done
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-09T21:02:00Z'
-updated_date: '2026-11-09T21:10:00Z'
+updated_date: '2026-11-09T21:11:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -37,3 +37,9 @@ Specified with the user: error exists (ST_ERROR, src/shared/constants.rs) and go
 
 status_rank + status:status branch in sort_rows. Test test_task_77_102_*; dashboard fmt, clippy, 254 tests green (overload throttle test flaked once, passed on rerun). Small change, no review. Done after the user's check.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+status:status sorts by urgency (blocked, error, NEEDS_USER, DONE_FOLLOWUP, DONE, other listening, active, other, stopped), oldest since first; hardcoded. Accepted by the user.
+<!-- SECTION:FINAL_SUMMARY:END -->
