@@ -15666,3 +15666,60 @@ fn test_task_77_100_vanished_selected_row_hands_selection_to_its_index() {
     run(&mut app, vec![]);
     assert_eq!(app.selected_row_id.as_deref(), Some("three"));
 }
+
+#[test]
+fn test_task_77_102_status_status_sorts_by_what_needs_the_user() {
+    use hcom_dashboard::table_data::{TableRow, sort_rows};
+
+    let row = |name: &str, running: bool, status: &str, report: &str, since: Option<u64>| {
+        let mut r = TableRow {
+            agent: name.into(),
+            instance: if running { name.into() } else { String::new() },
+            is_running: running,
+            status: status.into(),
+            since_seconds: since,
+            ..Default::default()
+        };
+        if !report.is_empty() {
+            r.status_values.insert("status".into(), report.into());
+        }
+        r
+    };
+    let mut rows = vec![
+        row("stopped_done", false, "", "DONE", None),
+        row("launching", true, "launching", "", Some(5)),
+        row("active", true, "active", "DONE", Some(9)),
+        row("waiting", true, "listening", "WAITING", Some(3)),
+        row("no_report", true, "listening", "", Some(4)),
+        row("done", true, "listening", "DONE", Some(7)),
+        row("followup", true, "listening", "DONE_FOLLOWUP", Some(1)),
+        row("needs_user_new", true, "listening", "NEEDS_USER", Some(2)),
+        row("needs_user_old", true, "listening", "NEEDS_USER", Some(200)),
+        row("needs_user_nosince", true, "listening", "NEEDS_USER", None),
+        row("error", true, "error", "", Some(1)),
+        row("blocked", true, "blocked", "DONE", Some(1)),
+    ];
+    let names = |rows: &[TableRow]| rows.iter().map(|r| r.agent.clone()).collect::<Vec<_>>();
+    let expected = vec![
+        "blocked",
+        "error",
+        "needs_user_old",
+        "needs_user_new",
+        "needs_user_nosince",
+        "followup",
+        "done",
+        "no_report",
+        "waiting",
+        "active",
+        "launching",
+        "stopped_done",
+    ];
+
+    sort_rows(&mut rows, "status:status", false, true);
+    assert_eq!(names(&rows), expected);
+
+    sort_rows(&mut rows, "status:status", true, true);
+    let mut reversed = expected.clone();
+    reversed.reverse();
+    assert_eq!(names(&rows), reversed, "reverse flips the whole order");
+}

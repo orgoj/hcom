@@ -710,7 +710,39 @@ pub fn shorten_path(path: &str, home: Option<&str>, max_chars: usize) -> String 
     out
 }
 
+/// Rank of `status:status` by what the user has to react to first; equal
+/// ranks go by `since`, oldest first (TASK-77.102).
+fn status_rank(row: &TableRow) -> u8 {
+    if !row.is_running {
+        return 8;
+    }
+    match row
+        .get_cell_value("status:status")
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "BLOCKED" => 0,
+        "ERROR" => 1,
+        "NEEDS_USER" => 2,
+        "DONE_FOLLOWUP" => 3,
+        "DONE" => 4,
+        _ if row.status == "listening" => 5,
+        "ACTIVE" => 6,
+        _ => 7,
+    }
+}
+
 pub fn sort_rows(rows: &mut [TableRow], col_key: &str, reverse: bool, empty_last: bool) {
+    if col_key == "status:status" {
+        rows.sort_by(|a, b| {
+            // Oldest first; a row without `since` (None) after the others.
+            let cmp = status_rank(a)
+                .cmp(&status_rank(b))
+                .then_with(|| b.since_seconds.cmp(&a.since_seconds));
+            if reverse { cmp.reverse() } else { cmp }
+        });
+        return;
+    }
     rows.sort_by(|a, b| {
         let val_a = a.get_cell_value(col_key);
         let val_b = b.get_cell_value(col_key);
