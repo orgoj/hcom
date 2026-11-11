@@ -1556,6 +1556,9 @@ impl ActionRunner for MockActionRunner {
                 result: Ok("cmd ok".into()),
             }),
             ActionRequest::SpawnDetached { .. } => None,
+            ActionRequest::RecoverList => {
+                Some(ActionResult::RecoverListLoaded { items: Ok(vec![]) })
+            }
             ActionRequest::ReloadTableData => Some(ActionResult::TableDataLoaded {
                 rows: Vec::new(),
                 catalog_groups: Vec::new(),
@@ -15816,4 +15819,74 @@ fn test_task_77_102_status_status_sorts_by_what_needs_the_user() {
     let mut reversed = expected.clone();
     reversed.reverse();
     assert_eq!(names(&rows), reversed, "reverse flips the whole order");
+}
+
+#[test]
+fn test_task_98_recover_items_preselect_unfinished_agents() {
+    use hcom_dashboard::action::parse_recover_items;
+    use hcom_dashboard::app::recover_command;
+
+    let json = r#"[
+        {"name":"luna","tool":"claude","stopped_at":"2026-11-11T08:34:00+00:00","last_status":"listening","directory":"/a","status_columns":{"status":"NEEDS_USER"}},
+        {"name":"nova","tool":"claude","last_status":"listening","status_columns":{"status":"DONE"}},
+        {"name":"kiri","tool":"codex","last_status":"listening","status_columns":{"status":"DONE_FOLLOWUP"}},
+        {"name":"tuna","tool":"claude","last_status":"blocked","status_columns":{}},
+        {"name":"miro","tool":"claude"}
+    ]"#;
+    let mut items = parse_recover_items(json).unwrap();
+    let checked: Vec<&str> = items
+        .iter()
+        .filter(|i| i.checked)
+        .map(|i| i.name.as_str())
+        .collect();
+    assert_eq!(checked, ["luna", "tuna", "miro"]);
+    assert_eq!(items[0].status(), "NEEDS_USER");
+    assert_eq!(items[3].status(), "");
+
+    assert_eq!(
+        recover_command(&items).unwrap(),
+        ["hcom", "recover", "luna", "tuna", "miro"]
+    );
+    for item in &mut items {
+        item.checked = false;
+    }
+    assert_eq!(
+        recover_command(&items),
+        None,
+        "nothing checked, nothing to run"
+    );
+    assert!(parse_recover_items("not json").is_err());
+}
+
+#[test]
+fn test_task_98_recover_dialog_is_modal_and_renders_headless() {
+    use hcom_dashboard::action::parse_recover_items;
+    use hcom_dashboard::app::{HcomDashboardApp, RecoverDialog};
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
+        std::path::PathBuf::from("/tmp"),
+    );
+    assert!(!app.modal_open());
+    let items = parse_recover_items(r#"[{"name":"luna","tool":"claude"}]"#).unwrap();
+    app.recover_dialog = Some(RecoverDialog::Ready(items.clone()));
+    assert!(app.modal_open(), "Recover dialog blocks global shortcuts");
+
+    let ctx = egui::Context::default();
+    let mut frame = eframe::Frame::_new_kittest();
+    for _ in 0..2 {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 800.0))),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| eframe::App::ui(&mut app, ui, &mut frame));
+        out.textures_delta.clear();
+    }
+    assert_eq!(
+        app.recover_dialog,
+        Some(RecoverDialog::Ready(items)),
+        "rendering alone keeps the dialog and its selection"
+    );
 }

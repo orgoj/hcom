@@ -85,7 +85,7 @@ tell any agent:
 
 **Subscribe** and notify on status changes, file edits, collisions, specific events. React automatically. Scripts can stream matching events as JSON Lines with `hcom events --follow`.
 
-**Spawn**, **fork**, **resume**, **kill** in any terminal emulator or headless. In Herdr, a catalog agent without `session` lands in the workspace named after its own `dir` (a roaming agent: the project it runs for; no `dir`: the caller's project); `hcom r` returns an agent to its recorded tab and `hcom f` opens a tab named after the fork; neither inherits your tab. `hcom kill` takes names, `@group`, `tag:<tag>`, `tool:<cli>` (e.g. `tool:agy`) or `SELF` (the calling agent ends itself). Add `--json` to a launch, `hcom r`, `hcom f` or `hcom kill` to get the outcome as one JSON object.
+**Spawn**, **fork**, **resume**, **kill** in any terminal emulator or headless. In Herdr, a catalog agent without `session` lands in the workspace named after its own `dir` (a roaming agent: the project it runs for; no `dir`: the caller's project); `hcom r` returns an agent to its recorded tab and `hcom f` opens a tab named after the fork; neither inherits your tab. `hcom kill` takes names, `@group`, `tag:<tag>`, `tool:<cli>` (e.g. `tool:agy`) or `SELF` (the calling agent ends itself). Add `--json` to a launch, `hcom r`, `hcom f` or `hcom kill` to get the outcome as one JSON object. After a crash or power loss, `hcom recover` lists agents whose process vanished (latest stop `process_exit`, not running now); `hcom recover <name>...` or `--all` resumes them.
 
 **Shell after exit**: a new window/pane keeps `bash -l` open after the agent exits; `hcom config keep_shell_on_exit false` closes it on exit code 0 (a failure still leaves the shell).
 

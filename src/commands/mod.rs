@@ -11,6 +11,7 @@ pub mod fork;
 pub mod handoff;
 pub mod kill;
 pub mod launch;
+pub mod recover;
 pub mod resume;
 pub mod start;
 pub mod stop;

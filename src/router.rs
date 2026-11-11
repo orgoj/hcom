@@ -36,6 +36,7 @@ const COMMANDS: &[&str] = &[
     "transcript",
     "bundle",
     "kill",
+    "recover",
     "term",
     "relay",
     "run",
@@ -759,7 +760,9 @@ pub fn dispatch() -> anyhow::Result<()> {
                 std::process::exit(exit_code);
             }
         }
-        Action::Command { ref cmd, ref args } if matches!(cmd.as_str(), "start" | "kill") => {
+        Action::Command { ref cmd, ref args }
+            if matches!(cmd.as_str(), "start" | "kill" | "recover") =>
+        {
             let (_, flags, help) = extract_global_flags_full(args);
             if help {
                 crate::commands::help::print_command_help(cmd);
@@ -768,6 +771,7 @@ pub fn dispatch() -> anyhow::Result<()> {
             let exit_code = match cmd.as_str() {
                 "start" => crate::commands::start::run(args, &flags)?,
                 "kill" => crate::commands::kill::run(args, &flags)?,
+                "recover" => crate::commands::recover::run(args, &flags)?,
                 _ => unreachable!(),
             };
             if exit_code != 0 {

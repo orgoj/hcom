@@ -75,9 +75,53 @@ pub enum ActionRequest {
         cmd: Vec<String>,
         cwd: Option<String>,
     },
+    /// Candidates of `hcom recover --json`.
+    RecoverList,
     ReloadTableData,
     ReloadStats,
     Shutdown,
+}
+
+/// An agent `hcom recover` would resume, as the Recover dialog shows it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct RecoverItem {
+    pub name: String,
+    #[serde(default)]
+    pub tool: String,
+    #[serde(default)]
+    pub stopped_at: String,
+    /// hcom status before the stop (`listening`, `active`, `blocked`).
+    #[serde(default)]
+    pub last_status: String,
+    #[serde(default)]
+    pub directory: String,
+    /// Stored status column values (`status` holds `DONE`, `NEEDS_USER`, ...).
+    #[serde(default)]
+    pub status_columns: std::collections::HashMap<String, serde_json::Value>,
+    /// Selected for resume; preset unless `status:status` is DONE or DONE_FOLLOWUP.
+    #[serde(skip)]
+    pub checked: bool,
+}
+
+impl RecoverItem {
+    /// The `status` column value; empty without one.
+    pub fn status(&self) -> &str {
+        self.status_columns
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+    }
+}
+
+/// Candidates from `hcom recover --json`; finished ones come unchecked.
+pub fn parse_recover_items(json: &str) -> Result<Vec<RecoverItem>, String> {
+    let mut items: Vec<RecoverItem> =
+        serde_json::from_str(json).map_err(|e| format!("hcom recover --json: {e}"))?;
+    for item in &mut items {
+        let status = item.status().to_ascii_uppercase();
+        item.checked = status != "DONE" && status != "DONE_FOLLOWUP";
+    }
+    Ok(items)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +164,9 @@ pub enum ActionResult {
     },
     CommandFinished {
         result: Result<String, String>,
+    },
+    RecoverListLoaded {
+        items: Result<Vec<RecoverItem>, String>,
     },
     SpawnDetachedFinished {
         cmd: Vec<String>,
@@ -581,6 +628,12 @@ impl ActionRunner for SystemActionRunner {
                     count,
                     result: res.map(|_| ()),
                 })
+            }
+            ActionRequest::RecoverList => {
+                let items = self
+                    .run_command_bounded("hcom", &["recover", "--json"], 1024 * 1024, 4096, None)
+                    .and_then(|json| parse_recover_items(&json));
+                Some(ActionResult::RecoverListLoaded { items })
             }
             ActionRequest::RunCommand { cmd, cwd } => {
                 let res = if cmd.is_empty() {

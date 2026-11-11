@@ -263,6 +263,7 @@ What you might type from a shell. Agents run their own commands that they learn 
 ```bash
 hcom [N] claude|gemini|codex|agy|opencode|kilo|pi|omp|cursor-agent|kimi|copilot|qoder|grok|hermes   # launch N agents
 hcom r <name|session_id>     # resume agent
+hcom recover [name...|--all] # list or resume agents a crash or power loss stopped (--json, --hours N)
 hcom f <name|session_id>     # fork session
 hcom kill <name|@group|tag:T|tool:CLI|SELF|all>   # kill + close terminal pane (SELF = the calling agent)
 ```

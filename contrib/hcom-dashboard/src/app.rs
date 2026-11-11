@@ -1,5 +1,6 @@
 use crate::action::{
-    ActionRequest, ActionResult, ActionWorkerHandle, SystemActionRunner, TranscriptFlags,
+    ActionRequest, ActionResult, ActionWorkerHandle, RecoverItem, SystemActionRunner,
+    TranscriptFlags,
 };
 use crate::canvas::{CanvasAction, CanvasView, ThemePalette};
 use crate::config::{
@@ -366,6 +367,8 @@ pub struct HcomDashboardApp {
     pub confirm_kill_target: Option<String>,
     pub confirm_restart_target: Option<(String, Vec<String>)>,
     pub confirm_kill_group: Option<Vec<String>>,
+    /// Recover dialog (`hcom recover`): loading, failed or the candidates.
+    pub recover_dialog: Option<RecoverDialog>,
     pub custom_cmd_confirm: Option<(String, Vec<String>, Option<String>)>,
     pub loaded_transcript: Option<(String, String)>,
     pub context_menu: Option<ContextMenuState>,
@@ -634,6 +637,29 @@ pub fn sessions_header_text(shown: usize, total: usize) -> String {
     }
 }
 
+/// State of the Recover dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoverDialog {
+    Loading,
+    Failed(String),
+    Ready(Vec<RecoverItem>),
+}
+
+/// `hcom recover <name>...` for the checked items; None when none is checked.
+pub fn recover_command(items: &[RecoverItem]) -> Option<Vec<String>> {
+    let names: Vec<String> = items
+        .iter()
+        .filter(|i| i.checked)
+        .map(|i| i.name.clone())
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    let mut cmd = vec!["hcom".to_string(), "recover".to_string()];
+    cmd.extend(names);
+    Some(cmd)
+}
+
 /// Sessions header line while the agent runs (TASK-77.83).
 pub const RESUME_OFF_TEXT: &str = "agent is running — Resume is off (Fork works)";
 
@@ -854,6 +880,7 @@ impl HcomDashboardApp {
             confirm_kill_target: None,
             confirm_restart_target: None,
             confirm_kill_group: None,
+            recover_dialog: None,
             custom_cmd_confirm: None,
             loaded_transcript: None,
             context_menu: None,
@@ -977,6 +1004,7 @@ impl HcomDashboardApp {
             confirm_kill_target: None,
             confirm_restart_target: None,
             confirm_kill_group: None,
+            recover_dialog: None,
             custom_cmd_confirm: None,
             context_menu: None,
             context_menu_opened_this_frame: false,
@@ -1583,6 +1611,9 @@ impl HcomDashboardApp {
                 ActionRequest::Sessions { agent, .. } => {
                     self.pending_action = Some(format!("Loading sessions for {}...", agent));
                 }
+                ActionRequest::RecoverList => {
+                    self.pending_action = Some("Loading hcom recover...".into());
+                }
                 ActionRequest::ReloadTableData => {}
                 ActionRequest::ReloadStats => {}
                 ActionRequest::Shutdown => {}
@@ -1826,6 +1857,7 @@ impl HcomDashboardApp {
         let dialog_open = self.confirm_kill_target.is_some()
             || self.confirm_restart_target.is_some()
             || self.confirm_kill_group.is_some()
+            || self.recover_dialog.is_some()
             || self.custom_cmd_confirm.is_some()
             || self.show_start_dialog
             || self.show_send_dialog
@@ -2182,6 +2214,77 @@ impl HcomDashboardApp {
             }
         }
         cmd
+    }
+
+    /// Recover dialog: candidates of `hcom recover` with checkboxes; agents
+    /// whose `status:status` is not DONE come checked.
+    fn render_recover_dialog(&mut self, ctx: &egui::Context, just_opened: bool) {
+        let mut close = false;
+        let mut run = None;
+        let (_, escape) = show_modal(ctx, "Recover Agents", |ui| {
+            match self.recover_dialog.as_mut() {
+                Some(RecoverDialog::Loading) | None => {
+                    ui.label("Loading hcom recover…");
+                }
+                Some(RecoverDialog::Failed(e)) => {
+                    ui.colored_label(Color32::from_rgb(231, 76, 60), e.as_str());
+                }
+                Some(RecoverDialog::Ready(items)) if items.is_empty() => {
+                    ui.label("No interrupted agents in the last 24h");
+                }
+                Some(RecoverDialog::Ready(items)) => {
+                    ui.label("Agents whose process vanished (crash, power loss):");
+                    egui::ScrollArea::vertical()
+                        .max_height(ui.ctx().content_rect().height() * 0.6)
+                        .show(ui, |ui| {
+                            egui::Grid::new("recover_grid")
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    for h in
+                                        ["Agent", "Tool", "STATUS", "hcom", "Stopped", "Directory"]
+                                    {
+                                        ui.strong(h);
+                                    }
+                                    ui.end_row();
+                                    for item in items.iter_mut() {
+                                        ui.checkbox(&mut item.checked, item.name.as_str());
+                                        ui.label(item.tool.as_str());
+                                        let status = item.status();
+                                        ui.label(if status.is_empty() { "–" } else { status });
+                                        ui.label(item.last_status.as_str());
+                                        ui.label(
+                                            item.stopped_at.get(..16).unwrap_or(&item.stopped_at),
+                                        );
+                                        ui.label(item.directory.as_str());
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                    let cmd = recover_command(items);
+                    if let Some(cmd) = &cmd {
+                        ui.label(RichText::new(command_preview(cmd)).monospace().weak());
+                    }
+                    if ui
+                        .add_enabled(cmd.is_some(), egui::Button::new("Resume"))
+                        .clicked()
+                    {
+                        run = cmd;
+                    }
+                }
+            }
+            let cancel = ui.button("Cancel");
+            if just_opened {
+                cancel.request_focus();
+            }
+            close |= cancel.clicked();
+        });
+        if let Some(cmd) = run {
+            self.dispatch_action(ActionRequest::RunCommand { cmd, cwd: None });
+            close = true;
+        }
+        if close || escape {
+            self.recover_dialog = None;
+        }
     }
 
     fn render_report_view(&self, ui: &mut egui::Ui, row: &TableRow) {
@@ -3894,6 +3997,7 @@ impl HcomDashboardApp {
         self.confirm_kill_target.is_some()
             || self.confirm_restart_target.is_some()
             || self.confirm_kill_group.is_some()
+            || self.recover_dialog.is_some()
             || self.custom_cmd_confirm.is_some()
             || self.show_start_dialog
             || self.show_send_dialog
@@ -3905,6 +4009,7 @@ impl HcomDashboardApp {
             || self.confirm_kill_target.is_some()
             || self.confirm_restart_target.is_some()
             || self.confirm_kill_group.is_some()
+            || self.recover_dialog.is_some()
             || self.custom_cmd_confirm.is_some()
             || self.show_start_dialog
             || self.show_send_dialog
@@ -4564,6 +4669,15 @@ impl eframe::App for HcomDashboardApp {
                             self.command_logs.push(format!("[ERROR] {}", msg));
                         }
                     },
+                    ActionResult::RecoverListLoaded { items } => {
+                        // Closed meanwhile: drop the late result.
+                        if self.recover_dialog.is_some() {
+                            self.recover_dialog = Some(match items {
+                                Ok(items) => RecoverDialog::Ready(items),
+                                Err(e) => RecoverDialog::Failed(e),
+                            });
+                        }
+                    }
                     ActionResult::CommandFinished { result } => match result {
                         Ok(out) => {
                             self.command_logs
@@ -5023,6 +5137,15 @@ impl eframe::App for HcomDashboardApp {
                     self.show_send_dialog = true;
                 }
 
+                if ui
+                    .button("Recover...")
+                    .on_hover_text("Resume agents a crash or power loss stopped (hcom recover)")
+                    .clicked()
+                {
+                    self.recover_dialog = Some(RecoverDialog::Loading);
+                    self.dispatch_action(ActionRequest::RecoverList);
+                }
+
                 ui.separator();
 
                 // Open with buttons
@@ -5376,6 +5499,10 @@ impl eframe::App for HcomDashboardApp {
             if escape {
                 self.confirm_restart_target = None;
             }
+        }
+
+        if self.recover_dialog.is_some() {
+            self.render_recover_dialog(&ctx, just_opened);
         }
 
         if let Some(ref targets) = self.confirm_kill_group.clone() {

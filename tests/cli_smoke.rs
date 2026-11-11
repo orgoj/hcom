@@ -3410,6 +3410,25 @@ fn agent_cli_overrides_reject_invalid_tools_and_non_global_catalogs() {
 }
 
 #[test]
+fn recover_lists_no_candidates_on_a_clean_install() {
+    let h = Hcom::new();
+    let (code, stdout, stderr) = h.run(["recover", "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert_eq!(stdout.trim(), "[]");
+
+    let (code, stdout, stderr) = h.run(["recover"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("No interrupted agents in the last 24h"),
+        "stdout={stdout}"
+    );
+
+    let (code, stdout, stderr) = h.run(["recover", "--all"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("No interrupted agents"), "stdout={stdout}");
+}
+
+#[test]
 fn agent_dry_run_renders_the_hcom_command_without_launching() {
     let h = Hcom::new();
     std::fs::write(

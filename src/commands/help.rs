@@ -600,6 +600,24 @@ const KILL_HELP: &[HelpEntry] = &[
     ),
 ];
 
+const RECOVER_HELP: &[HelpEntry] = &[
+    (
+        "recover",
+        "List agents whose process vanished (crash, power loss)",
+    ),
+    (
+        "",
+        "Latest stop is process_exit, not running now, local only",
+    ),
+    ("recover <name>...", "Resume the named agents (hcom r)"),
+    ("recover --all", "Resume every listed agent"),
+    ("  --hours N", "Look back N hours (default: 24)"),
+    (
+        "  --json",
+        "List as JSON (name, tool, stopped_at, last_status, status_columns, ...)",
+    ),
+];
+
 const LISTEN_HELP: &[HelpEntry] = &[
     ("listen [timeout]", "Block until message arrives"),
     ("  [timeout]", "Timeout in seconds (alias for --timeout)"),
@@ -1270,6 +1288,7 @@ pub const COMMAND_NAMES: &[&str] = &[
     "transcript",
     "bundle",
     "kill",
+    "recover",
     "term",
     "relay",
     "run",
@@ -1326,6 +1345,7 @@ Usage:\n\
 Launch:\n\
 \x20 hcom [N] {launchable} [flags] [tool-args]\n\
 \x20 hcom r <target>                       Resume stopped agent\n\
+\x20 hcom recover [name...|--all]          Resume agents a crash or power loss stopped\n\
 \x20 hcom f <target>                       Fork agent session ({forkable})\n\
 \x20 hcom kill <name(s)|@group|tag:T|tool:CLI|SELF|all>  Kill + close terminal pane\n\
 \n\
@@ -1499,6 +1519,7 @@ fn command_help_raw(name: &str) -> String {
         "handoff" => Some(&[HANDOFF_HELP]),
         "start" => Some(&[START_HELP]),
         "kill" => Some(&[KILL_HELP]),
+        "recover" => Some(&[RECOVER_HELP]),
         "listen" => Some(&[LISTEN_HELP]),
         "reset" => Some(&[RESET_HELP]),
         "relay" => Some(RELAY_PAGE),
@@ -1616,6 +1637,7 @@ mod tests {
             "transcript",
             "bundle",
             "kill",
+            "recover",
             "term",
             "relay",
             "run",
@@ -1950,6 +1972,7 @@ mod tests {
         assert!(get_help_text().contains("hcom kill <name(s)|@group|tag:T|tool:CLI|SELF|all>"));
         assert!(get_command_help("kill").contains("kill tool:<cli>"));
         assert!(get_command_help("kill").contains("kill SELF"));
+        assert!(get_command_help("recover").contains("recover --all"));
     }
 
     #[test]
