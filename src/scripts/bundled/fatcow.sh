@@ -48,6 +48,14 @@ Identity:
 
   -h, --help              Show this help
 
+Output:
+  Answers arrive as hcom messages to the asker. No file is written.
+  --ask without a caller identity waits --timeout seconds and prints the answer.
+
+Cleanup:
+  Live: keeps running until killed: hcom kill tag:fatcow.<dir>
+  Dead: stops itself after ingesting and after each --ask answer.
+
 Examples:
   hcom run fatcow --path src/tools
   hcom run fatcow --path src/ --focus "auth, middleware"

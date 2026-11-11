@@ -65,6 +65,16 @@ Options:
   --tool TOOL             AI tool for spawned agents (default: claude)
   -h, --help              Show this help
 
+Output:
+  The judge sends its verdict (grades, discrepancies, recommendation) as a
+  JSON hcom message to the caller. No file is written.
+
+Cleanup:
+  Launched agents keep running after the verdict until killed (the script
+  prints <batch>):
+    hcom kill tag:calibrator.<batch> tag:judge.<batch>
+  --fork also: hcom kill tag:confessor.<batch>
+
 Examples:
   hcom run confess
   hcom run confess --task "the auth refactor"
@@ -341,6 +351,7 @@ track_launch "$launch_out"
 trap - EXIT INT TERM
 
 echo "Confession analysis triggered"
+echo "  Batch: ${batch_id}"
 echo "  Target: ${instance_name}"
 echo "  Task hint: ${task_hint}"
 echo "  Tool: ${tool}"

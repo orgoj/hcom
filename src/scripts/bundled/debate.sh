@@ -61,6 +61,17 @@ Options:
   -i, --interactive       Launch in terminal windows instead of background
   -h, --help              Show this help
 
+Output:
+  The judge sends the VERDICT (winner, strengths, weaknesses, scores) as an
+  hcom message to the caller. No file is written. The whole debate stays in
+  the thread printed at start (debate-<time>-<pid>):
+    hcom events --sql "msg_thread='<thread>'"
+
+Cleanup:
+  Launched agents keep running after the verdict until killed.
+  --spawn:   hcom kill tag:pro.<thread> tag:con.<thread> tag:judge.<thread>
+  --workers: only the judge is new: hcom kill tag:judge.<thread>
+
 Examples:
   hcom run debate "AI will replace programmers" --spawn
   hcom run debate "tabs vs spaces" -w sity,offu
