@@ -6807,7 +6807,7 @@ fn test_table_arrow_keys_select_rows_in_shown_order() {
         "selected last row visible: {band:?}"
     );
 
-    // A focused text field (the search filter) keeps the arrows.
+    // The table search field passes the arrows to the table (TASK-77.104).
     let out = run(&mut app, vec![]);
     let hint = out
         .shapes
@@ -6833,8 +6833,8 @@ fn test_table_arrow_keys_select_rows_in_shown_order() {
     run(&mut app, key(egui::Key::ArrowUp));
     assert_eq!(
         sel(&app).as_deref(),
-        Some("w00_keep"),
-        "text field keeps keys"
+        Some("w01_keep"),
+        "search field passes Up"
     );
 }
 
@@ -11230,7 +11230,8 @@ fn test_task_77_50_table_row_double_click_or_enter_attaches() {
     app.confirm_kill_target = None;
     assert_eq!(attaches("inst_alpha_1"), 2, "dialog open");
 
-    // A focused text field (the search filter) keeps Enter.
+    // Enter in the table search field acts like Enter in the table
+    // (TASK-77.104).
     let out = run(&mut app, vec![]);
     let field = out
         .shapes
@@ -11248,7 +11249,7 @@ fn test_task_77_50_table_row_double_click_or_enter_attaches() {
     run(&mut app, vec![press(f, false)]);
     assert!(ctx.text_edit_focused(), "search field has focus");
     run(&mut app, enter.clone());
-    assert_eq!(attaches("inst_alpha_1"), 2, "text field keeps Enter");
+    assert_eq!(attaches("inst_alpha_1"), 3, "search field passes Enter");
     ctx.memory_mut(|m| m.stop_text_input());
     run(&mut app, vec![]);
     for _ in 0..10 {
@@ -11260,6 +11261,147 @@ fn test_task_77_50_table_row_double_click_or_enter_attaches() {
     assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
     run(&mut app, enter);
     assert_eq!(attaches("cat_beta"), 0, "stopped agent");
+}
+
+/// TASK-77.104: quick select from the table search field: Up/Down move the
+/// selection, a search change selects the first shown row when the selection
+/// is hidden, Shift+Enter opens Start (also in the table, also for a running
+/// agent), Escape leaves the field and keeps the filter, Alt+X clears it.
+#[test]
+fn test_task_77_104_table_search_quick_select() {
+    use eframe::App;
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = DashboardState {
+        columns: vec!["instance".into(), "agent".into()],
+        sort_col: Some("agent".into()),
+        ..Default::default()
+    };
+    let mut app =
+        HcomDashboardApp::new_for_test(DashboardConfig::default(), state, dir.path().to_path_buf());
+    let row = |agent: &str, instance: &str| TableRow {
+        agent: agent.into(),
+        instance: instance.into(),
+        is_running: !instance.is_empty(),
+        status: if instance.is_empty() {
+            "stopped"
+        } else {
+            "active"
+        }
+        .into(),
+        ..Default::default()
+    };
+    // Sorted by agent: alpha_run, beta_cat, gamma_adhoc.
+    app.table_rows = vec![
+        row("alpha_run", "alpha_run_1"),
+        row("beta_cat", ""),
+        row("", "gamma_adhoc"),
+    ];
+    app.sync_graph_from_table_rows();
+
+    let ctx = egui::Context::default();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 700.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut time = 0.0;
+    let mut run = |app: &mut HcomDashboardApp, events: Vec<egui::Event>| {
+        time += 0.05;
+        // Modifiers are released unless `key` holds them in this frame.
+        let mut all = vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)];
+        all.extend(events);
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events: all,
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        out.textures_delta.clear();
+    };
+    let key = |key, modifiers| {
+        vec![
+            egui::Event::ModifiersChanged(modifiers),
+            egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            },
+        ]
+    };
+    let text = |t: &str| vec![egui::Event::Text(t.into())];
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+
+    // "/" focuses the search field; Down/Up there move the selection.
+    run(&mut app, text("/"));
+    run(&mut app, vec![]);
+    assert!(ctx.text_edit_focused(), "search field has focus");
+    run(&mut app, key(egui::Key::ArrowDown, egui::Modifiers::NONE));
+    assert_eq!(app.selected_row_id.as_deref(), Some("alpha_run_1"));
+    run(&mut app, key(egui::Key::ArrowDown, egui::Modifiers::NONE));
+    assert_eq!(app.selected_row_id.as_deref(), Some("beta_cat"));
+    run(&mut app, key(egui::Key::ArrowUp, egui::Modifiers::NONE));
+    assert_eq!(app.selected_row_id.as_deref(), Some("alpha_run_1"));
+    assert!(ctx.text_edit_focused(), "field keeps focus");
+    assert_eq!(app.state.table_filter.search, "");
+
+    // Typing hides the selected row: the first shown row is selected.
+    run(&mut app, text("gam"));
+    run(&mut app, vec![]);
+    assert_eq!(app.state.table_filter.search, "gam");
+    assert_eq!(app.selected_row_id.as_deref(), Some("gamma_adhoc"));
+    // A change that keeps the selection shown leaves it alone.
+    run(&mut app, key(egui::Key::Backspace, egui::Modifiers::NONE));
+    run(&mut app, vec![]);
+    assert_eq!(app.selected_row_id.as_deref(), Some("gamma_adhoc"));
+
+    // Shift+Enter on an ad-hoc instance (no catalog agent) does nothing.
+    run(&mut app, key(egui::Key::Enter, egui::Modifiers::SHIFT));
+    run(&mut app, vec![]);
+    assert!(!app.show_start_dialog, "no catalog agent");
+
+    // Shift+Enter in the field opens Start for a running agent.
+    run(&mut app, key(egui::Key::Backspace, egui::Modifiers::NONE));
+    run(&mut app, key(egui::Key::Backspace, egui::Modifiers::NONE));
+    run(&mut app, text("alpha"));
+    run(&mut app, vec![]);
+    assert_eq!(app.selected_row_id.as_deref(), Some("alpha_run_1"));
+    assert!(ctx.text_edit_focused(), "field still has focus");
+    run(&mut app, key(egui::Key::Enter, egui::Modifiers::SHIFT));
+    run(&mut app, vec![]);
+    assert!(app.show_start_dialog, "Start from the search field");
+    assert_eq!(app.start_agent_name, "alpha_run");
+    run(&mut app, key(egui::Key::Escape, egui::Modifiers::NONE));
+    run(&mut app, vec![]);
+    assert!(!app.show_start_dialog);
+
+    // Escape leaves the field and keeps the filter.
+    run(&mut app, text("/"));
+    run(&mut app, vec![]);
+    assert!(ctx.text_edit_focused());
+    run(&mut app, key(egui::Key::Escape, egui::Modifiers::NONE));
+    run(&mut app, vec![]);
+    assert!(!ctx.text_edit_focused(), "Escape leaves the field");
+    assert_eq!(app.state.table_filter.search, "alpha");
+
+    // Shift+Enter in the table opens Start too, also for a running agent.
+    run(&mut app, key(egui::Key::Enter, egui::Modifiers::SHIFT));
+    run(&mut app, vec![]);
+    assert!(app.show_start_dialog, "Start from the table");
+    assert_eq!(app.start_agent_name, "alpha_run");
+    run(&mut app, key(egui::Key::Escape, egui::Modifiers::NONE));
+    run(&mut app, vec![]);
+    assert!(!app.show_start_dialog);
+
+    // Alt+X clears the filter.
+    run(&mut app, key(egui::Key::X, egui::Modifiers::ALT));
+    run(&mut app, vec![]);
+    assert_eq!(app.state.table_filter.search, "");
 }
 
 /// TASK-77.103: graph Running only follows the message window, table
@@ -11593,9 +11735,12 @@ fn test_task_77_53_alt_arrows_select_rows_wherever_the_keyboard_is() {
     run(&mut app, up(alt));
     assert_eq!(app.selected_row_id.as_deref(), Some("inst_alpha_1"));
 
-    // Plain arrows leave the selection alone while a text field has the
-    // keyboard (egui may move the focus on).
+    // In the table search field plain arrows move the selection too
+    // (TASK-77.104).
     run(&mut app, down(egui::Modifiers::NONE));
+    assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
+    assert!(ctx.text_edit_focused(), "the field keeps the keyboard");
+    run(&mut app, up(egui::Modifiers::NONE));
     assert_eq!(app.selected_row_id.as_deref(), Some("inst_alpha_1"));
 
     // Without a focused text field Alt+arrows act too.

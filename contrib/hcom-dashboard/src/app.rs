@@ -471,6 +471,9 @@ pub struct HcomDashboardApp {
     /// selection (e.g. a graph click) or a move of the selected row (sort
     /// order, a started agent) scrolls its row into view once.
     table_scrolled_id: Option<(String, usize)>,
+    /// The table search text changed; the next frame selects the first
+    /// shown row if the selection is hidden.
+    table_search_changed: bool,
     /// Selected row, its index in the shown order and its catalog agent,
     /// last frame; a vanished
     /// selected row (e.g. after Kill) hands the selection to its index.
@@ -745,6 +748,20 @@ pub fn format_last_limit(n: usize) -> String {
     }
 }
 
+/// Id of a filter strip's search field.
+fn filter_search_id(title: &str) -> egui::Id {
+    egui::Id::unique(("filter_search", title))
+}
+
+/// Table keys typed in the table search field (TASK-77.104).
+#[derive(Default, Clone, Copy)]
+struct SearchKeys {
+    down: bool,
+    up: bool,
+    enter: bool,
+    start: bool,
+}
+
 /// A panel filter strip: `<TITLE>`, search field, filter checkboxes and the
 /// panel's `Shown N / M`. Returns true when the filter changed; `focus`
 /// gives the search field the keyboard.
@@ -763,6 +780,7 @@ fn filter_strip(
         // Fixed width that fits its placeholder.
         let search = ui.add(
             egui::TextEdit::singleline(&mut filter.search)
+                .id(filter_search_id(title))
                 .hint_text(hint)
                 .desired_width(body_text_width(ui, hint) + 8.0),
         );
@@ -940,6 +958,7 @@ impl HcomDashboardApp {
             select_next: None,
             table_hover_row: None,
             table_scrolled_id: None,
+            table_search_changed: false,
             table_selected_at: None,
             restart_keep: None,
             table_row_bands: Vec::new(),
@@ -1064,6 +1083,7 @@ impl HcomDashboardApp {
             select_next: None,
             table_hover_row: None,
             table_scrolled_id: None,
+            table_search_changed: false,
             table_selected_at: None,
             restart_keep: None,
             table_row_bands: Vec::new(),
@@ -1729,9 +1749,31 @@ impl HcomDashboardApp {
         count: (usize, usize),
         focus_search: bool,
     ) {
+        self.select_first_shown(rows);
+        // In the search field Up/Down move the table selection, Enter acts
+        // like Enter in the table and Shift+Enter opens Start; consumed
+        // before the field sees them (Shift+Enter first: egui ignores an
+        // extra Shift when matching).
+        let title = "Table filter";
+        let in_search =
+            !self.modal_at_frame_start && ui.ctx().memory(|m| m.has_focus(filter_search_id(title)));
+        let keys = if in_search {
+            ui.input_mut(|i| {
+                let start = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter);
+                SearchKeys {
+                    start,
+                    enter: i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                    down: i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                    up: i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                }
+            })
+        } else {
+            SearchKeys::default()
+        };
+        let search_before = self.state.table_filter.search.clone();
         if filter_strip(
             ui,
-            "Table filter",
+            title,
             "Search agent, dir, tool... (/ to focus)",
             &mut self.state.table_filter,
             "Agents running now (the message window does not apply)",
@@ -1740,10 +1782,37 @@ impl HcomDashboardApp {
         ) {
             self.save_state();
         }
-        self.render_table(ui, rows);
+        // The rows of the new search come next frame; select_first_shown
+        // then picks the first one when the selection is hidden. `rows` are
+        // computed from the state before this frame's UI.
+        if self.state.table_filter.search != search_before {
+            self.table_search_changed = true;
+        }
+        self.render_table(ui, rows, keys);
     }
 
-    fn render_table(&mut self, ui: &mut egui::Ui, rows: &[TableRow]) {
+    /// After a search change: the first shown row when the selected one is
+    /// not among `rows` (TASK-77.104).
+    fn select_first_shown(&mut self, rows: &[TableRow]) {
+        if !std::mem::take(&mut self.table_search_changed) {
+            return;
+        }
+        let shown = |r: &TableRow| {
+            let id = if r.instance.is_empty() {
+                &r.agent
+            } else {
+                &r.instance
+            };
+            self.selected_row_id.as_deref() == Some(id.as_str())
+        };
+        if !rows.iter().any(shown)
+            && let Some(first) = rows.first()
+        {
+            self.select_table_row(first);
+        }
+    }
+
+    fn render_table(&mut self, ui: &mut egui::Ui, rows: &[TableRow], search: SearchKeys) {
         let columns = if !self.state.columns.is_empty() {
             self.state.columns.clone()
         } else {
@@ -1803,8 +1872,9 @@ impl HcomDashboardApp {
             .map(|(id, i)| (id, i, rows[i].agent.clone(), !rows[i].instance.is_empty()));
         // Up/Down move the selection in the shown order, unless a text field
         // has the keyboard; the moved row is scrolled into view below. Enter
-        // attaches the selected row like a double-click. Alt+Up/Down act
-        // wherever the keyboard is.
+        // attaches the selected row like a double-click, Shift+Enter opens
+        // Start for its catalog agent. Alt+Up/Down act wherever the keyboard
+        // is; the table search field passes its keys in `search`.
         let alt_key = |k: egui::Key| {
             ui.input(|i| {
                 i.events.iter().any(|e| {
@@ -1816,16 +1886,24 @@ impl HcomDashboardApp {
         let (alt_down, alt_up) = (alt_key(egui::Key::ArrowDown), alt_key(egui::Key::ArrowUp));
         // A modal dialog open at frame start keeps the keyboard, also when
         // its button (e.g. Cancel on Enter) closed it during this frame.
-        let (down, up, enter) = if self.modal_at_frame_start {
-            (false, false, false)
+        let (down, up, enter, start) = if self.modal_at_frame_start {
+            (false, false, false, false)
         } else if ui.ctx().text_edit_focused() {
-            (alt_down, alt_up, false)
+            (alt_down || search.down, alt_up || search.up, false, false)
         } else {
             ui.input(|i| {
+                // Shift from the key event itself, like alt_key.
+                let enter = |shift: bool| {
+                    i.events.iter().any(|e| {
+                        matches!(e, egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. }
+                            if modifiers.shift == shift)
+                    })
+                };
                 (
                     i.key_pressed(egui::Key::ArrowDown),
                     i.key_pressed(egui::Key::ArrowUp),
-                    i.key_pressed(egui::Key::Enter),
+                    enter(false),
+                    enter(true),
                 )
             })
         };
@@ -1862,8 +1940,9 @@ impl HcomDashboardApp {
             || self.show_start_dialog
             || self.show_send_dialog
             || self.columns_dialog.is_some();
-        let mut attach_row =
-            selected_row.filter(|_| enter && !dialog_open && !self.text_focus_at_frame_start);
+        let table_keys = !dialog_open && !self.text_focus_at_frame_start;
+        let mut attach_row = selected_row.filter(|_| enter && table_keys || search.enter);
+        let start_row = selected_row.filter(|_| start && table_keys || search.start);
         let last = rows.len().checked_sub(1);
         let key_row = match (down, up, selected_row, last) {
             (_, _, _, None) => None,
@@ -2075,6 +2154,12 @@ impl HcomDashboardApp {
                 ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                 self.open_start_dialog(row);
             }
+        }
+        // Shift+Enter: Start for the row's catalog agent, also while it runs.
+        if let Some(row) = start_row.map(|i| &rows[i]).filter(|r| !r.agent.is_empty()) {
+            self.select_table_row(row);
+            ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            self.open_start_dialog(row);
         }
     }
 
