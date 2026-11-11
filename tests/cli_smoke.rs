@@ -4167,6 +4167,61 @@ fn handoff_after_kill_and_resume_keeps_the_catalog_agent_of_an_as_instance() {
     assert_eq!(handoffs, 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn direct_resume_of_a_catalog_instance_applies_the_current_catalog_env() {
+    let h = Hcom::new();
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    // A project catalog outside the caller's directory: only the instance's
+    // directory brings it into scope.
+    let project = h.workspace.join("proj");
+    std::fs::create_dir_all(project.join(".hcom")).expect("create project");
+    let catalog_path = project.join(".hcom/agents.json");
+    let catalog = |env: &str| {
+        format!(
+            r#"{{"agents":{{"reviewer":{{"dir":".","cli":"claude","env":{{{env}}},
+                "terminal_command":"sh -c true {{script}}"}}}}}}"#
+        )
+    };
+    // First launch without the variable, so only the resume can supply it.
+    std::fs::write(&catalog_path, catalog("")).expect("write catalog");
+    let catalog_arg = catalog_path.to_string_lossy().into_owned();
+    let (code, stdout, stderr) = h.run([
+        "agent",
+        "reviewer",
+        "--as",
+        "rev2",
+        "--catalog",
+        catalog_arg.as_str(),
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let mut agent = idle_kill_sleeper(&h);
+    make_idle_kill_row(&conn, "rev2", "listening", agent.id());
+    let (code, stdout, stderr) = h.run(["kill", "rev2"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    agent.wait().expect("killed agent exits");
+
+    // `hcom r` from a plain shell: no catalog launch env inherited.
+    std::fs::write(&catalog_path, catalog(r#""POLICY_FILE":"policy""#)).expect("rewrite catalog");
+    let (code, stdout, stderr) = h.run(["r", "rev2"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    // A fork runs in the caller's context and gets no catalog env.
+    let (code, stdout, stderr) = h.run(["f", "rev2"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    // Non-HCOM env goes through a sidecar the runner deletes; the launcher
+    // logs which keys each script forwards.
+    let log = std::fs::read_to_string(h.hcom_dir.join(".tmp/logs/hcom.log")).unwrap_or_default();
+    let forwarded: Vec<&str> = log
+        .lines()
+        .filter(|l| l.contains("native.script"))
+        .collect();
+    assert_eq!(forwarded.len(), 3, "{log}");
+    assert!(!forwarded[0].contains("POLICY_FILE"), "{}", forwarded[0]);
+    assert!(forwarded[1].contains("instance=rev2"), "{}", forwarded[1]);
+    assert!(forwarded[1].contains("POLICY_FILE"), "{}", forwarded[1]);
+    assert!(!forwarded[2].contains("POLICY_FILE"), "{}", forwarded[2]);
+}
+
 #[test]
 fn agent_catalog_inline_system_prompt_overrides_file() {
     let h = Hcom::new();

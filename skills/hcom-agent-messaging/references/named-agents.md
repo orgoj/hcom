@@ -103,6 +103,8 @@ Catalog-launched Antigravity receives `DIPPY_POLICY_CWD` with the canonical cata
 directory. Its hooks inherit this value regardless of `--dir`, tool-call `Cwd`, or additional bundle
 workspaces. A named resume recomputes it; nested child launches do not inherit it.
 Direct tracked `hcom r <name>` restores the stored scope; older snapshots without one do not.
+A direct `hcom r` (or `hcom recover`) of a catalog instance also gets the agent's current catalog
+`env`, resolved from the directory it resumes in; a fork gets none.
 
 ## Local CLI replacement
 

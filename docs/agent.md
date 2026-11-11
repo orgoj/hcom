@@ -188,6 +188,10 @@ The value is recomputed on named resume and a CLI switch to Antigravity. A direc
 the variable. Child launches do not inherit the parent's policy directory.
 The directory must exist at launch so hcom can canonicalize it.
 
+A direct `hcom r <name>` (and `hcom recover`) of a catalog instance also receives the agent's
+current catalog `env` and `inherit_env` values, resolved from the directory it resumes in, as
+`hcom agent <name> --resume` would set them. An agent no longer in scope there resumes without them; a fork gets none.
+
 ## Example: project fleet with local memory
 
 A machine catalog can keep general-purpose agents alongside selective imports from project

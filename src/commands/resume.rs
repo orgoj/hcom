@@ -592,7 +592,24 @@ fn prepare_resume_plan_from_source(
     } else {
         None
     };
-    let mut launch_env = super::launch::catalog_launch_env()?.unwrap_or_default();
+    let catalog_env = super::launch::catalog_launch_env()?;
+    let from_catalog = catalog_env.is_some();
+    let mut launch_env = catalog_env.unwrap_or_default();
+    // A direct `hcom r` of a catalog instance gets the catalog env that
+    // `hcom agent` would set, resolved from the instance's directory.
+    // A fork runs in the caller's context and gets none.
+    if !fork
+        && !from_catalog
+        && !is_adoption
+        && let Some(agent_name) = load_agent_name(db, &display_name)?
+    {
+        for (key, value) in crate::commands::agent::catalog_env_for(
+            &agent_name,
+            std::path::Path::new(&effective_cwd),
+        ) {
+            launch_env.entry(key).or_insert(value);
+        }
+    }
     if !fork
         && !is_adoption
         && matches!(tool.as_str(), "agy" | "antigravity")

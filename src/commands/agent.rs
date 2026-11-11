@@ -117,6 +117,8 @@ Catalog and bundles (weakest to strongest, regardless of launch directory):
   Catalog-launched agy/antigravity also receive DIPPY_POLICY_CWD: the canonical
   catalog dir, independent of --dir overrides and tool Cwd.
   Tracked hcom r restores that scope from the stopped instance snapshot.
+  A direct hcom r (or hcom recover) of a catalog instance also gets the agent's
+  current catalog env, resolved from the directory it resumes in (not a fork).
   Relative import paths resolve against the importing file. Relative \"dir\" resolves
   against $HOME globally, the parent of project .hcom (also when imported), or its
   file for other catalogs.
@@ -885,17 +887,19 @@ pub(crate) struct Catalogs {
 
 impl Catalogs {
     fn load(no_project: bool, explicit: Option<&Path>) -> Result<Self> {
-        Self::load_with_mode(no_project, explicit, false)
+        Self::load_with_mode(no_project, explicit, false, None)
     }
 
     pub(crate) fn load_for_groups(no_project: bool, explicit: Option<&Path>) -> Result<Self> {
-        Self::load_with_mode(no_project, explicit, true)
+        Self::load_with_mode(no_project, explicit, true, None)
     }
 
+    /// `start`: directory whose project catalogs are in scope (default: cwd).
     fn load_with_mode(
         no_project: bool,
         explicit: Option<&Path>,
         include_all_import_agents: bool,
+        start: Option<&Path>,
     ) -> Result<Self> {
         let mut base_files = Vec::new();
         let mut stack = Vec::new();
@@ -947,8 +951,9 @@ impl Catalogs {
                 p.parent().map(Path::to_path_buf).into_iter().collect()
             }
             None if no_project => Vec::new(),
-            None => std::env::current_dir()
-                .ok()
+            None => start
+                .map(Path::to_path_buf)
+                .or_else(|| std::env::current_dir().ok())
                 .map(|cwd| find_project_hcom_dirs(&cwd))
                 .unwrap_or_default(),
         };
@@ -1566,6 +1571,27 @@ pub(crate) fn autostart_catalog_agent(db: &HcomDb, route: &CatalogRoute) -> Resu
             bail!("could not start catalog agent '{name}' (exit {code})")
         }
     }
+}
+
+/// Catalog `env` (plus `inherit_env` values set here) of `agent` as seen from
+/// `dir`, for a direct `hcom r` of its instance. Empty when the agent is not
+/// in scope there or the catalog cannot be read: resume then runs as upstream.
+pub(crate) fn catalog_env_for(agent: &str, dir: &Path) -> BTreeMap<String, String> {
+    let Some(mut def) = Catalogs::load_with_mode(false, None, false, Some(dir))
+        .ok()
+        .and_then(|c| c.resolve(agent))
+    else {
+        return BTreeMap::new();
+    };
+    for key in &def.inherit_env {
+        if !def.env.contains_key(key)
+            && let Ok(val) = std::env::var(key)
+            && !val.is_empty()
+        {
+            def.env.insert(key.clone(), val);
+        }
+    }
+    def.env
 }
 
 fn wait_for_catalog_agent_registration(
