@@ -750,7 +750,10 @@ impl GraphLayout {
     pub fn spring_params_for(&self, s: &Spring) -> (f32, f32) {
         if s.is_cluster {
             let (k, _) = self.spring_params(s.msgs);
-            return (k.max(CLUSTER_K), 2.0 * self.collision_radius + 5.0);
+            return (
+                k.max(CLUSTER_K),
+                2.0 * (self.collision_radius + COLLISION_MARGIN),
+            );
         }
         self.spring_params(s.msgs)
     }
@@ -1172,7 +1175,8 @@ impl GraphLayout {
     }
 }
 
-/// Order-independent key of the node set and the spawn structure.
+/// Order-independent key of the node set, the spawn structure and the agent
+/// of each instance.
 fn structure_key(graph: &AgentGraph) -> u64 {
     let mut sum = graph.graph.node_count() as u64;
     for (parent, child) in graph.spawn_edges.keys() {
@@ -1182,6 +1186,13 @@ fn structure_key(graph: &AgentGraph) -> u64 {
     }
     for idx in graph.graph.node_indices() {
         sum = sum.wrapping_add((idx.index() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        // The agent often arrives with a later snapshot than the node; it
+        // changes the cluster springs.
+        if let Some(agent) = &graph.graph[idx].agent_name {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (idx, agent).hash(&mut h);
+            sum = sum.wrapping_add(h.finish());
+        }
     }
     sum
 }

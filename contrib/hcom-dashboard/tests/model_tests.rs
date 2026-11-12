@@ -16151,8 +16151,8 @@ fn test_task_77_105_cluster_springs_pull_instances_of_same_agent_together() {
     );
 }
 
-/// Realistic graph plus two instances of agent `x` that talk to partners on
-/// opposite sides, settled through the planned move.
+/// Realistic graph plus three instances of agent `x` that each talk a lot
+/// to a different partner, settled through the planned move.
 fn settled_cluster_layout() -> (AgentGraph, GraphLayout) {
     let mut graph = realistic_layout_graph();
     let mut snap: Vec<InstanceSnapshot> = graph
@@ -16163,16 +16163,17 @@ fn settled_cluster_layout() -> (AgentGraph, GraphLayout) {
             layout_snap(&n.name, n.parent_name.as_deref())
         })
         .collect();
-    for name in ["x_1", "x_2"] {
+    for name in ["x_1", "x_2", "x_3"] {
         let mut s = layout_snap(name, None);
         s.agent_name = Some("x".into());
         snap.push(s);
     }
     graph.apply_instance_snapshot(&snap);
     let now = Utc::now();
-    for id in 0..20 {
-        graph.apply_message_event(&window_msg(1000 + 2 * id, now, "x_1", "boss"));
-        graph.apply_message_event(&window_msg(1001 + 2 * id, now, "x_2", "lone2"));
+    for id in 0..60 {
+        graph.apply_message_event(&window_msg(1000 + 3 * id, now, "x_1", "boss"));
+        graph.apply_message_event(&window_msg(1001 + 3 * id, now, "x_2", "lone2"));
+        graph.apply_message_event(&window_msg(1002 + 3 * id, now, "x_3", "c3"));
     }
     let mut layout = GraphLayout::new();
     layout.max_step_duration = Duration::from_secs(1);
@@ -16191,13 +16192,70 @@ fn settle(layout: &mut GraphLayout, graph: &AgentGraph) {
     panic!("layout did not come to rest");
 }
 
-/// Instances of one catalog agent end next to each other even when each
-/// talks to a different partner (TASK-77.106).
+/// Instances of one catalog agent end with touching rings (80 px between
+/// centers) even when each talks a lot to a different partner (TASK-77.106).
 #[test]
 fn test_task_77_106_instances_of_one_agent_settle_together() {
     let (graph, layout) = settled_cluster_layout();
+    for (a, b) in [("x_1", "x_2"), ("x_1", "x_3"), ("x_2", "x_3")] {
+        let d = node_pos(&layout, &graph, a).distance(node_pos(&layout, &graph, b));
+        assert!(d < 90.0, "instances {a} and {b} are {d} px apart");
+    }
+}
+
+/// The agent of an instance often arrives with a later snapshot than the
+/// node itself (e.g. the node came from a message event); that must wake the
+/// layout and pull the instances together (TASK-77.106).
+#[test]
+fn test_task_77_106_late_agent_name_wakes_layout_and_pulls_instances_together() {
+    let mut graph = AgentGraph::new();
+    let names = ["hub", "p1", "p2", "x_1", "x_2"];
+    let snap: Vec<InstanceSnapshot> = names.iter().map(|n| layout_snap(n, None)).collect();
+    graph.apply_instance_snapshot(&snap);
+    let now = Utc::now();
+    for id in 0..30 {
+        graph.apply_message_event(&window_msg(2 * id, now, "x_1", "p1"));
+        graph.apply_message_event(&window_msg(2 * id + 1, now, "x_2", "p2"));
+    }
+    let mut layout = GraphLayout::new();
+    layout.max_step_duration = Duration::from_secs(1);
+    layout.sync_nodes(&graph);
+    settle(&mut layout, &graph);
+
+    let snap: Vec<InstanceSnapshot> = names
+        .iter()
+        .map(|n| {
+            let mut s = layout_snap(n, None);
+            if n.starts_with("x_") {
+                s.agent_name = Some("x".into());
+            }
+            s
+        })
+        .collect();
+    graph.apply_instance_snapshot(&snap);
+    layout.sync_nodes(&graph);
+    assert!(
+        !layout.is_sleeping,
+        "a new agent membership wakes the layout"
+    );
+    settle(&mut layout, &graph);
     let d = node_pos(&layout, &graph, "x_1").distance(node_pos(&layout, &graph, "x_2"));
-    assert!(d < 100.0, "instances of agent x are {d} px apart");
+    assert!(d < 90.0, "instances of agent x are {d} px apart");
+}
+
+/// With one instance pinned far from the others' partners, the free
+/// instances still end touching it (TASK-77.106: user had `wdt_main` pinned).
+#[test]
+fn test_task_77_106_free_instances_settle_next_to_a_pinned_one() {
+    let (graph, mut layout) = settled_cluster_layout();
+    let x1 = graph.get_node_index("x_1").unwrap();
+    layout.set_pinned(x1, "x_1", false);
+    layout.set_node_pos(x1, Pos2::new(900.0, -900.0), true);
+    settle(&mut layout, &graph);
+    for b in ["x_2", "x_3"] {
+        let d = node_pos(&layout, &graph, "x_1").distance(node_pos(&layout, &graph, b));
+        assert!(d < 90.0, "instance {b} is {d} px from the pinned x_1");
+    }
 }
 
 /// Steps cut by the frame budget never count toward convergence: a plan
