@@ -3,6 +3,7 @@
 
 use crate::table_data::parse_event_ts;
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 
 /// Messages exchanged with one partner during a session.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -42,6 +43,7 @@ pub struct SessionInfo {
 /// The running session as `hcom list --json` reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LiveSession {
+    pub instance_name: String,
     pub session_id: String,
     pub transcript_path: String,
     pub tool: String,
@@ -75,45 +77,75 @@ fn jsonl(text: &str) -> Vec<Value> {
     out
 }
 
-/// Sessions of `agent`, newest first. `live` describes the running session
+/// Checks whether an instance name belongs to a catalog agent (exact match,
+/// roaming `<agent>_<project>_<hash>`, clone `<agent>__<suffix>`, or `<agent>-<num>`).
+pub fn instance_belongs_to_agent(instance: &str, agent: &str) -> bool {
+    instance == agent
+        || instance.starts_with(&format!("{agent}_"))
+        || instance.starts_with(&format!("{agent}__"))
+        || instance.starts_with(&format!("{agent}-"))
+}
+
+/// Sessions of `agent`, newest first. `live_sessions` describes running sessions
 /// (the last one without a `stopped` event); `now` ends it for partner counts.
 pub fn parse_sessions(
     agent: &str,
     life_jsonl: &str,
     msg_jsonl: &str,
-    live: Option<&LiveSession>,
+    live_sessions: &[LiveSession],
     now: u64,
 ) -> Vec<SessionInfo> {
     let mut sessions: Vec<SessionInfo> = Vec::new();
-    let mut open: Option<SessionInfo> = None;
-    let mut handoff = false;
+    let mut open: HashMap<String, SessionInfo> = HashMap::new();
+    let mut handoffs: HashSet<String> = HashSet::new();
     for e in jsonl(life_jsonl) {
-        if e.get("instance").and_then(Value::as_str) != Some(agent) {
+        let inst = s(e.get("instance"));
+        let snap_agent = e
+            .get("data")
+            .and_then(|d| d.get("snapshot"))
+            .and_then(|s| s.get("agent_name"))
+            .and_then(Value::as_str)
+            .or_else(|| {
+                e.get("data")
+                    .and_then(|d| d.get("launch_context"))
+                    .and_then(|lc| lc.get("agent_name"))
+                    .and_then(Value::as_str)
+            });
+
+        let matches_agent = instance_belongs_to_agent(&inst, agent)
+            || snap_agent == Some(agent)
+            || live_sessions.iter().any(|l| l.instance_name == inst);
+        if !matches_agent {
             continue;
         }
         let ts = parse_event_ts(e.get("ts").and_then(Value::as_str).unwrap_or(""));
         let data = e.get("data");
         let field = |k: &str| s(data.and_then(|d| d.get(k)));
         match field("action").as_str() {
-            "handoff" => handoff = true,
+            "handoff" => {
+                handoffs.insert(inst);
+            }
             "created" => {
-                if let Some(mut prev) = open.take() {
+                let is_handoff = handoffs.remove(&inst);
+                if let Some(mut prev) = open.remove(&inst) {
                     prev.end_ts = Some(ts);
                     sessions.push(prev);
                 }
-                open = Some(SessionInfo {
-                    start_ts: ts,
-                    launcher: if handoff {
-                        "handoff".into()
-                    } else {
-                        String::new()
+                open.insert(
+                    inst.clone(),
+                    SessionInfo {
+                        start_ts: ts,
+                        launcher: if is_handoff {
+                            "handoff".into()
+                        } else {
+                            String::new()
+                        },
+                        ..Default::default()
                     },
-                    ..Default::default()
-                });
-                handoff = false;
+                );
             }
             "ready" => {
-                if let Some(cur) = open.as_mut()
+                if let Some(cur) = open.get_mut(&inst)
                     && cur.launcher.is_empty()
                 {
                     let by = field("by");
@@ -125,9 +157,10 @@ pub fn parse_sessions(
                 }
             }
             "stopped" => {
+                let is_handoff = handoffs.contains(&inst);
                 let snap = data.and_then(|d| d.get("snapshot"));
                 let snap_field = |k: &str| s(snap.and_then(|v| v.get(k)));
-                let mut cur = open.take().unwrap_or_else(|| SessionInfo {
+                let mut cur = open.remove(&inst).unwrap_or_else(|| SessionInfo {
                     start_ts: snap
                         .and_then(|v| v.get("created_at"))
                         .and_then(Value::as_f64)
@@ -137,7 +170,7 @@ pub fn parse_sessions(
                 });
                 cur.end_ts = Some(ts);
                 let (reason, by) = (field("reason"), field("by"));
-                cur.end_reason = if handoff {
+                cur.end_reason = if is_handoff {
                     "handoff".into()
                 } else {
                     match (reason.is_empty(), by.is_empty()) {
@@ -158,8 +191,10 @@ pub fn parse_sessions(
             _ => {}
         }
     }
-    if let Some(mut cur) = open {
-        if let Some(l) = live {
+    for (inst, mut cur) in open {
+        if let Some(l) = live_sessions.iter().find(|l| {
+            l.instance_name == inst || (l.instance_name.is_empty() && live_sessions.len() == 1)
+        }) {
             cur.session_id = l.session_id.clone();
             cur.transcript_path = l.transcript_path.clone();
             cur.tool = l.tool.clone();
@@ -168,6 +203,7 @@ pub fn parse_sessions(
         }
         sessions.push(cur);
     }
+    sessions.sort_by_key(|s| s.start_ts);
     // A handoff session continues the one before it.
     for i in 1..sessions.len() {
         if sessions[i].launcher == "handoff" {
@@ -220,15 +256,19 @@ pub fn parse_sessions(
                 partners[idx].received += 1;
             }
         };
+        let belongs = |name: &str| {
+            instance_belongs_to_agent(name, agent)
+                || live_sessions.iter().any(|l| l.instance_name == name)
+        };
         for (ts, from, to) in &msgs {
             if *ts < cur.start_ts || *ts > end {
                 continue;
             }
-            if from == agent {
-                for r in to.iter().filter(|r| *r != agent) {
+            if belongs(from) {
+                for r in to.iter().filter(|r| !belongs(r)) {
                     bump(r, true);
                 }
-            } else if to.iter().any(|r| r == agent) {
+            } else if to.iter().any(|r| belongs(r)) {
                 bump(from, false);
             }
         }

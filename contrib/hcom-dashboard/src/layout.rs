@@ -55,11 +55,13 @@ impl LayoutMode {
 
 /// Aggregated spring between an unordered node pair.
 #[derive(Debug, Clone, Copy)]
-struct Spring {
-    a: NodeIndex,
-    b: NodeIndex,
+pub struct Spring {
+    pub a: NodeIndex,
+    pub b: NodeIndex,
     /// Messages in both directions (total since load, not the time window).
-    msgs: usize,
+    pub msgs: usize,
+    /// Whether this spring connects two instances of the same catalog agent.
+    pub is_cluster: bool,
 }
 
 /// Duration of the eased move to a planned arrangement after a Reset or a
@@ -590,7 +592,7 @@ impl GraphLayout {
         if self.springs_key == Some(key) {
             return;
         }
-        let mut pairs: HashMap<(NodeIndex, NodeIndex), usize> = HashMap::new();
+        let mut pairs: HashMap<(NodeIndex, NodeIndex), (usize, bool)> = HashMap::new();
         for e in graph.graph.edge_references() {
             let (s, t) = (e.source(), e.target());
             if s == t {
@@ -601,16 +603,56 @@ impl GraphLayout {
                 EdgeKind::Message(m) => m.count,
                 EdgeKind::Spawn(_) => 0,
             };
-            *pairs.entry(pair).or_default() += msgs;
+            let entry = pairs.entry(pair).or_insert((0, false));
+            entry.0 += msgs;
         }
+
+        // Group nodes by their catalog agent name for cluster cohesion
+        let mut agent_groups: HashMap<String, Vec<NodeIndex>> = HashMap::new();
+        for idx in graph.graph.node_indices() {
+            if let Some(node) = graph.graph.node_weight(idx)
+                && let Some(ref agent) = node.agent_name
+                && !agent.is_empty()
+            {
+                agent_groups.entry(agent.clone()).or_default().push(idx);
+            }
+        }
+
+        // Add cluster springs between all pairs of nodes belonging to the same agent
+        for group in agent_groups.values() {
+            if group.len() >= 2 {
+                for i in 0..group.len() {
+                    for j in (i + 1)..group.len() {
+                        let (a, b) = if group[i] < group[j] {
+                            (group[i], group[j])
+                        } else {
+                            (group[j], group[i])
+                        };
+                        let entry = pairs.entry((a, b)).or_insert((0, true));
+                        entry.1 = true;
+                    }
+                }
+            }
+        }
+
         let mut springs: Vec<Spring> = pairs
             .into_iter()
-            .map(|((a, b), msgs)| Spring { a, b, msgs })
+            .map(|((a, b), (msgs, is_cluster))| Spring {
+                a,
+                b,
+                msgs,
+                is_cluster,
+            })
             .collect();
         springs.sort_by_key(|s| (s.a, s.b));
         self.springs = springs;
         self.springs_key = Some(key);
         self.edge_cursor = 0;
+    }
+
+    /// Access to aggregated springs (for tests and inspection).
+    pub fn springs(&self) -> &[Spring] {
+        &self.springs
     }
 
     /// Stiffness and rest length of a spring: sublinear in the message count;
@@ -623,6 +665,18 @@ impl GraphLayout {
         let k = self.k_msg_base * w;
         let l = (self.l_msg_0 / (1.0 + self.msg_beta * w)).max(self.l_min);
         (k, l)
+    }
+
+    /// Stiffness and rest length taking cluster cohesion into account.
+    pub fn spring_params_for(&self, s: &Spring) -> (f32, f32) {
+        if s.is_cluster {
+            if s.msgs == 0 {
+                return (25.0, 75.0);
+            }
+            let (k, l) = self.spring_params(s.msgs);
+            return (k + 15.0, l.min(75.0));
+        }
+        self.spring_params(s.msgs)
     }
 
     /// Drops cached tree targets and springs, e.g. after the graph object was
@@ -842,11 +896,11 @@ impl GraphLayout {
                     break;
                 }
                 let s = self.springs[i];
-                // Hierarchy: the tree places spawn pairs; messages act on x only, weaker.
-                if !(hierarchy && s.msgs == 0)
+                // Hierarchy: the tree places spawn pairs; messages and clusters act on x only, weaker.
+                if !(hierarchy && s.msgs == 0 && !s.is_cluster)
                     && let (Some(pa), Some(pb)) = (self.nodes.get(&s.a), self.nodes.get(&s.b))
                 {
-                    let (k, l) = self.spring_params(s.msgs);
+                    let (k, l) = self.spring_params_for(&s);
                     let d = pb.pos - pa.pos;
                     let dist = d.length().max(1.0);
                     let mut f = (d / dist) * (k * (dist - l));

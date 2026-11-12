@@ -177,6 +177,8 @@ pub struct AgentNode {
     pub parent_name: Option<String>,
     pub directory: Option<String>,
     pub tool: Option<String>,
+    #[serde(default)]
+    pub agent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -238,6 +240,8 @@ pub struct InstanceSnapshot {
     pub parent_name: Option<String>,
     pub directory: Option<String>,
     pub tool: Option<String>,
+    #[serde(default)]
+    pub agent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -676,6 +680,9 @@ impl AgentGraph {
                 .node_weight(idx)
                 .and_then(|n| n.parent_name.clone());
             if let Some(slot) = self.graph.node_weight_mut(idx) {
+                if node.agent_name.is_none() {
+                    node.agent_name = slot.agent_name.clone();
+                }
                 *slot = node;
             }
             (idx, old_parent)
@@ -729,6 +736,7 @@ impl AgentGraph {
                 parent_name: None,
                 directory: None,
                 tool: None,
+                agent_name: None,
             };
             let idx = self.graph.add_node(placeholder);
             self.node_map.insert(name.to_string(), idx);
@@ -750,6 +758,7 @@ impl AgentGraph {
                 parent_name: s.parent_name.clone(),
                 directory: s.directory.clone(),
                 tool: s.tool.clone(),
+                agent_name: s.agent_name.clone(),
             };
             self.upsert_agent(node);
         }

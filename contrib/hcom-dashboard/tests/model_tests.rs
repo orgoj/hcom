@@ -105,6 +105,7 @@ fn test_identity_sanitization_and_collision_rule() {
         parent_name: None,
         directory: None,
         tool: None,
+        agent_name: None,
     };
     let idx = graph.upsert_agent(valid_node);
     assert!(idx.is_some());
@@ -127,6 +128,7 @@ fn test_identity_sanitization_and_collision_rule() {
         parent_name: None,
         directory: None,
         tool: None,
+        agent_name: None,
     };
     assert!(graph.upsert_agent(whitespace_node).is_none());
     assert_eq!(graph.node_count(), 1);
@@ -141,6 +143,7 @@ fn test_identity_sanitization_and_collision_rule() {
         parent_name: None,
         directory: None,
         tool: None,
+        agent_name: None,
     };
     assert!(graph.upsert_agent(malicious_node).is_none());
     assert_eq!(graph.node_count(), 1);
@@ -346,6 +349,7 @@ fn test_upsert_reparenting_and_parent_none() {
         parent_name: Some("parent_a".into()),
         directory: None,
         tool: None,
+        agent_name: None,
     };
     graph.upsert_agent(node_a);
     assert!(graph.get_spawn_edge("parent_a", "child").is_some());
@@ -359,6 +363,7 @@ fn test_upsert_reparenting_and_parent_none() {
         parent_name: Some("parent_b".into()),
         directory: None,
         tool: None,
+        agent_name: None,
     };
     graph.upsert_agent(node_b);
     assert!(
@@ -379,6 +384,7 @@ fn test_upsert_reparenting_and_parent_none() {
         parent_name: None,
         directory: None,
         tool: None,
+        agent_name: None,
     };
     graph.upsert_agent(node_none);
     assert!(
@@ -400,6 +406,7 @@ fn test_reset_preserves_spawn_edges_and_stable_indices() {
         parent_name: Some("parent".into()),
         directory: None,
         tool: None,
+        agent_name: None,
     };
     graph.upsert_agent(child_node);
     assert!(graph.get_spawn_edge("parent", "child").is_some());
@@ -439,6 +446,7 @@ fn test_reset_preserves_spawn_edges_and_stable_indices() {
         parent_name: Some("parent".into()),
         directory: None,
         tool: None,
+        agent_name: None,
     };
     graph.upsert_agent(updated_child);
     assert!(graph.get_spawn_edge("parent", "child").is_some());
@@ -988,6 +996,7 @@ fn test_layout_hit_test_and_drag_pinning() {
             parent_name: None,
             directory: None,
             tool: None,
+            agent_name: None,
         },
         InstanceSnapshot {
             name: "agent_b".into(),
@@ -998,6 +1007,7 @@ fn test_layout_hit_test_and_drag_pinning() {
             parent_name: Some("agent_a".into()),
             directory: None,
             tool: None,
+            agent_name: None,
         },
     ];
     graph.apply_instance_snapshot(&snap);
@@ -1052,6 +1062,7 @@ fn test_layout_physics_step_dt_clamping_and_sleep() {
             parent_name: None,
             directory: None,
             tool: None,
+            agent_name: None,
         },
         InstanceSnapshot {
             name: "node_2".into(),
@@ -1062,6 +1073,7 @@ fn test_layout_physics_step_dt_clamping_and_sleep() {
             parent_name: None,
             directory: None,
             tool: None,
+            agent_name: None,
         },
     ];
     graph.apply_instance_snapshot(&snap);
@@ -1347,6 +1359,7 @@ fn test_layout_frame_budget_deadline_enforced_and_resumes() {
             },
             directory: None,
             tool: None,
+            agent_name: None,
         });
     }
     graph.apply_instance_snapshot(&snap);
@@ -1429,6 +1442,7 @@ fn test_layout_large_graph_frame_budget_enforced_during_forces_init() {
             parent_name: None,
             directory: None,
             tool: None,
+            agent_name: None,
         });
     }
     graph.apply_instance_snapshot(&snap);
@@ -1754,6 +1768,7 @@ fn test_canvas_edge_and_node_hit_testing() {
             parent_name: None,
             directory: None,
             tool: None,
+            agent_name: None,
         },
         InstanceSnapshot {
             name: "node_b".into(),
@@ -1764,6 +1779,7 @@ fn test_canvas_edge_and_node_hit_testing() {
             parent_name: None,
             directory: None,
             tool: None,
+            agent_name: None,
         },
     ];
     graph.apply_instance_snapshot(&snap);
@@ -1851,6 +1867,7 @@ fn test_kill_requires_confirmation_flow_and_stale_target_check() {
             parent_name: None,
             directory: None,
             tool: None,
+            agent_name: None,
         },
         InstanceSnapshot {
             name: "stopped_agent".into(),
@@ -1861,6 +1878,7 @@ fn test_kill_requires_confirmation_flow_and_stale_target_check() {
             parent_name: None,
             directory: None,
             tool: None,
+            agent_name: None,
         },
     ];
     graph.apply_instance_snapshot(&snap);
@@ -2930,6 +2948,7 @@ fn test_canvas_filtering_excludes_hidden_nodes_and_edges() {
             parent_name: None,
             directory: None,
             tool: None,
+            agent_name: None,
         },
         InstanceSnapshot {
             name: "agent_b".into(),
@@ -2940,6 +2959,7 @@ fn test_canvas_filtering_excludes_hidden_nodes_and_edges() {
             parent_name: None,
             directory: None,
             tool: None,
+            agent_name: None,
         },
     ];
     graph.apply_instance_snapshot(&snap);
@@ -3551,6 +3571,7 @@ fn layout_snap(name: &str, parent: Option<&str>) -> InstanceSnapshot {
         parent_name: parent.map(Into::into),
         directory: None,
         tool: None,
+        agent_name: None,
     }
 }
 
@@ -4068,6 +4089,7 @@ fn test_tooltip_target_gates_and_content() {
         parent_name: Some("parent_x".into()),
         directory: None,
         tool: Some("claude".into()),
+        agent_name: None,
     }]);
     let idx = app.graph.get_node_index("worker_1").unwrap();
     app.table_rows = vec![TableRow {
@@ -4145,6 +4167,7 @@ fn snap(name: &str, parent: Option<&str>) -> InstanceSnapshot {
         parent_name: parent.map(|p| p.into()),
         directory: None,
         tool: None,
+        agent_name: None,
     }
 }
 
@@ -5429,6 +5452,7 @@ fn test_task_86_screen_stick_to_bottom() {
         parent_name: None,
         directory: None,
         tool: None,
+        agent_name: None,
     };
     app.graph.upsert_agent(node);
 
@@ -5493,6 +5517,7 @@ fn test_task_86_report_summary_horizontal_scroll_and_label_alignment() {
         parent_name: None,
         directory: Some("very_long_directory_path_without_spaces_".repeat(20)),
         tool: None,
+        agent_name: None,
     };
     app.graph.upsert_agent(node);
 
@@ -5591,6 +5616,7 @@ fn test_task_86_selection_and_edge_dock_reopens_hidden_panel() {
         parent_name: None,
         directory: None,
         tool: None,
+        agent_name: None,
     };
     app.graph.upsert_agent(node);
 
@@ -6172,6 +6198,7 @@ fn test_layout_realistic_graph_sleeps_in_cluster_and_hierarchy() {
             parent_name: parent.map(|p| p.into()),
             directory: None,
             tool: None,
+            agent_name: None,
         })
         .collect();
     let messages = [
@@ -7345,6 +7372,7 @@ fn test_task_77_29_hierarchy_and_spawn_edges_preserved_across_table_sync() {
             parent_name: None,
             directory: None,
             tool: Some("claude".into()),
+            agent_name: None,
         },
         InstanceSnapshot {
             name: "child_agent".into(),
@@ -7355,6 +7383,7 @@ fn test_task_77_29_hierarchy_and_spawn_edges_preserved_across_table_sync() {
             parent_name: Some("parent_agent".into()),
             directory: None,
             tool: Some("claude".into()),
+            agent_name: None,
         },
     ];
     app.graph.apply_instance_snapshot(&snapshots);
@@ -13183,10 +13212,11 @@ fn test_task_77_69_parse_sessions_from_events() {
         tool: "claude".into(),
         directory: "/work/live".into(),
         launch_args: vec!["--model".into(), "opus".into()],
+        ..Default::default()
     };
     let now = hcom_dashboard::table_data::parse_event_ts("2026-11-07T12:00:00");
     let ts = hcom_dashboard::table_data::parse_event_ts;
-    let s = parse_sessions(a, &life, &msgs, Some(&live), now);
+    let s = parse_sessions(a, &life, &msgs, std::slice::from_ref(&live), now);
     assert_eq!(s.len(), 3);
 
     // Newest first: the running handoff session.
@@ -13247,7 +13277,7 @@ fn test_task_77_69_parse_sessions_from_events() {
     );
 
     // Without `hcom list` data the running session has no session id.
-    let s = parse_sessions(a, &life, &msgs, None, now);
+    let s = parse_sessions(a, &life, &msgs, &[], now);
     assert_eq!(s[0].session_id, "");
 }
 
@@ -14229,7 +14259,7 @@ fn test_task_77_75_handoff_chain() {
         stopped(8, "2026-11-07T11:00:00", "s3"),
     ]
     .join("\n");
-    let s = parse_sessions(a, &life, "", None, 0);
+    let s = parse_sessions(a, &life, "", &[], 0);
     let chain: Vec<(&str, &str, &str, &str)> = s
         .iter()
         .map(|x| {
@@ -15101,7 +15131,7 @@ fn test_task_77_89_summary_loads_tabs_and_shows_metrics() {
             &|r| matches!(r, ActionRequest::Events { agent, .. } if agent == "inst_alpha_1")
         ));
         assert!(has(
-            &|r| matches!(r, ActionRequest::Sessions { agent, .. } if agent == "inst_alpha_1")
+            &|r| matches!(r, ActionRequest::Sessions { agent, .. } if agent == "agent_alpha")
         ));
     }
 
@@ -15289,7 +15319,7 @@ fn test_task_77_90_launch_args_and_summary() {
         ..Default::default()
     };
     let now = hcom_dashboard::table_data::parse_event_ts("2026-11-07T13:00:00");
-    let s = parse_sessions(a, &life, "", Some(&live), now);
+    let s = parse_sessions(a, &life, "", std::slice::from_ref(&live), now);
     assert_eq!(s.len(), 3);
     assert_eq!(s[0].launch_args, live.launch_args);
     assert_eq!(s[0].launch_summary(), "claude · opus · high");
@@ -16034,4 +16064,449 @@ fn test_task_98_recover_dialog_is_modal_and_renders_headless() {
         Some(RecoverDialog::Ready(items)),
         "rendering alone keeps the dialog and its selection"
     );
+}
+
+#[test]
+fn test_task_77_105_cluster_springs_pull_instances_of_same_agent_together() {
+    use hcom_dashboard::layout::GraphLayout;
+    use hcom_dashboard::model::{AgentGraph, AgentNode, AgentStatus};
+
+    let mut graph = AgentGraph::new();
+    let s1 = AgentNode {
+        name: "sphere_dev_1".into(),
+        status: AgentStatus::Active,
+        status_context: None,
+        status_age_seconds: 0,
+        unread_count: 0,
+        parent_name: None,
+        directory: None,
+        tool: None,
+        agent_name: Some("sphere_dev".into()),
+    };
+    let s2 = AgentNode {
+        name: "sphere_dev_2".into(),
+        status: AgentStatus::Active,
+        status_context: None,
+        status_age_seconds: 0,
+        unread_count: 0,
+        parent_name: None,
+        directory: None,
+        tool: None,
+        agent_name: Some("sphere_dev".into()),
+    };
+    let o1 = AgentNode {
+        name: "other_1".into(),
+        status: AgentStatus::Active,
+        status_context: None,
+        status_age_seconds: 0,
+        unread_count: 0,
+        parent_name: None,
+        directory: None,
+        tool: None,
+        agent_name: Some("other".into()),
+    };
+
+    let idx_s1 = graph.upsert_agent(s1).unwrap();
+    let idx_s2 = graph.upsert_agent(s2).unwrap();
+    let idx_o1 = graph.upsert_agent(o1).unwrap();
+
+    let mut layout = GraphLayout::new();
+    layout.sync_nodes(&graph);
+    layout.dragging = true;
+    layout.step(&graph, 0.016);
+
+    // Verify a cluster spring exists between s1 and s2
+    let (min_s, max_s) = if idx_s1 < idx_s2 {
+        (idx_s1, idx_s2)
+    } else {
+        (idx_s2, idx_s1)
+    };
+    let cluster_spring = layout
+        .springs()
+        .iter()
+        .find(|s| s.a == min_s && s.b == max_s);
+    assert!(
+        cluster_spring.is_some(),
+        "cluster spring must exist between instances of the same agent"
+    );
+    assert!(
+        cluster_spring.unwrap().is_cluster,
+        "is_cluster flag must be true"
+    );
+
+    // Verify other_1 has no cluster spring with s1 or s2
+    let cross_spring = layout.springs().iter().find(|s| {
+        (s.a == idx_o1 && (s.b == idx_s1 || s.b == idx_s2))
+            || (s.b == idx_o1 && (s.a == idx_s1 || s.a == idx_s2))
+    });
+    assert!(
+        cross_spring.is_none(),
+        "no cluster spring between different agents"
+    );
+}
+
+#[test]
+fn test_task_77_105_parse_sessions_matches_roaming_and_clones() {
+    use hcom_dashboard::sessions::{instance_belongs_to_agent, parse_sessions};
+
+    assert!(instance_belongs_to_agent("sphere_dev", "sphere_dev"));
+    assert!(instance_belongs_to_agent(
+        "sphere_dev_ansible_proweb_505",
+        "sphere_dev"
+    ));
+    assert!(instance_belongs_to_agent("hcom_dev__dashboard", "hcom_dev"));
+    assert!(instance_belongs_to_agent("wdt_main-1", "wdt_main"));
+    assert!(!instance_belongs_to_agent("wdt_main", "wdt_manager"));
+
+    let life_jsonl = r#"
+{"data":{"action":"created","by":"user"},"id":100,"instance":"sphere_dev_ansible_proweb_505","ts":"2026-11-12T10:00:00Z","type":"life"}
+{"data":{"action":"ready","status":"listening"},"id":101,"instance":"sphere_dev_ansible_proweb_505","ts":"2026-11-12T10:01:00Z","type":"life"}
+{"data":{"action":"stopped","reason":"finished","by":"user","snapshot":{"created_at":1000.0,"session_id":"sess-505","transcript_path":"/tmp/505.jsonl","tool":"claude"}},"id":105,"instance":"sphere_dev_ansible_proweb_505","ts":"2026-11-12T10:30:00Z","type":"life"}
+"#;
+    let msg_jsonl = r#"
+{"data":{"from":"sphere_dev_ansible_proweb_505","delivered_to":["proweb_main"],"text":"hello"},"id":102,"ts":"2026-11-12T10:10:00Z","type":"message"}
+"#;
+
+    let sessions = parse_sessions("sphere_dev", life_jsonl, msg_jsonl, &[], 1794480000);
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, "sess-505");
+    assert_eq!(sessions[0].transcript_path, "/tmp/505.jsonl");
+    assert_eq!(sessions[0].partners.len(), 1);
+    assert_eq!(sessions[0].partners[0].name, "proweb_main");
+    assert_eq!(sessions[0].partners[0].sent, 1);
+}
+
+#[test]
+fn test_task_77_105_resolve_agent_from_name_and_meta_fields() {
+    use hcom_dashboard::app::agent_meta_fields;
+    use hcom_dashboard::model::{AgentNode, AgentStatus};
+    use hcom_dashboard::table_data::resolve_agent_from_name;
+
+    let known = vec![
+        "sphere_dev".to_string(),
+        "wdt_main".to_string(),
+        "wdt_manager".to_string(),
+    ];
+
+    assert_eq!(
+        resolve_agent_from_name("sphere_dev_ansible_proweb_505", &known),
+        Some("sphere_dev".into())
+    );
+    assert_eq!(
+        resolve_agent_from_name("wdt_manager_run_1", &known),
+        Some("wdt_manager".into())
+    );
+    assert_eq!(
+        resolve_agent_from_name("wdt_main_2", &known),
+        Some("wdt_main".into())
+    );
+    assert_eq!(resolve_agent_from_name("unknown_random", &known), None);
+
+    let node = AgentNode {
+        name: "sphere_dev_505".into(),
+        status: AgentStatus::Active,
+        status_context: Some("working".into()),
+        status_age_seconds: 60,
+        unread_count: 3,
+        parent_name: None,
+        directory: Some("/path".into()),
+        tool: Some("claude".into()),
+        agent_name: Some("sphere_dev".into()),
+    };
+
+    let fields = agent_meta_fields(Some(&node), None);
+    let agent_field = fields.iter().find(|(k, _)| *k == "Catalog Agent");
+    assert_eq!(agent_field, Some(&("Catalog Agent", "sphere_dev".into())));
+}
+
+#[test]
+fn test_task_77_105_canvas_renders_agent_clouds_headless() {
+    use egui::{Pos2, Rect, Vec2};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::model::{AgentNode, AgentStatus};
+
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState::default(),
+        std::path::PathBuf::from("/tmp"),
+    );
+
+    let n1 = AgentNode {
+        name: "agent_cloud_1".into(),
+        status: AgentStatus::Active,
+        status_context: None,
+        status_age_seconds: 0,
+        unread_count: 0,
+        parent_name: None,
+        directory: None,
+        tool: None,
+        agent_name: Some("agent_cloud".into()),
+    };
+    let n2 = AgentNode {
+        name: "agent_cloud_2".into(),
+        status: AgentStatus::Listening,
+        status_context: None,
+        status_age_seconds: 0,
+        unread_count: 0,
+        parent_name: None,
+        directory: None,
+        tool: None,
+        agent_name: Some("agent_cloud".into()),
+    };
+    app.graph.upsert_agent(n1);
+    app.graph.upsert_agent(n2);
+    app.layout.sync_nodes(&app.graph);
+
+    let ctx = egui::Context::default();
+    let mut frame = eframe::Frame::_new_kittest();
+    let input = egui::RawInput {
+        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 800.0))),
+        ..Default::default()
+    };
+    let mut out = ctx.run_ui(input, |ui| eframe::App::ui(&mut app, ui, &mut frame));
+    out.textures_delta.clear();
+    // Rendering completes without panic
+    assert!(!out.shapes.is_empty());
+}
+
+#[test]
+fn test_task_77_105_stats_aggregation_across_historical_instances() {
+    use hcom_dashboard::table_data::{TableRow, apply_event_stats, compute_event_stats};
+    use std::collections::HashSet;
+
+    let life_jsonl = r#"
+{"data":{"action":"created","by":"user"},"id":100,"instance":"sphere_dev_project_a_1","ts":"2026-11-12T10:00:00Z","type":"life"}
+{"data":{"action":"ready","status":"listening"},"id":101,"instance":"sphere_dev_project_a_1","ts":"2026-11-12T10:01:00Z","type":"life"}
+{"data":{"action":"stopped","reason":"finished","by":"user","snapshot":{"agent_name":"sphere_dev"}},"id":105,"instance":"sphere_dev_project_a_1","ts":"2026-11-12T10:01:40Z","type":"life"}
+{"data":{"action":"created","by":"user"},"id":110,"instance":"sphere_dev_project_b_2","ts":"2026-11-12T10:05:00Z","type":"life"}
+{"data":{"action":"ready","status":"listening"},"id":111,"instance":"sphere_dev_project_b_2","ts":"2026-11-12T10:05:30Z","type":"life"}
+{"data":{"action":"stopped","reason":"finished","by":"user","snapshot":{"agent_name":"sphere_dev"}},"id":115,"instance":"sphere_dev_project_b_2","ts":"2026-11-12T10:06:00Z","type":"life"}
+"#;
+    let msg_jsonl = r#"
+{"data":{"from":"sphere_dev_project_a_1","delivered_to":["proweb_main"],"text":"hello 1"},"id":102,"ts":"2026-11-12T10:01:10Z","type":"message"}
+{"data":{"from":"proweb_main","delivered_to":["sphere_dev_project_a_1"],"text":"reply 1"},"id":103,"ts":"2026-11-12T10:01:20Z","type":"message"}
+{"data":{"from":"sphere_dev_project_b_2","delivered_to":["proweb_main"],"text":"hello 2"},"id":112,"ts":"2026-11-12T10:05:40Z","type":"message"}
+"#;
+
+    let running: HashSet<String> = HashSet::new();
+    let stats = compute_event_stats(life_jsonl, msg_jsonl, &running, 1794480000);
+
+    // Verify stats for individual instances exist
+    assert_eq!(stats.get("sphere_dev_project_a_1").unwrap().starts, 1);
+    assert_eq!(
+        stats.get("sphere_dev_project_a_1").unwrap().runtime_seconds,
+        100
+    );
+    assert_eq!(stats.get("sphere_dev_project_b_2").unwrap().starts, 1);
+    assert_eq!(
+        stats.get("sphere_dev_project_b_2").unwrap().runtime_seconds,
+        60
+    );
+
+    // Verify aggregated stats under the catalog agent "sphere_dev"
+    let cat_stats = stats
+        .get("sphere_dev")
+        .expect("catalog agent aggregated stats");
+    assert_eq!(
+        cat_stats.starts, 2,
+        "starts must aggregate across instances"
+    );
+    assert_eq!(cat_stats.stops, 2, "stops must aggregate across instances");
+    assert_eq!(
+        cat_stats.runtime_seconds, 160,
+        "runtime must aggregate across instances"
+    );
+    assert_eq!(cat_stats.sent, 2, "sent msgs must aggregate");
+    assert_eq!(cat_stats.received, 1, "received msgs must aggregate");
+    assert_eq!(cat_stats.msgs, 3, "total msgs must aggregate");
+
+    // Test apply_event_stats onto a TableRow representing the catalog agent
+    let mut rows = vec![TableRow {
+        agent: "sphere_dev".into(),
+        instance: "".into(),
+        ..Default::default()
+    }];
+    apply_event_stats(&mut rows, &stats);
+    assert_eq!(rows[0].starts_count, Some(2));
+    assert_eq!(rows[0].msgs_count, Some(3));
+    assert_eq!(rows[0].stops_summary, "2/0");
+}
+
+#[test]
+fn test_task_77_105_selected_catalog_agent_sessions_dispatch() {
+    use hcom_dashboard::action::{ActionRequest, ActionRunner};
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct MockRunner {
+        dispatched: Arc<Mutex<Vec<ActionRequest>>>,
+    }
+    impl ActionRunner for MockRunner {
+        fn execute(&self, req: ActionRequest) -> Option<hcom_dashboard::action::ActionResult> {
+            self.dispatched.lock().unwrap().push(req);
+            None
+        }
+    }
+
+    let mut app = HcomDashboardApp::new_for_test(
+        DashboardConfig::default(),
+        DashboardState {
+            show_side_panel: true,
+            detail_tab: "Sessions".into(),
+            ..Default::default()
+        },
+        std::path::PathBuf::from("/tmp"),
+    );
+
+    let runner = MockRunner::default();
+    let dispatched = runner.dispatched.clone();
+    app.action_worker = Some(hcom_dashboard::action::ActionWorkerHandle::new(runner));
+
+    app.table_rows = vec![TableRow {
+        agent: "sphere_dev".into(),
+        instance: "sphere_dev_project_a_1".into(),
+        is_running: true,
+        ..Default::default()
+    }];
+
+    app.selected_row_id = Some("sphere_dev_project_a_1".into());
+
+    // Selected agent for instance-targeted actions (Attach/Screen) is the instance:
+    assert_eq!(
+        app.selected_agent_name(),
+        Some("sphere_dev_project_a_1".into())
+    );
+    // Selected agent for sessions/stats is the catalog agent:
+    assert_eq!(app.selected_catalog_agent_name(), Some("sphere_dev".into()));
+
+    app.on_selection_changed();
+
+    // Wait briefly for worker to receive
+    for _ in 0..20 {
+        if !dispatched.lock().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let reqs = dispatched.lock().unwrap();
+    let sessions_req = reqs
+        .iter()
+        .find(|r| matches!(r, ActionRequest::Sessions { .. }));
+    assert!(sessions_req.is_some(), "Sessions action must be dispatched");
+    if let Some(ActionRequest::Sessions { agent, .. }) = sessions_req {
+        assert_eq!(
+            agent, "sphere_dev",
+            "Sessions request must target catalog agent, not individual instance"
+        );
+    }
+}
+
+#[test]
+fn test_task_77_105_parse_sessions_multiple_simultaneous_live_instances() {
+    use hcom_dashboard::sessions::{LiveSession, parse_sessions};
+
+    let life_jsonl = r#"
+{"data":{"action":"created","by":"user"},"id":100,"instance":"sphere_dev_project_a_1","ts":"2026-11-12T10:00:00Z","type":"life"}
+{"data":{"action":"ready","status":"listening"},"id":101,"instance":"sphere_dev_project_a_1","ts":"2026-11-12T10:01:00Z","type":"life"}
+{"data":{"action":"created","by":"user"},"id":110,"instance":"sphere_dev_project_b_2","ts":"2026-11-12T10:05:00Z","type":"life"}
+{"data":{"action":"ready","status":"listening"},"id":111,"instance":"sphere_dev_project_b_2","ts":"2026-11-12T10:05:30Z","type":"life"}
+"#;
+    let msg_jsonl = "";
+
+    let live_sessions = vec![
+        LiveSession {
+            instance_name: "sphere_dev_project_a_1".into(),
+            session_id: "sess-live-a".into(),
+            transcript_path: "/t/live_a.jsonl".into(),
+            tool: "claude".into(),
+            directory: "/work/project_a".into(),
+            launch_args: vec!["--arg-a".into()],
+        },
+        LiveSession {
+            instance_name: "sphere_dev_project_b_2".into(),
+            session_id: "sess-live-b".into(),
+            transcript_path: "/t/live_b.jsonl".into(),
+            tool: "codex".into(),
+            directory: "/work/project_b".into(),
+            launch_args: vec!["--arg-b".into()],
+        },
+    ];
+
+    let sessions = parse_sessions(
+        "sphere_dev",
+        life_jsonl,
+        msg_jsonl,
+        &live_sessions,
+        1794480000,
+    );
+
+    assert_eq!(sessions.len(), 2, "must parse both live sibling sessions");
+
+    let sess_a = sessions
+        .iter()
+        .find(|s| s.session_id == "sess-live-a")
+        .expect("session for instance a");
+    assert_eq!(sess_a.transcript_path, "/t/live_a.jsonl");
+    assert_eq!(sess_a.tool, "claude");
+    assert_eq!(sess_a.directory, "/work/project_a");
+    assert_eq!(sess_a.launch_args, vec!["--arg-a"]);
+
+    let sess_b = sessions
+        .iter()
+        .find(|s| s.session_id == "sess-live-b")
+        .expect("session for instance b");
+    assert_eq!(sess_b.transcript_path, "/t/live_b.jsonl");
+    assert_eq!(sess_b.tool, "codex");
+    assert_eq!(sess_b.directory, "/work/project_b");
+    assert_eq!(sess_b.launch_args, vec!["--arg-b"]);
+}
+
+#[test]
+fn test_task_77_105_parse_sessions_live_non_prefix_instance() {
+    use hcom_dashboard::sessions::{LiveSession, parse_sessions};
+
+    // An instance started with an explicit name like `task_123`, having launch_context with catalog agent
+    let life_jsonl = r#"
+{"data":{"action":"created","by":"user","launch_context":{"agent_name":"sphere_dev"}},"id":100,"instance":"task_123","ts":"2026-11-12T10:00:00Z","type":"life"}
+{"data":{"action":"ready","status":"listening"},"id":101,"instance":"task_123","ts":"2026-11-12T10:01:00Z","type":"life"}
+"#;
+    let msg_jsonl = r#"
+{"data":{"from":"task_123","delivered_to":["proweb_main"],"text":"hello from custom named task"},"id":102,"ts":"2026-11-12T10:02:00Z","type":"message"}
+"#;
+
+    let live_sessions = vec![LiveSession {
+        instance_name: "task_123".into(),
+        session_id: "sess-custom-123".into(),
+        transcript_path: "/t/task_123.jsonl".into(),
+        tool: "claude".into(),
+        directory: "/work/custom".into(),
+        launch_args: vec!["--custom".into()],
+    }];
+
+    let sessions = parse_sessions(
+        "sphere_dev",
+        life_jsonl,
+        msg_jsonl,
+        &live_sessions,
+        1794480000,
+    );
+
+    assert_eq!(
+        sessions.len(),
+        1,
+        "non-prefix live instance must be included under catalog agent"
+    );
+    assert_eq!(sessions[0].session_id, "sess-custom-123");
+    assert_eq!(sessions[0].transcript_path, "/t/task_123.jsonl");
+    assert_eq!(sessions[0].tool, "claude");
+    assert_eq!(sessions[0].directory, "/work/custom");
+    assert_eq!(sessions[0].launch_args, vec!["--custom"]);
+    assert_eq!(sessions[0].partners.len(), 1);
+    assert_eq!(sessions[0].partners[0].name, "proweb_main");
+    assert_eq!(sessions[0].partners[0].sent, 1);
 }

@@ -33,6 +33,24 @@ pub fn format_age(seconds: u64) -> String {
     }
 }
 
+/// Resolves the catalog agent name an instance belongs to (exact match,
+/// roaming `<agent>_<project>_<hash>`, clone `<agent>__<suffix>`, or prefix `<agent>_<number>`).
+pub fn resolve_agent_from_name(name: &str, known_agents: &[String]) -> Option<String> {
+    let mut sorted: Vec<&String> = known_agents.iter().collect();
+    sorted.sort_by_key(|a| std::cmp::Reverse(a.len()));
+
+    for a in sorted {
+        if name == a
+            || name.starts_with(&format!("{a}_"))
+            || name.starts_with(&format!("{a}__"))
+            || name.starts_with(&format!("{a}-"))
+        {
+            return Some(a.clone());
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CatalogSkillItem {
     pub name: String,
@@ -162,8 +180,10 @@ pub fn build_table_rows(
     };
 
     let mut catalog_map = HashMap::new();
+    let mut known_agent_names = Vec::new();
     for cat in &catalog_agents {
         catalog_map.insert(cat.name.clone(), cat);
+        known_agent_names.push(cat.name.clone());
     }
 
     let mut rows = Vec::new();
@@ -171,11 +191,17 @@ pub fn build_table_rows(
 
     // 1. Convert live instances
     for live in &live_instances {
-        let catalog_name = live
+        let mut catalog_name = live
             .launch_context
             .as_ref()
             .and_then(|lc| lc.agent_name.clone())
             .unwrap_or_default();
+
+        if catalog_name.is_empty()
+            && let Some(resolved) = resolve_agent_from_name(&live.name, &known_agent_names)
+        {
+            catalog_name = resolved;
+        }
 
         if !catalog_name.is_empty() {
             seen_catalog_agents.insert(catalog_name.clone());
@@ -935,6 +961,44 @@ pub fn compute_event_stats(
     }
     life_events.sort_by_key(|e| e.get("id").and_then(|i| i.as_u64()).unwrap_or(0));
 
+    // Discover catalog agents from snapshot.agent_name and instances
+    let mut instance_to_agent: HashMap<String, String> = HashMap::new();
+    let mut known_agents_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for e in &life_events {
+        let inst = e.get("instance").and_then(|i| i.as_str()).unwrap_or("");
+        let snap_agent = e
+            .get("data")
+            .and_then(|d| d.get("snapshot"))
+            .and_then(|s| s.get("agent_name"))
+            .and_then(|a| a.as_str())
+            .or_else(|| {
+                e.get("data")
+                    .and_then(|d| d.get("launch_context"))
+                    .and_then(|lc| lc.get("agent_name"))
+                    .and_then(|a| a.as_str())
+            });
+
+        if let Some(agent) = snap_agent
+            && !agent.is_empty()
+        {
+            if !inst.is_empty() {
+                instance_to_agent.insert(inst.to_string(), agent.to_string());
+            }
+            known_agents_set.insert(agent.to_string());
+        }
+    }
+    let known_agents: Vec<String> = known_agents_set.into_iter().collect();
+
+    for e in &life_events {
+        if let Some(inst) = e.get("instance").and_then(|i| i.as_str())
+            && !instance_to_agent.contains_key(inst)
+            && let Some(agent) = resolve_agent_from_name(inst, &known_agents)
+        {
+            instance_to_agent.insert(inst.to_string(), agent);
+        }
+    }
+
     let mut opened: HashMap<String, u64> = HashMap::new();
     let mut stats: HashMap<String, EventStatsEntry> = HashMap::new();
     // Instances whose next relaunch is a handoff: like a compact, it keeps
@@ -954,29 +1018,38 @@ pub fn compute_event_stats(
             .and_then(|a| a.as_str())
             .unwrap_or("");
 
-        let entry = stats.entry(name.clone()).or_default();
+        let targets: Vec<String> = if let Some(agent) = instance_to_agent.get(&name) {
+            if agent != &name {
+                vec![name.clone(), agent.clone()]
+            } else {
+                vec![name.clone()]
+            }
+        } else {
+            vec![name.clone()]
+        };
+
         match action {
             "created" => {
-                entry.starts += 1;
-                if let Some(last) = entry.run_intervals.last_mut()
-                    && last.1.is_none()
-                {
-                    last.1 = Some(ts_sec);
-                }
-                entry.run_intervals.push((ts_sec, None));
-                if let Some(id) = e.get("id").and_then(|i| i.as_u64()) {
-                    entry.session_starts.push(id);
+                for t in &targets {
+                    let entry = stats.entry(t.clone()).or_default();
+                    entry.starts += 1;
+                    if let Some(last) = entry.run_intervals.last_mut()
+                        && last.1.is_none()
+                    {
+                        last.1 = Some(ts_sec);
+                    }
+                    entry.run_intervals.push((ts_sec, None));
+                    if let Some(id) = e.get("id").and_then(|i| i.as_u64()) {
+                        entry.session_starts.push(id);
+                    }
+                    if !ts_str.is_empty() {
+                        entry.last_start = ts_str.to_string();
+                    }
+                    if !handing_off.contains(&name) {
+                        entry.launcher = None;
+                    }
                 }
                 opened.insert(name.clone(), ts_sec);
-                if !ts_str.is_empty() {
-                    entry.last_start = ts_str.to_string();
-                }
-                // A new session determines its launcher again. An hcom launch
-                // logs its child's `created` before its `batch_launched`
-                // (the launcher pre-registers the instance in the launch loop).
-                if !handing_off.contains(&name) {
-                    entry.launcher = None;
-                }
             }
             "batch_launched" => {
                 let by = data
@@ -993,27 +1066,40 @@ pub fn compute_event_stats(
                     if handing_off.remove(child) {
                         continue;
                     }
-                    stats.entry(child.to_string()).or_default().launcher =
-                        is_agent_launcher(by, child).then(|| by.to_string());
+                    let launcher = is_agent_launcher(by, child).then(|| by.to_string());
+                    stats.entry(child.to_string()).or_default().launcher = launcher.clone();
+                    if let Some(agent) = instance_to_agent.get(child)
+                        && agent != child
+                    {
+                        stats.entry(agent.clone()).or_default().launcher = launcher;
+                    }
                 }
             }
             "stopped" => {
-                entry.stops += 1;
-                if let Some(last) = entry.run_intervals.last_mut()
-                    && last.1.is_none()
-                {
-                    last.1 = Some(ts_sec);
+                for t in &targets {
+                    let entry = stats.entry(t.clone()).or_default();
+                    entry.stops += 1;
+                    if let Some(last) = entry.run_intervals.last_mut()
+                        && last.1.is_none()
+                    {
+                        last.1 = Some(ts_sec);
+                    }
+                    if let Some(start_ts) = opened.get(&name) {
+                        entry.runtime_seconds += ts_sec.saturating_sub(*start_ts);
+                    }
                 }
-                if let Some(start_ts) = opened.remove(&name) {
-                    entry.runtime_seconds += ts_sec.saturating_sub(start_ts);
-                }
+                opened.remove(&name);
             }
             "handoff" => {
-                entry.handoffs += 1;
+                for t in &targets {
+                    stats.entry(t.clone()).or_default().handoffs += 1;
+                }
                 handing_off.insert(name.clone());
             }
             "launch_failed" | "launch_blocked" => {
-                entry.failed += 1;
+                for t in &targets {
+                    stats.entry(t.clone()).or_default().failed += 1;
+                }
             }
             _ => {}
         }
@@ -1021,7 +1107,13 @@ pub fn compute_event_stats(
 
     for (name, start_ts) in opened {
         if running_instances.contains(&name) {
-            stats.entry(name).or_default().runtime_seconds += now.saturating_sub(start_ts);
+            let dur = now.saturating_sub(start_ts);
+            stats.entry(name.clone()).or_default().runtime_seconds += dur;
+            if let Some(agent) = instance_to_agent.get(&name)
+                && agent != &name
+            {
+                stats.entry(agent.clone()).or_default().runtime_seconds += dur;
+            }
         }
     }
 
@@ -1038,6 +1130,15 @@ pub fn compute_event_stats(
             .unwrap_or(inst);
         if !from.is_empty() {
             stats.entry(from.to_string()).or_default().sent += 1;
+            let agent_opt = instance_to_agent
+                .get(from)
+                .cloned()
+                .or_else(|| resolve_agent_from_name(from, &known_agents));
+            if let Some(agent) = agent_opt
+                && agent != from
+            {
+                stats.entry(agent).or_default().sent += 1;
+            }
         }
         if let Some(recipients) = data
             .and_then(|d| d.get("delivered_to"))
@@ -1046,6 +1147,15 @@ pub fn compute_event_stats(
             for rec in recipients {
                 if let Some(rec_name) = rec.as_str() {
                     stats.entry(rec_name.to_string()).or_default().received += 1;
+                    let agent_opt = instance_to_agent
+                        .get(rec_name)
+                        .cloned()
+                        .or_else(|| resolve_agent_from_name(rec_name, &known_agents));
+                    if let Some(agent) = agent_opt
+                        && agent != rec_name
+                    {
+                        stats.entry(agent).or_default().received += 1;
+                    }
                 }
             }
         }
@@ -1060,12 +1170,12 @@ pub fn compute_event_stats(
 
 pub fn apply_event_stats(rows: &mut [TableRow], stats: &HashMap<String, EventStatsEntry>) {
     for r in rows.iter_mut() {
-        let key = if !r.instance.is_empty() {
-            &r.instance
+        let st = if !r.agent.is_empty() {
+            stats.get(&r.agent).or_else(|| stats.get(&r.instance))
         } else {
-            &r.agent
+            stats.get(&r.instance)
         };
-        if let Some(st) = stats.get(key) {
+        if let Some(st) = st {
             r.starts_count = Some(st.starts);
             r.runtime_text = if st.runtime_seconds > 0 {
                 format_age(st.runtime_seconds)

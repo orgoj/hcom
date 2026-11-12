@@ -53,6 +53,8 @@ pub struct ThemePalette {
     pub slider_fill: Color32,
     pub slider_knob: Color32,
     pub slider_stroke: Color32,
+    pub cloud_fill: Color32,
+    pub cloud_stroke: Color32,
 }
 
 impl ThemePalette {
@@ -89,6 +91,8 @@ impl ThemePalette {
                 slider_fill: Color32::from_rgb(70, 70, 80),
                 slider_knob: Color32::WHITE,
                 slider_stroke: Color32::from_rgb(100, 100, 100),
+                cloud_fill: Color32::from_rgba_unmultiplied(60, 80, 120, 28),
+                cloud_stroke: Color32::from_rgba_unmultiplied(120, 160, 220, 75),
             },
             ResolvedTheme::Light => Self {
                 resolved,
@@ -121,6 +125,8 @@ impl ThemePalette {
                 slider_fill: Color32::from_rgb(160, 175, 195),
                 slider_knob: Color32::WHITE,
                 slider_stroke: Color32::from_rgb(140, 145, 160),
+                cloud_fill: Color32::from_rgba_unmultiplied(100, 140, 210, 25),
+                cloud_stroke: Color32::from_rgba_unmultiplied(80, 120, 190, 85),
             },
         }
     }
@@ -1054,6 +1060,100 @@ impl CanvasView {
                     }
                 }
             }
+        }
+
+        // 4b. Render Agent Clouds (Grouping of instances belonging to the same catalog agent)
+        let mut agent_clusters: std::collections::HashMap<String, Vec<NodeIndex>> =
+            std::collections::HashMap::new();
+        for idx in layout.nodes.keys() {
+            if let Some(v) = visible_nodes
+                && !v.contains(idx)
+            {
+                continue;
+            }
+            if let Some(node_data) = graph.graph.node_weight(*idx)
+                && let Some(ref agent) = node_data.agent_name
+                && !agent.is_empty()
+            {
+                agent_clusters.entry(agent.clone()).or_default().push(*idx);
+            }
+        }
+
+        for (agent_name, cluster_nodes) in &agent_clusters {
+            if cluster_nodes.len() < 2 {
+                continue;
+            }
+            let screen_pts: Vec<Pos2> = cluster_nodes
+                .iter()
+                .filter_map(|idx| layout.nodes.get(idx))
+                .map(|p| self.world_to_screen(p.pos, rect))
+                .collect();
+            if screen_pts.len() < 2 {
+                continue;
+            }
+
+            let pad = 44.0 * self.zoom;
+            let mut bounds = Rect::from_points(&screen_pts).expand(pad);
+            let header_height = 18.0 * self.zoom;
+            bounds.min.y -= header_height;
+
+            if !rect.intersects(bounds) {
+                continue;
+            }
+
+            let is_cluster_focused = self
+                .selected_node
+                .is_some_and(|sel| cluster_nodes.contains(&sel));
+            let stroke_color = if is_cluster_focused {
+                palette.selected_ring
+            } else {
+                palette.cloud_stroke
+            };
+            let stroke_width = if is_cluster_focused {
+                2.0 * self.zoom.clamp(0.8, 2.0)
+            } else {
+                1.5 * self.zoom.clamp(0.8, 2.0)
+            };
+
+            let rounding = 24.0 * self.zoom;
+            painter.rect_filled(bounds, rounding, palette.cloud_fill);
+            painter.rect_stroke(
+                bounds,
+                rounding,
+                Stroke::new(stroke_width, stroke_color),
+                egui::StrokeKind::Outside,
+            );
+
+            // Cloud tag / title pill
+            let label_text = format!("☁ {} ({})", agent_name, cluster_nodes.len());
+            let font_size = (11.0 * self.zoom).clamp(8.0, 14.0);
+            let galley = painter.layout_no_wrap(
+                label_text,
+                FontId::proportional(font_size),
+                palette.badge_text,
+            );
+            let tag_pad_x = 8.0 * self.zoom;
+            let tag_pad_y = 3.0 * self.zoom;
+            let tag_rect = Rect::from_min_size(
+                Pos2::new(
+                    bounds.min.x + 14.0 * self.zoom,
+                    bounds.min.y + 4.0 * self.zoom,
+                ),
+                galley.size() + Vec2::new(tag_pad_x * 2.0, tag_pad_y * 2.0),
+            );
+            let tag_rounding = 6.0 * self.zoom;
+            painter.rect_filled(tag_rect, tag_rounding, palette.badge_fill);
+            painter.rect_stroke(
+                tag_rect,
+                tag_rounding,
+                Stroke::new(1.0 * self.zoom, palette.badge_stroke),
+                egui::StrokeKind::Outside,
+            );
+            painter.galley(
+                Pos2::new(tag_rect.min.x + tag_pad_x, tag_rect.min.y + tag_pad_y),
+                galley,
+                palette.badge_text,
+            );
         }
 
         // 5. Render Nodes

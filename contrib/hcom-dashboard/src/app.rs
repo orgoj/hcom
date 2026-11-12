@@ -825,7 +825,7 @@ pub fn agent_meta_fields(
     node: Option<&AgentNode>,
     row: Option<&TableRow>,
 ) -> Vec<(&'static str, String)> {
-    let (detail, age, unread, tool, dir, parent) = match (node, row) {
+    let (detail, age, unread, tool, dir, parent, agent) = match (node, row) {
         (Some(n), _) => (
             n.status_context.clone().unwrap_or_default(),
             if n.status_age_seconds > 0 {
@@ -837,6 +837,7 @@ pub fn agent_meta_fields(
             n.tool.clone().unwrap_or_default(),
             n.directory.clone().unwrap_or_default(),
             n.parent_name.clone().unwrap_or_default(),
+            n.agent_name.clone().unwrap_or_default(),
         ),
         (None, Some(r)) => (
             r.detail.clone(),
@@ -845,10 +846,12 @@ pub fn agent_meta_fields(
             r.cli.clone(),
             r.directory.clone(),
             String::new(),
+            r.agent.clone(),
         ),
         (None, None) => return Vec::new(),
     };
     [
+        ("Catalog Agent", agent),
         ("Status Detail", detail),
         ("Status Age", age),
         ("Unread Count", unread),
@@ -1312,7 +1315,7 @@ impl HcomDashboardApp {
     /// (TASK-77.89): `…` until loaded, `—` where a stopped agent has none.
     pub fn summary_metrics(&self) -> Vec<(&'static str, String)> {
         const PENDING: &str = "…";
-        let agent = self.selected_agent_name();
+        let catalog_agent = self.selected_catalog_agent_name();
         let instance = self
             .selected_row()
             .filter(|r| r.is_running && !r.instance.is_empty())
@@ -1324,15 +1327,18 @@ impl HcomDashboardApp {
             (Some(i), Some((a, _, text))) if a == i => f(text),
             _ => PENDING.to_string(),
         };
-        let sessions = match (&agent, &self.sessions_content) {
-            (Some(agent), Some((a, _, Ok(list)))) if a == agent => {
+        let sel_inst = self.selected_agent_name();
+        let sessions = match (&catalog_agent, &self.sessions_content) {
+            (Some(agent), Some((a, _, Ok(list)))) if a == agent || sel_inst.as_ref() == Some(a) => {
                 let now_dt = chrono::Utc::now();
                 let now = now_dt.timestamp().max(0) as u64;
                 let (start, end) = self.window_bounds(now_dt);
                 let shown = list.iter().filter(|s| s.overlaps(start, end, now)).count();
                 sessions_header_text(shown, list.len())
             }
-            (Some(agent), Some((a, _, Err(_)))) if a == agent => LOAD_FAILED.to_string(),
+            (Some(agent), Some((a, _, Err(_)))) if a == agent || sel_inst.as_ref() == Some(a) => {
+                LOAD_FAILED.to_string()
+            }
             _ => PENDING.to_string(),
         };
         vec![
@@ -1368,6 +1374,18 @@ impl HcomDashboardApp {
         })
     }
 
+    pub fn selected_catalog_agent_name(&self) -> Option<String> {
+        self.selected_row().and_then(|r| {
+            if !r.agent.is_empty() {
+                Some(r.agent)
+            } else if !r.instance.is_empty() {
+                Some(r.instance)
+            } else {
+                None
+            }
+        })
+    }
+
     pub fn selected_row(&self) -> Option<TableRow> {
         let sel_id = self.selected_row_id.as_ref()?;
         let all_rows = self.get_all_rows();
@@ -1394,9 +1412,10 @@ impl HcomDashboardApp {
         // Summary also loads Sessions, Transcript and Events for its
         // metrics (TASK-77.89).
         let summary = self.state.detail_tab == "Summary";
+        let catalog_agent = self.selected_catalog_agent_name();
         let selected = self.selected_agent_name();
         if (summary || self.state.detail_tab == "Sessions")
-            && let Some(agent) = selected.clone()
+            && let Some(agent) = catalog_agent.clone()
         {
             self.dispatch_action(ActionRequest::Sessions {
                 agent,
@@ -1409,7 +1428,7 @@ impl HcomDashboardApp {
         if self.state.detail_tab == "Transcript"
             && let Some((agent, path, _)) = self.session_transcript.clone()
         {
-            if selected.as_ref() == Some(&agent) {
+            if selected.as_ref() == Some(&agent) || catalog_agent.as_ref() == Some(&agent) {
                 self.dispatch_action(ActionRequest::SessionTranscript {
                     agent,
                     generation: gen_id,
@@ -3116,13 +3135,14 @@ impl HcomDashboardApp {
     /// Sessions of the selected agent within the message window, newest
     /// first, with Resume, Fork and Transcript (TASK-77.69).
     fn render_sessions_tab(&mut self, ui: &mut egui::Ui) {
-        let Some(agent) = self.selected_agent_name() else {
+        let Some(agent) = self.selected_catalog_agent_name() else {
             ui.weak("No agent selected");
             return;
         };
+        let sel_inst = self.selected_agent_name();
         let sessions = match &self.sessions_content {
-            Some((a, _, Ok(list))) if *a == agent => list.clone(),
-            Some((a, _, Err(e))) if *a == agent => {
+            Some((a, _, Ok(list))) if *a == agent || sel_inst.as_ref() == Some(a) => list.clone(),
+            Some((a, _, Err(e))) if *a == agent || sel_inst.as_ref() == Some(a) => {
                 ui.colored_label(Color32::from_rgb(231, 76, 60), format!("Error: {e}"));
                 return;
             }
@@ -3998,6 +4018,15 @@ impl HcomDashboardApp {
         if self.table_rows.is_empty() {
             return;
         }
+        let known_agents: Vec<String> = self
+            .table_rows
+            .iter()
+            .map(|r| r.agent.clone())
+            .filter(|a| !a.is_empty())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
         for r in &self.table_rows {
             let name = if !r.instance.is_empty() {
                 &r.instance
@@ -4007,6 +4036,12 @@ impl HcomDashboardApp {
             if name.is_empty() {
                 continue;
             }
+
+            let agent_name = if !r.agent.is_empty() {
+                Some(r.agent.clone())
+            } else {
+                crate::table_data::resolve_agent_from_name(name, &known_agents)
+            };
 
             let status = match r.status.to_lowercase().as_str() {
                 "active" => AgentStatus::Active,
@@ -4053,8 +4088,20 @@ impl HcomDashboardApp {
                 } else {
                     None
                 },
+                agent_name,
             };
             self.graph.upsert_agent(node);
+        }
+
+        // Backfill agent_name for any historical event nodes that don't have it yet
+        let indices: Vec<NodeIndex> = self.graph.graph.node_indices().collect();
+        for idx in indices {
+            if let Some(node) = self.graph.graph.node_weight_mut(idx)
+                && node.agent_name.is_none()
+            {
+                node.agent_name =
+                    crate::table_data::resolve_agent_from_name(&node.name, &known_agents);
+            }
         }
         self.layout.sync_nodes(&self.graph);
     }
@@ -4722,7 +4769,16 @@ impl eframe::App for HcomDashboardApp {
                     } => {
                         if accept_generation_result(self.selection_generation, generation) {
                             match &sessions {
-                                Ok(_) => self.clear_stale_error("Sessions", &agent),
+                                Ok(_) => {
+                                    self.clear_stale_error("Sessions", &agent);
+                                    if let Some(inst) = self
+                                        .selected_row()
+                                        .map(|r| r.instance)
+                                        .filter(|i| !i.is_empty())
+                                    {
+                                        self.clear_stale_error("Sessions", &inst);
+                                    }
+                                }
                                 Err(e) => {
                                     let msg = format!("Sessions for '{}' failed: {}", agent, e);
                                     self.set_action_error(Some(&agent), msg);

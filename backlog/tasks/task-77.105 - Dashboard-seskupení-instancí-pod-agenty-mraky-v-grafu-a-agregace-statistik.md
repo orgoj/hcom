@@ -1,9 +1,11 @@
 ---
 id: TASK-77.105
 title: 'Dashboard: seskupení instancí pod agenty (mraky v grafu a agregace statistik)'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@hcom_dev__dashboard'
 created_date: '2026-11-12T10:58:00Z'
+updated_date: '2026-11-12T12:19:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -20,7 +22,7 @@ V grafu dashboardu zobrazit instance patřící ke stejnému agentovi seskupené
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Instance patřící ke stejnému agentovi se v grafu drží u sebe (přitažlivá síla clusteru/centroidu)
+- [x] #1 Instance patřící ke stejnému agentovi se v grafu drží u sebe (přitažlivá síla clusteru/centroidu)
 - [ ] #2 Skupina instancí stejného agenta je na plátně vizuálně ohraničena jako mrak/bublina s názvem agenta
 - [ ] #3 V záložce Sessions agenta se zobrazují relace a transkripty všech jeho instancí (včetně roaming/klonů)
 - [ ] #4 Statistiky a souhrny zpráv v okně All lze prohlížet agregovaně za agenta

@@ -493,10 +493,62 @@ impl ActionRunner for SystemActionRunner {
                 })
             }
             ActionRequest::Sessions { agent, generation } => {
+                let live: Vec<crate::sessions::LiveSession> = self
+                    .run_command_bounded("hcom", &["list", "--json"], 1024 * 1024, 4096, None)
+                    .ok()
+                    .and_then(|out| {
+                        serde_json::from_str::<Vec<crate::table_data::LiveInstanceItem>>(&out).ok()
+                    })
+                    .map(|items| {
+                        items
+                            .into_iter()
+                            .filter(|i| {
+                                (crate::sessions::instance_belongs_to_agent(&i.name, &agent)
+                                    || i.name == agent
+                                    || i.launch_context
+                                        .as_ref()
+                                        .and_then(|lc| lc.agent_name.as_deref())
+                                        == Some(&agent))
+                                    && i.status.as_deref() != Some("stopped")
+                            })
+                            .map(|i| crate::sessions::LiveSession {
+                                instance_name: i.name,
+                                session_id: i.session_id.unwrap_or_default(),
+                                transcript_path: i.transcript_path.unwrap_or_default(),
+                                tool: i.tool.unwrap_or_default(),
+                                directory: i.directory.unwrap_or_default(),
+                                launch_args: i.launch_args.unwrap_or_default(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let mut extra_names: Vec<String> = live
+                    .iter()
+                    .map(|l| l.instance_name.clone())
+                    .filter(|n| !crate::sessions::instance_belongs_to_agent(n, &agent))
+                    .collect();
+                extra_names.sort();
+                extra_names.dedup();
+
+                let mut life_sql = format!(
+                    "instance LIKE '{agent}%' OR (json_valid(data) AND (json_extract(data, '$.snapshot.agent_name') = '{agent}' OR json_extract(data, '$.launch_context.agent_name') = '{agent}'))"
+                );
+                let mut agent_sql = format!(
+                    "instance LIKE '{agent}%' OR msg_from LIKE '{agent}%' OR msg_delivered_to LIKE '%{agent}%'"
+                );
+                for extra in &extra_names {
+                    life_sql.push_str(&format!(" OR instance = '{extra}'"));
+                    agent_sql.push_str(&format!(
+                        " OR instance = '{extra}' OR msg_from = '{extra}' OR msg_delivered_to LIKE '%{extra}%'"
+                    ));
+                }
+
                 let life = self.run_command_bounded(
                     "hcom",
                     &[
-                        "events", "--type", "life", "--agent", &agent, "--full", "--last", "100000",
+                        "events", "--type", "life", "--sql", &life_sql, "--full", "--last",
+                        "100000",
                     ],
                     16 * 1024 * 1024,
                     4096,
@@ -505,42 +557,18 @@ impl ActionRunner for SystemActionRunner {
                 let msgs = self.run_command_bounded(
                     "hcom",
                     &[
-                        "events",
-                        "--type",
-                        "message",
-                        "--participant",
-                        &agent,
-                        "--full",
-                        "--last",
+                        "events", "--type", "message", "--sql", &agent_sql, "--full", "--last",
                         "100000",
                     ],
                     16 * 1024 * 1024,
                     4096,
                     None,
                 );
-                let live = self
-                    .run_command_bounded("hcom", &["list", "--json"], 1024 * 1024, 4096, None)
-                    .ok()
-                    .and_then(|out| {
-                        serde_json::from_str::<Vec<crate::table_data::LiveInstanceItem>>(&out).ok()
-                    })
-                    .and_then(|items| {
-                        items
-                            .into_iter()
-                            .find(|i| i.name == agent && i.status.as_deref() != Some("stopped"))
-                    })
-                    .map(|i| crate::sessions::LiveSession {
-                        session_id: i.session_id.unwrap_or_default(),
-                        transcript_path: i.transcript_path.unwrap_or_default(),
-                        tool: i.tool.unwrap_or_default(),
-                        directory: i.directory.unwrap_or_default(),
-                        launch_args: i.launch_args.unwrap_or_default(),
-                    });
                 let sessions = life.and_then(|life| {
                     let msgs = msgs?;
                     let now = chrono::Utc::now().timestamp() as u64;
                     let mut list =
-                        crate::sessions::parse_sessions(&agent, &life, &msgs, live.as_ref(), now);
+                        crate::sessions::parse_sessions(&agent, &life, &msgs, &live, now);
                     let codex = std::env::var_os("HOME")
                         .map(|h| std::path::PathBuf::from(h).join(".codex/session_index.jsonl"))
                         .and_then(|p| std::fs::read_to_string(p).ok())
