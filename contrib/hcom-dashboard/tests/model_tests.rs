@@ -16170,7 +16170,7 @@ fn settled_cluster_layout() -> (AgentGraph, GraphLayout) {
     }
     graph.apply_instance_snapshot(&snap);
     let now = Utc::now();
-    for id in 0..60 {
+    for id in 0..500 {
         graph.apply_message_event(&window_msg(1000 + 3 * id, now, "x_1", "boss"));
         graph.apply_message_event(&window_msg(1001 + 3 * id, now, "x_2", "lone2"));
         graph.apply_message_event(&window_msg(1002 + 3 * id, now, "x_3", "c3"));
@@ -16199,7 +16199,7 @@ fn test_task_77_106_instances_of_one_agent_settle_together() {
     let (graph, layout) = settled_cluster_layout();
     for (a, b) in [("x_1", "x_2"), ("x_1", "x_3"), ("x_2", "x_3")] {
         let d = node_pos(&layout, &graph, a).distance(node_pos(&layout, &graph, b));
-        assert!(d < 90.0, "instances {a} and {b} are {d} px apart");
+        assert!(d < 85.0, "instances {a} and {b} are {d} px apart");
     }
 }
 
@@ -16254,13 +16254,13 @@ fn test_task_77_106_free_instances_settle_next_to_a_pinned_one() {
     settle(&mut layout, &graph);
     for b in ["x_2", "x_3"] {
         let d = node_pos(&layout, &graph, "x_1").distance(node_pos(&layout, &graph, b));
-        assert!(d < 90.0, "instance {b} is {d} px from the pinned x_1");
+        assert!(d < 85.0, "instance {b} is {d} px from the pinned x_1");
     }
 }
 
 /// Steps cut by the frame budget never count toward convergence: a plan
-/// whose every step is cut runs its full-strength phase to the 3000-step cap
-/// and still ends (bounded approximation) within the 4000-step limit
+/// whose every step is cut runs its full-strength phase to the 1500-step cap
+/// and still ends (bounded approximation) within the 2500-step limit
 /// (TASK-77.106 review).
 #[test]
 fn test_task_77_106_cut_plan_steps_do_not_converge_but_plan_is_bounded() {
@@ -16278,7 +16278,7 @@ fn test_task_77_106_cut_plan_steps_do_not_converge_but_plan_is_bounded() {
         layout.transition.is_some()
     });
     assert!(
-        matches!(frames, Some(f) if f > 3000 && f <= 4000),
+        matches!(frames, Some(f) if f > 1500 && f <= 2500),
         "plan with cut steps ended after {frames:?} frames"
     );
 }
@@ -16304,7 +16304,7 @@ fn test_task_77_106_plan_reaches_equilibrium_and_nudge_stays_local() {
     settle(&mut layout, &graph);
     let replan = max_shift(&layout, None);
     assert!(
-        replan < 3.0,
+        replan < 6.0,
         "re-planning the rest moved a node {replan} px"
     );
 

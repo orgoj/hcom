@@ -4,7 +4,7 @@ title: 'Dashboard: silná vazba instancí agenta a plán do skutečně ustálen�
 status: Done
 assignee: []
 created_date: '2026-11-12T14:40:00Z'
-updated_date: '2026-11-12T15:27:00Z'
+updated_date: '2026-11-12T16:14:00Z'
 labels: []
 dependencies: []
 parent_task_id: TASK-77
@@ -43,6 +43,10 @@ Diff: /home/michael/projects/hcom/tmp/task-77.106.diff, review u agent_review. S
 Review agent_review: krok uřezaný rozpočtem snímku se nepočítá do okna konvergence (step_complete); plán s trvale uřezanými kroky je omezená aproximace se stropem 3000/4000 kroků, regresní test test_task_77_106_cut_plan_steps_do_not_converge_but_plan_is_bounded.
 
 Uživatel: vazba v živém grafu pořád volná. Příčina: agent_name instance přichází často s pozdějším snapshotem než uzel (placeholder ze zprávy); structure_key ho neobsahoval, layout se neprobudil a cluster pružiny se nepřepočítaly. Oprava: agent instance je součástí structure_key; klidová délka cluster pružiny = dotyk kroužků (2*(r+1)). Test test_task_77_106_late_agent_name_wakes_layout_and_pulls_instances_together.
+
+Uživatel (2. kolo): instance pořád daleko, graf dlouho stál. Reprodukce na živých datech (193 uzlů, pin wdt_main): instance 145-158 px, plán 7.7 s (2 ms/krok kvůli HashMap v párových smyčkách). Oprava: tuhá vazba instancí (bind_agent_groups, korekce sdílená s kotvou jako u kolize, připnutá kotva se nehýbe), párové smyčky odpuzování a kolizí přes pole (7.7 s -> 0.7 s), plán smí 4x rozpočet snímku, strop plnosilné fáze 1500/2500 kroků. Živá data: instance 80-82 px. Diff k review: /home/michael/projects/hcom/tmp/task-77.106-rigid.diff
+
+Review 2. kolo (agent_review): bez blokujících nálezů.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

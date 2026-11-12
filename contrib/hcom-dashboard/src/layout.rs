@@ -75,11 +75,14 @@ const SETTLE_MIN_SECS: f32 = 0.3;
 const SETTLE_MAX_SECS: f32 = 2.0;
 /// Step limits of a simulation that computes target positions: the
 /// full-strength phase, and in total with the cooling tail (~750 steps).
-const PLAN_CONVERGE_STEPS: u32 = 3000;
-const PLAN_MAX_STEPS: u32 = 4000;
+const PLAN_CONVERGE_STEPS: u32 = 1500;
+const PLAN_MAX_STEPS: u32 = 2500;
 /// Step time of a planning simulation: the longest step `simulate` accepts,
 /// since no frame shows its intermediate positions.
 const PLAN_DT: f32 = 1.0 / 30.0;
+/// Share of a frame a plan may use, in frame budgets: no node moves while
+/// it runs, so it may take longer than a live simulation step.
+const PLAN_BUDGET_FACTOR: u32 = 4;
 /// A planning simulation runs at full strength without cooling, so it finds
 /// the force equilibrium instead of freezing on the way there; it counts as
 /// converged when no node moved `PLAN_SETTLED_PX` over `PLAN_WINDOW` steps.
@@ -171,6 +174,9 @@ pub struct GraphLayout {
     pub tree_targets: HashMap<NodeIndex, egui::Pos2>,
     springs_key: Option<(usize, u64, usize, u64)>,
     springs: Vec<Spring>,
+    /// Instances of each catalog agent with at least two of them, rebuilt
+    /// with the springs; `bind_agent_groups` keeps them together.
+    agent_groups: Vec<Vec<NodeIndex>>,
     /// Positions of user-pinned nodes by name; a pinned node starts there and
     /// the simulation does not move it, in every mode.
     pub pinned_positions: HashMap<String, egui::Pos2>,
@@ -239,6 +245,7 @@ impl GraphLayout {
             tree_targets: HashMap::new(),
             springs_key: None,
             springs: Vec::new(),
+            agent_groups: Vec::new(),
             pinned_positions: HashMap::new(),
             transition: None,
             dragging: false,
@@ -470,7 +477,8 @@ impl GraphLayout {
         let plan = self.plan.as_mut().expect("plan was just created");
         let mut this_frame = 0;
         while !plan.sim.is_sleeping && plan.steps < PLAN_MAX_STEPS {
-            let left = self.max_step_duration.saturating_sub(start.elapsed());
+            let left =
+                (self.max_step_duration * PLAN_BUDGET_FACTOR).saturating_sub(start.elapsed());
             // At least one (time-sliced) step per frame, so an exhausted
             // budget still makes progress.
             if left.is_zero() && this_frame > 0 {
@@ -724,8 +732,58 @@ impl GraphLayout {
             .collect();
         springs.sort_by_key(|s| (s.a, s.b));
         self.springs = springs;
+        let mut groups: Vec<Vec<NodeIndex>> = agent_groups
+            .into_values()
+            .filter(|g| g.len() >= 2)
+            .map(|mut g| {
+                g.sort();
+                g
+            })
+            .collect();
+        groups.sort();
+        self.agent_groups = groups;
         self.springs_key = Some(key);
         self.edge_cursor = 0;
+    }
+
+    /// Rigid link of the instances of one catalog agent: every instance
+    /// farther than ring contact from the group's anchor (its first pinned
+    /// instance, otherwise its first instance) is pulled back to ring
+    /// contact. Like a collision, an unpinned pair shares the correction, so
+    /// the forces on every instance move the whole group as one body;
+    /// collision then spreads the instances around the anchor.
+    fn bind_agent_groups(&mut self) {
+        let reach = 2.0 * (self.collision_radius + COLLISION_MARGIN);
+        for group in &self.agent_groups {
+            let Some(&anchor) = group
+                .iter()
+                .find(|i| self.nodes.get(i).is_some_and(|p| p.pinned))
+                .or_else(|| group.iter().find(|i| self.nodes.contains_key(i)))
+            else {
+                continue;
+            };
+            for &idx in group {
+                let (Some(a), Some(p)) = (self.nodes.get(&anchor), self.nodes.get(&idx)) else {
+                    continue;
+                };
+                if idx == anchor || p.pinned {
+                    continue;
+                }
+                let d = p.pos - a.pos;
+                let excess = d.length() - reach;
+                if excess <= 0.0 {
+                    continue;
+                }
+                let dir = d.normalized();
+                let anchor_share = if a.pinned { 0.0 } else { 0.5 };
+                if let Some(a) = self.nodes.get_mut(&anchor) {
+                    a.pos += dir * (excess * anchor_share);
+                }
+                if let Some(p) = self.nodes.get_mut(&idx) {
+                    p.pos -= dir * (excess * (1.0 - anchor_share));
+                }
+            }
+        }
     }
 
     /// Access to aggregated springs (for tests and inspection).
@@ -918,7 +976,14 @@ impl GraphLayout {
         }
         self.refresh_springs(graph);
 
-        let mut forces = HashMap::<NodeIndex, egui::Vec2>::new();
+        // Forces by position in `sorted_indices`; the pair loops avoid map lookups.
+        let mut forces = vec![egui::Vec2::ZERO; n];
+        let slot: HashMap<NodeIndex, usize> = self
+            .sorted_indices
+            .iter()
+            .enumerate()
+            .map(|(k, i)| (*i, k))
+            .collect();
 
         // 1. Coulomb repulsion with exact pair cursor
         let total_pairs = n * (n - 1) / 2;
@@ -935,20 +1000,15 @@ impl GraphLayout {
                 break;
             }
 
-            let idx_i = self.sorted_indices[cur_i];
-            let idx_j = self.sorted_indices[cur_j];
-            let pos_i = self.nodes[&idx_i].pos;
-            let pos_j = self.nodes[&idx_j].pos;
-
-            let d = pos_j - pos_i;
+            let d = start_pos[cur_j] - start_pos[cur_i];
             let dist_sq = d.length_sq().max(1.0);
             let dist = dist_sq.sqrt();
 
             let force_mag = self.k_rep / dist_sq;
             let f = (d / dist) * force_mag;
 
-            *forces.entry(idx_i).or_default() -= f;
-            *forces.entry(idx_j).or_default() += f;
+            forces[cur_i] -= f;
+            forces[cur_j] += f;
 
             processed_pairs += 1;
             cur_j += 1;
@@ -978,17 +1038,17 @@ impl GraphLayout {
                 let s = self.springs[i];
                 // Hierarchy: the tree places spawn pairs; messages and clusters act on x only, weaker.
                 if !(hierarchy && s.msgs == 0 && !s.is_cluster)
-                    && let (Some(pa), Some(pb)) = (self.nodes.get(&s.a), self.nodes.get(&s.b))
+                    && let (Some(&a), Some(&b)) = (slot.get(&s.a), slot.get(&s.b))
                 {
                     let (k, l) = self.spring_params_for(&s);
-                    let d = pb.pos - pa.pos;
+                    let d = start_pos[b] - start_pos[a];
                     let dist = d.length().max(1.0);
                     let mut f = (d / dist) * (k * (dist - l));
                     if hierarchy {
                         f = egui::vec2(f.x * 0.5, 0.0);
                     }
-                    *forces.entry(s.a).or_default() += f;
-                    *forces.entry(s.b).or_default() -= f;
+                    forces[a] += f;
+                    forces[b] -= f;
                 }
                 i += 1;
                 done += 1;
@@ -1019,7 +1079,7 @@ impl GraphLayout {
                 if phys.pinned {
                     phys.vel = egui::Vec2::ZERO;
                 } else {
-                    let pair_f = forces.get(&idx).copied().unwrap_or(egui::Vec2::ZERO);
+                    let pair_f = forces[k];
                     let f = match target {
                         // Hierarchy: anchor to the tree slot instead of center gravity.
                         Some(t) => {
@@ -1047,6 +1107,10 @@ impl GraphLayout {
         }
 
         self.integrate_cursor = k;
+
+        if !hierarchy {
+            self.bind_agent_groups();
+        }
 
         // 4. Collision separation (position-based) with its own resume cursor
         if !self.collide(start_time, total_pairs) {
@@ -1107,25 +1171,27 @@ impl GraphLayout {
     fn collide(&mut self, start_time: std::time::Instant, total_pairs: usize) -> bool {
         let n = self.sorted_indices.len();
         let min_dist = 2.0 * self.collision_radius;
+        // Local copies: the pair loop avoids map lookups.
+        let mut pos: Vec<egui::Pos2> = Vec::with_capacity(n);
+        let mut pinned: Vec<bool> = Vec::with_capacity(n);
+        for idx in &self.sorted_indices {
+            let p = &self.nodes[idx];
+            pos.push(p.pos);
+            pinned.push(p.pinned);
+        }
         let mut processed = 0usize;
+        let mut complete = true;
         while processed < total_pairs {
             if processed > 0
                 && processed.is_multiple_of(64)
                 && start_time.elapsed() >= self.max_step_duration
             {
-                return false;
+                complete = false;
+                break;
             }
             let (ci, cj) = (self.collision_i, self.collision_j);
-            let (idx_i, idx_j) = (self.sorted_indices[ci], self.sorted_indices[cj]);
-            let (pi, pin_i) = {
-                let p = &self.nodes[&idx_i];
-                (p.pos, p.pinned)
-            };
-            let (pj, pin_j) = {
-                let p = &self.nodes[&idx_j];
-                (p.pos, p.pinned)
-            };
-            let d = pj - pi;
+            let (pin_i, pin_j) = (pinned[ci], pinned[cj]);
+            let d = pos[cj] - pos[ci];
             let dist = d.length();
             if dist < min_dist && !(pin_i && pin_j) {
                 let dir = if dist > 1e-3 {
@@ -1141,12 +1207,8 @@ impl GraphLayout {
                     (_, true) => (delta, 0.0),
                     _ => (delta * 0.5, delta * 0.5),
                 };
-                if let Some(p) = self.nodes.get_mut(&idx_i) {
-                    p.pos -= dir * move_i;
-                }
-                if let Some(p) = self.nodes.get_mut(&idx_j) {
-                    p.pos += dir * move_j;
-                }
+                pos[ci] -= dir * move_i;
+                pos[cj] += dir * move_j;
                 // Contact within the 1 px margin of both nodes leaves the rings
                 // apart; only a deeper overlap keeps the layout awake.
                 if delta > 2.0 * COLLISION_MARGIN {
@@ -1171,7 +1233,12 @@ impl GraphLayout {
                 self.collision_done = 0;
             }
         }
-        true
+        for (idx, p) in self.sorted_indices.iter().zip(pos) {
+            if let Some(phys) = self.nodes.get_mut(idx) {
+                phys.pos = p;
+            }
+        }
+        complete
     }
 }
 
