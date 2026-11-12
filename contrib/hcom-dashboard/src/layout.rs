@@ -68,12 +68,26 @@ pub struct Spring {
 /// mode switch.
 pub const TRANSITION_SECS: f32 = 4.0;
 /// Average speed (px/s) of the eased move to settled positions; smoothstep
-/// peaks at 1.5x, close to the live simulation's ~200 px/s.
-const SETTLE_SPEED: f32 = 120.0;
-/// Shortest eased move to settled positions.
+/// peaks at 1.5x, under 6 px per frame at 60 fps.
+const SETTLE_SPEED: f32 = 230.0;
+/// Shortest and longest eased move to settled positions.
 const SETTLE_MIN_SECS: f32 = 0.3;
-/// Step limit of a simulation that computes target positions.
-const PLAN_MAX_STEPS: u32 = 3000;
+const SETTLE_MAX_SECS: f32 = 2.0;
+/// Step limits of a simulation that computes target positions: the
+/// full-strength phase, and in total with the cooling tail (~750 steps).
+const PLAN_CONVERGE_STEPS: u32 = 3000;
+const PLAN_MAX_STEPS: u32 = 4000;
+/// Step time of a planning simulation: the longest step `simulate` accepts,
+/// since no frame shows its intermediate positions.
+const PLAN_DT: f32 = 1.0 / 30.0;
+/// A planning simulation runs at full strength without cooling, so it finds
+/// the force equilibrium instead of freezing on the way there; it counts as
+/// converged when no node moved `PLAN_SETTLED_PX` over `PLAN_WINDOW` steps.
+const PLAN_WINDOW: u32 = 60;
+const PLAN_SETTLED_PX: f32 = 1.0;
+/// Stiffness of the spring between instances of the same catalog agent; it
+/// dominates message springs and repulsion, so the instances sit together.
+const CLUSTER_K: f32 = 300.0;
 
 /// Eased move of the unpinned nodes from `from` to `to`.
 #[derive(Debug, Clone)]
@@ -168,6 +182,12 @@ pub struct GraphLayout {
     /// nodes there with a transition, so no node swings back and forth.
     pub dragging: bool,
     plan: Option<Plan>,
+    /// Planning copy in its full-strength phase: positions at the start of
+    /// the current convergence window and the complete steps since then
+    /// (see `plan_step`).
+    convergence: Option<(Vec<egui::Pos2>, u32)>,
+    /// The last `simulate` call finished every pass within the frame budget.
+    step_complete: bool,
 }
 
 impl Default for GraphLayout {
@@ -223,6 +243,8 @@ impl GraphLayout {
             transition: None,
             dragging: false,
             plan: None,
+            convergence: None,
+            step_complete: false,
         }
     }
 
@@ -368,9 +390,9 @@ impl GraphLayout {
         sim.sorted_indices.sort();
         sim.is_sleeping = false;
         sim.calm_steps = 0;
-        sim.alpha = 1.0;
-        for _ in 0..PLAN_MAX_STEPS {
-            sim.simulate(graph, 1.0 / 60.0);
+        sim.converge_fully();
+        for steps in 0..PLAN_MAX_STEPS {
+            sim.plan_step(graph, steps);
             if sim.is_sleeping {
                 break;
             }
@@ -439,6 +461,7 @@ impl GraphLayout {
             let mut sim = self.clone();
             sim.transition = None;
             sim.dragging = false;
+            sim.converge_fully();
             self.plan = Some(Plan {
                 sim: Box::new(sim),
                 steps: 0,
@@ -454,12 +477,13 @@ impl GraphLayout {
                 return self.epsilon_sleep + 0.1;
             }
             plan.sim.max_step_duration = left;
-            plan.sim.simulate(graph, 1.0 / 60.0);
+            plan.sim.plan_step(graph, plan.steps);
             plan.steps += 1;
             this_frame += 1;
         }
         let plan = self.plan.take().expect("plan exists");
-        self.alpha = plan.sim.alpha;
+        // The targets are the equilibrium: a later wake reheats gently.
+        self.alpha = self.alpha.min(self.alpha_min);
         let mut from = HashMap::new();
         let mut to = HashMap::new();
         let mut longest = 0.0f32;
@@ -476,10 +500,64 @@ impl GraphLayout {
             from,
             to,
             elapsed: 0.0,
-            duration: (longest / SETTLE_SPEED).clamp(SETTLE_MIN_SECS, TRANSITION_SECS),
+            duration: (longest / SETTLE_SPEED).clamp(SETTLE_MIN_SECS, SETTLE_MAX_SECS),
             reset: false,
         });
         self.epsilon_sleep + 0.1
+    }
+
+    /// Makes this planning copy run at full strength without cooling (see
+    /// `plan_step`).
+    fn converge_fully(&mut self) {
+        self.alpha = 1.0;
+        self.convergence = Some((Vec::new(), PLAN_WINDOW));
+    }
+
+    /// One planning step at `PLAN_DT`. The full-strength phase ends once no
+    /// node moved `PLAN_SETTLED_PX` over the last `PLAN_WINDOW` complete
+    /// steps (the force equilibrium; contact jitter cancels out over the
+    /// window; a step cut by the frame budget does not count) or after
+    /// `PLAN_CONVERGE_STEPS`. The cap makes a plan whose steps the budget
+    /// keeps cutting (very large graphs) a bounded approximation, not the
+    /// equilibrium. A cooling run from `alpha_reheat` then relieves lasting
+    /// contact pressure and sleeps as the live layout does.
+    fn plan_step(&mut self, graph: &AgentGraph, steps: u32) {
+        if steps >= PLAN_CONVERGE_STEPS {
+            self.end_convergence();
+        }
+        if let Some((start, complete)) = &self.convergence
+            && *complete >= PLAN_WINDOW
+        {
+            let now: Vec<egui::Pos2> = self
+                .sorted_indices
+                .iter()
+                .map(|i| self.nodes[i].pos)
+                .collect();
+            let settled = start.len() == now.len()
+                && start
+                    .iter()
+                    .zip(&now)
+                    .all(|(a, b)| a.distance(*b) < PLAN_SETTLED_PX);
+            if settled {
+                self.end_convergence();
+            } else {
+                self.convergence = Some((now, 0));
+            }
+        }
+        self.simulate(graph, PLAN_DT);
+        if self.step_complete
+            && let Some((_, n)) = self.convergence.as_mut()
+        {
+            *n += 1;
+        }
+    }
+
+    /// Ends the full-strength planning phase (see `plan_step`).
+    fn end_convergence(&mut self) {
+        if self.convergence.take().is_some() {
+            self.alpha = self.alpha_reheat;
+            self.calm_steps = 0;
+        }
     }
 
     /// Advances the transition by `dt`: smoothstep from `from` to `to`, so
@@ -667,14 +745,12 @@ impl GraphLayout {
         (k, l)
     }
 
-    /// Stiffness and rest length taking cluster cohesion into account.
+    /// Stiffness and rest length taking cluster cohesion into account:
+    /// instances of one agent rest just beyond ring contact.
     pub fn spring_params_for(&self, s: &Spring) -> (f32, f32) {
         if s.is_cluster {
-            if s.msgs == 0 {
-                return (25.0, 75.0);
-            }
-            let (k, l) = self.spring_params(s.msgs);
-            return (k + 15.0, l.min(75.0));
+            let (k, _) = self.spring_params(s.msgs);
+            return (k.max(CLUSTER_K), 2.0 * self.collision_radius + 5.0);
         }
         self.spring_params(s.msgs)
     }
@@ -796,6 +872,7 @@ impl GraphLayout {
         }
 
         let n = self.sorted_indices.len();
+        self.step_complete = n < 2;
         if n < 2 {
             return 0.0;
         }
@@ -984,7 +1061,13 @@ impl GraphLayout {
             .map(|(idx, p0)| self.nodes[idx].pos.distance(*p0))
             .fold(0.0f32, f32::max);
 
-        if !budget_exceeded && total_motion < self.epsilon_sleep && self.last_collision_pass_clean {
+        // A planning copy in its full-strength phase neither sleeps nor cools.
+        let converging = self.convergence.is_some();
+        if !converging
+            && !budget_exceeded
+            && total_motion < self.epsilon_sleep
+            && self.last_collision_pass_clean
+        {
             self.calm_steps += 1;
             if self.calm_steps >= self.sleep_after_calm_steps {
                 self.is_sleeping = true;
@@ -994,7 +1077,9 @@ impl GraphLayout {
         }
         // Cooling counts steps, not time, so the layout stops even when the
         // frame budget cuts passes short.
-        self.alpha *= 1.0 - self.alpha_decay;
+        if !converging {
+            self.alpha *= 1.0 - self.alpha_decay;
+        }
         if self.alpha < self.alpha_min {
             // Start a fresh collision pass; the previous result predates the
             // last integration.
@@ -1003,6 +1088,7 @@ impl GraphLayout {
             self.last_collision_pass_clean = false;
         }
 
+        self.step_complete = !budget_exceeded;
         if budget_exceeded || !self.last_collision_pass_clean {
             total_motion.max(self.epsilon_sleep + 0.1)
         } else {

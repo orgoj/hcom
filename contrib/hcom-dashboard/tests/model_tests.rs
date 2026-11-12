@@ -3875,6 +3875,8 @@ fn test_collision_pass_resumes_under_tight_budget() {
     layout.set_node_pos(last, Pos2::new(5_000_000.0, 0.0), false);
     layout.set_node_pos(prev, Pos2::new(5_000_000.0, 0.0), false);
     layout.max_step_duration = Duration::from_micros(300);
+    // Live physics: the planning copy no longer cools (TASK-77.106).
+    layout.dragging = true;
     for _ in 0..3000 {
         layout.step(&graph, 0.016);
         let d = layout.nodes[&last].pos.distance(layout.nodes[&prev].pos);
@@ -6280,6 +6282,8 @@ fn test_layout_alpha_cooling_sleeps_with_exhausted_budget() {
     let mut layout = GraphLayout::new();
     layout.max_step_duration = std::time::Duration::ZERO;
     layout.sync_nodes(&graph);
+    // Live physics: the planning copy no longer cools (TASK-77.106).
+    layout.dragging = true;
     let steps = (1..=1000).find(|_| {
         layout.step(&graph, 1.0 / 60.0);
         layout.is_sleeping
@@ -6503,6 +6507,8 @@ fn test_layout_alpha_stop_waits_for_a_full_collision_pass() {
     layout.set_node_pos(last, Pos2::new(5_000_000.0, 0.0), false);
     layout.set_node_pos(prev, Pos2::new(5_000_000.0, 0.0), false);
     layout.max_step_duration = Duration::from_micros(300);
+    // Live physics: the planning copy no longer cools (TASK-77.106).
+    layout.dragging = true;
     // Stale clean result and alpha one step above the threshold.
     layout.last_collision_pass_clean = true;
     layout.alpha = layout.alpha_min * 1.001;
@@ -16143,6 +16149,117 @@ fn test_task_77_105_cluster_springs_pull_instances_of_same_agent_together() {
         cross_spring.is_none(),
         "no cluster spring between different agents"
     );
+}
+
+/// Realistic graph plus two instances of agent `x` that talk to partners on
+/// opposite sides, settled through the planned move.
+fn settled_cluster_layout() -> (AgentGraph, GraphLayout) {
+    let mut graph = realistic_layout_graph();
+    let mut snap: Vec<InstanceSnapshot> = graph
+        .graph
+        .node_indices()
+        .map(|i| {
+            let n = &graph.graph[i];
+            layout_snap(&n.name, n.parent_name.as_deref())
+        })
+        .collect();
+    for name in ["x_1", "x_2"] {
+        let mut s = layout_snap(name, None);
+        s.agent_name = Some("x".into());
+        snap.push(s);
+    }
+    graph.apply_instance_snapshot(&snap);
+    let now = Utc::now();
+    for id in 0..20 {
+        graph.apply_message_event(&window_msg(1000 + 2 * id, now, "x_1", "boss"));
+        graph.apply_message_event(&window_msg(1001 + 2 * id, now, "x_2", "lone2"));
+    }
+    let mut layout = GraphLayout::new();
+    layout.max_step_duration = Duration::from_secs(1);
+    layout.sync_nodes(&graph);
+    settle(&mut layout, &graph);
+    (graph, layout)
+}
+
+fn settle(layout: &mut GraphLayout, graph: &AgentGraph) {
+    for _ in 0..2000 {
+        layout.step(graph, 1.0 / 60.0);
+        if layout.is_sleeping {
+            return;
+        }
+    }
+    panic!("layout did not come to rest");
+}
+
+/// Instances of one catalog agent end next to each other even when each
+/// talks to a different partner (TASK-77.106).
+#[test]
+fn test_task_77_106_instances_of_one_agent_settle_together() {
+    let (graph, layout) = settled_cluster_layout();
+    let d = node_pos(&layout, &graph, "x_1").distance(node_pos(&layout, &graph, "x_2"));
+    assert!(d < 100.0, "instances of agent x are {d} px apart");
+}
+
+/// Steps cut by the frame budget never count toward convergence: a plan
+/// whose every step is cut runs its full-strength phase to the 3000-step cap
+/// and still ends (bounded approximation) within the 4000-step limit
+/// (TASK-77.106 review).
+#[test]
+fn test_task_77_106_cut_plan_steps_do_not_converge_but_plan_is_bounded() {
+    let mut graph = AgentGraph::new();
+    let snap: Vec<InstanceSnapshot> = (0..40)
+        .map(|i| layout_snap(&format!("n{i}"), None))
+        .collect();
+    graph.apply_instance_snapshot(&snap);
+    let mut layout = GraphLayout::new();
+    layout.max_step_duration = Duration::ZERO;
+    layout.sync_nodes(&graph);
+    // One (cut) planning step per frame until the move starts.
+    let frames = (1..=5000).find(|_| {
+        layout.step(&graph, 1.0 / 60.0);
+        layout.transition.is_some()
+    });
+    assert!(
+        matches!(frames, Some(f) if f > 3000 && f <= 4000),
+        "plan with cut steps ended after {frames:?} frames"
+    );
+}
+
+/// The planned rest is the force equilibrium, not a cooled freeze: planning
+/// again from it moves nothing visibly, and a small nudge of one node moves
+/// the others only slightly (TASK-77.106).
+#[test]
+fn test_task_77_106_plan_reaches_equilibrium_and_nudge_stays_local() {
+    let (graph, mut layout) = settled_cluster_layout();
+    let rest: std::collections::HashMap<_, _> =
+        layout.nodes.iter().map(|(i, p)| (*i, p.pos)).collect();
+    let max_shift = |layout: &GraphLayout, skip: Option<petgraph::stable_graph::NodeIndex>| {
+        layout
+            .nodes
+            .iter()
+            .filter(|(i, _)| Some(**i) != skip)
+            .map(|(i, p)| p.pos.distance(rest[i]))
+            .fold(0.0f32, f32::max)
+    };
+
+    layout.wake_up();
+    settle(&mut layout, &graph);
+    let replan = max_shift(&layout, None);
+    assert!(
+        replan < 3.0,
+        "re-planning the rest moved a node {replan} px"
+    );
+
+    let lone1 = graph.get_node_index("lone1").unwrap();
+    let p = layout.nodes[&lone1].pos + Vec2::new(10.0, 0.0);
+    layout.dragging = true;
+    layout.set_node_pos(lone1, p, true);
+    layout.step(&graph, 1.0 / 60.0);
+    layout.dragging = false;
+    layout.set_node_pos(lone1, p, false);
+    settle(&mut layout, &graph);
+    let nudge = max_shift(&layout, Some(lone1));
+    assert!(nudge < 25.0, "a 10 px nudge moved another node {nudge} px");
 }
 
 #[test]
