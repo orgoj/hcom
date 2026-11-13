@@ -66,6 +66,14 @@ pub struct DashboardConfig {
     /// Fields of the node hover tooltip (same keys as `report`); empty = off.
     #[serde(default = "default_tooltip")]
     pub tooltip: Vec<String>,
+    /// Format of durations (Since, Age, Runtime): tokens `d`, `hh`, `h`,
+    /// `mm`, `ss`; `short` is the largest unit only (`1h`).
+    #[serde(default = "default_time_format")]
+    pub time_format: String,
+}
+
+pub fn default_time_format() -> String {
+    "hh:mm".to_string()
 }
 
 pub fn default_tooltip() -> Vec<String> {
@@ -174,6 +182,7 @@ impl Default for DashboardConfig {
             screen_bar: default_screen_bar(),
             report: default_report(),
             tooltip: default_tooltip(),
+            time_format: default_time_format(),
         }
     }
 }

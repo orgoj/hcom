@@ -873,6 +873,7 @@ impl HcomDashboardApp {
         let hcom_dir = crate::config::hcom_dir();
 
         let config = load_config(&hcom_dir);
+        crate::table_data::set_time_format(&config.time_format);
         let state = load_state(&hcom_dir);
         let window_span = state.window_span_secs;
 

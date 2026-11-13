@@ -1,9 +1,10 @@
 ---
 id: TASK-77.109
 title: 'Dashboard: nastavitelný formát časových údajů (default hh:mm)'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-13T08:34:00Z'
+updated_date: '2026-11-13T09:26:00Z'
 labels:
   - feature
 dependencies: []
@@ -19,7 +20,13 @@ Sloupce Since/Age (format_age v contrib/hcom-dashboard/src/table_data.rs) ukazuj
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 dashboard.json má volbu formátu časových údajů, default hh:mm
-- [ ] #2 Sloupce Since a Age zobrazují minuty podle zvoleného formátu
-- [ ] #3 Formát je popsaný v dokumentaci dashboardu a pokrytý testy
+- [x] #1 dashboard.json má volbu formátu časových údajů, default hh:mm
+- [x] #2 Sloupce Since a Age zobrazují minuty podle zvoleného formátu
+- [x] #3 Formát je popsaný v dokumentaci dashboardu a pokrytý testy
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+time_format v dashboard.json (default hh:mm, tokeny d/hh/h/mm/ss, short = dřívější tvar) pro Since, Age, Runtime, Status Age a délku session; README a test test_task_77_109_duration_formats. Review agent_review OK.
+<!-- SECTION:FINAL_SUMMARY:END -->

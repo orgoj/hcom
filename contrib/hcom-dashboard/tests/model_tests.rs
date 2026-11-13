@@ -2866,7 +2866,7 @@ fn test_event_stats_computation_and_application() {
     assert_eq!(r.msgs_count, Some(2)); // 1 sent + 1 received
     assert_eq!(r.last_start_text, "2026-11-01T10:10:00Z");
     // 5 minutes from first session + 5 minutes up to now in second active session = 10m
-    assert_eq!(r.runtime_text, "10m");
+    assert_eq!(r.runtime_text, "00:10");
 }
 
 #[test]
@@ -10959,7 +10959,7 @@ fn test_task_77_26_last_limit_count_and_agent_fields_texts() {
     let labels: Vec<&str> = fields.iter().map(|(l, _)| *l).collect();
     assert_eq!(labels, ["Status Age", "Unread Count", "CLI Tool"]);
     assert_eq!(fields[0].1, hcom_dashboard::table_data::format_age(300));
-    assert_eq!(fields[0].1, "5m");
+    assert_eq!(fields[0].1, "00:05");
     assert!(agent_meta_fields(None, None).is_empty());
 }
 
@@ -14507,7 +14507,7 @@ fn test_task_77_81_compact_card_and_handoff_link() {
     );
     // Fallback title, launch summary, meta, directory, partners.
     assert_eq!(card_lines("session s0000001", resumes[1].0.top()), 5);
-    find(&all, "ended · 47m");
+    find(&all, "ended · 00:47");
     let start = |i: usize| {
         chrono::DateTime::from_timestamp(session_minutes_start(&sessions[i]) as i64, 0)
             .unwrap()
@@ -16705,4 +16705,30 @@ fn test_task_77_105_parse_sessions_live_non_prefix_instance() {
     assert_eq!(sessions[0].partners.len(), 1);
     assert_eq!(sessions[0].partners[0].name, "proweb_main");
     assert_eq!(sessions[0].partners[0].sent, 1);
+}
+
+/// TASK-77.109: durations use the configured `time_format`, default `hh:mm`.
+#[test]
+fn test_task_77_109_duration_formats() {
+    use hcom_dashboard::table_data::format_duration;
+    let t = 51 * 3600 + 15 * 60 + 7;
+    assert_eq!(format_duration(300, "hh:mm"), "00:05");
+    assert_eq!(format_duration(5000, "hh:mm"), "01:23");
+    assert_eq!(format_duration(t, "hh:mm"), "51:15");
+    assert_eq!(format_duration(t, "d hh:mm"), "2 03:15");
+    assert_eq!(format_duration(t, "h:mm:ss"), "51:15:07");
+    assert_eq!(format_duration(125, "mm:ss"), "02:05");
+    assert_eq!(format_duration(5000, "short"), "1h");
+    assert_eq!(format_duration(t, "short"), "2d");
+
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = hcom_dashboard::config::load_config(dir.path());
+    assert_eq!(cfg.time_format, "hh:mm");
+    std::fs::write(
+        dir.path().join("dashboard.json"),
+        r#"{"time_format": "d hh:mm"}"#,
+    )
+    .unwrap();
+    let cfg = hcom_dashboard::config::load_config(dir.path());
+    assert_eq!(cfg.time_format, "d hh:mm");
 }

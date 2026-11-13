@@ -21,7 +21,70 @@ pub const DEFAULT_COLUMNS: &[&str] = &[
     "git",
 ];
 
+/// The `time_format` of `dashboard.json`, set once at start; rows are built on
+/// background threads, so it is not passed through every builder.
+static TIME_FORMAT: std::sync::RwLock<String> = std::sync::RwLock::new(String::new());
+
+pub fn set_time_format(format: &str) {
+    if let Ok(mut f) = TIME_FORMAT.write() {
+        *f = format.to_string();
+    }
+}
+
+/// A duration in the configured `time_format` (default `hh:mm`).
 pub fn format_age(seconds: u64) -> String {
+    let format = TIME_FORMAT.read().map(|f| f.clone()).unwrap_or_default();
+    if format.is_empty() {
+        format_duration(seconds, &crate::config::default_time_format())
+    } else {
+        format_duration(seconds, &format)
+    }
+}
+
+/// `format` tokens: `d` days, `hh`/`h` hours (padded/unpadded), `mm` minutes,
+/// `ss` seconds; anything else is literal. The largest unit present holds the
+/// whole remainder (`hh:mm` of 51 h 15 m is `51:15`). `short` is the largest
+/// unit only (`2d`, `1h`, `5m`, `30s`).
+pub fn format_duration(seconds: u64, format: &str) -> String {
+    if format == "short" {
+        return format_short(seconds);
+    }
+    let has = |t: &str| format.contains(t);
+    let days = seconds / 86400;
+    let hours = if has("d") {
+        seconds % 86400 / 3600
+    } else {
+        seconds / 3600
+    };
+    let minutes = if has("h") {
+        seconds % 3600 / 60
+    } else {
+        seconds / 60
+    };
+    let secs = if has("m") { seconds % 60 } else { seconds };
+    let mut out = String::new();
+    let mut rest = format;
+    while let Some(c) = rest.chars().next() {
+        let (text, len) = if rest.starts_with("hh") {
+            (format!("{hours:02}"), 2)
+        } else if rest.starts_with("mm") {
+            (format!("{minutes:02}"), 2)
+        } else if rest.starts_with("ss") {
+            (format!("{secs:02}"), 2)
+        } else if c == 'h' {
+            (hours.to_string(), 1)
+        } else if c == 'd' {
+            (days.to_string(), 1)
+        } else {
+            (c.to_string(), c.len_utf8())
+        };
+        out.push_str(&text);
+        rest = &rest[len..];
+    }
+    out
+}
+
+fn format_short(seconds: u64) -> String {
     if seconds >= 86400 {
         format!("{}d", seconds / 86400)
     } else if seconds >= 3600 {
