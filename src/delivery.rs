@@ -446,6 +446,11 @@ mod host_label {
 
     impl Backend {
         fn resolve() -> Option<Self> {
+            // Unit tests inherit HERDR_* from the developer's pane; a test
+            // delivery loop would rename that live Herdr agent (TASK-107).
+            if cfg!(test) {
+                return None;
+            }
             if std::env::var("HERDR_ENV").ok().as_deref() == Some("1") {
                 let socket_path = std::env::var("HERDR_SOCKET_PATH")
                     .ok()
@@ -726,6 +731,25 @@ mod host_label {
             let db = crate::db::HcomDb::open().unwrap();
 
             assert_eq!(pane_title_label(&db, "luna", ST_LISTENING, ""), "");
+        }
+
+        #[test]
+        #[serial]
+        fn resolve_never_reaches_a_live_herdr_in_unit_tests() {
+            // SAFETY: test is #[serial].
+            unsafe {
+                std::env::set_var("HERDR_ENV", "1");
+                std::env::set_var("HERDR_SOCKET_PATH", "/nonexistent/herdr.sock");
+                std::env::set_var("HERDR_PANE_ID", "w1:p1");
+            }
+            let label = HostLabel::resolve();
+            // SAFETY: clear before assert so a panic doesn't leak env.
+            unsafe {
+                std::env::remove_var("HERDR_ENV");
+                std::env::remove_var("HERDR_SOCKET_PATH");
+                std::env::remove_var("HERDR_PANE_ID");
+            }
+            assert!(label.backend.is_none());
         }
 
         #[test]
