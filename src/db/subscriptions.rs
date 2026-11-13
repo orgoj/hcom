@@ -191,6 +191,8 @@ fn instance_tool(db: &HcomDb, name: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Same rule as the live cancel paths: a message with `reply_to` answers only
+/// that event, so a reply to another request leaves this one open.
 fn reqwatch_reply_exists(db: &HcomDb, request_id: i64, target: &str, sub_caller: &str) -> bool {
     if sub_caller.is_empty() {
         return false;
@@ -199,7 +201,9 @@ fn reqwatch_reply_exists(db: &HcomDb, request_id: i64, target: &str, sub_caller:
         .query_row(
             "SELECT 1 FROM events_v WHERE id > ? AND type = 'message' \
              AND msg_from = ? AND (\
-               (msg_scope = 'mentions' AND EXISTS (\
+               (msg_scope = 'mentions' \
+                AND json_extract(data, '$.reply_to_local') IS NULL \
+                AND EXISTS (\
                   SELECT 1 FROM json_each(msg_delivered_to) WHERE value = ?\
                 )) \
                OR json_extract(data, '$.reply_to_local') = ? \
@@ -289,7 +293,9 @@ fn sweep_expired_reqwatch_graces(db: &HcomDb, now: f64) {
                        SELECT 1 FROM events_v
                        WHERE id > ?4 AND type = 'message' AND msg_from = ?3
                          AND (
-                             (msg_scope = 'mentions' AND EXISTS (
+                             (msg_scope = 'mentions'
+                              AND json_extract(data, '$.reply_to_local') IS NULL
+                              AND EXISTS (
                                  SELECT 1 FROM json_each(msg_delivered_to) WHERE value = ?5
                              ))
                              OR json_extract(data, '$.reply_to_local') = ?4
@@ -1124,6 +1130,7 @@ pub(crate) fn cancel_request_watches_by_flow(
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
                 if req_id != rid {
+                    notify_request_still_open(db, key, sub, sender, rid, req_id);
                     continue;
                 }
             }
@@ -1136,6 +1143,31 @@ pub(crate) fn cancel_request_watches_by_flow(
             }
         }
     }
+}
+
+/// The target replied to another event while this request stays open: tell
+/// the requester once, so a request skipped in a batch does not wait unseen
+/// (the idle notice may be off, see `request_idle_notify`).
+fn notify_request_still_open(
+    db: &HcomDb,
+    key: &str,
+    sub: &serde_json::Value,
+    target: &str,
+    replied_to: i64,
+    request_id: i64,
+) {
+    if sub.get("open_notified").is_some() {
+        return;
+    }
+    let caller = sub.get("caller").and_then(|v| v.as_str()).unwrap_or("");
+    let sub_id = sub.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let text = format!(
+        "[sub:{sub_id}] {target} replied to #{replied_to}, but your request #{request_id} is still unanswered. If that reply does not cover it, remind {target}."
+    );
+    send_sub_notification(db, caller, &text);
+    let mut sub_mut = sub.clone();
+    sub_mut["open_notified"] = serde_json::json!(true);
+    kv_store_sub(db, key, &sub_mut);
 }
 
 /// Cancel request-watch subs by explicit reply_to match.
@@ -1641,6 +1673,78 @@ mod tests {
         cleanup_test_db(db_path);
     }
 
+    /// One reply marked for request A must not close request B (TASK-113).
+    #[test]
+    fn test_reply_to_one_request_keeps_the_other_open_and_says_so() {
+        let (db, db_path) = setup_full_test_db();
+        let first = setup_reqwatch_pair(&db, "gora", "nabe", "claude");
+        let req_data = serde_json::json!({
+            "from": "gora", "sender_kind": "instance", "scope": "mentions",
+            "text": "second", "delivered_to": ["nabe"], "intent": "request",
+            "mentions": ["nabe"],
+        });
+        let second = db.log_event("message", "gora", &req_data).unwrap();
+        create_request_watches(&db, "gora", second, &["nabe".to_string()], false);
+        db.conn()
+            .execute(
+                "UPDATE instances SET last_event_id = ?1 WHERE name = 'nabe'",
+                params![second],
+            )
+            .unwrap();
+
+        let reply = serde_json::json!({
+            "from": "nabe", "sender_kind": "instance", "scope": "mentions",
+            "text": "done", "delivered_to": ["gora"], "intent": "ack",
+            "mentions": ["gora"], "reply_to_local": first,
+        });
+        db.log_event("message", "nabe", &reply).unwrap();
+        db.log_event(
+            "status",
+            "nabe",
+            &serde_json::json!({"status": "listening"}),
+        )
+        .unwrap();
+
+        assert!(
+            db.kv_get(&format!("events_sub:reqwatch-{first}-nabe"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.kv_get(&format!("events_sub:reqwatch-{second}-nabe"))
+                .unwrap()
+                .is_some(),
+            "a reply to #{first} must not close #{second}"
+        );
+        let open_notices = |db: &HcomDb| -> i64 {
+            db.conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM events WHERE type = 'message'
+                     AND json_extract(data, '$.text') LIKE ?1",
+                    params![format!("%your request #{second} is still unanswered%")],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(open_notices(&db), 1);
+
+        // A second reply to #first does not repeat the notice.
+        db.log_event("message", "nabe", &reply).unwrap();
+        assert_eq!(open_notices(&db), 1);
+
+        db.log_event(
+            "life",
+            "nabe",
+            &serde_json::json!({"action": "stopped", "by": "pty"}),
+        )
+        .unwrap();
+        assert!(
+            count_reqwatch_without_reply_notifications(&db, "gora") >= 1,
+            "stopped still reports the open request"
+        );
+        cleanup_test_db(db_path);
+    }
+
     #[test]
     fn test_create_request_watches_records_antigravity_target_tool() {
         let (db, db_path) = setup_full_test_db();
@@ -1920,6 +2024,53 @@ mod tests {
             count_reqwatch_without_reply_notifications(&db, "gora"),
             before,
             "a reply during grace must suppress the idle notice"
+        );
+        cleanup_test_db(db_path);
+    }
+
+    /// agy grace expiry: a reply to request A must not suppress B's idle notice.
+    #[test]
+    fn test_agy_grace_reply_to_other_request_keeps_idle_notice() {
+        let (db, db_path) = setup_full_test_db();
+        let first = setup_reqwatch_pair(&db, "gora", "nabe", "antigravity");
+        let req_data = serde_json::json!({
+            "from": "gora", "sender_kind": "instance", "scope": "mentions",
+            "text": "second", "delivered_to": ["nabe"], "intent": "request",
+            "mentions": ["nabe"],
+        });
+        let second = db.log_event("message", "gora", &req_data).unwrap();
+        create_request_watches(&db, "gora", second, &["nabe".to_string()], true);
+        db.conn()
+            .execute(
+                "UPDATE instances SET last_event_id = ?1 WHERE name = 'nabe'",
+                params![second],
+            )
+            .unwrap();
+        let before = count_reqwatch_without_reply_notifications(&db, "gora");
+
+        db.log_event(
+            "message",
+            "nabe",
+            &serde_json::json!({
+                "from": "nabe", "sender_kind": "instance", "scope": "mentions",
+                "text": "done", "mentions": ["gora"], "delivered_to": ["gora"],
+                "reply_to_local": first,
+            }),
+        )
+        .unwrap();
+        db.set_status("nabe", "listening", "").unwrap();
+        db.log_event(
+            "status",
+            "nabe",
+            &serde_json::json!({"status": "listening", "context": ""}),
+        )
+        .unwrap();
+        sweep_expired_reqwatch_graces(&db, f64::MAX);
+
+        assert_eq!(
+            count_reqwatch_without_reply_notifications(&db, "gora"),
+            before + 1,
+            "#{second} is still open and gets its idle notice"
         );
         cleanup_test_db(db_path);
     }

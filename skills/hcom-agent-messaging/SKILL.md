@@ -91,7 +91,7 @@ tell any agent:
 
 **Idle autokill**: `hcom config -i <name|self> idle_kill <seconds>` (or catalog `"idle_kill"`) kills a local agent (not a remote one or a subagent) that stays idle that long; `0` clears. An agent waiting for a reply to its own `--intent request` message, or with unread messages, is not killed.
 
-**Request watch**: an `--intent request` message notifies its sender when the recipient goes idle or stops without replying. `hcom config request_idle_notify false` keeps only the stopped notice.
+**Request watch**: an `--intent request` message notifies its sender when the recipient goes idle or stops without replying. `hcom config request_idle_notify false` keeps only the stopped notice. A reply with `--reply-to` answers only that request; when the recipient replies to one of your requests while another stays open, you are told once at that moment.
 
 **Roaming catalog agent**: `"roaming": true` makes `@<name>` address `<name>_<project>_<hash>` for the sender's Git/project root (`<hash>` = 3-digit number from SHA-256 of the root path, so roots with the same basename get different instances) and start it there when missing. `hcom send --project-dir <DIR> @<name>` uses `<DIR>`'s project root instead (roaming targets only). Send and `hcom agent <name>` print a `Note:` line on stdout with that instance name; address it by that name. Instances of the role in other projects are separate agents. `hcom list` marks each instance `↻<name>`; `hcom agent list --json` gives a roaming entry's running `instances`.
 
