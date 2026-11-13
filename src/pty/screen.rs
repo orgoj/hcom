@@ -202,8 +202,11 @@ fn is_dash_rule(line: &str) -> bool {
     trimmed.chars().count() >= 3 && trimmed.chars().all(|c| c == '─')
 }
 
-const ANTIGRAVITY_ACCEPT_EDITS_STATUS: &str =
-    "Accept-edits mode: file edits auto-approved (shift+tab to cycle)";
+/// Fixed mode statuses Antigravity renders in the empty input row.
+const ANTIGRAVITY_MODE_STATUSES: &[&str] = &[
+    "Accept-edits mode: file edits auto-approved (shift+tab to cycle)",
+    "Auto mode: edits & safe commands auto-approved (shift+tab to cycle)",
+];
 
 /// Check if a line is a Gemini dash border (all ─ chars, at least 20 wide)
 fn is_dash_border(line: &str) -> bool {
@@ -1323,7 +1326,7 @@ impl ScreenTracker {
             // Antigravity 1.1.20 renders this fixed mode status in the input row
             // with the cursor still parked immediately after `> `. Require both
             // signals so identical user-entered text remains protected.
-            if text == ANTIGRAVITY_ACCEPT_EDITS_STATUS
+            if ANTIGRAVITY_MODE_STATUSES.contains(&text)
                 && prompt_col.is_some_and(|col| {
                     screen.cursor_position() == (row_idx as u16, col.saturating_add(2))
                 })
@@ -2819,16 +2822,17 @@ mod tests {
 
     #[test]
     fn antigravity_fixed_mode_status_at_prompt_cursor_returns_empty() {
-        let status = ANTIGRAVITY_ACCEPT_EDITS_STATUS;
-        let mut t = make_tracker(24, 100, "? for shortcuts");
-        t.process(format!("> {status}\r\n? for shortcuts\x1b[1;3H").as_bytes());
-        assert_eq!(t.get_antigravity_input_text(), Some(String::new()));
+        for status in ANTIGRAVITY_MODE_STATUSES {
+            let mut t = make_tracker(24, 100, "? for shortcuts");
+            t.process(format!("> {status}\r\n? for shortcuts\x1b[1;3H").as_bytes());
+            assert_eq!(t.get_antigravity_input_text(), Some(String::new()));
 
-        let mut typed = make_tracker(24, 100, "? for shortcuts");
-        typed.process(
-            format!("> {status}\r\n? for shortcuts\x1b[1;{}H", status.len() + 3).as_bytes(),
-        );
-        assert_eq!(typed.get_antigravity_input_text(), Some(status.to_string()));
+            let mut typed = make_tracker(24, 100, "? for shortcuts");
+            typed.process(
+                format!("> {status}\r\n? for shortcuts\x1b[1;{}H", status.len() + 3).as_bytes(),
+            );
+            assert_eq!(typed.get_antigravity_input_text(), Some(status.to_string()));
+        }
     }
 
     #[test]
