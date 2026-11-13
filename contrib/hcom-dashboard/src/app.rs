@@ -502,6 +502,11 @@ pub struct HcomDashboardApp {
     /// Start dialog suggestions: installed CLIs, catalog models.
     pub start_cli_choices: Vec<String>,
     pub start_model_choices: Vec<String>,
+    /// Text of the Start dialog cli field; only a suggestion picked from it
+    /// becomes `start_cli`.
+    start_cli_text: String,
+    /// The open suggestion list of a Start dialog field.
+    start_suggest: Option<SuggestList>,
     /// Pending Browse… folder choice for the Start dialog dir.
     pub start_dir_pick: Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
     /// A modal dialog was open in the previous frame.
@@ -762,6 +767,145 @@ struct SearchKeys {
     start: bool,
 }
 
+/// The open suggestion list of a Start dialog field (TASK-77.111).
+#[derive(Clone, Copy)]
+struct SuggestList {
+    field: egui::Id,
+    highlight: Option<usize>,
+}
+
+/// `choices` containing `text` (any case); all of them when `text` is empty
+/// or one of them.
+fn suggestions<'a>(text: &str, choices: &'a [String]) -> Vec<&'a String> {
+    let t = text.trim().to_lowercase();
+    if t.is_empty() || choices.iter().any(|c| c.to_lowercase() == t) {
+        return choices.iter().collect();
+    }
+    choices
+        .iter()
+        .filter(|c| c.to_lowercase().contains(&t))
+        .collect()
+}
+
+/// A text field with a suggestion list below it (TASK-77.111). Typing, a
+/// click or Down opens the list of matching `choices`, Up/Down choose, Enter
+/// or a click put the choice into the field and close the list (the keyboard
+/// stays in the field), Tab puts it there and moves on, Escape closes only
+/// the list. Enter with
+/// the list closed is left to the dialog. Returns the field response and
+/// the picked choice.
+fn suggest_field(
+    ui: &mut egui::Ui,
+    salt: &str,
+    text: &mut String,
+    choices: &[String],
+    width: f32,
+    list: &mut Option<SuggestList>,
+) -> (egui::Response, Option<String>) {
+    let id = egui::Id::unique(("start_suggest", salt));
+    let mut open = list.filter(|l| l.field == id).map(|l| l.highlight);
+    let shown = suggestions(text, choices);
+    let mut pick: Option<String> = None;
+    // Tab moves on after the pick; the arrows scroll the choice into view.
+    let (mut tab_pick, mut moved) = (false, false);
+    // egui drops the text focus on Escape before the UI runs: give it back.
+    if open.is_some() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        open = None;
+        ui.memory_mut(|m| m.request_focus(id));
+    }
+    if ui.memory(|m| m.has_focus(id)) {
+        let (down, up, enter, tab) = ui.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                open.is_some() && i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                open.is_some() && i.key_pressed(egui::Key::Tab),
+            )
+        });
+        moved = down || up;
+        tab_pick = tab;
+        let last = shown.len().saturating_sub(1);
+        match open {
+            None if down || up => {
+                let current = shown.iter().position(|c| *c == text);
+                open = Some((!shown.is_empty()).then(|| current.unwrap_or(0)));
+            }
+            Some(h) if down => open = Some(Some(h.map_or(0, |h| (h + 1).min(last)))),
+            Some(h) if up => open = Some(Some(h.map_or(0, |h| h.saturating_sub(1)))),
+            _ => {}
+        }
+        if enter || tab {
+            pick = open
+                .flatten()
+                .and_then(|h| shown.get(h))
+                .map(|c| c.to_string());
+            open = None;
+        }
+    }
+    let field = egui::TextEdit::singleline(text)
+        .id(id)
+        .desired_width(width)
+        .show(ui)
+        .response;
+    if field.changed() {
+        // The typed choice itself, else the first match.
+        let shown = suggestions(text, choices);
+        let t = text.trim().to_lowercase();
+        let exact = shown.iter().position(|c| c.to_lowercase() == t);
+        let first = !t.is_empty() && !shown.is_empty();
+        open = Some(exact.or(first.then_some(0)));
+    } else if field.clicked() && open.is_none() {
+        open = Some(None);
+    }
+    if let Some(highlight) = open {
+        let shown = suggestions(text, choices);
+        if !shown.is_empty() {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(width - 2.0 * ui.spacing().item_spacing.x);
+                egui::ScrollArea::vertical()
+                    .id_salt(("start_suggest_list", salt))
+                    .max_height(8.0 * ui.spacing().interact_size.y)
+                    .show(ui, |ui| {
+                        for (i, c) in shown.iter().enumerate() {
+                            let item = ui.selectable_label(highlight == Some(i), c.as_str());
+                            if moved && highlight == Some(i) {
+                                item.scroll_to_me(None);
+                            }
+                            if item.clicked() {
+                                pick = Some(c.to_string());
+                            }
+                        }
+                    });
+            });
+        }
+    }
+    if let Some(p) = &pick {
+        *text = p.clone();
+        open = None;
+        if !tab_pick {
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+    } else if !ui.memory(|m| m.has_focus(id)) && !ui.input(|i| i.pointer.any_down()) {
+        // Focus moved away (a press on a list item keeps it open).
+        open = None;
+    }
+    // No match shows no list, and Enter goes to the dialog.
+    if suggestions(text, choices).is_empty() {
+        open = None;
+    }
+    match open {
+        Some(highlight) => {
+            *list = Some(SuggestList {
+                field: id,
+                highlight,
+            })
+        }
+        None if list.is_some_and(|l| l.field == id) => *list = None,
+        None => {}
+    }
+    (field.response, pick)
+}
+
 /// A panel filter strip: `<TITLE>`, search field, filter checkboxes and the
 /// panel's `Shown N / M`. Returns true when the filter changed; `focus`
 /// gives the search field the keyboard.
@@ -982,6 +1126,8 @@ impl HcomDashboardApp {
             start_session: None,
             start_cli_choices: Vec::new(),
             start_model_choices: Vec::new(),
+            start_cli_text: String::new(),
+            start_suggest: None,
             start_dir_pick: None,
             modal_was_open: false,
             modal_at_frame_start: false,
@@ -1107,6 +1253,8 @@ impl HcomDashboardApp {
             start_session: None,
             start_cli_choices: Vec::new(),
             start_model_choices: Vec::new(),
+            start_cli_text: String::new(),
+            start_suggest: None,
             start_dir_pick: None,
             modal_was_open: false,
             modal_at_frame_start: false,
@@ -1770,13 +1918,22 @@ impl HcomDashboardApp {
         focus_search: bool,
     ) {
         self.select_first_shown(rows);
-        // In the search field Up/Down move the table selection, Enter acts
-        // like Enter in the table and Shift+Enter opens Start; consumed
-        // before the field sees them (Shift+Enter first: egui ignores an
-        // extra Shift when matching).
+        // In the search field Up/Down move the table selection and hand the
+        // keyboard to the table (Delete, s/m/r act there; "/" returns),
+        // Enter acts like Enter in the table and Shift+Enter opens Start;
+        // consumed before the field sees them (Shift+Enter first: egui
+        // ignores an extra Shift when matching).
         let title = "Table filter";
         let in_search =
             !self.modal_at_frame_start && ui.ctx().memory(|m| m.has_focus(filter_search_id(title)));
+        // Alt+Up/Down keep the field (TASK-77.53); read before the arrows
+        // are consumed.
+        let alt_arrow = ui.input(|i| {
+            i.events.iter().any(|e| {
+                matches!(e, egui::Event::Key { key: egui::Key::ArrowDown | egui::Key::ArrowUp,
+                    pressed: true, modifiers, .. } if modifiers.alt)
+            })
+        });
         let keys = if in_search {
             ui.input_mut(|i| {
                 let start = i.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter);
@@ -1790,6 +1947,10 @@ impl HcomDashboardApp {
         } else {
             SearchKeys::default()
         };
+        if (keys.down || keys.up) && !alt_arrow {
+            ui.ctx()
+                .memory_mut(|m| m.surrender_focus(filter_search_id(title)));
+        }
         let search_before = self.state.table_filter.search.clone();
         if filter_strip(
             ui,
@@ -1920,8 +2081,8 @@ impl HcomDashboardApp {
                     })
                 };
                 (
-                    i.key_pressed(egui::Key::ArrowDown),
-                    i.key_pressed(egui::Key::ArrowUp),
+                    i.key_pressed(egui::Key::ArrowDown) || search.down,
+                    i.key_pressed(egui::Key::ArrowUp) || search.up,
                     enter(false),
                     enter(true),
                 )
@@ -2245,6 +2406,8 @@ impl HcomDashboardApp {
         self.start_prompt.clear();
         // A folder chosen for an earlier dialog does not land in this one.
         self.start_dir_pick = None;
+        self.start_cli_text = self.start_cli.clone();
+        self.start_suggest = None;
         self.start_cli_choices =
             installed_clis(&self.start_cli, std::env::var_os("PATH").as_deref());
         let mut models: Vec<String> = self
@@ -3544,6 +3707,7 @@ impl HcomDashboardApp {
         self.start_dir = session.directory.clone();
         self.start_prompt.clear();
         self.start_dir_pick = None;
+        self.start_suggest = None;
         self.show_start_dialog = true;
     }
 
@@ -5709,9 +5873,10 @@ impl eframe::App for HcomDashboardApp {
         if self.show_start_dialog {
             let agent = self.start_agent_name.clone();
             // Enter (not Shift+Enter) launches; consumed before the prompt
-            // field would take it as a newline. Escape cancels (show_modal).
-            let mut launch =
-                ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+            // field would take it as a newline. An open suggestion list
+            // keeps Enter and Escape. Escape cancels (show_modal).
+            let mut launch = self.start_suggest.is_none()
+                && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
             let mut close = false;
             if let Some(rx) = &self.start_dir_pick {
                 match rx.try_recv() {
@@ -5806,43 +5971,55 @@ impl eframe::App for HcomDashboardApp {
                         ui.end_row();
 
                         if session.is_none() {
+                            // Only a listed CLI: the text resets to the
+                            // chosen one when the field is left.
                             ui.label("cli");
-                            egui::ComboBox::from_id_salt("start_cli")
-                                .width(FIELD_W)
-                                .selected_text(self.start_cli.clone())
-                                .show_ui(ui, |ui| {
-                                    for c in &self.start_cli_choices {
-                                        ui.selectable_value(&mut self.start_cli, c.clone(), c);
-                                    }
-                                });
+                            ui.vertical(|ui| {
+                                let (field, pick) = suggest_field(
+                                    ui,
+                                    "cli",
+                                    &mut self.start_cli_text,
+                                    &self.start_cli_choices,
+                                    FIELD_W,
+                                    &mut self.start_suggest,
+                                );
+                                if let Some(cli) = pick {
+                                    self.start_cli = cli;
+                                } else if !field.has_focus()
+                                    && self.start_suggest.is_none_or(|l| l.field != field.id)
+                                {
+                                    self.start_cli_text = self.start_cli.clone();
+                                }
+                            });
                             ui.end_row();
 
-                            // Editable: any value, the menu holds suggestions.
-                            let suggest =
-                                |ui: &mut egui::Ui, value: &mut String, choices: &[String]| {
-                                    ui.horizontal(|ui| {
-                                        ui.add(
-                                            egui::TextEdit::singleline(value)
-                                                .desired_width(FIELD_W - 28.0),
-                                        );
-                                        ui.menu_button("▾", |ui| {
-                                            for c in choices {
-                                                if ui.selectable_label(value == c, c).clicked() {
-                                                    *value = c.clone();
-                                                    ui.close();
-                                                }
-                                            }
-                                        });
-                                    });
-                                };
+                            // Editable: any value, the list holds suggestions.
                             ui.label("model");
-                            suggest(ui, &mut self.start_model, &self.start_model_choices);
+                            ui.vertical(|ui| {
+                                suggest_field(
+                                    ui,
+                                    "model",
+                                    &mut self.start_model,
+                                    &self.start_model_choices,
+                                    FIELD_W,
+                                    &mut self.start_suggest,
+                                );
+                            });
                             ui.end_row();
 
                             ui.label("reasoning");
                             let levels: Vec<String> =
                                 REASONING_LEVELS.iter().map(|s| s.to_string()).collect();
-                            suggest(ui, &mut self.start_reasoning, &levels);
+                            ui.vertical(|ui| {
+                                suggest_field(
+                                    ui,
+                                    "reasoning",
+                                    &mut self.start_reasoning,
+                                    &levels,
+                                    FIELD_W,
+                                    &mut self.start_suggest,
+                                );
+                            });
                             ui.end_row();
                         }
 

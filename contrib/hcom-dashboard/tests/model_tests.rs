@@ -11372,17 +11372,40 @@ fn test_task_77_104_table_search_quick_select() {
         run(&mut app, vec![]);
     }
 
-    // "/" focuses the search field; Down/Up there move the selection.
+    // "/" focuses the search field; Down/Up there move the selection and
+    // hand the keyboard to the table (TASK-77.110).
     run(&mut app, text("/"));
     run(&mut app, vec![]);
     assert!(ctx.text_edit_focused(), "search field has focus");
-    run(&mut app, key(egui::Key::ArrowDown, egui::Modifiers::NONE));
-    assert_eq!(app.selected_row_id.as_deref(), Some("alpha_run_1"));
+    run(&mut app, text("a"));
+    run(&mut app, vec![]);
     run(&mut app, key(egui::Key::ArrowDown, egui::Modifiers::NONE));
     assert_eq!(app.selected_row_id.as_deref(), Some("beta_cat"));
+    assert!(!ctx.text_edit_focused(), "Down leaves the field");
+    assert_eq!(app.state.table_filter.search, "a", "search kept");
     run(&mut app, key(egui::Key::ArrowUp, egui::Modifiers::NONE));
     assert_eq!(app.selected_row_id.as_deref(), Some("alpha_run_1"));
-    assert!(ctx.text_edit_focused(), "field keeps focus");
+    // Delete now acts on the table: kill confirmation for the row.
+    run(&mut app, key(egui::Key::Delete, egui::Modifiers::NONE));
+    run(&mut app, vec![]);
+    assert!(
+        app.confirm_kill_target.is_some(),
+        "Delete kills from the table"
+    );
+    run(&mut app, key(egui::Key::Escape, egui::Modifiers::NONE));
+    run(&mut app, vec![]);
+    assert!(app.confirm_kill_target.is_none());
+    assert_eq!(app.state.table_filter.search, "a");
+    // Up from the field moves too.
+    run(&mut app, text("/"));
+    run(&mut app, vec![]);
+    assert!(ctx.text_edit_focused());
+    run(&mut app, key(egui::Key::ArrowUp, egui::Modifiers::NONE));
+    assert!(!ctx.text_edit_focused(), "Up leaves the field");
+    run(&mut app, text("/"));
+    run(&mut app, vec![]);
+    run(&mut app, key(egui::Key::Backspace, egui::Modifiers::NONE));
+    run(&mut app, vec![]);
     assert_eq!(app.state.table_filter.search, "");
 
     // Typing hides the selected row: the first shown row is selected.
@@ -11792,10 +11815,10 @@ fn test_task_77_53_alt_arrows_select_rows_wherever_the_keyboard_is() {
     assert_eq!(app.selected_row_id.as_deref(), Some("inst_alpha_1"));
 
     // In the table search field plain arrows move the selection too
-    // (TASK-77.104).
+    // (TASK-77.104) and hand the keyboard to the table (TASK-77.110).
     run(&mut app, down(egui::Modifiers::NONE));
     assert_eq!(app.selected_row_id.as_deref(), Some("cat_beta"));
-    assert!(ctx.text_edit_focused(), "the field keeps the keyboard");
+    assert!(!ctx.text_edit_focused(), "the table has the keyboard");
     run(&mut app, up(egui::Modifiers::NONE));
     assert_eq!(app.selected_row_id.as_deref(), Some("inst_alpha_1"));
 
@@ -11932,14 +11955,6 @@ fn test_task_77_55_56_start_dialog_like_hcom_gui() {
     ] {
         assert!(text_rect(&out, label).is_some(), "{label}");
     }
-    assert!(
-        out.shapes
-            .iter()
-            .filter(|c| matches!(&c.shape, egui::Shape::Text(t) if t.galley.text() == "▾"))
-            .count()
-            >= 2,
-        "model and reasoning suggestion menus"
-    );
 
     // Focus on the name field prefills "<agent>__".
     let (name_label, _) = text_rect(&out, "name").unwrap();
@@ -11980,6 +11995,110 @@ fn test_task_77_55_56_start_dialog_like_hcom_gui() {
     run(&mut app, enter(none));
     run(&mut app, vec![]);
     assert!(!app.show_start_dialog);
+}
+
+/// TASK-77.111: cli, model and reasoning are fields with a suggestion list:
+/// typing or Down opens it, Up/Down choose, Enter puts the choice into the
+/// field without launching, Escape closes only the list, Enter with the list
+/// closed launches; cli takes only a listed CLI.
+#[test]
+fn test_task_77_111_start_dialog_suggestion_fields() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let none = egui::Modifiers::NONE;
+    let key = |k| vec![task_77_52_key(k, none)];
+    let text = |t: &str| vec![egui::Event::Text(t.into())];
+    let focus = |salt: &str| {
+        let id = egui::Id::unique(("start_suggest", salt));
+        ctx.memory_mut(|m| m.request_focus(id));
+    };
+    let launched = || {
+        std::thread::sleep(Duration::from_millis(50));
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| matches!(r, ActionRequest::RunCommand { .. }))
+            .count()
+    };
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    let row = app.table_rows[1].clone();
+    app.open_start_dialog(&row);
+    app.start_cli_choices = vec!["claude".into(), "codex".into()];
+    app.start_model_choices = vec!["gpt-5".into(), "gpt-5-mini".into(), "opus".into()];
+    app.start_model.clear();
+    for _ in 0..3 {
+        run(&mut app, vec![]);
+    }
+    assert_eq!(app.start_cli, "codex");
+
+    // Typing opens the list on the first match; Enter takes it, no launch.
+    focus("model");
+    run(&mut app, vec![]);
+    run(&mut app, text("op"));
+    run(&mut app, vec![]);
+    run(&mut app, key(egui::Key::Enter));
+    run(&mut app, vec![]);
+    assert_eq!(app.start_model, "opus");
+    assert!(app.show_start_dialog, "Enter in the list does not launch");
+    assert!(ctx.text_edit_focused(), "the keyboard stays in the field");
+    assert_eq!(launched(), 0);
+
+    // Down opens the whole list on the current value; Up/Down choose.
+    run(&mut app, key(egui::Key::ArrowDown));
+    run(&mut app, key(egui::Key::ArrowUp));
+    run(&mut app, key(egui::Key::Enter));
+    run(&mut app, vec![]);
+    assert_eq!(app.start_model, "gpt-5-mini");
+
+    // A typed choice stays on Enter (the list shows all, not first wins).
+    app.start_model.clear();
+    run(&mut app, vec![]);
+    run(&mut app, text("gpt-5-mini"));
+    run(&mut app, vec![]);
+    run(&mut app, key(egui::Key::Enter));
+    run(&mut app, vec![]);
+    assert_eq!(app.start_model, "gpt-5-mini");
+    assert!(app.show_start_dialog);
+
+    // Escape closes only the list.
+    run(&mut app, key(egui::Key::ArrowDown));
+    run(&mut app, key(egui::Key::Escape));
+    run(&mut app, vec![]);
+    assert!(app.show_start_dialog, "Escape closes only the list");
+    assert!(ctx.text_edit_focused());
+    assert_eq!(app.start_model, "gpt-5-mini");
+
+    // cli: typed text that is no CLI does not stick.
+    focus("cli");
+    run(&mut app, vec![]);
+    run(&mut app, text("zzz"));
+    run(&mut app, vec![]);
+    focus("reasoning");
+    run(&mut app, vec![]);
+    run(&mut app, vec![]);
+    assert!(app.show_start_dialog);
+    assert_eq!(app.start_cli, "codex", "only a listed CLI");
+    // A listed one is chosen with the arrows.
+    focus("cli");
+    run(&mut app, vec![]);
+    run(&mut app, key(egui::Key::ArrowDown));
+    run(&mut app, key(egui::Key::ArrowUp));
+    run(&mut app, key(egui::Key::Enter));
+    run(&mut app, vec![]);
+    assert_eq!(app.start_cli, "claude");
+    assert!(app.show_start_dialog);
+
+    // Enter with the list closed launches.
+    run(&mut app, key(egui::Key::Enter));
+    run(&mut app, vec![]);
+    assert!(!app.show_start_dialog, "Enter launches");
+    assert_eq!(launched(), 1);
 }
 
 #[test]
