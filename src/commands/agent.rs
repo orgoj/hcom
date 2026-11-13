@@ -2619,8 +2619,16 @@ fn focus_running(eff: &Effective, live: &LiveAgent) -> Result<()> {
             eff.name
         );
     }
+    // The recorded pane does not depend on Herdr's agent name, which can drift
+    // from the hcom name (TASK-50); without it, fall back to the name.
+    let target = live
+        .launch_context
+        .get("pane_id")
+        .and_then(|value| value.as_str())
+        .filter(|pane| !pane.is_empty())
+        .unwrap_or(&eff.name);
     let status = Command::new("herdr")
-        .args(["agent", "focus", &eff.name])
+        .args(["agent", "focus", target])
         .status()?;
     if !status.success() {
         bail!("could not focus Herdr agent '{}'", eff.name);

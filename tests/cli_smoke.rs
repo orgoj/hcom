@@ -3428,6 +3428,67 @@ fn recover_lists_no_candidates_on_a_clean_install() {
     assert!(stdout.contains("No interrupted agents"), "stdout={stdout}");
 }
 
+/// TASK-50: attach focuses the recorded Herdr pane, not Herdr's agent name,
+/// which can drift from the hcom name; without a pane id it uses the name.
+#[test]
+#[cfg(unix)]
+fn agent_attach_focuses_the_recorded_herdr_pane() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = Hcom::new();
+    let name = h.start_with_process_id("attach-pane");
+    let bin = h.root_path().join("fake-herdr-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = h.root_path().join("herdr-args");
+    let herdr = bin.join("herdr");
+    std::fs::write(
+        &herdr,
+        format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&herdr, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let set_context = |context: &str| {
+        let conn = rusqlite::Connection::open(h.path().join("hcom.db")).unwrap();
+        conn.execute(
+            "UPDATE instances SET launch_context = ?1 WHERE name = ?2",
+            [context, name.as_str()],
+        )
+        .unwrap();
+    };
+    let attach = || {
+        let mut cmd = h.cmd();
+        let path = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "PATH")
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let output = cmd
+            .env("PATH", format!("{}:{path}", bin.display()))
+            .args(["agent", "attach", &name])
+            .output()
+            .expect("run attach");
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    set_context(r#"{"terminal_preset_effective":"herdr","pane_id":"w9:p3"}"#);
+    attach();
+    set_context(r#"{"terminal_preset_effective":"herdr"}"#);
+    attach();
+
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        [
+            "agent focus w9:p3".to_string(),
+            format!("agent focus {name}")
+        ],
+    );
+}
+
 #[test]
 fn agent_dry_run_renders_the_hcom_command_without_launching() {
     let h = Hcom::new();
