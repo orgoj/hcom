@@ -213,6 +213,7 @@ pub(crate) const FIELDS: &[ConfigField] = &[
     f("hermes_args", "HCOM_HERMES_ARGS", "launch.hermes.args", Str, "Default args for hermes chat on launch"),
     f("timeout", "HCOM_TIMEOUT", "preferences.timeout", Int, "Idle timeout in seconds (default: 86400)"),
     f("auto_approve", "HCOM_AUTO_APPROVE", "preferences.auto_approve", Bool, "Auto-approve safe hcom commands"),
+    f("request_idle_notify", "HCOM_REQUEST_IDLE_NOTIFY", "preferences.request_idle_notify", Bool, "Notify a request sender when the recipient goes idle without replying (default: true)"),
     f("name_export", "HCOM_NAME_EXPORT", "preferences.name_export", Str, "Export instance name to custom env var"),
     f("relay", "HCOM_RELAY", "relay.url", Str, "Relay MQTT broker URL (managed by hcom relay)"),
     f("relay_id", "HCOM_RELAY_ID", "relay.id", Str, "Relay group identifier (managed by hcom relay)"),
@@ -305,6 +306,10 @@ pub struct HcomConfig {
     pub relay_psk: String,
     pub relay_enabled: bool,
     pub auto_approve: bool,
+    /// Request watches (`send --intent request`) also notify when the
+    /// recipient goes idle without replying (default: true). When false,
+    /// only the "stopped without responding" notice is sent.
+    pub request_idle_notify: bool,
     pub auto_subscribe: String,
     pub name_export: String,
     pub auto_trust_workspace: bool,
@@ -357,6 +362,7 @@ impl Default for HcomConfig {
             relay_psk: String::new(),
             relay_enabled: true,
             auto_approve: true,
+            request_idle_notify: true,
             auto_subscribe: "collision".to_string(),
             name_export: String::new(),
             auto_trust_workspace: true,
@@ -562,6 +568,7 @@ impl HcomConfig {
             "relay_psk" => Some(self.relay_psk.clone()),
             "relay_enabled" => Some(if self.relay_enabled { "1" } else { "0" }.into()),
             "auto_approve" => Some(if self.auto_approve { "1" } else { "0" }.into()),
+            "request_idle_notify" => Some(if self.request_idle_notify { "1" } else { "0" }.into()),
             "auto_subscribe" => Some(self.auto_subscribe.clone()),
             "name_export" => Some(self.name_export.clone()),
             "auto_trust_workspace" => {
@@ -620,6 +627,7 @@ impl HcomConfig {
             "relay_psk" => self.relay_psk = value.to_string(),
             "relay_enabled" => self.relay_enabled = !is_falsy(value),
             "auto_approve" => self.auto_approve = !is_falsy(value),
+            "request_idle_notify" => self.request_idle_notify = !is_falsy(value),
             "auto_subscribe" => self.auto_subscribe = value.to_string(),
             "name_export" => self.name_export = value.to_string(),
             "auto_trust_workspace" => self.auto_trust_workspace = !is_falsy(value),
@@ -719,6 +727,9 @@ impl HcomConfig {
         FIELDS
             .iter()
             .filter(|f| !f.is_relay())
+            // Read at send time: an exported launch-time value would pin running
+            // agents and hide a later `hcom config request_idle_notify` change.
+            .filter(|f| f.name != "request_idle_notify")
             .filter_map(|f| Some((f.env.to_string(), self.get_field(f.name)?)))
             .collect()
     }
@@ -1983,6 +1994,13 @@ mod tests {
         let (roundtrip, errors) = HcomConfig::load_from_sources(&HashMap::new(), Some(&dict));
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(config, roundtrip);
+    }
+
+    #[test]
+    fn test_to_env_dict_omits_request_idle_notify() {
+        // Launched agents must follow config.toml changes for this key.
+        let dict = HcomConfig::default().to_env_dict();
+        assert!(!dict.contains_key("HCOM_REQUEST_IDLE_NOTIFY"));
     }
 
     #[test]

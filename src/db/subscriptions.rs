@@ -330,11 +330,15 @@ fn sweep_expired_reqwatch_graces(db: &HcomDb, now: f64) {
 }
 
 /// Create request-watch subscriptions for each recipient.
+///
+/// `idle_notify` (config `request_idle_notify`) also arms the "idle without
+/// reply" notice; without it only the `stopped` life event fires.
 pub(crate) fn create_request_watches(
     db: &HcomDb,
     sender: &str,
     request_event_id: i64,
     recipients: &[String],
+    idle_notify: bool,
 ) {
     let last_id = db.get_last_event_id();
     let now = crate::shared::time::now_epoch_f64();
@@ -344,13 +348,23 @@ pub(crate) fn create_request_watches(
         let sub_key = format!("events_sub:{sub_id}");
         let target_tool = instance_tool(db, recipient);
 
-        let sql = "(type='status' AND instance=? AND status_val='listening') OR (type='life' AND instance=? AND life_action='stopped')";
+        let (sql, params) = if idle_notify {
+            (
+                "(type='status' AND instance=? AND status_val='listening') OR (type='life' AND instance=? AND life_action='stopped')",
+                serde_json::json!([recipient, recipient]),
+            )
+        } else {
+            (
+                "type='life' AND instance=? AND life_action='stopped'",
+                serde_json::json!([recipient]),
+            )
+        };
 
         let sub_data = serde_json::json!({
             "id": sub_id,
             "caller": sender,
             "sql": sql,
-            "params": [recipient, recipient],
+            "params": params,
             "filters": {
                 "request_watch": true,
                 "request_id": request_event_id,
@@ -1566,7 +1580,7 @@ mod tests {
             "mentions": [responder],
         });
         let request_id = db.log_event("message", requester, &req_data).unwrap();
-        create_request_watches(db, requester, request_id, &[responder.to_string()]);
+        create_request_watches(db, requester, request_id, &[responder.to_string()], true);
         db.conn()
             .execute(
                 "UPDATE instances SET last_event_id = ?1 WHERE name = ?2",
@@ -1574,6 +1588,57 @@ mod tests {
             )
             .unwrap();
         request_id
+    }
+
+    #[test]
+    fn test_reqwatch_without_idle_notify_fires_only_on_stopped() {
+        let (db, db_path) = setup_full_test_db();
+        db.conn()
+            .execute(
+                "INSERT INTO instances (name, tool, last_event_id, created_at)
+                 VALUES ('gora', 'claude', 0, 1000.0), ('nabe', 'claude', 0, 1000.0)",
+                [],
+            )
+            .unwrap();
+        let req_data = serde_json::json!({
+            "from": "gora", "sender_kind": "instance", "scope": "mentions",
+            "text": "ping", "delivered_to": ["nabe"], "intent": "request",
+            "mentions": ["nabe"],
+        });
+        let request_id = db.log_event("message", "gora", &req_data).unwrap();
+        create_request_watches(&db, "gora", request_id, &["nabe".to_string()], false);
+        db.conn()
+            .execute(
+                "UPDATE instances SET last_event_id = ?1 WHERE name = 'nabe'",
+                params![request_id],
+            )
+            .unwrap();
+        let before = count_reqwatch_without_reply_notifications(&db, "gora");
+
+        db.log_event(
+            "status",
+            "nabe",
+            &serde_json::json!({"status": "listening", "context": ""}),
+        )
+        .unwrap();
+        assert_eq!(
+            count_reqwatch_without_reply_notifications(&db, "gora"),
+            before,
+            "idle notice is off"
+        );
+
+        db.log_event(
+            "life",
+            "nabe",
+            &serde_json::json!({"action": "stopped", "by": "pty"}),
+        )
+        .unwrap();
+        assert_eq!(
+            count_reqwatch_without_reply_notifications(&db, "gora"),
+            before + 1,
+            "stopped still notifies"
+        );
+        cleanup_test_db(db_path);
     }
 
     #[test]
@@ -1585,7 +1650,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        create_request_watches(&db, "gora", 42, &[String::from("nabe")]);
+        create_request_watches(&db, "gora", 42, &[String::from("nabe")], true);
         let sub_raw = db
             .kv_get("events_sub:reqwatch-42-nabe")
             .unwrap()

@@ -703,7 +703,13 @@ fn send_message_with_catalog_outcome(
             && delivery.effective_scope == MessageScope::Mentions
             && !delivery.is_thread_resolved
         {
-            create_request_watches(db, &identity.name, event_id, &delivery.delivered_to);
+            create_request_watches(
+                db,
+                &identity.name,
+                event_id,
+                &delivery.delivered_to,
+                crate::config::HcomConfig::load(None).request_idle_notify,
+            );
         }
     }
 

@@ -592,13 +592,25 @@ mod tests {
         let (db, path) = setup_test_db();
         let now = now_epoch_f64();
         insert_listening(&db, "luna", 100);
-        crate::db::subscriptions::create_request_watches(&db, "luna", 7, &["nova".to_string()]);
+        crate::db::subscriptions::create_request_watches(
+            &db,
+            "luna",
+            7,
+            &["nova".to_string()],
+            true,
+        );
         assert!(!is_idle(&db, &row(&db, "luna"), 60, now).unwrap());
         // Someone else's request does not hold luna.
         db.conn()
             .execute("DELETE FROM kv WHERE key LIKE 'events_sub:reqwatch-%'", [])
             .unwrap();
-        crate::db::subscriptions::create_request_watches(&db, "nova", 8, &["luna".to_string()]);
+        crate::db::subscriptions::create_request_watches(
+            &db,
+            "nova",
+            8,
+            &["luna".to_string()],
+            true,
+        );
         assert!(is_idle(&db, &row(&db, "luna"), 60, now).unwrap());
         cleanup(path);
     }

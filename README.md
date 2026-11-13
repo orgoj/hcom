@@ -488,6 +488,7 @@ hcom config -i <name> <key> <value>   # per-agent override at runtime
 | `notes` | Text appended to bootstrap (one-time, at launch) |
 | `bootstrap_exclude` | Bootstrap parts to omit: `identity`, `messages`, `capabilities` (including tag, relay, headless, and command notices), `rules`, `handoff`, or `all` (default: `none`). Inspect with `hcom config bootstrap show [part]`. |
 | `auto_approve` | Auto-approve safe hcom commands (send/list/events/…) |
+| `request_idle_notify` | After `send --intent request`, notify the sender when the recipient goes idle without replying (default `true`); `false` keeps only the notice that the recipient stopped without replying |
 | `auto_subscribe` | Event subscription presets: `collision`, `created`, `stopped`, `blocked` |
 | `name_export` | Export instance name to a custom env var |
 | `title_mode` | Terminal/tab title behavior: `combined` (default), `label`, or `off` |

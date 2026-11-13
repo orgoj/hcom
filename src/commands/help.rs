@@ -736,6 +736,10 @@ const CONFIG_KEYS_HELP: &[HelpEntry] = &[
         "Default system prompt",
     ),
     ("  auto_approve", "Auto-approve safe hcom commands"),
+    (
+        "  request_idle_notify",
+        "Tell a request sender when the recipient idles without reply",
+    ),
     ("  auto_subscribe", "Event auto-subscribe presets"),
     (
         "  auto_trust_workspace",
