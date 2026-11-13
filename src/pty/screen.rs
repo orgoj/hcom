@@ -202,11 +202,9 @@ fn is_dash_rule(line: &str) -> bool {
     trimmed.chars().count() >= 3 && trimmed.chars().all(|c| c == '─')
 }
 
-/// Fixed mode statuses Antigravity renders in the empty input row.
-const ANTIGRAVITY_MODE_STATUSES: &[&str] = &[
-    "Accept-edits mode: file edits auto-approved (shift+tab to cycle)",
-    "Auto mode: edits & safe commands auto-approved (shift+tab to cycle)",
-];
+/// Suffix of every mode status Antigravity renders in the empty input row
+/// (e.g. "Accept-edits mode: … (shift+tab to cycle)", "Auto mode: … (shift+tab to cycle)").
+const ANTIGRAVITY_MODE_STATUS_SUFFIX: &str = "(shift+tab to cycle)";
 
 /// Check if a line is a Gemini dash border (all ─ chars, at least 20 wide)
 fn is_dash_border(line: &str) -> bool {
@@ -1323,10 +1321,10 @@ impl ScreenTracker {
                     .cell(row_idx as u16, col)
                     .is_some_and(|cell| cell.contents() == ">")
             });
-            // Antigravity 1.1.20 renders this fixed mode status in the input row
+            // Antigravity (1.1.20+) renders its mode status in the input row
             // with the cursor still parked immediately after `> `. Require both
             // signals so identical user-entered text remains protected.
-            if ANTIGRAVITY_MODE_STATUSES.contains(&text)
+            if text.ends_with(ANTIGRAVITY_MODE_STATUS_SUFFIX)
                 && prompt_col.is_some_and(|col| {
                     screen.cursor_position() == (row_idx as u16, col.saturating_add(2))
                 })
@@ -2822,7 +2820,11 @@ mod tests {
 
     #[test]
     fn antigravity_fixed_mode_status_at_prompt_cursor_returns_empty() {
-        for status in ANTIGRAVITY_MODE_STATUSES {
+        for status in [
+            "Accept-edits mode: file edits auto-approved (shift+tab to cycle)",
+            "Auto mode: edits & safe commands auto-approved (shift+tab to cycle)",
+            "Plan mode: read-only tools only (shift+tab to cycle)",
+        ] {
             let mut t = make_tracker(24, 100, "? for shortcuts");
             t.process(format!("> {status}\r\n? for shortcuts\x1b[1;3H").as_bytes());
             assert_eq!(t.get_antigravity_input_text(), Some(String::new()));
