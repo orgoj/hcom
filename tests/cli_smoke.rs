@@ -4152,6 +4152,58 @@ fn handoff_keeps_the_cli_the_instance_was_launched_with() {
     assert!(stdout.contains("claude --as rev3"), "stdout={stdout}");
 }
 
+#[test]
+fn handoff_keeps_the_model_the_instance_was_launched_with() {
+    let h = Hcom::new();
+    std::fs::write(
+        h.path().join("agents.json"),
+        r#"{"agents":{"reviewer":{"dir":"/tmp","cli":"claude","model":"catalog-model",
+                "terminal_command":"sh -c true {script}"}}}"#,
+    )
+    .expect("write catalog");
+    let launch = |args: &[&str]| {
+        let (code, stdout, stderr) = h.run(args.iter().copied());
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+        let scripts = std::fs::read_dir(h.path().join(".tmp/launch"))
+            .expect("read launch directory")
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::remove_dir_all(h.path().join(".tmp/launch")).expect("clear launch directory");
+        scripts
+            .split("HCOM_PROCESS_ID=")
+            .nth(1)
+            .and_then(|rest| {
+                rest.split(|c: char| c.is_whitespace() || c == '\'' || c == ';')
+                    .find(|s| !s.is_empty())
+            })
+            .expect("process id in launch script")
+            .to_string()
+    };
+
+    // Started with an explicit model: the successor runs the same model.
+    let process_id = launch(&["agent", "reviewer", "--as", "rev2", "--model", "special"]);
+    let (code, stdout, stderr) = h.run_as_process(&process_id, ["handoff", "--dry-run", "next"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("--model special"), "stdout={stdout}");
+    assert!(!stdout.contains("catalog-model"), "stdout={stdout}");
+
+    // Handoff to another CLI does not carry the old CLI's model.
+    let (code, stdout, stderr) = h.run_as_process(
+        &process_id,
+        ["handoff", "--dry-run", "--cli", "codex", "next"],
+    );
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(!stdout.contains("special"), "stdout={stdout}");
+
+    // Started on the catalog model: handoff keeps that one.
+    let process_id = launch(&["agent", "reviewer", "--as", "rev3"]);
+    let (code, stdout, stderr) = h.run_as_process(&process_id, ["handoff", "--dry-run", "next"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(stdout.contains("--model catalog-model"), "stdout={stdout}");
+}
+
 #[cfg(unix)]
 #[test]
 fn handoff_after_kill_and_resume_keeps_the_catalog_agent_of_an_as_instance() {

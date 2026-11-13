@@ -532,12 +532,12 @@ const STOP_HELP: &[HelpEntry] = &[
 const HANDOFF_HELP: &[HelpEntry] = &[
     (
         "handoff <prompt>",
-        "Restart yourself: same catalog agent and name, clean session, <prompt> as initial prompt",
+        "Restart yourself: same catalog agent, name, CLI and launch model, clean session, <prompt> as initial prompt",
     ),
     ("handoff < file", "Read the prompt from stdin"),
     (
         "  --cli <tool>",
-        "Restart on another AI CLI (default: the CLI it runs on now)",
+        "Restart on another AI CLI, dropping the launch model (default: the CLI it runs on now)",
     ),
     (
         "  --dry-run",
@@ -1361,7 +1361,7 @@ Commands:\n\
 \x20 transcript   Read another agent's conversation\n\
 \x20 start        Connect to hcom (run inside any AI tool)\n\
 \x20 stop         Disconnect from hcom\n\
-\x20 handoff      Restart yourself in a clean session with your prompt\n\
+\x20 handoff      Restart yourself (same name, CLI, model) in a clean session\n\
 \x20 config       Get/set global and per-agent settings (incl. idle_kill)\n\
 \x20 run          Execute workflow scripts\n\
 \x20 agent        Launch named agents from a JSON catalog (\"disabled\": true hides one;\n\
@@ -1900,6 +1900,8 @@ mod tests {
     fn handoff_help_documents_the_life_event() {
         assert!(get_command_help("handoff").contains("Logs life action 'handoff'"));
         assert!(get_command_help("handoff").contains("default: the CLI it runs on now"));
+        assert!(get_command_help("handoff").contains("name, CLI and launch model"));
+        assert!(get_command_help("handoff").contains("dropping the launch model"));
         assert!(get_command_help("events").contains("stopped | handoff |"));
     }
 

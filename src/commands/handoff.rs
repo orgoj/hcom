@@ -20,7 +20,7 @@ use crate::shared::{CommandContext, SenderKind};
 pub struct HandoffArgs {
     /// Initial prompt for the successor session; read from stdin when omitted
     pub prompt: Vec<String>,
-    /// Restart on another AI CLI (claude, codex, ...); default: the CLI it runs on now
+    /// Restart on another AI CLI (claude, codex, ...); default: the CLI it runs on now, with its launch model
     #[arg(long)]
     pub cli: Option<String>,
     /// Print the relaunch without stopping anything
@@ -85,6 +85,17 @@ fn run(db: &HcomDb, args: &HandoffArgs, ctx: Option<&CommandContext>) -> anyhow:
     if let Some(cli) = cli {
         argv.extend(["--cli".to_string(), cli]);
     }
+    // Keep the model the instance runs with, unless switching to another CLI.
+    let same_cli = args.cli.as_deref().is_none_or(|cli| {
+        cli.parse::<crate::tool::Tool>().ok()
+            == data
+                .get("tool")
+                .and_then(|v| v.as_str())
+                .and_then(|t| t.parse::<crate::tool::Tool>().ok())
+    });
+    if let Some(model) = recorded_model(&data).filter(|_| same_cli) {
+        argv.extend(["--model".to_string(), model]);
+    }
 
     // Validate synchronously: the detached relaunch has nobody to report to.
     let mut check = relaunch_command(&argv, &dir);
@@ -134,6 +145,23 @@ fn env_agent_name(name: &str) -> Option<String> {
     (instance == name && !agent.is_empty()).then_some(agent)
 }
 
+/// The model from the instance's recorded launch args (`--model X`,
+/// `--model=X`, `-m X`); the last one wins, as on the CLI.
+fn recorded_model(data: &serde_json::Value) -> Option<String> {
+    let raw = data.get("launch_args")?.as_str()?;
+    let args: Vec<String> = serde_json::from_str(raw).ok()?;
+    let mut model = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--model" || arg == "-m" {
+            model = iter.next().cloned();
+        } else if let Some(value) = arg.strip_prefix("--model=") {
+            model = Some(value.to_string());
+        }
+    }
+    model.filter(|m| !m.is_empty())
+}
+
 fn read_prompt(words: &[String]) -> anyhow::Result<String> {
     let prompt = if words.is_empty() && !std::io::stdin().is_terminal() {
         let mut buf = String::new();
@@ -166,4 +194,21 @@ fn relaunch_command(argv: &[String], dir: &str) -> Command {
         cmd.env_remove(var);
     }
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recorded_model;
+    use serde_json::json;
+
+    #[test]
+    fn recorded_model_reads_every_flag_form_and_none_without_one() {
+        let model = |args: &str| recorded_model(&json!({"launch_args": args}));
+        assert_eq!(model(r#"["--model","a","--x"]"#).as_deref(), Some("a"));
+        assert_eq!(model(r#"["--model=b"]"#).as_deref(), Some("b"));
+        assert_eq!(model(r#"["-m","c","--model","d"]"#).as_deref(), Some("d"));
+        assert_eq!(model(r#"["--add-dir","/x"]"#), None);
+        assert_eq!(model(""), None);
+        assert_eq!(recorded_model(&json!({})), None);
+    }
 }

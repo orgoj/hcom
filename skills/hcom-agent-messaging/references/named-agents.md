@@ -393,7 +393,7 @@ hcom checks the relaunch first, then runs `hcom agent <HCOM_AGENT_NAME> --as <HC
 agent it kills. The catalog name is the one recorded at launch, or the agent's own `HCOM_AGENT_NAME`
 when none is recorded. The successor is the same catalog agent under the same instance name, so `--as`
 aliases and roaming instances keep their names. Without `--cli`, it keeps the CLI the agent runs on
-now (also when that differs from the catalog default). The prompt is its initial prompt. Run it as the last
+now (also when that differs from the catalog default), and the `--model` it was launched with; a `--cli` switch drops that model. The prompt is its initial prompt. Run it as the last
 action of a turn; its output is logged to `.tmp/logs/handoff-<name>.log` in the hcom data directory
 (`~/.hcom/.tmp/logs/` by default). Each validated handoff logs a life event with action `handoff`
 (`hcom events --action handoff`).
