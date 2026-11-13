@@ -4611,13 +4611,14 @@ impl eframe::App for HcomDashboardApp {
         {
             self.restore_graph_window();
         }
-        // Alt+X clears the table search, the one `/` focuses.
-        if clear_search
-            && !self.inject_input_has_focus
-            && !self.state.table_filter.search.is_empty()
-        {
-            self.state.table_filter.search.clear();
-            self.save_state();
+        // Alt+X clears the table search, the one `/` focuses. The text the
+        // key produces in this frame must not reach the field (TASK-77.108).
+        if clear_search && !self.inject_input_has_focus {
+            ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
+            if !self.state.table_filter.search.is_empty() {
+                self.state.table_filter.search.clear();
+                self.save_state();
+            }
         }
         // A modal dialog keeps the keyboard: no global shortcuts.
         if let Some(key) = fkey.filter(|_| !self.modal_at_frame_start) {

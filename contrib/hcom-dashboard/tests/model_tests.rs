@@ -11555,6 +11555,27 @@ fn test_task_77_51_slash_focuses_the_search_field() {
     run(&mut app, vec![]);
     assert_eq!(app.state.table_filter.search, "/");
     assert!(ctx.text_edit_focused());
+
+    // TASK-77.108: Alt+X in the focused field clears it; the x that winit
+    // sends with the key in the same frame is not typed.
+    let alt = egui::Modifiers::ALT;
+    run(
+        &mut app,
+        vec![
+            egui::Event::ModifiersChanged(alt),
+            egui::Event::Key {
+                key: egui::Key::X,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: alt,
+            },
+            egui::Event::Text("x".into()),
+        ],
+    );
+    run(&mut app, vec![]);
+    assert_eq!(app.state.table_filter.search, "", "Alt+X types nothing");
+    assert!(ctx.text_edit_focused());
 }
 
 /// App with the mock action runner and two rows: running `inst_alpha_1`
