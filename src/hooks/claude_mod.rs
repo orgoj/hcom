@@ -108,7 +108,12 @@ pub fn report_health(db: &HcomDb, process: &str, name: &str) -> Result<()> {
     if !db.is_idle(name) {
         return Ok(());
     }
-    let session = row.session_id.as_deref().unwrap_or("");
+    // The mod keys its state by session, so before SessionStart binds one there
+    // is nothing to report; a gate context here would also replace the launch
+    // context SessionStart needs to recognize this launch and bind it.
+    let Some(session) = row.session_id.as_deref() else {
+        return Ok(());
+    };
     let current = state(db, session, process)?;
     let (context, detail) = match current.as_ref() {
         // Error first: a mod that fails every cycle never refreshes checked_at.
@@ -629,6 +634,27 @@ mod tests {
                 .unwrap()
                 .status_context,
             ""
+        );
+    }
+
+    #[test]
+    fn health_waits_for_the_session_bind() {
+        // A slow Claude start: the grace expired before SessionStart. The
+        // launch context must survive, or SessionStart refuses to bind.
+        let (_dir, db) = database();
+        db.conn()
+            .execute(
+                "UPDATE instances SET session_id = NULL, status_context = 'start' WHERE name = 'nova'",
+                [],
+            )
+            .unwrap();
+        report_health(&db, "process-1", "nova").unwrap();
+        assert_eq!(
+            db.get_instance_full("nova")
+                .unwrap()
+                .unwrap()
+                .status_context,
+            "start"
         );
     }
 
