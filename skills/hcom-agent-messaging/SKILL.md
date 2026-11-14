@@ -3,7 +3,8 @@ name: hcom-agent-messaging
 description: >
   Multi-agent communication for AI coding tools. Agents message, watch,
   and spawn each other across terminals. Use when sending or replying to
-  hcom messages, setting up hcom, or troubleshooting.
+  hcom messages, launching an agent or a clone of yourself (hcom agent,
+  --as, spawn, fork), setting up hcom, or troubleshooting.
 ---
 
 # hcom — multi-agent communication for AI coding tools
