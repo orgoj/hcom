@@ -4,7 +4,7 @@ title: 'Sandboxed agents: bwrap sandbox + hcom shim/proxy'
 status: To Do
 assignee: []
 created_date: 2026-10-30 20:53
-updated_date: '2026-11-06T21:50:00Z'
+updated_date: '2026-11-16T14:42:00Z'
 labels: []
 dependencies: []
 type: feature
@@ -73,4 +73,6 @@ One-time user steps (documented): install bwrap/slirp4netns/nft, create the Clau
 
 <!-- SECTION:NOTES:BEGIN -->
 Spec finding: Claude defaults to no PTY wrapper (`uses_pty_default: false`, src/integration_spec.rs); a sandboxed Claude always launches on the PTY path (as `ClaudePty`), because the proxy lives in the host PTY wrapper. hcom already knows `config_dir_env` (`CLAUDE_CONFIG_DIR`) per tool; reuse it for the private config dir.
+
+User decision 2026-11-16: threat model is a malicious/prompt-injected agent, so the whole CLI runs in the sandbox (CLI-native tool sandboxes are not enough). Credential approach to revisit after research (user finds per-agent logins too complex): brief tmp/knowledge/agent-cli-full-sandbox-brief.md, report tmp/knowledge/agent-cli-full-sandbox.md (@knowledge).
 <!-- SECTION:NOTES:END -->
