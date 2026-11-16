@@ -224,7 +224,20 @@ pub(crate) fn assemble_gemini_family_lifecycle_outputs(
         // agy gets one short anti-stall preamble before each delivery (see
         // ANTIGRAVITY_DELIVERY_ACTION). On an empty wake it gets nothing and
         // simply ends its turn — no discovery prompt is needed.
-        if let Some(prepared) = prepare_pending_messages(db, instance_name) {
+        // With a PTY, agy delivery types the bodies into the prompt instead
+        // (build_antigravity_prompt): an ephemeralMessage reaches one model call
+        // only, so a body delivered here is lost from the conversation.
+        let pty_delivers =
+            db.has_notify_endpoint_kind(instance_name, crate::notify::WakeKind::Pty.as_str());
+        // This PreInvocation started a turn: the PTY acks its typed bodies on
+        // this signal, and the gate stops typing into a working agy.
+        if pty_delivers && opts.set_status_on_empty && instance.status == ST_LISTENING {
+            lifecycle::set_status(db, instance_name, ST_ACTIVE, "prompt", Default::default());
+        }
+        if let Some(prepared) = (!pty_delivers)
+            .then(|| prepare_pending_messages(db, instance_name))
+            .flatten()
+        {
             parts.push(bootstrap::ANTIGRAVITY_DELIVERY_ACTION.to_string());
             parts.push(prepared.formatted);
             delivery_ack = Some(prepared.ack);

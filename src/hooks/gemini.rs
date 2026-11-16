@@ -2974,6 +2974,74 @@ mod tests {
         assert_eq!(db.get_unread_messages("vago")[0].event_id, Some(message_id));
     }
 
+    /// agy's ephemeralMessage reaches one model call only, so with a PTY the
+    /// bodies are typed into the prompt and the hook must leave them pending.
+    #[test]
+    fn test_antigravity_beforeagent_leaves_bodies_to_pty() {
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let env: HashMap<String, String> = [
+            ("ANTIGRAVITY_AGENT", "1"),
+            ("HOME", "/home/test"),
+            ("HCOM_PROCESS_ID", "pid-vago"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let ctx = HcomContext::from_env(&env, PathBuf::from("/tmp"));
+        let payload = HookPayload {
+            session_id: Some("sess-vago".to_string()),
+            transcript_path: None,
+            hook_name: "gemini-beforeagent".to_string(),
+            tool: "antigravity".to_string(),
+            tool_name: String::new(),
+            tool_input: serde_json::Value::Null,
+            tool_result: String::new(),
+            notification_type: None,
+            raw: serde_json::Value::Null,
+        };
+
+        for with_pty in [true, false] {
+            let (_dir, db) = make_test_db();
+            insert_test_instance(&db, "vago", "antigravity");
+            db.rebind_session("sess-vago", "vago").unwrap();
+            db.set_process_binding("pid-vago", "sess-vago", "vago")
+                .unwrap();
+            if with_pty {
+                db.register_notify_port("vago", 7777).unwrap();
+            }
+            insert_test_message(&db, "homo", "homo", "secret body");
+            db.conn()
+                .execute(
+                    "UPDATE instances SET status = 'listening' WHERE name = 'vago'",
+                    [],
+                )
+                .unwrap();
+
+            let HookResult::Allow {
+                additional_context,
+                delivery_ack,
+                ..
+            } = handle_beforeagent(&db, &ctx, &payload)
+            else {
+                panic!("expected Allow");
+            };
+            let has_body = additional_context
+                .as_deref()
+                .is_some_and(|c| c.contains("secret body"));
+            assert_eq!(
+                has_body, !with_pty,
+                "with_pty={with_pty} ctx={additional_context:?}"
+            );
+            assert_eq!(delivery_ack.is_some(), !with_pty, "with_pty={with_pty}");
+            assert_eq!(db.get_unread_messages("vago").len(), 1);
+            // The turn start is the PTY's signal to ack the typed bodies.
+            let status = db.get_status("vago").unwrap().unwrap().0;
+            assert_eq!(status == "active", with_pty, "with_pty={with_pty}");
+        }
+    }
+
     #[test]
     fn test_antigravity_afteragent_does_not_mark_idle_mid_turn() {
         let (_dir, db) = make_test_db();

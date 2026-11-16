@@ -1306,6 +1306,10 @@ impl ScreenTracker {
         let lines = self.get_screen_lines();
 
         if let Some((row_idx, text)) = lines.iter().enumerate().rev().find_map(|(row_idx, line)| {
+            // A wrapped input row (two-space indent) may itself start with `>`.
+            if line.starts_with("  ") {
+                return None;
+            }
             let trimmed = line.trim_start();
             let after = trimmed.strip_prefix('>')?.trim_start();
             Some((row_idx, trim_with_nbsp(after)))
@@ -1332,14 +1336,31 @@ impl ScreenTracker {
                 return Some(String::new());
             }
 
+            // agy wraps long input onto rows indented by two spaces; the
+            // wrap eats the space at the break. The footer below is indented
+            // further, so it never matches.
+            let wrapped = || {
+                let mut joined = text.to_string();
+                for row in &lines[row_idx + 1..] {
+                    let Some(rest) = row.strip_prefix("  ") else {
+                        break;
+                    };
+                    if rest.is_empty() || rest.starts_with(' ') {
+                        break;
+                    }
+                    joined.push(' ');
+                    joined.push_str(trim_with_nbsp(rest));
+                }
+                joined
+            };
             return match self.is_dim_after_prompt(row_idx as u16, ">") {
                 Some(true) => Some(String::new()),
-                Some(false) => Some(text.to_string()),
+                Some(false) => Some(wrapped()),
                 None => {
                     if self.is_ready() {
                         Some(String::new())
                     } else {
-                        Some(text.to_string())
+                        Some(wrapped())
                     }
                 }
             };
@@ -2851,6 +2872,31 @@ mod tests {
         assert_eq!(
             t.get_antigravity_input_text(),
             Some("<hcom>test</hcom>".to_string())
+        );
+    }
+
+    /// agy 1.5.9 layout: long input wraps onto rows indented by two spaces,
+    /// between separator rules, above a footer indented further.
+    #[test]
+    fn antigravity_joins_wrapped_input_rows() {
+        let mut t = make_tracker(24, 40, "? for shortcuts");
+        let rule = "─".repeat(40);
+        t.process(
+            format!(
+                "{rule}\r\n> <hcom>[ack #1] luna -> nova: first\r\n  > quoted row\r\n  third</hcom>\r\n{rule}\r\n                      auto · Gemini\r\n"
+            )
+            .as_bytes(),
+        );
+        assert_eq!(
+            t.get_antigravity_input_text(),
+            Some("<hcom>[ack #1] luna -> nova: first > quoted row third</hcom>".to_string())
+        );
+
+        let mut bare = make_tracker(24, 40, "? for shortcuts");
+        bare.process("> typed text\r\n                      auto · Gemini\r\n".as_bytes());
+        assert_eq!(
+            bare.get_antigravity_input_text(),
+            Some("typed text".to_string())
         );
     }
 

@@ -1772,8 +1772,14 @@ enum PromptOwnership {
 }
 
 fn prompt_ownership(input_text: Option<&str>, injected_text: &str) -> PromptOwnership {
+    // A wrapped prompt is read back with one space per row break, also where
+    // the TUI broke inside a word longer than a row.
+    let unspaced = |s: &str| s.split_whitespace().collect::<String>();
     match input_text {
-        Some(input) if !injected_text.is_empty() && input == injected_text => {
+        Some(input)
+            if !injected_text.is_empty()
+                && (input == injected_text || unspaced(input) == unspaced(injected_text)) =>
+        {
             PromptOwnership::Exclusive
         }
         Some(input) if !injected_text.is_empty() && input.contains(injected_text) => {
@@ -2322,6 +2328,11 @@ pub fn run_delivery_loop(
         let mut inject_attempt: u32 = 0;
         let mut enter_attempt: u32 = 0;
         let mut injected_text = String::new();
+        // agy: the typed prompt carries the bodies, so the PTY acks them itself.
+        let mut prompt_ack: Option<crate::hooks::DeliveryAck> = None;
+        // Whether this attempt pressed Enter: a prompt cleared without it was
+        // cleared by someone else, so its typed bodies were not submitted.
+        let mut enter_sent = false;
         let mut submitting_leftover = false;
         let mut phase_started_at = Instant::now();
         let mut cursor_before: i64 = 0;
@@ -2520,6 +2531,8 @@ pub fn run_delivery_loop(
                                 "Prompt holds only a leftover wake; submitting it with Enter",
                             );
                             injected_text = WAKE_TRIGGER.to_string();
+                            prompt_ack = None;
+                            enter_sent = false;
                             submitting_leftover = true;
                             phase_started_at = Instant::now();
                             enter_attempt = 0;
@@ -2530,16 +2543,28 @@ pub fn run_delivery_loop(
                         // Claude/Codex hooks show the full delivery in the TUI, so
                         // they only need a trigger. Gemini-style paths use a
                         // compact, prompt-safe preview for human visibility.
+                        // agy gets the bodies typed in (see build_antigravity_prompt).
                         use crate::tool::Tool;
                         use std::str::FromStr;
 
                         let parsed_tool = Tool::from_str(&config.tool).ok();
                         let cols = state.screen.read().map(|s| s.cols).unwrap_or(80);
                         let input_box_width = (cols as usize).saturating_sub(15).max(10);
+                        prompt_ack = None;
+                        enter_sent = false;
                         let text = match parsed_tool {
                             Some(Tool::Claude) | Some(Tool::Codex) | Some(Tool::Cursor)
                             | Some(Tool::Kimi) | Some(Tool::Copilot) | Some(Tool::Qoder)
                             | Some(Tool::Pi) | Some(Tool::Omp) => WAKE_TRIGGER.to_string(),
+                            Some(Tool::Antigravity) => {
+                                match antigravity::build_antigravity_prompt(db, &current_name) {
+                                    Some((text, ack)) => {
+                                        prompt_ack = Some(ack);
+                                        text
+                                    }
+                                    None => WAKE_TRIGGER.to_string(),
+                                }
+                            }
                             _ => build_wake_inject_text(db, &current_name, input_box_width),
                         };
 
@@ -2763,7 +2788,7 @@ pub fn run_delivery_loop(
 
                             if !user_active && !approval {
                                 log_info("native", "delivery.send_enter", "Sending Enter key");
-                                inject_enter(state.inject_port);
+                                enter_sent |= inject_enter(state.inject_port);
                             } else if approval {
                                 log_info(
                                     "native",
@@ -2829,6 +2854,9 @@ pub fn run_delivery_loop(
                             "delivery.text_cleared",
                             "Input box cleared, verifying cursor",
                         );
+                        if !enter_sent {
+                            prompt_ack = None;
+                        }
                         delivery_state = State::VerifyCursor;
                         phase_started_at = Instant::now();
                         continue;
@@ -2869,7 +2897,7 @@ pub fn run_delivery_loop(
                                         enter_attempt, input_text
                                     ),
                                 );
-                                inject_enter(state.inject_port);
+                                enter_sent |= inject_enter(state.inject_port);
                                 enter_attempt += 1;
                                 phase_started_at = Instant::now();
                                 let backoff = Duration::from_millis(200 * (1 << enter_attempt));
@@ -2930,6 +2958,8 @@ pub fn run_delivery_loop(
 
                 State::VerifyCursor => {
                     let elapsed = phase_started_at.elapsed();
+
+                    antigravity::ack_prompt_once_turn_started(db, &current_name, &mut prompt_ack);
 
                     // Check if cursor advanced (hook processed messages)
                     let current_cursor = db.get_cursor(&current_name);
@@ -3052,7 +3082,7 @@ pub fn run_delivery_loop(
                                             inject_attempt
                                         ),
                                     );
-                                    inject_enter(state.inject_port);
+                                    enter_sent |= inject_enter(state.inject_port);
                                 } else {
                                     log_info(
                                         "native",
@@ -3726,6 +3756,22 @@ mod tests {
         );
         assert_eq!(
             prompt_ownership(Some("user draft"), "<hcom>"),
+            PromptOwnership::Other,
+        );
+        // A wrapped prompt read back with a space where a long word broke.
+        assert_eq!(
+            prompt_ownership(
+                Some("<hcom>see /a/very/lo ng/path</hcom>"),
+                "<hcom>see /a/very/long/path</hcom>"
+            ),
+            PromptOwnership::Exclusive,
+        );
+        // A partly rendered prompt is not ours yet.
+        assert_eq!(
+            prompt_ownership(
+                Some("<hcom>see /a/very"),
+                "<hcom>see /a/very/long/path</hcom>"
+            ),
             PromptOwnership::Other,
         );
     }
