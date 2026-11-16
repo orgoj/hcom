@@ -4,7 +4,7 @@ title: 'Sandboxed agents: bwrap sandbox + hcom shim/proxy'
 status: To Do
 assignee: []
 created_date: 2026-10-30 20:53
-updated_date: '2026-11-16T14:46:00Z'
+updated_date: '2026-11-16T17:05:00Z'
 labels: []
 dependencies: []
 type: feature
@@ -77,4 +77,6 @@ Spec finding: Claude defaults to no PTY wrapper (`uses_pty_default: false`, src/
 User decision 2026-11-16: threat model is a malicious/prompt-injected agent, so the whole CLI runs in the sandbox (CLI-native tool sandboxes are not enough). Credential approach to revisit after research (user finds per-agent logins too complex): brief tmp/knowledge/agent-cli-full-sandbox-brief.md, report tmp/knowledge/agent-cli-full-sandbox.md (@knowledge).
 
 Research 2026-11-16 (@knowledge, wiki 2-Knowledge/Research/plny-sandboxing-agentnich-cli-a-predplatne.md) confirms the design: built-in CLI sandboxes do not contain a malicious CLI (Claude srt wraps only Bash, not Read/Edit; Codex --yolo disables its sandbox); bwrap of the whole CLI + per-instance unix socket is the established pattern. Credentials: Claude setup-token (1-year, once per machine, shared by all sandboxed Claudes); Codex has no long-lived subscription token, shared auth.json across concurrent instances fails with refresh_token_reused -> own CODEX_HOME per agent (device-auth once, persistent); agy needs a Secret Service (D-Bus) or manual OAuth URL login. Strongest option: host L7 credential proxy with sentinel tokens (out of scope for phase 1). Credential choice awaits the user.
+
+User decisions 2026-11-16: (1) no ~/.local/share/hcom*; sandbox state lives in ~/.hcom (e.g. ~/.hcom/sandbox/<instance>/), only that subdir is bound into the sandbox, never the DB or the rest of ~/.hcom (corrects the earlier spec line). (2) Sandbox sessions must appear among the normal CLI sessions (~/.claude/projects, ~/.codex/sessions, agy store). Proposed: private dir in ~/.hcom/sandbox/<instance>/, host-side hcom symlinks each new session file into the normal store (sandbox never sees host sessions); alternative: bind the project's ~/.claude/projects/<encoded cwd>/ rw (exposes and lets it tamper with other sessions of the same project). To verify: symlink handling in Claude/Codex resume pickers (Codex sqlite index), agy session storage.
 <!-- SECTION:NOTES:END -->
