@@ -10,12 +10,12 @@ allow ruff *
 allow ./target/debug/hcom *
 allow ./target/release/hcom *
 allow /home/michael/.cargo/bin/hcom *
-allow contrib/test-hcom-gui *
+allow [sha256:64363d8fd72c21870ac443be8b8fc4a17940305f2608510d311f7cc6202fd773] contrib/test-hcom-gui *
 
 # Runs on every release: awk over Cargo.toml plus the matching Cargo.lock edit.
 # No network, no rm. An allow on a script is an allow on whatever the script
 # becomes later, so this one is only as safe as review of that file.
-allow scripts/bump-fork-version.sh
+allow [sha256:410e5d685eb5dca88bc4c150f4c11411f22497890c0bc4294d78dd053d7c60b3] scripts/bump-fork-version.sh
 
 allow sqlite3 ~/.hcom/hcom.db *
 allow sqlite3 -readonly ~/.hcom/hcom.db *
