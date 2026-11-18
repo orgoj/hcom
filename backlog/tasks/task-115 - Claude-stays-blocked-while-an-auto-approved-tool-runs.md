@@ -1,11 +1,11 @@
 ---
 id: TASK-115
 title: Claude stays blocked while an auto-approved tool runs
-status: In Progress
+status: Done
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-18T16:36:00Z'
-updated_date: '2026-11-18T18:26:00Z'
+updated_date: '2026-11-18T20:32:00Z'
 labels: []
 dependencies: []
 priority: high
@@ -22,7 +22,7 @@ Observed 2026-11-18 on nuntora_dev__remote (claude, auto mode, Herdr pane): the 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 A real approval dialog still sets blocked/approval and clears on approval or denial, covered by a test
-- [ ] #2 A permission dialog answered through any channel (window, remote control, phone) never leaves the instance blocked while the tool runs, covered by a test
+- [x] #2 A permission dialog answered through any channel (window, remote control, phone) never leaves the instance blocked while the tool runs, covered by a test
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -33,4 +33,6 @@ Analysis 2026-11-18 (hcom_dev): premise 'auto-approved' is wrong. Claude transcr
 User decision 2026-11-18: variant B. Approval may come from any channel (window, Claude remote control, phone), so no keystroke heuristic (variant A rejected: user approves dialogs in many ways, hcom must not rely on an Enter). Plan: (1) find a stable marker of Claude's permission dialog in the PTY screen or OSC output (title/notification), verified on a live dialog via hcom term; (2) verify that a remote-control approval removes the dialog from the local screen; (3) in the Claude PTY, while the row is hook-blocked context=approval and the dialog is absent for a debounce period, release to active; PostToolUse/PermissionDenied stay as fallback; minimal upstream touch; tests. Then reword AC #1 to 'a dialog answered through any channel'.
 
 Variant B implemented 2026-11-18: Claude PTY scrapes its permission dialog (ScreenTracker::is_claude_permission_dialog_visible: 'Esc to cancel'/'Do you want to' below the last ─── rule; live capture Claude Code v2.1.327). Once a seen dialog stays gone 1500 ms (claude_permission_answered) the PTY releases a row still blocked with hook context 'approval' to active/'approval_answered' (publish_claude_permission_answered); PostToolUse/PermissionDenied stay fallback. A never-seen dialog never releases (old behavior). Live check with debug PTY (t115-fola): blocked/approval 18:25:33 -> active/approval_answered 18:25:39 while 'sleep 25' ran. Not verified by hcom_dev: approval via Claude remote control/phone removes the local dialog (user to confirm).
+
+User confirmed 2026-11-18 on 0.7.30-orgoj.55: release after an answered dialog works.
 <!-- SECTION:NOTES:END -->
