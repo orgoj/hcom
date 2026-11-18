@@ -7836,6 +7836,7 @@ fn idle_killed_catalog_agents_restart_on_send_and_resume() {
         r#"{"defaults":{"idle_kill":1},"agents":{
             "reviewer":{"roaming":true,"cli":"claude","terminal_command":"sh -c true {script}"},
             "keeper":{"dir":"/tmp","cli":"claude","terminal_command":"sh -c true {script}"},
+            "mine":{"dir":"/tmp","cli":"claude","terminal_command":"sh -c true {script}"},
             "never":{"dir":"/tmp","idle_kill":false}}}"#,
     )
     .expect("write catalog");
@@ -7886,9 +7887,18 @@ fn idle_killed_catalog_agents_restart_on_send_and_resume() {
         "stdout={stdout} stderr={stderr}"
     );
 
-    // A persistent agent killed for idling resumes with hcom r.
-    let (code, stdout, stderr) = h.run(["agent", "keeper"]);
+    // A user's own launch from a shell gets no idle_kill.
+    let (code, stdout, stderr) = h.run(["agent", "mine"]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let (code, stdout, _) = h.run(["config", "-i", "mine", "idle_kill"]);
+    assert_eq!((code, stdout.trim()), (0, "0"));
+
+    // A persistent agent launched by another agent and killed for idling
+    // resumes with hcom r.
+    let (code, stdout, stderr) = h.run(["agent", "keeper", "--name", instance.as_str()]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let (code, stdout, _) = h.run(["config", "-i", "keeper", "idle_kill"]);
+    assert_eq!((code, stdout.trim()), (0, "1"));
     let mut keeper = idle_kill_sleeper(&h);
     make_idle_kill_row(&conn, "keeper", "listening", keeper.id());
     wait_for_idle_kill(&h, &mut keeper, true);

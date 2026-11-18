@@ -497,7 +497,7 @@ Agent and `defaults` fields:
 - `cli`, `dir`, boolean `roaming`, `roaming_dirs` array, `terminal`, `terminal_command`, `session`, `window`, `tag`, `groups`, `model`, `reasoning`
 - `prompt`, `system_prompt`, boolean `resume`, and boolean `continue`
 - `env` object, `inherit_env` and `args` arrays
-- `idle_kill` (seconds; `0` or `false` disables) and boolean `disabled`
+- `idle_kill` (seconds; `0` or `false` disables; only for launches by another agent or send autostart) and boolean `disabled`
 - `tools` object keyed by CLI name
 
 Top level: `version`, `defaults`, `agents`, `imports`, `system_prompt_file`, and `cli_overrides`

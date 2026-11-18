@@ -221,6 +221,8 @@ Idle autokill:
   \"idle_kill\": <seconds> in catalog defaults or an agent entry kills the launched instance
   like `hcom kill` once it has been listening that long with nothing unread and no own
   intent=request message still waiting for a reply. 0 or false disables it.
+  It applies only to launches by another agent (its hcom agent, or send autostart),
+  never to an agent the user launches from a shell.
   Roaming agents restart on the next send; others resume with hcom r.
   For a running local instance (not a subagent): hcom config -i <name> idle_kill <seconds>.
 
@@ -242,8 +244,12 @@ Use --as <name> to launch the same catalog definition as another independent ins
     )
 }
 
-pub fn cmd_agent(args: &AgentArgs) -> i32 {
-    match run(&args.args) {
+pub fn cmd_agent(args: &AgentArgs, ctx: &crate::shared::CommandContext) -> i32 {
+    let by_agent = ctx
+        .identity
+        .as_ref()
+        .is_some_and(|id| id.kind == crate::shared::SenderKind::Instance);
+    match run(&args.args, by_agent) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("Error: {e:#}");
@@ -252,7 +258,8 @@ pub fn cmd_agent(args: &AgentArgs) -> i32 {
     }
 }
 
-fn run(argv: &[String]) -> Result<i32> {
+/// `by_agent`: the caller is an hcom instance, not a user's shell.
+fn run(argv: &[String], by_agent: bool) -> Result<i32> {
     let Some(first) = argv.first().map(|s| s.as_str()) else {
         println!("{}", help_text());
         return Ok(0);
@@ -268,8 +275,8 @@ fn run(argv: &[String]) -> Result<i32> {
             println!("{}", help_text());
             Ok(0)
         }
-        group if group.starts_with('@') => cmd_launch_group(&group[1..], &argv[1..]),
-        name => cmd_launch(name, &argv[1..]),
+        group if group.starts_with('@') => cmd_launch_group(&group[1..], &argv[1..], by_agent),
+        name => cmd_launch(name, &argv[1..], by_agent),
     }
 }
 
@@ -1543,6 +1550,7 @@ pub(crate) fn autostart_catalog_agent(db: &HcomDb, route: &CatalogRoute) -> Resu
     let catalogs = Catalogs::load(false, None)?;
     let cli = Cli {
         as_name: Some(route.instance.clone()),
+        by_agent: true,
         ..Cli::default()
     };
     let (code, clean) = launch_named_with_roaming(
@@ -1709,6 +1717,9 @@ struct Cli {
     no_project: bool,
     catalog: Option<PathBuf>,
     passthrough: Vec<String>,
+    /// Launched by another agent (its `hcom agent`, or send autostart):
+    /// only then does the catalog `idle_kill` apply.
+    by_agent: bool,
 }
 
 fn parse_cli(argv: &[String]) -> Result<Cli> {
@@ -2638,8 +2649,9 @@ fn focus_running(eff: &Effective, live: &LiveAgent) -> Result<()> {
 
 // ── Subcommand: launch ──────────────────────────────────────────────────
 
-fn cmd_launch(name: &str, rest: &[String]) -> Result<i32> {
-    let cli = parse_cli(rest)?;
+fn cmd_launch(name: &str, rest: &[String], by_agent: bool) -> Result<i32> {
+    let mut cli = parse_cli(rest)?;
+    cli.by_agent = by_agent;
     let catalogs = Catalogs::load(cli.no_project, cli.catalog.as_deref())?;
     launch_named(name, &cli, &catalogs)
 }
@@ -2743,13 +2755,14 @@ fn launch_named_with_roaming(
     Ok((launch(&eff, cli, eff.resume)?, clean))
 }
 
-fn cmd_launch_group(group: &str, rest: &[String]) -> Result<i32> {
+fn cmd_launch_group(group: &str, rest: &[String], by_agent: bool) -> Result<i32> {
     if group.is_empty() || !crate::identity::is_valid_base_name(group) {
         bail!(
             "invalid agent group '{group}': use @ followed by lowercase letters, numbers, and underscore"
         );
     }
-    let cli = parse_cli(rest)?;
+    let mut cli = parse_cli(rest)?;
+    cli.by_agent = by_agent;
     if cli.as_name.is_some() {
         bail!("--as cannot be used when launching an agent group");
     }
@@ -2966,6 +2979,11 @@ fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
     };
     let mut policy_eff = eff.clone();
     apply_agy_policy_cwd(&mut policy_eff)?;
+    if !cli.by_agent {
+        // A user's own launch is never autokilled; this also clears a value
+        // an earlier agent launch under this name left behind.
+        policy_eff.idle_kill = 0;
+    }
     let eff = &policy_eff;
     let configured_terminal = configured_terminal();
     let (strategy, warnings) = choose_strategy(eff, configured_terminal.as_deref());

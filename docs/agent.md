@@ -376,7 +376,9 @@ materialized instance name itself.
 
 `"idle_kill": <seconds>` in catalog defaults or an agent entry kills the launched instance like
 `hcom kill` once it has been listening that long with nothing unread and no own `intent=request`
-message still waiting for a reply. `0` or `false` disables it. Roaming agents restart on the next
+message still waiting for a reply. `0` or `false` disables it. It applies only when another agent
+launches the instance (its `hcom agent`, or send autostart), never to an agent the user launches
+from a shell. Roaming agents restart on the next
 send; others resume with `hcom r`. For a running local instance (not a subagent), set it with
 `hcom config -i <name> idle_kill <seconds>`.
 

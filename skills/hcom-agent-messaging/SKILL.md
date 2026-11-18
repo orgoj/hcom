@@ -90,7 +90,7 @@ tell any agent:
 
 **Shell after exit**: a new window/pane keeps `bash -l` open after the agent exits; `hcom config keep_shell_on_exit false` closes it on exit code 0 (a failure still leaves the shell).
 
-**Idle autokill**: `hcom config -i <name|self> idle_kill <seconds>` (or catalog `"idle_kill"`) kills a local agent (not a remote one or a subagent) that stays idle that long; `0` clears. An agent waiting for a reply to its own `--intent request` message, or with unread messages, is not killed.
+**Idle autokill**: `hcom config -i <name|self> idle_kill <seconds>` (or catalog `"idle_kill"`, applied only when an agent or send autostart launches it) kills a local agent (not a remote one or a subagent) that stays idle that long; `0` clears. An agent waiting for a reply to its own `--intent request` message, or with unread messages, is not killed.
 
 **Request watch**: an `--intent request` message notifies its sender when the recipient goes idle or stops without replying. `hcom config request_idle_notify false` keeps only the stopped notice. A reply with `--reply-to` answers only that request; when the recipient replies to one of your requests while another stays open, you are told once at that moment.
 

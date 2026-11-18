@@ -1136,7 +1136,7 @@ fn dispatch_native_command(cmd: &str, args: &[String]) -> i32 {
             crate::commands::run::cmd_run(&db, &args, Some(&ctx))
         }),
         "agent" => clap_dispatch!(crate::commands::agent::AgentArgs, cmd, &cmd_argv, |args| {
-            crate::commands::agent::cmd_agent(&args)
+            crate::commands::agent::cmd_agent(&args, &ctx)
         }),
         "update" => clap_dispatch!(
             crate::commands::update::UpdateArgs,
