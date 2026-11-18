@@ -1054,11 +1054,9 @@ impl Proxy {
             // A latched approval clears on a timer (`APPROVAL_SCRAPE_CLEAR_MS`),
             // and once the dialog is gone the tool may go quiet. Wake to
             // re-evaluate instead of holding delivery until the next 10s timeout.
-            if self
-                .delivery_state
-                .read()
-                .is_ok_and(|s| s.approval_scrape_latched || s.dialog.is_some())
-            {
+            if self.delivery_state.read().is_ok_and(|s| {
+                s.approval_scrape_latched || s.dialog.is_some() || s.claude_permission_seen
+            }) {
                 poll_timeout = poll_timeout.min(crate::delivery::APPROVAL_SCRAPE_CLEAR_MS as u16);
             }
             match poll(&mut poll_fds, PollTimeout::from(poll_timeout)) {
@@ -1529,6 +1527,16 @@ impl Proxy {
             shared::publish_dialog_status(
                 dialog.as_deref(),
                 &mut self.dialog_prior_status.borrow_mut(),
+                self.config.instance_name.as_deref(),
+                &self.current_status,
+            );
+        }
+        if shared::claude_permission_answered(
+            &self.delivery_state,
+            &self.screen,
+            &self.config.target,
+        ) {
+            shared::publish_claude_permission_answered(
                 self.config.instance_name.as_deref(),
                 &self.current_status,
             );

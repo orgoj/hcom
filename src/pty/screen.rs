@@ -630,6 +630,26 @@ impl ScreenTracker {
         has_question && has_footer
     }
 
+    /// Claude permission dialog detection (captured live on Claude Code
+    /// v2.1.327): the dialog replaces the input box below a `───` rule, with a
+    /// "Do you want to proceed?" (or "... make this edit ...") question, a
+    /// numbered menu and an "Esc to cancel · Tab to amend" footer. Only the
+    /// region below the last rule counts, so the question in scrollback or agent
+    /// output cannot match; the normal footer's "esc to interrupt" does not
+    /// match either. Used only to release a hook-set approval block once the
+    /// dialog is gone, so a missed variant keeps the old hook-only behavior.
+    pub fn is_claude_permission_dialog_visible(&self) -> bool {
+        let lines = self.get_screen_lines();
+        let start = lines
+            .iter()
+            .rposition(|line| line.trim_start().starts_with("───"))
+            .map_or(0, |i| i + 1);
+        lines[start..].iter().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("Esc to cancel") || line.starts_with("Do you want to")
+        })
+    }
+
     /// Claude native subagent-navigator detection.
     ///
     /// Claude Code (v2.1.2xx+) has an in-session subagent navigator: a bottom
@@ -2020,6 +2040,57 @@ mod tests {
         let mut t = make_tracker(24, 80, "");
         t.process(b"> hello world\r\nrunning a build\r\n");
         assert!(!t.is_cursor_approval_visible());
+    }
+
+    // ---- Claude permission dialog detection ----
+    // Fixtures are bottom-of-screen captures from Claude Code v2.1.327.
+
+    #[test]
+    fn claude_permission_dialog_detected() {
+        let mut t = make_tracker(30, 80, "");
+        render_rows(
+            &mut t,
+            &[
+                "● Bash(pkill -x hcomt115none ; echo \"exit=$?\")",
+                "  ⎿  Waiting…",
+                "",
+                "────────────────────────────────────────────────────────────────",
+                " Bash command",
+                " Kill process named hcomt115none",
+                "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+                " pkill -x hcomt115none ; echo \"exit=$?\"",
+                "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌",
+                " Do you want to proceed?",
+                " ❯ 1. Yes",
+                "   2. No",
+                "",
+                " Esc to cancel · Tab to amend",
+            ],
+        );
+        assert!(t.is_claude_permission_dialog_visible());
+    }
+
+    #[test]
+    fn claude_permission_dialog_absent_after_answer() {
+        // The question in scrollback above the input box does not count.
+        let mut t = make_tracker(30, 80, "");
+        render_rows(
+            &mut t,
+            &[
+                "Do you want to proceed? I asked the user.",
+                "Esc to cancel was shown earlier.",
+                "● Bash(pkill -x hcomt115none ; echo \"exit=$?\")",
+                "  ⎿  Running…",
+                "",
+                "* Improvising… (5s · ↓ 407 tokens)",
+                "",
+                "────────────────────────────────────────────────────────────────",
+                "❯",
+                "────────────────────────────────────────────────────────────────",
+                "  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt",
+            ],
+        );
+        assert!(!t.is_claude_permission_dialog_visible());
     }
 
     // ---- Claude subagent navigator detection ----

@@ -533,6 +533,79 @@ fn dialog_status_edge<'a>(
     }
 }
 
+/// How long Claude's permission dialog must stay off screen before the
+/// approval block is released. Longer than `APPROVAL_SCRAPE_CLEAR_MS` so menu
+/// navigation and full redraws never release a dialog that is still open.
+const CLAUDE_PERMISSION_CLEAR_MS: u64 = 1500;
+
+/// Claude: true once a permission dialog seen on screen has stayed gone for
+/// `CLAUDE_PERMISSION_CLEAR_MS`, i.e. it was answered through any channel
+/// (this PTY, remote control, phone). Claude fires no hook between the answer
+/// and PostToolUse, so without this the hook-set `blocked`/`approval` lasts
+/// for the whole tool run. A dialog never seen (unknown layout) never fires.
+pub(super) fn claude_permission_answered(
+    screen_state: &Arc<RwLock<ScreenState>>,
+    screen: &ScreenTracker,
+    target: &PtyTarget,
+) -> bool {
+    if !matches!(target.known_tool(), Some(Tool::Claude)) {
+        return false;
+    }
+    let visible = screen.is_claude_permission_dialog_visible();
+    screen_state
+        .write()
+        .is_ok_and(|mut state| claude_permission_edge(&mut state, visible, Instant::now()))
+}
+
+fn claude_permission_edge(state: &mut ScreenState, visible: bool, now: Instant) -> bool {
+    if visible {
+        state.claude_permission_seen = true;
+        state.claude_permission_negative_since = None;
+        return false;
+    }
+    if !state.claude_permission_seen {
+        return false;
+    }
+    let since = *state.claude_permission_negative_since.get_or_insert(now);
+    if now.saturating_duration_since(since) < Duration::from_millis(CLAUDE_PERMISSION_CLEAR_MS) {
+        return false;
+    }
+    state.claude_permission_seen = false;
+    state.claude_permission_negative_since = None;
+    true
+}
+
+/// Release a hook-set approval block after its dialog was answered. Only the
+/// PermissionRequest context `approval` is touched; PostToolUse and
+/// PermissionDenied remain the fallback and win when they ran first.
+pub(super) fn publish_claude_permission_answered(
+    instance_name_cfg: Option<&str>,
+    current_status: &Arc<RwLock<String>>,
+) {
+    let Ok(db) = HcomDb::open() else {
+        return;
+    };
+    let Some(instance_name) = pty_instance_name(&db, instance_name_cfg) else {
+        return;
+    };
+    let Ok(Some(row)) = db.get_instance_full(&instance_name) else {
+        return;
+    };
+    if !releases_answered_permission(&row.status, &row.status_context) {
+        return;
+    }
+    apply_dialog_status_edge(
+        &db,
+        &instance_name,
+        (ST_ACTIVE, "approval_answered", &row.status_detail),
+        current_status,
+    );
+}
+
+fn releases_answered_permission(status: &str, context: &str) -> bool {
+    status == ST_BLOCKED && context == "approval"
+}
+
 fn apply_dialog_status_edge(
     db: &HcomDb,
     instance_name: &str,
@@ -2245,6 +2318,45 @@ No session found matching 'never-saved'"
             None
         );
         assert_eq!(prior, None);
+    }
+
+    #[test]
+    fn claude_permission_edge_fires_once_after_the_dialog_stays_gone() {
+        let mut state = ScreenState::default();
+        let t0 = Instant::now();
+        let clear = Duration::from_millis(CLAUDE_PERMISSION_CLEAR_MS);
+
+        // No dialog seen yet (the hook fired before it rendered, or an unknown
+        // layout): never releases.
+        assert!(!claude_permission_edge(&mut state, false, t0));
+        assert!(!claude_permission_edge(&mut state, false, t0 + clear * 2));
+
+        // Shown, then a short gap (redraw, menu navigation) and shown again.
+        assert!(!claude_permission_edge(&mut state, true, t0));
+        assert!(!claude_permission_edge(&mut state, false, t0));
+        assert!(!claude_permission_edge(
+            &mut state,
+            false,
+            t0 + clear - Duration::from_millis(1)
+        ));
+        assert!(!claude_permission_edge(&mut state, true, t0 + clear));
+
+        // Answered: gone for the full wait fires exactly once.
+        let t1 = t0 + clear * 2;
+        assert!(!claude_permission_edge(&mut state, false, t1));
+        assert!(claude_permission_edge(&mut state, false, t1 + clear));
+        assert!(!claude_permission_edge(&mut state, false, t1 + clear * 3));
+    }
+
+    #[test]
+    fn answered_permission_releases_only_the_hook_approval_block() {
+        assert!(releases_answered_permission(ST_BLOCKED, "approval"));
+        // PostToolUse / PermissionDenied already moved the row on, or another
+        // block owns it.
+        assert!(!releases_answered_permission(ST_ACTIVE, "approved:Bash"));
+        assert!(!releases_answered_permission(ST_BLOCKED, "pty:approval"));
+        assert!(!releases_answered_permission(ST_BLOCKED, "pty:dialog"));
+        assert!(!releases_answered_permission(ST_LISTENING, ""));
     }
 
     #[test]

@@ -1283,6 +1283,11 @@ pub struct ScreenState {
     pub dialog: Option<String>,
     /// When the dialog scrape last turned negative (`None` while positive).
     pub dialog_scrape_negative_since: Option<Instant>,
+    /// Claude permission dialog seen on screen and not yet released (see
+    /// `pty::shared::claude_permission_answered`).
+    pub claude_permission_seen: bool,
+    /// When the Claude permission dialog last left the screen (`None` while shown).
+    pub claude_permission_negative_since: Option<Instant>,
 }
 
 impl Default for ScreenState {
@@ -1304,6 +1309,8 @@ impl Default for ScreenState {
             startup_loading: false,
             dialog: None,
             dialog_scrape_negative_since: None,
+            claude_permission_seen: false,
+            claude_permission_negative_since: None,
         }
     }
 }
@@ -3410,6 +3417,8 @@ mod tests {
             startup_loading: false,
             dialog: None,
             dialog_scrape_negative_since: None,
+            claude_permission_seen: false,
+            claude_permission_negative_since: None,
         }
     }
 
