@@ -215,7 +215,7 @@ pub(crate) const FIELDS: &[ConfigField] = &[
     f("auto_approve", "HCOM_AUTO_APPROVE", "preferences.auto_approve", Bool, "Auto-approve safe hcom commands"),
     f("request_idle_notify", "HCOM_REQUEST_IDLE_NOTIFY", "preferences.request_idle_notify", Bool, "Notify a request sender when the recipient goes idle without replying (default: true)"),
     f("name_export", "HCOM_NAME_EXPORT", "preferences.name_export", Str, "Export instance name to custom env var"),
-    f("bigboss_notify_command", "HCOM_BIGBOSS_NOTIFY_COMMAND", "preferences.bigboss_notify_command", Str, "Command run detached for each message to bigboss; placeholders {from} {text} {id} (default: unset)"),
+    f("bigboss_notify_command", "HCOM_BIGBOSS_NOTIFY_COMMAND", "preferences.bigboss_notify_command", Str, "Command run detached for each message to bigboss; placeholders {from} {preview} {text} {id} (default: unset)"),
     f("relay", "HCOM_RELAY", "relay.url", Str, "Relay MQTT broker URL (managed by hcom relay)"),
     f("relay_id", "HCOM_RELAY_ID", "relay.id", Str, "Relay group identifier (managed by hcom relay)"),
     f("relay_token", "HCOM_RELAY_TOKEN", "relay.token", Str, "Relay authentication token (managed by hcom relay)"),

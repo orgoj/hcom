@@ -490,7 +490,7 @@ hcom config -i <name> <key> <value>   # per-agent override at runtime
 | `bootstrap_exclude` | Bootstrap parts to omit: `identity`, `messages`, `capabilities` (including tag, relay, headless, and command notices), `rules`, `handoff`, or `all` (default: `none`). Inspect with `hcom config bootstrap show [part]`. |
 | `auto_approve` | Auto-approve safe hcom commands (send/list/events/…) |
 | `request_idle_notify` | After `send --intent request`, notify the sender when the recipient goes idle without replying (default `true`); `false` keeps only the notice that the recipient stopped without replying |
-| `bigboss_notify_command` | Command the sender runs detached for each message to bigboss, e.g. `"notify-send 'hcom: {from}' {text}"`; placeholders `{from}`, `{text}`, `{id}` stay one argument each, no shell; unset (default) runs nothing |
+| `bigboss_notify_command` | Command the sender runs detached for each message to bigboss, e.g. `"notify-send -u critical -a bigboss {from} {preview}"`; placeholders `{from}`, `{preview}` (first 200 characters on one line), `{text}` (full text), `{id}` stay one argument each, no shell; unset (default) runs nothing |
 | `auto_subscribe` | Event subscription presets: `collision`, `created`, `stopped`, `blocked` |
 | `name_export` | Export instance name to a custom env var |
 | `title_mode` | Terminal/tab title behavior: `combined` (default), `label`, or `off` |

@@ -1588,10 +1588,12 @@ Purpose:
 Format:
   A shell-quoted command line split into arguments; no shell runs it.
   Placeholders inside an argument are replaced and the argument stays one
-  argument: {from} sender name, {text} message text, {id} message event id.
+  argument: {from} sender name, {preview} first 200 characters of the
+  text on one line (for desktop notifications), {text} full message text
+  (up to 128 KiB per argument on Linux), {id} message event id.
 
 Usage:
-  hcom config bigboss_notify_command \"notify-send 'hcom: {from}' {text}\"
+  hcom config bigboss_notify_command \"notify-send -u critical -a bigboss {from} {preview}\"
   hcom config bigboss_notify_command \"\"   # Turn off (default)
 
 Notes:

@@ -6,19 +6,49 @@ use std::process::{Command, Stdio};
 
 use crate::log::log_warn;
 
-/// Argv of `command` (shell-quoted, no shell) with `{id}`, `{from}` and
-/// `{text}` substituted inside each token, so every value stays one argument.
-/// `{text}` goes last: message text must not expand the other placeholders.
+/// Characters of `{preview}`; desktop notifications show only a few lines.
+const PREVIEW_CHARS: usize = 200;
+
+/// `text` on one line (whitespace runs collapsed), cut to [`PREVIEW_CHARS`]
+/// with a trailing `…`.
+fn preview(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(PREVIEW_CHARS) {
+        Some((cut, _)) => format!("{}…", &line[..cut]),
+        None => line,
+    }
+}
+
+/// Argv of `command` (shell-quoted, no shell) with `{id}`, `{from}`,
+/// `{preview}` and `{text}` substituted inside each token, so every value
+/// stays one argument. One pass: substituted values are never re-expanded.
 fn build_argv(command: &str, from: &str, text: &str, event_id: i64) -> Result<Vec<String>, String> {
-    let id = event_id.to_string();
+    let values = [
+        ("{id}", event_id.to_string()),
+        ("{from}", from.to_string()),
+        ("{preview}", preview(text)),
+        ("{text}", text.to_string()),
+    ];
     let argv: Vec<String> = shell_words::split(command)
         .map_err(|e| format!("invalid shell quoting: {e}"))?
         .into_iter()
         .map(|token| {
-            token
-                .replace("{id}", &id)
-                .replace("{from}", from)
-                .replace("{text}", text)
+            let mut out = String::new();
+            let mut rest = token.as_str();
+            while !rest.is_empty() {
+                match values.iter().find(|(key, _)| rest.starts_with(key)) {
+                    Some((key, value)) => {
+                        out.push_str(value);
+                        rest = &rest[key.len()..];
+                    }
+                    None => {
+                        let ch = rest.chars().next().unwrap();
+                        out.push(ch);
+                        rest = &rest[ch.len_utf8()..];
+                    }
+                }
+            }
+            out
         })
         .collect();
     if argv.is_empty() {
@@ -80,6 +110,18 @@ mod tests {
                 "--hint=id:42"
             ]
         );
+    }
+
+    #[test]
+    fn preview_is_one_short_line_and_never_expands() {
+        let long = format!("Threat check\n\n{}", "ž".repeat(300));
+        let argv = build_argv("x {preview}", "a", &long, 1).unwrap();
+        assert!(argv[1].starts_with("Threat check žž"), "{}", argv[1]);
+        assert_eq!(argv[1].chars().count(), PREVIEW_CHARS + 1);
+        assert!(argv[1].ends_with('…'));
+
+        let argv = build_argv("x {preview}", "a", "short {text} {id}", 7).unwrap();
+        assert_eq!(argv[1], "short {text} {id}");
     }
 
     #[test]
