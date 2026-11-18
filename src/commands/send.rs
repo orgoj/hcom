@@ -688,6 +688,11 @@ fn send_message_with_catalog_outcome(
         .log_event("message", &routing_instance, &data)
         .map_err(|e| format!("Failed to write message to database: {e}"))?;
 
+    // Fork: optional user notification (`bigboss_notify_command`).
+    if delivery.effective_mentions.iter().any(|m| m == SENDER) {
+        crate::bigboss_notify::notify(&identity.name, message, event_id);
+    }
+
     // Auto-create request-watch subscriptions for targeted requests
     if let Some(env) = envelope {
         if let Some(thread) = env.thread.as_deref() {

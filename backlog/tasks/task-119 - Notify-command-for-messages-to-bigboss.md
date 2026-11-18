@@ -1,9 +1,11 @@
 ---
 id: TASK-119
 title: Notify command for messages to bigboss
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@hcom_dev'
 created_date: '2026-11-18T17:33:00Z'
+updated_date: '2026-11-18T17:51:00Z'
 labels: []
 dependencies: []
 priority: high
@@ -19,8 +21,28 @@ User need (2026-11-18): agent results sent to bigboss (e.g. the cron-driven know
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 With the key unset, sending to bigboss behaves exactly as before, covered by a test
-- [ ] #2 With the key set, a message whose recipients include bigboss runs the command once, detached, with {from}, {text} (and the message id) substituted as single argv tokens; messages not addressed to bigboss run nothing; covered by tests
-- [ ] #3 A failing or missing notify command never fails or delays the send; the failure is logged
-- [ ] #4 hcom config help, README, docs and skills/hcom-agent-messaging document the key with a notify-send example
+- [x] #1 With the key unset, sending to bigboss behaves exactly as before, covered by a test
+- [x] #2 With the key set, a message whose recipients include bigboss runs the command once, detached, with {from}, {text} (and the message id) substituted as single argv tokens; messages not addressed to bigboss run nothing; covered by tests
+- [x] #3 A failing or missing notify command never fails or delays the send; the failure is logged
+- [x] #4 hcom config help, README, docs and skills/hcom-agent-messaging document the key with a notify-send example
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Config key bigboss_notify_command (Str, shell-quoted like *_args, not exported to agents' env, read at send time). 2. src/bigboss_notify.rs builds argv ({id},{from},{text} substituted per token, {text} last), spawns detached (null stdio, own process group, reaped by a thread), logs bigboss_notify.failed. 3. Hook in send_message_with_catalog_outcome after log_event when effective_mentions contains bigboss (broadcasts excluded). 4. Help/--info/README/skill, unit + cli_smoke tests. 5. Review agent_review, commit, release build, user sets live config.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Deviation from the spec example: the value is a shell-quoted string (same convention as claude_args), not a TOML array; config fields are string/int/bool only. 'Recipients include bigboss' = event mentions contain bigboss (delivered_to never lists bigboss); broadcasts do not notify.
+
+Review agent_review_hcom_884 #392574: broadcast finding rejected (see review:rejected task); exit-status finding resolved by stating in --info that only start failures are logged.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Opt-in config key bigboss_notify_command: the sending hcom process spawns it detached for every message whose mentions include bigboss; {from} {text} {id} substituted as single argv tokens, no shell; start failures logged (bigboss_notify.failed); unset = no change. Docs: config --info/--help, README, skill. Tests: unit (argv) + cli_smoke bigboss_notify_command_runs_only_for_messages_to_bigboss.
+<!-- SECTION:FINAL_SUMMARY:END -->

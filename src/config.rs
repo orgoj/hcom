@@ -215,6 +215,7 @@ pub(crate) const FIELDS: &[ConfigField] = &[
     f("auto_approve", "HCOM_AUTO_APPROVE", "preferences.auto_approve", Bool, "Auto-approve safe hcom commands"),
     f("request_idle_notify", "HCOM_REQUEST_IDLE_NOTIFY", "preferences.request_idle_notify", Bool, "Notify a request sender when the recipient goes idle without replying (default: true)"),
     f("name_export", "HCOM_NAME_EXPORT", "preferences.name_export", Str, "Export instance name to custom env var"),
+    f("bigboss_notify_command", "HCOM_BIGBOSS_NOTIFY_COMMAND", "preferences.bigboss_notify_command", Str, "Command run detached for each message to bigboss; placeholders {from} {text} {id} (default: unset)"),
     f("relay", "HCOM_RELAY", "relay.url", Str, "Relay MQTT broker URL (managed by hcom relay)"),
     f("relay_id", "HCOM_RELAY_ID", "relay.id", Str, "Relay group identifier (managed by hcom relay)"),
     f("relay_token", "HCOM_RELAY_TOKEN", "relay.token", Str, "Relay authentication token (managed by hcom relay)"),
@@ -327,6 +328,9 @@ pub struct HcomConfig {
     /// Keep `bash -l` open in a new window/pane after the tool exits
     /// (default: true). When false, the shell opens only on a non-zero exit.
     pub keep_shell_on_exit: bool,
+    /// Fork: shell-quoted argv run detached by the sender for each message
+    /// whose recipients include bigboss (empty = off). See `bigboss_notify`.
+    pub bigboss_notify_command: String,
 }
 
 impl Default for HcomConfig {
@@ -370,6 +374,7 @@ impl Default for HcomConfig {
             title_mode: "combined".to_string(),
             herdr_autostart: true,
             keep_shell_on_exit: true,
+            bigboss_notify_command: String::new(),
         }
     }
 }
@@ -503,6 +508,7 @@ impl HcomConfig {
             ("qoder_args", &self.qoder_args),
             ("grok_args", &self.grok_args),
             ("hermes_args", &self.hermes_args),
+            ("bigboss_notify_command", &self.bigboss_notify_command),
         ] {
             if !value.is_empty()
                 && let Err(e) = shell_words::split(value)
@@ -578,6 +584,7 @@ impl HcomConfig {
             "title_mode" => Some(self.title_mode.clone()),
             "herdr_autostart" => Some(if self.herdr_autostart { "1" } else { "0" }.into()),
             "keep_shell_on_exit" => Some(if self.keep_shell_on_exit { "1" } else { "0" }.into()),
+            "bigboss_notify_command" => Some(self.bigboss_notify_command.clone()),
             _ => None,
         }
     }
@@ -636,6 +643,7 @@ impl HcomConfig {
             "title_mode" => self.title_mode = value.to_string(),
             "herdr_autostart" => self.herdr_autostart = !is_falsy(value),
             "keep_shell_on_exit" => self.keep_shell_on_exit = !is_falsy(value),
+            "bigboss_notify_command" => self.bigboss_notify_command = value.to_string(),
             _ => return Err(format!("unknown field: {field}")),
         }
         Ok(())
@@ -728,8 +736,9 @@ impl HcomConfig {
             .iter()
             .filter(|f| !f.is_relay())
             // Read at send time: an exported launch-time value would pin running
-            // agents and hide a later `hcom config request_idle_notify` change.
-            .filter(|f| f.name != "request_idle_notify")
+            // agents and hide a later `hcom config request_idle_notify` (or
+            // `bigboss_notify_command`) change.
+            .filter(|f| !matches!(f.name, "request_idle_notify" | "bigboss_notify_command"))
             .filter_map(|f| Some((f.env.to_string(), self.get_field(f.name)?)))
             .collect()
     }

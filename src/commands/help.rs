@@ -759,6 +759,10 @@ const CONFIG_KEYS_HELP: &[HelpEntry] = &[
         "Keep a shell in the pane after the agent exits",
     ),
     (
+        "  bigboss_notify_command",
+        "Command run detached for messages to bigboss",
+    ),
+    (
         "  continue_last",
         "Recent exchanges in the --continue handoff",
     ),

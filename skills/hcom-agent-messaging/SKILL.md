@@ -94,6 +94,8 @@ tell any agent:
 
 **Request watch**: an `--intent request` message notifies its sender when the recipient goes idle or stops without replying. `hcom config request_idle_notify false` keeps only the stopped notice. A reply with `--reply-to` answers only that request; when the recipient replies to one of your requests while another stays open, you are told once at that moment.
 
+**User notification**: `hcom config bigboss_notify_command "notify-send 'hcom: {from}' {text}"` runs that command (no shell; `{from}` `{text}` `{id}` placeholders) whenever a message is addressed to bigboss, so the user sees it outside hcom. Unset by default.
+
 **Roaming catalog agent**: `"roaming": true` makes `@<name>` address `<name>_<project>_<hash>` for the sender's Git/project root (`<hash>` = 3-digit number from SHA-256 of the root path, so roots with the same basename get different instances) and start it there when missing. `hcom send --project-dir <DIR> @<name>` uses `<DIR>`'s project root instead (roaming targets only). Send and `hcom agent <name>` print a `Note:` line on stdout with that instance name; address it by that name. Instances of the role in other projects are separate agents. `hcom list` marks each instance `↻<name>`; `hcom agent list --json` gives a roaming entry's running `instances`.
 
 **Agent status columns**: `[[status_column]]` tables in `~/.hcom/config.toml` (`name`, `regex`, `reset = "keep" | "turn"`) take values from each agent's last reply when it goes idle. `hcom agent list --status` shows the latest values per catalog agent (also for stopped ones); `--status --json` adds `status_columns` with full values per instance and `latest`. Remote (relay) agents are not covered.

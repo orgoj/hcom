@@ -1573,6 +1573,35 @@ Notes:
   - The same setting can be provided with HCOM_KEEP_SHELL_ON_EXIT in the environment.",
         ),
 
+        "HCOM_BIGBOSS_NOTIFY_COMMAND" => Some(
+            "\
+HCOM_BIGBOSS_NOTIFY_COMMAND - Notify the user of messages to bigboss
+
+Default: unset (no notification)
+
+Purpose:
+  The sending hcom process runs this command detached for every message
+  whose recipients include bigboss (@bigboss, or a reply to a bigboss
+  message), so the user notices it without watching hcom. Broadcasts do not
+  trigger it.
+
+Format:
+  A shell-quoted command line split into arguments; no shell runs it.
+  Placeholders inside an argument are replaced and the argument stays one
+  argument: {from} sender name, {text} message text, {id} message event id.
+
+Usage:
+  hcom config bigboss_notify_command \"notify-send 'hcom: {from}' {text}\"
+  hcom config bigboss_notify_command \"\"   # Turn off (default)
+
+Notes:
+  - The command never fails or delays the send. A command that cannot start
+    is logged to hcom.log (bigboss_notify.failed); its exit status is not
+    tracked once it runs detached.
+  - Read at send time; not exported to launched agents.
+  - Messages from remote devices (relay) run it only on the sending device.",
+        ),
+
         "HCOM_NAME_EXPORT" => Some(
             "\
 HCOM_NAME_EXPORT - Export instance name to custom env var

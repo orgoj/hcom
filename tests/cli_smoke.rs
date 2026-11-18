@@ -2533,6 +2533,73 @@ fn keep_shell_on_exit_config_and_help() {
 }
 
 #[test]
+fn bigboss_notify_command_runs_only_for_messages_to_bigboss() {
+    let h = Hcom::new();
+    let sender = h.start();
+    let other = h.start();
+    let out = h.path().join("notified");
+    let send = |target: &str, text: &str| {
+        let (code, stdout, stderr) = h.run(["send", target, "--name", &sender, "--", text]);
+        assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    };
+
+    // Unset (default): sending to bigboss works as before and runs nothing.
+    let (code, stdout, _) = h.run(["config", "bigboss_notify_command"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("(not set)"), "stdout={stdout}");
+    send("@bigboss", "before");
+
+    let script = format!(
+        "sh -c 'printf \"%s|%s|%s\\n\" \"$1\" \"$2\" \"$3\" >> {}' notify {{from}} {{text}} {{id}}",
+        out.display()
+    );
+    let (code, _, stderr) = h.run(["config", "bigboss_notify_command", &script]);
+    assert_eq!(code, 0, "stderr={stderr}");
+
+    send(&format!("@{other}"), "not for the user");
+    send("@bigboss", "two words; $(touch {from})");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !out.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let written = std::fs::read_to_string(&out).expect("notify command output");
+    let lines: Vec<&str> = written.lines().collect();
+    assert_eq!(lines.len(), 1, "written={written}");
+    let fields: Vec<&str> = lines[0].split('|').collect();
+    assert_eq!(fields[0], sender);
+    assert_eq!(fields[1], "two words; $(touch {from})");
+    assert!(fields[2].parse::<i64>().is_ok(), "written={written}");
+
+    // A missing command never fails the send.
+    let (code, _, _) = h.run([
+        "config",
+        "bigboss_notify_command",
+        "/nonexistent/notify {text}",
+    ]);
+    assert_eq!(code, 0);
+    send("@bigboss", "still delivered");
+    let log = std::fs::read_to_string(h.path().join(".tmp/logs/hcom.log")).unwrap_or_default();
+    assert!(log.contains("bigboss_notify.failed"), "log={log}");
+
+    let (code, _, _) = h.run(["config", "bigboss_notify_command", ""]);
+    assert_eq!(code, 0);
+    let (_, stdout, _) = h.run(["config", "bigboss_notify_command"]);
+    assert!(stdout.contains("(not set)"), "stdout={stdout}");
+
+    let (code, stdout, _) = h.run(["config", "bigboss_notify_command", "--info"]);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("{from}") && stdout.contains("notify-send"),
+        "stdout={stdout}"
+    );
+    let (code, stdout, _) = h.run(["config", "--help"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("bigboss_notify_command"), "stdout={stdout}");
+}
+
+#[test]
 fn agent_help_lists_catalog_layers() {
     let h = Hcom::new();
     let (code, stdout, stderr) = h.run(["agent", "--help"]);
