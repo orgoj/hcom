@@ -1,9 +1,12 @@
 ---
 id: TASK-118
-title: Scheduled agent launches with a prompt (catalog schedule + one cron tick)
+title: >-
+  Scheduled agent messages: cron runs a parameterless script that sends the
+  prompt
 status: Idea
 assignee: []
 created_date: '2026-11-18T17:07:00Z'
+updated_date: '2026-11-18T17:09:00Z'
 labels: []
 dependencies: []
 priority: medium
@@ -14,5 +17,5 @@ ordinal: 229000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-User need (2026-11-18): launch knowledge as knowledge_vulncheck several times a day with a prompt to check current vulnerabilities (it has its own procedure and scripts), ideally configured from hcom-dashboard. No scheduler exists in hcom or upstream (checked git log upstream/main and src). Works today without code: a cron line 'hcom agent knowledge --as knowledge_vulncheck --hcom-prompt <text>' (or a catalog entry knowledge_vulncheck with prompt + idle_kill so the instance ends after the run; a launch while the instance still runs is a no-op and the prompt is lost). Unverified: launching from cron into Herdr (cron env: PATH from mise, Herdr socket). Suggested direction: optional 'schedule' key (cron expressions) in a catalog agent entry; one user crontab line runs 'hcom schedule tick' every minute, which launches due agents with their prompt, logs a life event per run and skips (logs) a run whose instance still runs; no daemon. Dashboard shows schedules, last and next run; editing from the dashboard is an open decision (catalog is user-edited config). Open questions: catalog key vs separate schedules file, behavior when the previous run still runs (skip, send the prompt to it, or --restart), whether the dashboard edits schedules. Needs analysis before implementation.
+User need (2026-11-18): several times a day send the knowledge agent, as instance knowledge_vulncheck, a prompt to check current vulnerabilities (it has its own procedure and scripts); ideally configured from hcom-dashboard. User decisions: no separate catalog entry (knowledge_vulncheck is the knowledge agent under another name); each scheduled job is a script in ~/.hcom so the crontab line is only the command without parameters; the script uses send, which delivers whether the instance runs or not. Works with the current binary (docs/agent.md, send --spawn-as/--as): 'hcom send @knowledge --as knowledge_vulncheck --intent request -- <prompt>' delivers to a running knowledge_vulncheck, otherwise autostarts the catalog agent knowledge under that name and delivers once ready (output 'Queued; delivery pending' while it starts). No scheduler exists in hcom or upstream. To verify: send autostart from the cron environment (PATH from mise, Herdr server; herdr_autostart starts it headless if missing). Remaining hcom scope (open): how hcom-dashboard shows or sets up these scheduled scripts (list of jobs, crontab times, last run). Needs analysis before implementation.
 <!-- SECTION:DESCRIPTION:END -->
