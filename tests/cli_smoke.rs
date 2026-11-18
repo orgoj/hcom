@@ -7836,7 +7836,9 @@ fn idle_killed_catalog_agents_restart_on_send_and_resume() {
         r#"{"defaults":{"idle_kill":1},"agents":{
             "reviewer":{"roaming":true,"cli":"claude","terminal_command":"sh -c true {script}"},
             "keeper":{"dir":"/tmp","cli":"claude","terminal_command":"sh -c true {script}"},
-            "mine":{"dir":"/tmp","cli":"claude","terminal_command":"sh -c true {script}"},
+            "mine":{"dir":"/tmp","cli":"claude","idle_kill_agent_only":true,
+                "terminal_command":"sh -c true {script}"},
+            "always":{"dir":"/tmp","cli":"claude","terminal_command":"sh -c true {script}"},
             "never":{"dir":"/tmp","idle_kill":false}}}"#,
     )
     .expect("write catalog");
@@ -7887,15 +7889,36 @@ fn idle_killed_catalog_agents_restart_on_send_and_resume() {
         "stdout={stdout} stderr={stderr}"
     );
 
-    // A user's own launch from a shell gets no idle_kill.
+    // A user's own launch from a shell keeps idle_kill by default and drops
+    // it under idle_kill_agent_only.
+    let (code, stdout, stderr) = h.run(["agent", "always"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let (code, stdout, _) = h.run(["config", "-i", "always", "idle_kill"]);
+    assert_eq!((code, stdout.trim()), (0, "1"));
+    let (code, stdout, stderr) = h.run(["agent", "show", "mine"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    assert!(
+        stdout.contains("idle_kill: 1s (agent launches only)"),
+        "stdout={stdout}"
+    );
     let (code, stdout, stderr) = h.run(["agent", "mine"]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     let (code, stdout, _) = h.run(["config", "-i", "mine", "idle_kill"]);
     assert_eq!((code, stdout.trim()), (0, "0"));
+    let (code, stdout, stderr) = h.run([
+        "agent",
+        "mine",
+        "--as",
+        "mine2",
+        "--name",
+        instance.as_str(),
+    ]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let (code, stdout, _) = h.run(["config", "-i", "mine2", "idle_kill"]);
+    assert_eq!((code, stdout.trim()), (0, "1"));
 
-    // A persistent agent launched by another agent and killed for idling
-    // resumes with hcom r.
-    let (code, stdout, stderr) = h.run(["agent", "keeper", "--name", instance.as_str()]);
+    // A persistent agent killed for idling resumes with hcom r.
+    let (code, stdout, stderr) = h.run(["agent", "keeper"]);
     assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
     let (code, stdout, _) = h.run(["config", "-i", "keeper", "idle_kill"]);
     assert_eq!((code, stdout.trim()), (0, "1"));

@@ -60,7 +60,7 @@ pub fn help_text() -> String {
 Agent fields (in an \"agents\" entry or in \"defaults\"):
   description, cli, dir, model, reasoning, prompt, system_prompt, terminal,
   terminal_command, session, window, tag, groups, env, inherit_env, args,
-  resume, continue, idle_kill, roaming, roaming_dirs, disabled, tools.
+  resume, continue, idle_kill, idle_kill_agent_only, roaming, roaming_dirs, disabled, tools.
   Top level: version, defaults, agents, imports, system_prompt_file, and
   cli_overrides (global catalog only).
 
@@ -221,8 +221,8 @@ Idle autokill:
   \"idle_kill\": <seconds> in catalog defaults or an agent entry kills the launched instance
   like `hcom kill` once it has been listening that long with nothing unread and no own
   intent=request message still waiting for a reply. 0 or false disables it.
-  It applies only to launches by another agent (its hcom agent, or send autostart),
-  never to an agent the user launches from a shell.
+  \"idle_kill_agent_only\": true applies it only to launches by another agent (its
+  hcom agent, or send autostart), never to an agent the user launches from a shell.
   Roaming agents restart on the next send; others resume with hcom r.
   For a running local instance (not a subagent): hcom config -i <name> idle_kill <seconds>.
 
@@ -312,6 +312,8 @@ struct AgentDef {
     continue_session: Option<bool>,
     /// Seconds idle before hcom kills the instance; 0 or false disables.
     idle_kill: Option<serde_json::Value>,
+    /// true applies `idle_kill` only to launches by another agent.
+    idle_kill_agent_only: Option<bool>,
     #[serde(default)]
     env: BTreeMap<String, String>,
     #[serde(default)]
@@ -387,6 +389,7 @@ impl AgentDef {
             resume,
             continue_session,
             idle_kill,
+            idle_kill_agent_only,
             agent_dir,
             instructions,
             instructions_content
@@ -1889,6 +1892,7 @@ struct Effective {
     continue_last: Option<usize>,
     /// Seconds; 0 = off.
     idle_kill: u64,
+    idle_kill_agent_only: bool,
     env: BTreeMap<String, String>,
     inherit_env: Vec<String>,
     extra: Vec<String>,
@@ -2203,6 +2207,7 @@ fn effective(name: &str, mut def: AgentDef, cli: &Cli) -> Effective {
             .unwrap_or(false),
         continue_last: cli.continue_last,
         idle_kill: def.idle_kill.as_ref().and_then(idle_kill_secs).unwrap_or(0),
+        idle_kill_agent_only: def.idle_kill_agent_only.unwrap_or(false),
         env: {
             for key in &def.inherit_env {
                 if !def.env.contains_key(key)
@@ -2979,8 +2984,8 @@ fn launch(eff: &Effective, cli: &Cli, resume: bool) -> Result<i32> {
     };
     let mut policy_eff = eff.clone();
     apply_agy_policy_cwd(&mut policy_eff)?;
-    if !cli.by_agent {
-        // A user's own launch is never autokilled; this also clears a value
+    if policy_eff.idle_kill_agent_only && !cli.by_agent {
+        // A user's own launch is not autokilled; this also clears a value
         // an earlier agent launch under this name left behind.
         policy_eff.idle_kill = 0;
     }
@@ -3527,7 +3532,12 @@ fn cmd_show(rest: &[String]) -> Result<i32> {
         println!("roaming_dirs: {}", dir.display());
     }
     if eff.idle_kill > 0 {
-        println!("idle_kill: {}s", eff.idle_kill);
+        let scope = if eff.idle_kill_agent_only {
+            " (agent launches only)"
+        } else {
+            ""
+        };
+        println!("idle_kill: {}s{scope}", eff.idle_kill);
     }
     for skill in &eff.skills {
         println!(

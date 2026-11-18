@@ -399,7 +399,8 @@ Launch flags override the catalog for one run: `--cli` (alias `--tool`), `--dir`
 | `groups` | Catalog groups for `hcom agent @group`, `hcom send @group` and `hcom kill @group` |
 | `env`, `inherit_env`, `args` | Extra environment, variables copied from the caller, extra tool arguments |
 | `resume`, `continue` | Default start mode; `--resume`, `--continue` and `--clean` override it |
-| `idle_kill` | Seconds of idle listening before hcom kills the instance (`0` or `false` off); only for launches by another agent or send autostart, never a user's shell launch |
+| `idle_kill` | Seconds of idle listening before hcom kills the instance (`0` or `false` off) |
+| `idle_kill_agent_only` | `true`: `idle_kill` only for launches by another agent or send autostart, never a user's shell launch |
 | `roaming` | Per-project instances, see below |
 | `roaming_dirs` | Project directories a roaming agent may run in, see below |
 | `disabled` | `true` hides the entry, see below |

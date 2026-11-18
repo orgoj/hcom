@@ -353,6 +353,7 @@ Supported agent fields:
 | `inherit_env` | Variables copied from the caller's environment when set |
 | `args` | Additional CLI arguments |
 | `idle_kill` | Seconds of idle listening before hcom kills the instance (`0` or `false` disables) |
+| `idle_kill_agent_only` | `true` applies `idle_kill` only to launches by another agent or send autostart |
 | `disabled` | `true` treats the agent as undefined, see [Disabled agents](#disabled-agents) |
 | `tools.<cli>` | Per-CLI `model`, `reasoning`, `prompt`, `system_prompt`, and `args` overrides |
 
@@ -376,9 +377,9 @@ materialized instance name itself.
 
 `"idle_kill": <seconds>` in catalog defaults or an agent entry kills the launched instance like
 `hcom kill` once it has been listening that long with nothing unread and no own `intent=request`
-message still waiting for a reply. `0` or `false` disables it. It applies only when another agent
-launches the instance (its `hcom agent`, or send autostart), never to an agent the user launches
-from a shell. Roaming agents restart on the next
+message still waiting for a reply. `0` or `false` disables it. `"idle_kill_agent_only": true` applies it
+only when another agent launches the instance (its `hcom agent`, or send autostart), never to an
+agent the user launches from a shell. Roaming agents restart on the next
 send; others resume with `hcom r`. For a running local instance (not a subagent), set it with
 `hcom config -i <name> idle_kill <seconds>`.
 
