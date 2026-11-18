@@ -30,7 +30,7 @@ EOF
 
 All flags go before `--`; everything after `--` is the message. `@<group>` reaches every catalog agent of that group in your scope and starts stopped ones. Intents: `request` (want reply), `inform` (no reply needed), `ack` (answer to a `request`, requires `--reply-to`; to an `inform` or `ack` reply with `inform --reply-to`). No need to run `hcom status`, `hcom list` or `--help` before sending; use them only if the send fails.
 
-When the user tells you who to message (an agent or group, with or without `@`), send the user's request to that name right away. Do not research the content first (web, code, transcripts) and do not verify the name with `hcom list` or the catalog; the recipient does the analysis. Look the name up only if the send fails.
+When the user tells you who to message (an agent or group, with or without `@`), send the user's request to that name right away. Do not research the content first (web, code, transcripts) and do not verify the name with `hcom list` or the catalog; the recipient does the analysis. Look the name up only if the send fails, with `hcom agent list` (catalog names and descriptions); never `hcom list` (running instances only) or agents.json.
 
 AI agents running in separate terminals are isolated. hcom connects them via hooks and a shared database so they can message, watch, and spawn each other in real-time.
 
