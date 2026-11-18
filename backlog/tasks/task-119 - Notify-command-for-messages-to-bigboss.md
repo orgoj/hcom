@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@hcom_dev'
 created_date: '2026-11-18T17:33:00Z'
-updated_date: '2026-11-18T17:51:00Z'
+updated_date: '2026-11-18T18:12:00Z'
 labels: []
 dependencies: []
 priority: high
@@ -39,6 +39,8 @@ User need (2026-11-18): agent results sent to bigboss (e.g. the cron-driven know
 Deviation from the spec example: the value is a shell-quoted string (same convention as claude_args), not a TOML array; config fields are string/int/bool only. 'Recipients include bigboss' = event mentions contain bigboss (delivered_to never lists bigboss); broadcasts do not notify.
 
 Review agent_review_hcom_884 #392574: broadcast finding rejected (see review:rejected task); exit-status finding resolved by stating in --info that only start failures are logged.
+
+Follow-up (user): {preview} placeholder, 200 chars one line; live config set to notify-send -u critical -a bigboss {from} {preview}. Review OK #392679. Deployed 0.7.30-orgoj.54.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
