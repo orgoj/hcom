@@ -1,9 +1,11 @@
 ---
 id: TASK-115
 title: Claude stays blocked while an auto-approved tool runs
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@hcom_dev'
 created_date: '2026-11-18T16:36:00Z'
+updated_date: '2026-11-18T17:39:00Z'
 labels: []
 dependencies: []
 priority: high
@@ -22,3 +24,9 @@ Observed 2026-11-18 on nuntora_dev__remote (claude, auto mode, Herdr pane): the 
 - [ ] #1 An auto-approved tool call (auto mode or a PermissionRequest hook that allows) never leaves the instance in status blocked while the tool runs, covered by a test
 - [ ] #2 A real approval dialog still sets blocked/approval and clears on approval or denial, covered by a test
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Analysis 2026-11-18 (hcom_dev): premise 'auto-approved' is wrong. Claude transcripts carry permissionDecision per tool_result. Classifier/config/hook (Dippy PreToolUse allow) approvals fire NO PermissionRequest (nuntora_dev__remote 15:00:58, 15:54:01: only PostToolUse in hcom.log). PermissionRequest fires only when a dialog is shown (Dippy PreToolUse 'ask'). Incident 16:23:15: Dippy ask 'pkill -x' -> PermissionRequest -> Notification at 16:23:21 (permission_prompt arrives ~6 s after the dialog, absent when answered faster: wdt_main 10:19:28/43, answered in 4-5 s) -> tool_result 16:33:15 permissionDecision source=user_temporary. So the user answered the dialog, the 10 min command ran, and Claude fires no hook between the answer and PostToolUse; blocked/approval stays for the tool runtime. Upstream main (0.7.31) has the identical handler. Candidate fixes: (A) Claude PTY: a user or injected keystroke that answers the dialog (Enter, Esc, digit) while the row is hook-blocked context=approval releases to active (no screen scraping; answers outside the hcom PTY, e.g. Claude remote/mobile, stay uncovered); (B) Claude PTY screen scrape of the permission dialog, authoritative release when it disappears (fragile across Claude versions); (C) keep upstream behavior. AC #1 needs rewording to 'an answered dialog' once the option is chosen.
+<!-- SECTION:NOTES:END -->
