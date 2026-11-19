@@ -82,8 +82,11 @@ pub(crate) fn ack_prompt_once_turn_started(
     }
 }
 
+/// Whitespace runs collapse to one space: agy wraps a long prompt onto rows
+/// indented by two spaces, and a wrap before a space run starts a row indented
+/// further, which reads back as the footer and the typed text is never ours.
 fn one_line(text: &str) -> String {
-    text.trim().replace(['\r', '\n', '\t'], " ")
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn cut_prompt(body: &str, note: &str, id: i64) -> String {
@@ -172,14 +175,34 @@ mod tests {
 
     #[test]
     fn prompt_keeps_message_text_verbatim_on_one_line() {
-        let (_dir, db, ids) = db_with_messages(&["run hcom send @luna -- hi\n> quoted  a >= 2"]);
+        let (_dir, db, ids) = db_with_messages(&["run hcom send @luna -- hi\n> quoted a >= 2"]);
         let (text, ack) = build_antigravity_prompt(&db, "vago").unwrap();
         assert!(!text.contains('\n'), "{text}");
         assert!(
-            text.contains("run hcom send @luna -- hi > quoted  a >= 2"),
+            text.contains("run hcom send @luna -- hi > quoted a >= 2"),
             "{text}"
         );
         assert_eq!(ack.last_event_id, ids[0]);
+    }
+
+    /// An indented line wrapped at its indent started a row the agy screen
+    /// parser reads as the footer, so the typed text never matched (TASK-126).
+    #[test]
+    fn prompt_collapses_indented_lines_to_single_spaces() {
+        let (_dir, db, _) =
+            db_with_messages(&["- Codex CLI:\n  * Repo: x\n\t\t* Package:   y\r\n\n end"]);
+        let (text, _) = build_antigravity_prompt(&db, "vago").unwrap();
+        assert!(
+            !text
+                .chars()
+                .zip(text.chars().skip(1))
+                .any(|(a, b)| a.is_whitespace() && b.is_whitespace()),
+            "{text}"
+        );
+        assert!(
+            text.contains("- Codex CLI: * Repo: x * Package: y end"),
+            "{text}"
+        );
     }
 
     #[test]
