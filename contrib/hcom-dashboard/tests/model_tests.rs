@@ -16973,6 +16973,12 @@ fn test_task_125_inbox_filter_read_state_and_selection() {
     assert_eq!(app.inbox_unread(), 0);
     app.state.inbox_sources.broadcasts = true;
     assert_eq!(app.inbox_unread(), 1, "Mark all read skips hidden messages");
+    app.state.inbox_unread_only = true;
+    let ids: Vec<u64> = app.inbox_messages().iter().map(|m| m.id).collect();
+    assert_eq!(ids, vec![3], "Unread only hides read messages");
+    assert_eq!(app.inbox_unread(), 1);
+    app.state.inbox_unread_only = false;
+    assert_eq!(app.inbox_messages().len(), 3);
 
     let restored = load_state(dir.path());
     assert!(!restored.inbox_sources.broadcasts);

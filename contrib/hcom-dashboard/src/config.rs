@@ -433,6 +433,9 @@ pub struct DashboardState {
     /// Inbox messages marked read, by `InboxMessage::read_key`.
     #[serde(default)]
     pub inbox_read: BTreeSet<String>,
+    /// Inbox lists only unread messages.
+    #[serde(default)]
+    pub inbox_unread_only: bool,
 }
 
 /// Which messages the Inbox tab lists (see `InboxMessage`).
@@ -705,6 +708,7 @@ impl Default for DashboardState {
             edge_width_bytes: false,
             inbox_sources: InboxSources::default(),
             inbox_read: BTreeSet::new(),
+            inbox_unread_only: false,
         }
     }
 }

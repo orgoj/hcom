@@ -3987,14 +3987,16 @@ impl HcomDashboardApp {
         });
     }
 
-    /// Inbox messages the enabled sources list, newest first.
+    /// Inbox messages the enabled sources (and `Unread only`) list, newest first.
     pub fn inbox_messages(&self) -> Vec<&InboxMessage> {
         let sources = self.state.inbox_sources;
+        let unread_only = self.state.inbox_unread_only;
         self.graph
             .inbox
             .iter()
             .rev()
             .filter(|m| sources.matches(m))
+            .filter(|m| !unread_only || !self.state.inbox_read.contains(&m.read_key()))
             .collect()
     }
 
@@ -4046,6 +4048,10 @@ impl HcomDashboardApp {
                 .checkbox(&mut s.broadcasts, "Broadcasts")
                 .on_hover_text("Messages without recipients")
                 .changed();
+            changed |= ui
+                .checkbox(&mut self.state.inbox_unread_only, "Unread only")
+                .on_hover_text("Hide messages marked read")
+                .changed();
             mark_all = ui.button("Mark all read").clicked();
         });
         ui.separator();
@@ -4057,7 +4063,11 @@ impl HcomDashboardApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 if messages.is_empty() {
-                    ui.weak("No messages for bigboss.");
+                    ui.weak(if self.state.inbox_unread_only {
+                        "No unread messages for bigboss."
+                    } else {
+                        "No messages for bigboss."
+                    });
                 }
                 for m in &messages {
                     let key = m.read_key();

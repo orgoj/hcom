@@ -4,7 +4,7 @@ title: 'hcom-dashboard: panel for messages to bigboss'
 status: In Progress
 assignee: []
 created_date: '2026-11-19T11:36:00Z'
-updated_date: '2026-11-19T20:43:00Z'
+updated_date: '2026-11-19T20:55:00Z'
 labels: []
 dependencies: []
 priority: high
@@ -58,4 +58,6 @@ Out of scope: changes to the hcom binary, desktop notifications (TASK-119 covers
 agent_review OK (#403618); its non-blocking note applied: clicking the message text also selects the sender.
 
 Visual check by app_tester OK (steps 1-6 on live data, no clipping at 260 px; Broadcasts toggle showed no change because live data had no broadcasts). Waiting for user acceptance before Done.
+
+User 2026-11-19: Mark all read needs an unread filter; added 'Unread only' toggle (off by default, persisted inbox_unread_only), test extended. Gates: fmt, clippy 0, tests green except known load flakes (overload_10k, frame_budget, 77_68 under loadavg 13; pass on rerun/isolation).
 <!-- SECTION:NOTES:END -->
