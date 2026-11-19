@@ -1890,6 +1890,18 @@ fn phase1_decision(
     }
 }
 
+/// Whether Pending resumes a typed agy prompt whose render missed the phase-1
+/// deadline. agy reports the prompt not ready while its box holds text, so the
+/// gate would wait for an empty prompt forever; only our exact text, once idle.
+fn resume_late_render(
+    late: bool,
+    is_idle: bool,
+    input_text: Option<&str>,
+    injected_text: &str,
+) -> bool {
+    late && is_idle && prompt_ownership(input_text, injected_text) == PromptOwnership::Exclusive
+}
+
 /// Timeout for phase 2 (text clear verification).
 const PHASE2_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -2341,6 +2353,8 @@ pub fn run_delivery_loop(
         // cleared by someone else, so its typed bodies were not submitted.
         let mut enter_sent = false;
         let mut submitting_leftover = false;
+        // agy: the typed prompt missed the phase-1 deadline and may still finish.
+        let mut late_render = false;
         let mut phase_started_at = Instant::now();
         let mut cursor_before: i64 = 0;
         // Gate block tracking for TUI status updates
@@ -2507,6 +2521,27 @@ pub fn run_delivery_loop(
                         true
                     };
 
+                    let input_text = state.screen.read().unwrap().input_text.clone();
+                    if resume_late_render(
+                        late_render,
+                        is_idle,
+                        input_text.as_deref(),
+                        &injected_text,
+                    ) {
+                        log_info(
+                            "native",
+                            "delivery.late_render",
+                            "Typed prompt finished rendering after the timeout; submitting it",
+                        );
+                        late_render = false;
+                        cursor_before = db.get_cursor(&current_name);
+                        enter_sent = false;
+                        phase_started_at = Instant::now();
+                        enter_attempt = 0;
+                        delivery_state = State::WaitTextRender;
+                        continue;
+                    }
+
                     let gate = evaluate_gate(config, state, is_idle);
 
                     if gate.safe {
@@ -2588,6 +2623,7 @@ pub fn run_delivery_loop(
                             );
                             injected_text = text;
                             submitting_leftover = false;
+                            late_render = false;
                             phase_started_at = Instant::now();
                             enter_attempt = 0;
                             delivery_state = State::WaitTextRender;
@@ -2834,6 +2870,7 @@ pub fn run_delivery_loop(
                                     elapsed, inject_attempt
                                 ),
                             );
+                            late_render = prompt_ack.is_some();
                             delivery_state = State::Pending;
                             inject_attempt += 1;
                             attempt += 1;
@@ -3629,6 +3666,33 @@ mod tests {
             ),
             Phase1Decision::Rendered,
         );
+    }
+
+    #[test]
+    fn late_render_resumes_only_our_exact_prompt_once_idle() {
+        let typed = "<hcom>[ack #1] a → b: long body";
+        // Wrapped rows read back with extra spaces still count as ours.
+        assert!(resume_late_render(
+            true,
+            true,
+            Some("<hcom>[ack #1] a → b: long bo dy"),
+            typed
+        ));
+        assert!(!resume_late_render(false, true, Some(typed), typed));
+        assert!(!resume_late_render(true, false, Some(typed), typed));
+        assert!(!resume_late_render(
+            true,
+            true,
+            Some("<hcom>[ack #1] a → b: long"),
+            typed
+        ));
+        assert!(!resume_late_render(
+            true,
+            true,
+            Some(&format!("{typed} draft")),
+            typed
+        ));
+        assert!(!resume_late_render(true, true, Some(""), typed));
     }
 
     #[test]
