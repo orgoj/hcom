@@ -11,8 +11,8 @@ use crate::config::{
 };
 use crate::layout::{GraphLayout, LayoutMode};
 use crate::model::{
-    AgentGraph, AgentNode, AgentStatus, EdgeKind, MAX_DURATION_SECS, MessageRange, MessageWindow,
-    format_canonical_range, parse_time_range,
+    AgentGraph, AgentNode, AgentStatus, EdgeKind, InboxMessage, MAX_DURATION_SECS, MessageRange,
+    MessageWindow, format_canonical_range, parse_time_range,
 };
 use crate::sync::BackgroundSync;
 use crate::table_data::{
@@ -519,6 +519,8 @@ pub struct HcomDashboardApp {
     pub columns_dialog: Option<(Vec<(String, bool)>, usize)>,
     pub send_target: String,
     pub send_text: String,
+    /// Send dialog answers this message id (`--reply-to`); set by Inbox Reply.
+    pub send_reply_to: Option<u64>,
 
     pub inject_input_has_focus: bool,
     /// A text field had the keyboard when the frame began: a single-line
@@ -534,6 +536,22 @@ pub struct HcomDashboardApp {
     /// Normal window geometry (inner size, outer position) and the egui time
     /// it was first seen; recorded once it held for 0.5 s (TASK-77.87).
     window_geom_since: Option<(GeomKey, f64)>,
+}
+
+/// `hcom send` of the Send dialog: as bigboss to `@target`, answering
+/// `reply_to` when set.
+pub fn send_command(target: &str, text: &str, reply_to: Option<u64>) -> Vec<String> {
+    let mut cmd = vec![
+        "hcom".into(),
+        "send".into(),
+        "-b".into(),
+        format!("@{}", target.trim().trim_start_matches('@')),
+    ];
+    if let Some(id) = reply_to {
+        cmd.extend(["--reply-to".into(), id.to_string()]);
+    }
+    cmd.extend(["--".into(), text.to_string()]);
+    cmd
 }
 
 /// Consecutive equal lines as one line with their count (Log tab).
@@ -1135,6 +1153,7 @@ impl HcomDashboardApp {
             columns_dialog: None,
             send_target: String::new(),
             send_text: String::new(),
+            send_reply_to: None,
             inject_input_has_focus: false,
             text_focus_at_frame_start: false,
             text_focus_last_frame: false,
@@ -1262,6 +1281,7 @@ impl HcomDashboardApp {
             columns_dialog: None,
             send_target: String::new(),
             send_text: String::new(),
+            send_reply_to: None,
             inject_input_has_focus: false,
             text_focus_at_frame_start: false,
             text_focus_last_frame: false,
@@ -3734,9 +3754,16 @@ impl HcomDashboardApp {
             self.log_error_mark = true;
         }
         self.log_checked = self.command_logs.len();
+        let unread = self.inbox_unread();
+        let inbox_label = if unread > 0 {
+            format!("Inbox ({unread})")
+        } else {
+            "Inbox".to_string()
+        };
         ui.horizontal_wrapped(|ui| {
             for (tab, label) in DETAIL_TABS.iter().zip([
                 "Summary",
+                inbox_label.as_str(),
                 "Report (F9)",
                 "Screen (F5)",
                 "Transcript (F6)",
@@ -3849,6 +3876,9 @@ impl HcomDashboardApp {
             "Sessions" => {
                 self.render_sessions_tab(ui);
             }
+            "Inbox" => {
+                self.render_inbox_tab(ui);
+            }
             "Events" => {
                 let agent = self.selected_agent_name();
                 let is_running = self
@@ -3955,6 +3985,137 @@ impl HcomDashboardApp {
                 });
             }
         });
+    }
+
+    /// Inbox messages the enabled sources list, newest first.
+    pub fn inbox_messages(&self) -> Vec<&InboxMessage> {
+        let sources = self.state.inbox_sources;
+        self.graph
+            .inbox
+            .iter()
+            .rev()
+            .filter(|m| sources.matches(m))
+            .collect()
+    }
+
+    /// Unread messages among `inbox_messages`.
+    pub fn inbox_unread(&self) -> usize {
+        self.inbox_messages()
+            .iter()
+            .filter(|m| !self.state.inbox_read.contains(&m.read_key()))
+            .count()
+    }
+
+    /// Marks every message the current filter lists as read.
+    pub fn inbox_mark_all_read(&mut self) {
+        let keys: Vec<String> = self.inbox_messages().iter().map(|m| m.read_key()).collect();
+        self.state.inbox_read.extend(keys);
+        self.save_state();
+    }
+
+    /// Selects the table row of instance `name`; an unknown name changes nothing.
+    pub fn select_inbox_sender(&mut self, name: &str) {
+        if let Some(row) = self.table_rows.iter().find(|r| r.instance == name).cloned() {
+            self.select_table_row(&row);
+        }
+    }
+
+    /// Opens the Send dialog answering message `id` of `from`.
+    pub fn open_reply_dialog(&mut self, from: &str, id: u64) {
+        self.send_target = from.to_string();
+        self.send_reply_to = Some(id);
+        self.send_text.clear();
+        self.show_send_dialog = true;
+    }
+
+    /// Inbox tab: messages for bigboss, independent of the selected agent.
+    fn render_inbox_tab(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        let mut mark_all = false;
+        ui.horizontal_wrapped(|ui| {
+            let s = &mut self.state.inbox_sources;
+            changed |= ui
+                .checkbox(&mut s.direct, "Direct")
+                .on_hover_text("Messages that mention @bigboss")
+                .changed();
+            changed |= ui
+                .checkbox(&mut s.replies, "Replies")
+                .on_hover_text("Replies to messages from bigboss")
+                .changed();
+            changed |= ui
+                .checkbox(&mut s.broadcasts, "Broadcasts")
+                .on_hover_text("Messages without recipients")
+                .changed();
+            mark_all = ui.button("Mark all read").clicked();
+        });
+        ui.separator();
+        let messages: Vec<InboxMessage> = self.inbox_messages().into_iter().cloned().collect();
+        let mut select = None;
+        let mut reply = None;
+        egui::ScrollArea::vertical()
+            .id_salt("inbox_scroll_tab")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if messages.is_empty() {
+                    ui.weak("No messages for bigboss.");
+                }
+                for m in &messages {
+                    let key = m.read_key();
+                    let mut read = self.state.inbox_read.contains(&key);
+                    ui.push_id(&key, |ui| {
+                        ui.group(|ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal_wrapped(|ui| {
+                                if ui.checkbox(&mut read, "").on_hover_text("Read").changed() {
+                                    if read {
+                                        self.state.inbox_read.insert(key.clone());
+                                    } else {
+                                        self.state.inbox_read.remove(&key);
+                                    }
+                                    changed = true;
+                                }
+                                let time =
+                                    m.ts.with_timezone(&chrono::Local)
+                                        .format("%Y-%m-%d %H:%M")
+                                        .to_string();
+                                ui.weak(time);
+                                let from = RichText::new(&m.from);
+                                let from = if read { from } else { from.strong() };
+                                if ui.link(from).on_hover_text("Select the sender").clicked() {
+                                    select = Some(m.from.clone());
+                                }
+                                if let Some(intent) = &m.intent {
+                                    ui.weak(intent);
+                                }
+                                if ui.small_button("Reply").clicked() {
+                                    reply = Some((m.from.clone(), m.id));
+                                }
+                            });
+                            let text = RichText::new(&m.text);
+                            let text = if read { text.weak() } else { text.strong() };
+                            if ui
+                                .add(egui::Label::new(text).sense(egui::Sense::click()))
+                                .on_hover_text("Select the sender")
+                                .clicked()
+                            {
+                                select = Some(m.from.clone());
+                            }
+                        });
+                    });
+                }
+            });
+        if changed {
+            self.save_state();
+        }
+        if mark_all {
+            self.inbox_mark_all_read();
+        }
+        if let Some(name) = select {
+            self.select_inbox_sender(&name);
+        }
+        if let Some((from, id)) = reply {
+            self.open_reply_dialog(&from, id);
+        }
     }
 
     fn render_config_tab(&mut self, ui: &mut egui::Ui, palette: &ThemePalette) {
@@ -5449,6 +5610,7 @@ impl eframe::App for HcomDashboardApp {
                             r.agent.clone()
                         };
                     }
+                    self.send_reply_to = None;
                     self.show_send_dialog = true;
                 }
 
@@ -6101,6 +6263,9 @@ impl eframe::App for HcomDashboardApp {
             let (_, escape) = show_modal(&ctx, "Send Message", |ui| {
                 ui.label("Target Agent / Instance:");
                 ui.text_edit_singleline(&mut self.send_target);
+                if let Some(id) = self.send_reply_to {
+                    ui.weak(format!("Reply to message #{id}"));
+                }
                 ui.label("Message:");
                 let message = ui.text_edit_multiline(&mut self.send_text);
                 if just_opened {
@@ -6108,14 +6273,8 @@ impl eframe::App for HcomDashboardApp {
                 }
                 ui.horizontal(|ui| {
                     if ui.button("Send").clicked() && !self.send_target.trim().is_empty() {
-                        let cmd = vec![
-                            "hcom".into(),
-                            "send".into(),
-                            "-b".into(),
-                            format!("@{}", self.send_target.trim().trim_start_matches('@')),
-                            "--".into(),
-                            self.send_text.clone(),
-                        ];
+                        let cmd =
+                            send_command(&self.send_target, &self.send_text, self.send_reply_to);
                         self.dispatch_action(ActionRequest::RunCommand { cmd, cwd: None });
                         self.send_text.clear();
                         self.show_send_dialog = false;

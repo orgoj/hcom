@@ -1,7 +1,10 @@
 use chrono::{DateTime, Local, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+/// The user's identity in hcom.
+pub const BIGBOSS: &str = "bigboss";
 
 /// Scans UTF-8 bytes and strips ECMA-48 CSI and OSC escape sequences
 /// (both 7-bit and UTF-8 2-byte C1 encodings). Discards unterminated
@@ -257,6 +260,29 @@ pub struct MessageData {
     pub reply_to: Option<serde_json::Value>,
     #[serde(default)]
     pub text: String,
+}
+
+/// A message for bigboss in the Inbox tab, with the sources it matches.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InboxMessage {
+    pub id: u64,
+    pub ts: DateTime<Utc>,
+    pub from: String,
+    pub intent: Option<String>,
+    pub text: String,
+    /// Mentions contain bigboss.
+    pub direct: bool,
+    /// Answers a message bigboss sent.
+    pub reply: bool,
+    /// Has no recipients (no mentions).
+    pub broadcast: bool,
+}
+
+impl InboxMessage {
+    /// Read-state key: ids restart after a database reset, the time does not.
+    pub fn read_key(&self) -> String {
+        format!("{}@{}", self.id, self.ts.to_rfc3339())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -610,6 +636,10 @@ pub struct AgentGraph {
     initiators_dirty: bool,
     /// Window (and live second) `initiators` were counted for.
     initiators_key: Option<(MessageWindow, i64)>,
+    /// Messages for bigboss in event order (Inbox tab).
+    pub inbox: Vec<InboxMessage>,
+    /// Ids of messages bigboss sent, to recognize replies to them.
+    bigboss_sent: HashSet<u64>,
 }
 
 /// The message that opened a conversation segment.
@@ -776,6 +806,7 @@ impl AgentGraph {
             self.last_event_id = event.id;
             return false;
         }
+        self.collect_inbox(event);
 
         let mut recipients = event.data.delivered_to.clone();
         if recipients.is_empty() {
@@ -843,6 +874,38 @@ impl AgentGraph {
         self.last_event_id = event.id;
         self.initiators_dirty = true;
         true
+    }
+
+    /// Records a message from bigboss (for reply detection) or adds a
+    /// message for bigboss to `inbox`, classified by source.
+    fn collect_inbox(&mut self, event: &MessageEvent) {
+        let data = &event.data;
+        if data.from == BIGBOSS {
+            self.bigboss_sent.insert(event.id);
+            return;
+        }
+        let direct = data.mentions.iter().any(|m| m == BIGBOSS);
+        // Only a plain id is local; `7:BOXE` names a message on another device.
+        let reply_id = match &data.reply_to {
+            Some(serde_json::Value::Number(n)) => n.as_u64(),
+            Some(serde_json::Value::String(s)) => s.trim().parse().ok(),
+            _ => None,
+        };
+        let reply = reply_id.is_some_and(|id| self.bigboss_sent.contains(&id));
+        let broadcast = data.mentions.is_empty();
+        if !(direct || reply || broadcast) {
+            return;
+        }
+        self.inbox.push(InboxMessage {
+            id: event.id,
+            ts: event.ts,
+            from: data.from.clone(),
+            intent: data.intent.as_deref().map(sanitize_display_string),
+            text: sanitize_display_string(&data.text),
+            direct,
+            reply,
+            broadcast,
+        });
     }
 
     /// Replaces the session starts (event ids of life `created` per instance).
@@ -1095,6 +1158,8 @@ impl AgentGraph {
         self.graph
             .retain_edges(|frozen, edge_idx| !matches!(frozen[edge_idx], EdgeKind::Message(_)));
         self.message_edges.clear();
+        self.inbox.clear();
+        self.bigboss_sent.clear();
         self.last_event_id = 0;
         self.initiators_dirty = true;
 

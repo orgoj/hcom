@@ -16889,3 +16889,182 @@ fn test_task_77_109_duration_formats() {
     let cfg = hcom_dashboard::config::load_config(dir.path());
     assert_eq!(cfg.time_format, "d hh:mm");
 }
+
+/// TASK-125: Inbox message for bigboss from `from`.
+fn inbox_event(id: u64, from: &str, mentions: &[&str], reply_to: Option<&str>) -> MessageEvent {
+    MessageEvent {
+        id,
+        ts: chrono::DateTime::from_timestamp(1_700_000_000 + id as i64, 0).unwrap(),
+        instance: from.into(),
+        data: MessageData {
+            from: from.into(),
+            delivered_to: mentions.iter().map(|m| m.to_string()).collect(),
+            mentions: mentions.iter().map(|m| m.to_string()).collect(),
+            intent: Some("inform".into()),
+            reply_to: reply_to.map(|r| serde_json::json!(r)),
+            text: format!("msg {id}"),
+        },
+    }
+}
+
+/// TASK-125: sources direct (mentions bigboss), replies (reply_to a message
+/// from bigboss, plain local id only) and broadcasts (no mentions).
+#[test]
+fn test_task_125_inbox_classifies_sources() {
+    let mut g = AgentGraph::new();
+    for e in [
+        inbox_event(1, "bigboss", &["luna"], None),
+        inbox_event(2, "luna", &["bigboss"], None),
+        inbox_event(3, "luna", &["nova"], Some("1")),
+        inbox_event(4, "luna", &[], None),
+        inbox_event(5, "luna", &["nova"], None),
+        inbox_event(6, "luna", &["nova"], Some("1:BOXE")),
+        inbox_event(7, "nova", &["luna"], Some("2")),
+    ] {
+        g.apply_message_event(&e);
+    }
+    let got: Vec<(u64, bool, bool, bool)> = g
+        .inbox
+        .iter()
+        .map(|m| (m.id, m.direct, m.reply, m.broadcast))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (2, true, false, false),
+            (3, false, true, false),
+            (4, false, false, true)
+        ]
+    );
+    g.reset_events();
+    assert!(g.inbox.is_empty());
+    g.apply_message_event(&inbox_event(3, "luna", &["nova"], Some("1")));
+    assert!(g.inbox.is_empty(), "reset forgets messages bigboss sent");
+}
+
+/// TASK-125: default filter, unread count, read state persisted by id@ts,
+/// Mark all read covers only the listed messages, sender selection.
+#[test]
+fn test_task_125_inbox_filter_read_state_and_selection() {
+    use hcom_dashboard::config::{DashboardState, InboxSources, load_state};
+    use hcom_dashboard::table_data::TableRow;
+
+    let defaults = InboxSources::default();
+    assert!(defaults.direct && defaults.replies && !defaults.broadcasts);
+    let parsed: DashboardState = serde_json::from_str("{}").unwrap();
+    assert_eq!(parsed.inbox_sources, defaults);
+
+    let (dir, mut app) = split_test_app(DashboardState::default());
+    for e in [
+        inbox_event(1, "luna", &["bigboss"], None),
+        inbox_event(2, "nova", &["bigboss"], None),
+        inbox_event(3, "kira", &[], None),
+    ] {
+        app.graph.apply_message_event(&e);
+    }
+    let ids: Vec<u64> = app.inbox_messages().iter().map(|m| m.id).collect();
+    assert_eq!(ids, vec![2, 1], "newest first, broadcast off by default");
+    assert_eq!(app.inbox_unread(), 2);
+
+    app.state.inbox_sources.broadcasts = true;
+    assert_eq!(app.inbox_unread(), 3);
+    app.state.inbox_sources.broadcasts = false;
+    app.inbox_mark_all_read();
+    assert_eq!(app.inbox_unread(), 0);
+    app.state.inbox_sources.broadcasts = true;
+    assert_eq!(app.inbox_unread(), 1, "Mark all read skips hidden messages");
+
+    let restored = load_state(dir.path());
+    assert!(!restored.inbox_sources.broadcasts);
+    assert_eq!(restored.inbox_read.len(), 2);
+    let key = app.graph.inbox[0].read_key();
+    assert!(restored.inbox_read.contains(&key));
+    // Same id after a database reset, other time: unread.
+    let mut after_reset = inbox_event(1, "luna", &["bigboss"], None);
+    after_reset.ts += chrono::Duration::days(1);
+    let mut g = AgentGraph::new();
+    g.apply_message_event(&after_reset);
+    assert!(!restored.inbox_read.contains(&g.inbox[0].read_key()));
+
+    app.table_rows = vec![TableRow {
+        agent: "luna".into(),
+        instance: "luna".into(),
+        is_running: true,
+        ..Default::default()
+    }];
+    app.select_inbox_sender("ghost");
+    assert_eq!(app.selected_row_id, None, "unknown sender changes nothing");
+    app.select_inbox_sender("luna");
+    assert_eq!(app.selected_row_id.as_deref(), Some("luna"));
+}
+
+/// TASK-125: Reply opens the Send dialog for the sender and sends
+/// `hcom send -b @sender --reply-to <id> -- <text>`; plain Send stays as before.
+#[test]
+fn test_task_125_reply_command() {
+    use hcom_dashboard::app::send_command;
+    use hcom_dashboard::config::DashboardState;
+
+    assert_eq!(
+        send_command("@luna", "ok", Some(42)),
+        [
+            "hcom",
+            "send",
+            "-b",
+            "@luna",
+            "--reply-to",
+            "42",
+            "--",
+            "ok"
+        ]
+    );
+    assert_eq!(
+        send_command("luna", "hi", None),
+        ["hcom", "send", "-b", "@luna", "--", "hi"]
+    );
+    let (_dir, mut app) = split_test_app(DashboardState::default());
+    app.send_text = "stale".into();
+    app.open_reply_dialog("luna", 42);
+    assert!(app.show_send_dialog);
+    assert_eq!(app.send_target, "luna");
+    assert_eq!(app.send_reply_to, Some(42));
+    assert!(app.send_text.is_empty());
+}
+
+/// TASK-125: the Inbox tab renders headless and its label shows the unread
+/// count, none at zero.
+#[test]
+fn test_task_125_inbox_tab_label_shows_unread_count() {
+    use eframe::App;
+    use hcom_dashboard::config::DashboardState;
+
+    let (_dir, mut app) = split_test_app(DashboardState {
+        detail_tab: "Inbox".into(),
+        ..Default::default()
+    });
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 800.0));
+    let mut frame = eframe::Frame::_new_kittest();
+    let mut render = |app: &mut hcom_dashboard::app::HcomDashboardApp| {
+        let mut out = None;
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let mut o = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+            o.textures_delta.clear();
+            out = Some(o);
+        }
+        out.unwrap()
+    };
+    let out = render(&mut app);
+    assert_eq!(widget_rects(&out, "Inbox").len(), 1);
+    app.graph
+        .apply_message_event(&inbox_event(1, "luna", &["bigboss"], None));
+    let out = render(&mut app);
+    assert_eq!(widget_rects(&out, "Inbox (1)").len(), 1);
+    assert_eq!(widget_rects(&out, "Mark all read").len(), 1);
+    assert_eq!(widget_rects(&out, "Reply").len(), 1);
+}

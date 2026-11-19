@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -427,6 +427,37 @@ pub struct DashboardState {
     /// Message arrow width by text bytes instead of message count.
     #[serde(default)]
     pub edge_width_bytes: bool,
+    /// Sources the Inbox tab lists.
+    #[serde(default)]
+    pub inbox_sources: InboxSources,
+    /// Inbox messages marked read, by `InboxMessage::read_key`.
+    #[serde(default)]
+    pub inbox_read: BTreeSet<String>,
+}
+
+/// Which messages the Inbox tab lists (see `InboxMessage`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InboxSources {
+    pub direct: bool,
+    pub replies: bool,
+    pub broadcasts: bool,
+}
+
+impl Default for InboxSources {
+    fn default() -> Self {
+        Self {
+            direct: true,
+            replies: true,
+            broadcasts: false,
+        }
+    }
+}
+
+impl InboxSources {
+    pub fn matches(&self, m: &crate::model::InboxMessage) -> bool {
+        (self.direct && m.direct) || (self.replies && m.reply) || (self.broadcasts && m.broadcast)
+    }
 }
 
 /// Search text and filter checkboxes of one panel (graph or table).
@@ -622,8 +653,9 @@ fn default_sort_col() -> Option<String> {
 }
 
 /// Tabs of the right detail panel, in display order.
-pub const DETAIL_TABS: [&str; 9] = [
+pub const DETAIL_TABS: [&str; 10] = [
     "Summary",
+    "Inbox",
     "Report",
     "Screen",
     "Transcript",
@@ -671,6 +703,8 @@ impl Default for DashboardState {
             show_message_edges: true,
             show_spawn_edges: true,
             edge_width_bytes: false,
+            inbox_sources: InboxSources::default(),
+            inbox_read: BTreeSet::new(),
         }
     }
 }

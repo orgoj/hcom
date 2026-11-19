@@ -1,10 +1,10 @@
 ---
 id: TASK-125
 title: 'hcom-dashboard: panel for messages to bigboss'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-11-19T11:36:00Z'
-updated_date: '2026-11-19T11:44:00Z'
+updated_date: '2026-11-19T20:22:00Z'
 labels: []
 dependencies: []
 priority: high
@@ -30,14 +30,14 @@ Out of scope: changes to the hcom binary, desktop notifications (TASK-119 covers
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A right detail-panel tab Inbox lists, newest first, the messages matching the enabled sources, with time, sender, intent and text; it does not depend on the selected agent
-- [ ] #2 Source toggles direct (mentions contain bigboss), replies (reply_to a message from bigboss) and broadcasts (no recipients) filter the list; default direct and replies on, broadcasts off; the choice survives a restart (dashboard-state.json)
-- [ ] #3 Each message can be marked read or unread by hand; unread ones are visually distinct; the state survives a restart and is keyed by id plus timestamp, so a database reset does not mark new messages read
-- [ ] #4 Mark all read marks every message shown by the current filter as read
-- [ ] #5 The Inbox tab label shows the number of unread messages in the current filter; zero shows no mark
-- [ ] #6 Clicking a message selects its sender agent; a message from an agent not in the table changes nothing and logs no error
-- [ ] #7 Reply opens the Send dialog prefilled with the sender and sends hcom send -b @sender --reply-to <id> -- <text>
-- [ ] #8 Headless tests cover the source classification, filter defaults, read-state persistence and the reply command; dashboard fmt, clippy --all-targets and tests pass
+- [x] #1 A right detail-panel tab Inbox lists, newest first, the messages matching the enabled sources, with time, sender, intent and text; it does not depend on the selected agent
+- [x] #2 Source toggles direct (mentions contain bigboss), replies (reply_to a message from bigboss) and broadcasts (no recipients) filter the list; default direct and replies on, broadcasts off; the choice survives a restart (dashboard-state.json)
+- [x] #3 Each message can be marked read or unread by hand; unread ones are visually distinct; the state survives a restart and is keyed by id plus timestamp, so a database reset does not mark new messages read
+- [x] #4 Mark all read marks every message shown by the current filter as read
+- [x] #5 The Inbox tab label shows the number of unread messages in the current filter; zero shows no mark
+- [x] #6 Clicking a message selects its sender agent; a message from an agent not in the table changes nothing and logs no error
+- [x] #7 Reply opens the Send dialog prefilled with the sender and sends hcom send -b @sender --reply-to <id> -- <text>
+- [x] #8 Headless tests cover the source classification, filter defaults, read-state persistence and the reply command; dashboard fmt, clippy --all-targets and tests pass
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -49,3 +49,11 @@ Out of scope: changes to the hcom binary, desktop notifications (TASK-119 covers
 4. Send dialog: optional reply_to field appended as --reply-to.
 5. Tests (headless), gates, review agent_review, commit, release build (deploy), visual check by @app_tester.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-19: implemented (model.rs collect_inbox/InboxMessage, config.rs InboxSources+inbox_read, app.rs render_inbox_tab, send_command with --reply-to), 4 tests test_task_125_*, README updated. Deviation from plan step 1: replies match only a plain local reply_to id; a relayed '7:BOXE' names a message on another device, and reply_to_local carries the sender DB value for relayed events. Next: agent_review OK -> commit -> release build -> visual check by @app_tester.
+
+agent_review OK (#403618); its non-blocking note applied: clicking the message text also selects the sender.
+<!-- SECTION:NOTES:END -->
