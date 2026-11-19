@@ -593,6 +593,14 @@ const KILL_HELP: &[HelpEntry] = &[
     ),
     ("kill all", "Kill all with tracked PIDs"),
     ("  --json", "Print every outcome as one JSON object"),
+    (
+        "  --soft",
+        "Names only: kill only if idle (listening, nothing unread)",
+    ),
+    (
+        "",
+        "One line per name: killed | not running | not killed: working (<status>)",
+    ),
     ("", ""),
     (
         "Idle autokill:",
@@ -1356,6 +1364,7 @@ Launch:\n\
 \x20 hcom recover [name...|--all]          Resume agents a crash or power loss stopped\n\
 \x20 hcom f <target>                       Fork agent session ({forkable})\n\
 \x20 hcom kill <name(s)|@group|tag:T|tool:CLI|SELF|all>  Kill + close terminal pane\n\
+\x20 hcom kill --soft <name(s)>            Kill only agents that are not working\n\
 \n\
 \x20 Any flag hcom does not know is forwarded verbatim to the tool; -- ends\n\
 \x20 hcom's own flags. Use --dry-run to see the command without running it.\n\
@@ -1982,6 +1991,8 @@ mod tests {
         assert!(get_help_text().contains("hcom kill <name(s)|@group|tag:T|tool:CLI|SELF|all>"));
         assert!(get_command_help("kill").contains("kill tool:<cli>"));
         assert!(get_command_help("kill").contains("kill SELF"));
+        assert!(get_command_help("kill").contains("--soft"));
+        assert!(get_help_text().contains("hcom kill --soft <name(s)>"));
         assert!(get_command_help("recover").contains("recover --all"));
     }
 

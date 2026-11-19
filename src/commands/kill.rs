@@ -24,6 +24,9 @@ pub struct KillArgs {
     /// Print one JSON object describing every outcome
     #[arg(long)]
     pub json: bool,
+    /// Kill only agents that are not working (listening, nothing unread)
+    #[arg(long)]
+    pub soft: bool,
 }
 
 pub struct KillTrackedResult {
@@ -48,7 +51,8 @@ struct KillOutcome {
     kind: &'static str,
     pid: Option<u32>,
     /// `sent`, `already_dead`, `permission_denied`, `already_stopped`,
-    /// `disconnected`, `stopped`, or `error`.
+    /// `disconnected`, `stopped`, or `error`; `--soft` adds `not_running` and
+    /// `not_killed` (reason in `error`).
     result: &'static str,
     pane_closed: bool,
     pane_retry_command: Option<String>,
@@ -378,10 +382,32 @@ pub fn run(argv: &[String], flags: &GlobalFlags) -> Result<i32> {
     }
     let explicit_name = flags.name.clone();
 
+    if kill_args.soft
+        && let Some(bad) = targets.iter().find(|t| {
+            *t == "all"
+                || *t == "SELF"
+                || t.starts_with('@')
+                || t.starts_with("tag:")
+                || t.starts_with("tool:")
+        })
+    {
+        eprintln!("Error: --soft takes agent names only, not '{bad}'");
+        return Ok(1);
+    }
+
     let db = HcomDb::open()?;
     let hcom_dir = paths::hcom_dir();
     let initiator = resolve_initiator(&db, explicit_name.as_deref());
     let mut report = KillReport::new(kill_args.json);
+
+    if kill_args.soft {
+        pidtrack::claim_orphans(&db, &hcom_dir);
+        let mut worst_exit = 0;
+        for target in &targets {
+            worst_exit = worst_exit.max(kill_soft(&db, target, &initiator, &mut report)?);
+        }
+        return Ok(report.finish(worst_exit));
+    }
 
     let catalogs = crate::commands::agent::Catalogs::load_for_groups(false, None).ok();
 
@@ -1080,6 +1106,111 @@ fn kill_single(
         outcome
     });
     Ok(if incomplete { 1 } else { exit })
+}
+
+/// Why a soft kill must spare this row, or `None` when the agent is idle:
+/// listening, no TUI gate (user typing, pending input), nothing unread.
+fn soft_kill_busy_reason(db: &HcomDb, row: &crate::db::InstanceRow) -> Result<Option<String>> {
+    if row.status != crate::shared::ST_LISTENING || crate::instances::is_launching_placeholder(row)
+    {
+        return Ok(Some(row.status.clone()));
+    }
+    if row.status_context.starts_with("tui:") {
+        return Ok(Some(format!("listening, {}", row.status_context)));
+    }
+    let unread = db.try_get_unread_messages(&row.name)?.len();
+    if unread > 0 {
+        return Ok(Some(format!("listening, {unread} unread")));
+    }
+    Ok(None)
+}
+
+/// `hcom kill --soft <name>`: kill a local agent only while it is not working.
+/// The idle check and the kill marker share one write transaction. A turn
+/// that starts in the milliseconds between that commit and the signal is
+/// still killed; the guard is against agents seen busy, not an exact barrier.
+/// Prints one line per target.
+fn kill_soft(db: &HcomDb, target: &str, initiator: &str, report: &mut KillReport) -> Result<i32> {
+    let name = identity::resolve_display_name(db, target).unwrap_or_else(|| target.to_string());
+    let checked = db.with_write_scope(|| {
+        let Some(row) = db.get_instance_full(&name)? else {
+            return Ok(Err("not running".to_string()));
+        };
+        if row.origin_device_id.is_some() {
+            return Ok(Err("not killed: remote agent (--soft is local only)".into()));
+        }
+        if let Some(reason) = soft_kill_busy_reason(db, &row)? {
+            return Ok(Err(format!("not killed: working ({reason})")));
+        }
+        if row.pid.is_none() {
+            return Ok(Err("not killed: no tracked process".into()));
+        }
+        db.mark_killed(&row.name, initiator)?;
+        Ok(Ok(row))
+    })?;
+    let row = match checked {
+        Ok(row) => row,
+        Err(line) => {
+            report.say(format!("{name}: {line}"));
+            let not_running = line == "not running";
+            let mut outcome = KillOutcome::new(
+                &name,
+                "agent",
+                if not_running {
+                    "not_running"
+                } else {
+                    "not_killed"
+                },
+            );
+            if !not_running {
+                outcome.error = Some(line);
+            }
+            report.record(outcome);
+            return Ok(if not_running { 0 } else { 1 });
+        }
+    };
+    let pid = row.pid.unwrap_or_default() as u32;
+    let (result, pane_closed, pane_retry_command, _, _) =
+        kill_instance(db, &row.name, pid, &row, row.background != 0, initiator);
+    if result == terminal::KillResult::PermissionDenied {
+        eprintln!(
+            "Permission denied to kill process group {} for '{}'",
+            pid, row.name
+        );
+        report.say(format!("{}: not killed: permission denied", row.name));
+        report.record(KillOutcome::signalled(
+            &row.name,
+            "agent",
+            pid,
+            result,
+            pane_closed,
+            pane_retry_command,
+        ));
+        return Ok(1);
+    }
+    stop_instance(db, &row.name, initiator, "killed");
+    report.say(format!(
+        "{}: {}",
+        row.name,
+        if result == terminal::KillResult::Sent {
+            "killed"
+        } else {
+            "not running"
+        }
+    ));
+    let incomplete = report_incomplete_pane_cleanup(result.into(), pane_retry_command.as_deref());
+    report.record(
+        KillOutcome::signalled(
+            &row.name,
+            "agent",
+            pid,
+            result,
+            pane_closed,
+            pane_retry_command,
+        )
+        .resumable(&row.name),
+    );
+    Ok(if incomplete { 1 } else { 0 })
 }
 
 fn restore_failed_kill_status(

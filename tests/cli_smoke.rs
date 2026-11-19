@@ -5216,6 +5216,99 @@ fn kill_by_tool_kills_only_instances_of_that_cli() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn kill_soft_kills_only_agents_that_are_not_working() {
+    use std::os::unix::process::CommandExt;
+
+    let h = Hcom::new();
+    let conn = rusqlite::Connection::open(h.hcom_dir.join("hcom.db")).expect("open hcom db");
+    let now = chrono::Utc::now().timestamp();
+    let mut sleepers = Vec::new();
+    for (name, status, context) in [
+        ("soft_idle", "listening", ""),
+        ("soft_busy", "active", ""),
+        ("soft_gate", "listening", "tui:user-active"),
+        ("soft_blocked", "blocked", ""),
+        ("soft_unread", "listening", ""),
+    ] {
+        // Own process group: kill signals the agent's group.
+        let child = std::process::Command::new("sleep")
+            .arg("300")
+            .process_group(0)
+            .spawn()
+            .expect("spawn sleep");
+        conn.execute(
+            "INSERT INTO instances (name, status, status_context, status_time, created_at, tool, pid) \
+             VALUES (?1, ?2, ?3, ?4, ?4, 'claude', ?5)",
+            rusqlite::params![name, status, context, now, child.id()],
+        )
+        .expect("insert instance");
+        sleepers.push((name, child));
+    }
+
+    // A launch placeholder has no PID yet; it is busy, not untracked.
+    conn.execute(
+        "INSERT INTO instances (name, status, status_time, created_at, tool) \
+         VALUES ('soft_launching', 'launching', ?1, ?1, 'claude')",
+        rusqlite::params![now],
+    )
+    .expect("insert launching instance");
+
+    let (code, _, stderr) = h.run(["send", "-b", "@soft_unread", "--", "pending"]);
+    assert_eq!(code, 0, "send failed: {stderr}");
+
+    let (code, stdout, stderr) = h.run(["kill", "--soft", "tag:x"]);
+    assert_eq!(code, 1, "stdout={stdout} stderr={stderr}");
+    assert!(stderr.contains("--soft takes agent names only"), "{stderr}");
+
+    let (code, stdout, stderr) = h.run([
+        "kill",
+        "--soft",
+        "soft_idle",
+        "soft_busy",
+        "soft_gate",
+        "soft_blocked",
+        "soft_unread",
+        "soft_launching",
+        "soft_nobody",
+    ]);
+    assert_eq!(code, 1, "spared agents fail the command: stderr={stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "soft_idle: killed",
+            "soft_busy: not killed: working (active)",
+            "soft_gate: not killed: working (listening, tui:user-active)",
+            "soft_blocked: not killed: working (blocked)",
+            "soft_unread: not killed: working (listening, 1 unread)",
+            "soft_launching: not killed: working (launching)",
+            "soft_nobody: not running",
+        ],
+        "stderr={stderr}"
+    );
+
+    for (name, mut child) in sleepers {
+        let mut exited = false;
+        for _ in 0..40 {
+            exited = child.try_wait().expect("try_wait").is_some();
+            if exited || name != "soft_idle" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(exited, name == "soft_idle", "{name}");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    let (code, stdout, stderr) = h.run(["kill", "--soft", "soft_idle", "--json"]);
+    assert_eq!(code, 0, "stdout={stdout} stderr={stderr}");
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+    assert_eq!(report["results"][0]["result"], "not_running", "{report}");
+}
+
 #[test]
 fn kill_self_kills_only_the_calling_instance() {
     let h = Hcom::new();

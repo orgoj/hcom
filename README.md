@@ -266,6 +266,7 @@ hcom r <name|session_id>     # resume agent
 hcom recover [name...|--all] # list or resume agents a crash or power loss stopped (--json, --hours N)
 hcom f <name|session_id>     # fork session
 hcom kill <name|@group|tag:T|tool:CLI|SELF|all>   # kill + close terminal pane (SELF = the calling agent)
+hcom kill --soft <name...>   # kill only if not working: prints killed | not running | not killed: working (<status>)
 ```
 
 hcom launch flags:
