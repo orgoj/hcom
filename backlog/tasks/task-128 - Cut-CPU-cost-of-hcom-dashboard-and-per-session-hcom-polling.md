@@ -4,7 +4,7 @@ title: Cut CPU cost of hcom-dashboard and per-session hcom polling
 status: Idea
 assignee: []
 created_date: '2026-11-19T15:45:00Z'
-updated_date: '2026-11-19T15:47:00Z'
+updated_date: '2026-11-19T15:57:00Z'
 labels: []
 dependencies: []
 priority: medium
@@ -22,4 +22,6 @@ Measured 2026-11-19 on a 4-core i5-4690 with 14 Claude sessions: hcom-dashboard 
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-19 follow-up sample (20 s): the dashboard runs python3 -I contrib/idle-classifier/idle_check.py --json -- <agent> one agent after another, nonstop; each run lasts 10-12+ s and calls hcom list --json, so one Python process runs practically all the time. User decision (2026-11-19): hcom-dashboard is pure Rust: no Python at all, no spawning of external scripts or of the hcom CLI per agent; idle detection lives inside the Rust code. Still record only, do not implement now.
+
+Idle classifier spawning is split out as TASK-130 (off by default, opt-in in dashboard.json).
 <!-- SECTION:NOTES:END -->
