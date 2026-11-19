@@ -4,7 +4,7 @@ title: 'hcom-dashboard: panel for messages to bigboss'
 status: In Progress
 assignee: []
 created_date: '2026-11-19T11:36:00Z'
-updated_date: '2026-11-19T20:22:00Z'
+updated_date: '2026-11-19T20:43:00Z'
 labels: []
 dependencies: []
 priority: high
@@ -56,4 +56,6 @@ Out of scope: changes to the hcom binary, desktop notifications (TASK-119 covers
 2026-11-19: implemented (model.rs collect_inbox/InboxMessage, config.rs InboxSources+inbox_read, app.rs render_inbox_tab, send_command with --reply-to), 4 tests test_task_125_*, README updated. Deviation from plan step 1: replies match only a plain local reply_to id; a relayed '7:BOXE' names a message on another device, and reply_to_local carries the sender DB value for relayed events. Next: agent_review OK -> commit -> release build -> visual check by @app_tester.
 
 agent_review OK (#403618); its non-blocking note applied: clicking the message text also selects the sender.
+
+Visual check by app_tester OK (steps 1-6 on live data, no clipping at 260 px; Broadcasts toggle showed no change because live data had no broadcasts). Waiting for user acceptance before Done.
 <!-- SECTION:NOTES:END -->
