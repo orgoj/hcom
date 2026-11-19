@@ -1744,12 +1744,16 @@ impl HcomDashboardApp {
     /// Drops the error `<kind> for '<agent>' failed…` once such a load
     /// succeeded (e.g. a Screen of an agent that was still starting).
     pub fn clear_stale_error(&mut self, kind: &str, agent: &str) {
-        let prefix = format!("{kind} for '{agent}' failed");
+        self.clear_error_starting(agent, &format!("{kind} for '{agent}' failed"));
+    }
+
+    /// Drops the error of `agent` that starts with `prefix`.
+    fn clear_error_starting(&mut self, agent: &str, prefix: &str) {
         if self.action_error_agent.as_deref() == Some(agent)
             && self
                 .action_error
                 .as_ref()
-                .is_some_and(|e| e.starts_with(&prefix))
+                .is_some_and(|e| e.starts_with(prefix))
         {
             self.action_error = None;
         }
@@ -4847,6 +4851,10 @@ impl eframe::App for HcomDashboardApp {
                             self.set_action_error(Some(&agent), msg.clone());
                             self.command_logs.push(format!("[ERROR] {}", msg));
                         } else {
+                            self.clear_error_starting(
+                                &agent,
+                                &format!("Attach to '{}' failed", agent),
+                            );
                             self.command_logs
                                 .push(format!("[OK] Attached to {}", agent));
                         }

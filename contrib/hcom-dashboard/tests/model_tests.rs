@@ -14164,6 +14164,44 @@ fn test_task_77_70_successful_load_clears_its_stale_error() {
     }
 }
 
+/// A successful attach drops that agent's failed-attach error; other errors
+/// stay (TASK-122).
+#[test]
+fn test_task_122_successful_attach_clears_its_stale_error() {
+    use hcom_dashboard::config::DashboardConfig;
+
+    let (mut app, _recorded, _dir) = task_77_52_app(DashboardConfig::default());
+    let ctx = egui::Context::default();
+    let mut run = task_77_52_runner(ctx.clone());
+    let row = app.table_rows[0].clone();
+    app.select_table_row(&row);
+    run(&mut app, vec![]);
+    let mut attach = |app: &mut hcom_dashboard::app::HcomDashboardApp| {
+        app.dispatch_action(ActionRequest::Attach {
+            agent: "inst_alpha_1".into(),
+            custom_cmd: None,
+        });
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(20));
+            run(app, vec![]);
+        }
+    };
+
+    let err = "Attach to 'inst_alpha_1' failed: agent target not found";
+    app.set_action_error(Some("inst_alpha_1"), err.into());
+    attach(&mut app);
+    assert_eq!(app.action_error, None, "attach success clears its error");
+
+    for (agent, err) in [
+        ("inst_alpha_1", "Inject to 'inst_alpha_1' failed: x"),
+        ("other", "Attach to 'other' failed: x"),
+    ] {
+        app.set_action_error(Some(agent), err.into());
+        attach(&mut app);
+        assert_eq!(app.action_error.as_deref(), Some(err));
+    }
+}
+
 /// The window opens maximized or in its last normal size (TASK-77.71).
 #[test]
 fn test_task_77_71_window_state_is_remembered() {
