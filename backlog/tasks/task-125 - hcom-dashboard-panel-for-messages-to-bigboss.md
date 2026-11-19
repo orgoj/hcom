@@ -1,10 +1,10 @@
 ---
 id: TASK-125
 title: 'hcom-dashboard: panel for messages to bigboss'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-19T11:36:00Z'
-updated_date: '2026-11-19T20:55:00Z'
+updated_date: '2026-11-19T20:57:00Z'
 labels: []
 dependencies: []
 priority: high
@@ -60,4 +60,6 @@ agent_review OK (#403618); its non-blocking note applied: clicking the message t
 Visual check by app_tester OK (steps 1-6 on live data, no clipping at 260 px; Broadcasts toggle showed no change because live data had no broadcasts). Waiting for user acceptance before Done.
 
 User 2026-11-19: Mark all read needs an unread filter; added 'Unread only' toggle (off by default, persisted inbox_unread_only), test extended. Gates: fmt, clippy 0, tests green except known load flakes (overload_10k, frame_budget, 77_68 under loadavg 13; pass on rerun/isolation).
+
+Accepted by the user 2026-11-19 (Unread only stays off by default).
 <!-- SECTION:NOTES:END -->
