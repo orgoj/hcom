@@ -1765,7 +1765,7 @@ pub(crate) fn inject_enter(port: u16) -> bool {
 const RETRY_DELAY: Duration = Duration::from_millis(250);
 
 /// Timeout for phase 1 (text render verification).
-const PHASE1_TIMEOUT: Duration = Duration::from_secs(10);
+const PHASE1_TIMEOUT: Duration = Duration::from_secs(100);
 
 /// Classify the prompt text relative to the text injected by this delivery attempt.
 ///
@@ -1903,10 +1903,10 @@ fn resume_late_render(
 }
 
 /// Timeout for phase 2 (text clear verification).
-const PHASE2_TIMEOUT: Duration = Duration::from_secs(2);
+const PHASE2_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Overall verification timeout for cursor advance.
-const VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(100);
 
 /// Start an OpenCode/Kilo session for mail that arrived before one existed. The
 /// plugin creates the session and shows it in the TUI when woken on its
@@ -3652,8 +3652,8 @@ mod tests {
     // ---- phase-1 ownership tests ----
 
     #[test]
-    fn phase1_timeout_is_ten_seconds() {
-        assert_eq!(PHASE1_TIMEOUT, Duration::from_secs(10));
+    fn phase1_timeout_is_a_hundred_seconds() {
+        assert_eq!(PHASE1_TIMEOUT, Duration::from_secs(100));
     }
 
     #[test]

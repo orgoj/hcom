@@ -13,7 +13,7 @@ use crate::shared::ST_INACTIVE;
 
 /// Longest prompt hcom types into agy. agy 1.5.9 re-wraps the whole input per
 /// typed character (~330 chars/s, slower as it grows), so longer text would miss
-/// the 10 s render check; the cut-off rest is left to `hcom events`.
+/// the render check under load; the cut-off rest is left to `hcom events`.
 const AGY_PROMPT_MAX_CHARS: usize = 1500;
 
 const AGY_REQUEST_NOTE: &str =
