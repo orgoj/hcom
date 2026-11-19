@@ -109,12 +109,11 @@ pub fn sweep_throttled(db: &HcomDb) {
     if !any_key(db) {
         return;
     }
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
+    // `hcom` from PATH: a long-running process outlives its replaced binary,
+    // and its current_exe() is then a deleted file that cannot be spawned.
     // Concurrent duplicate sweeps are harmless: every claim is a compare-and-swap.
     let _ = db.kv_set(SWEEP_KV, Some(&now.to_string()));
-    sweep(db, now, &exe);
+    sweep(db, now, Path::new("hcom"));
 }
 
 /// Identifies one process incarnation of a row: PID reuse alone must not let a
