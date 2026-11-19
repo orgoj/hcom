@@ -37,9 +37,64 @@ elif os.path.basename(sys.argv[0]) == "hcom" and sys.argv[1:3] == ["agent", "sho
     if os.environ.get("FAKE_SHOW_FAIL"):
         sys.exit("Error: " + os.environ["FAKE_SHOW_FAIL"])
     print(os.environ.get("FAKE_SHOW", ""))
-elif os.path.basename(sys.argv[0]) == "claude":
+elif os.path.basename(sys.argv[0]) == "hcom" and sys.argv[1] == "events":
+    kind = "stopped" if "stopped" in sys.argv else "message" if "message" in sys.argv else "status"
+    print(os.environ.get("FAKE_EVENTS_" + kind.upper(), ""))
+elif os.path.basename(sys.argv[0]) == "hcom" and sys.argv[1] == "transcript":
+    path = sys.argv[sys.argv.index("--path") + 1]
+    if "--json" in sys.argv:
+        print(json.dumps(json.loads(os.environ["FAKE_TRANSCRIPTS"])[path]))
+    else:
+        print("RENDERED " + path + " " + sys.argv[sys.argv.index("--path") + 2])
+elif os.path.basename(sys.argv[0]) in ("claude", "agy"):
     print(os.environ.get("FAKE_CLAUDE_OUT", "# Session review: report body\\n\\nSTATUS: DONE\\nDone: review"))
 """
+
+DAY = "2026-11-19"
+
+
+def ts(hm):
+    """UTC timestamp of DAY at local HH:MM, as hcom writes it."""
+    from datetime import datetime, timezone
+    return datetime.strptime(f"{DAY} {hm}", "%Y-%m-%d %H:%M").astimezone().astimezone(
+        timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def day_env():
+    """cca_dev stopped at 12:00, its clone cca_dev_2 running; the stopped session also has an
+    exchange the day before."""
+    stopped = {"type": "life", "id": 1, "instance": "cca_dev", "ts": ts("12:00"),
+               "data": {"action": "stopped", "snapshot": {
+                   "transcript_path": "/t/a.jsonl", "tool": "claude", "directory": "/p",
+                   "agent_name": "cca_dev", "created_at": 0}}}
+    running = [{"name": "cca_dev_2", "tool": "codex", "transcript_path": "/t/b.jsonl",
+                "directory": "/p", "created_at": 0, "launch_context": {"agent_name": "cca_dev"}},
+               {"name": "other", "tool": "claude", "transcript_path": "/t/o.jsonl",
+                "created_at": 0}]
+    transcripts = {
+        "/t/a.jsonl": [
+            {"position": 1, "user": "old", "timestamp": "2026-11-17T10:00:00Z",
+             "usage": {"input": 1000, "output": 1000}},
+            {"position": 2, "user": "fix the bug", "timestamp": ts("09:00") + "Z",
+             "usage": {"input": 10, "output": 20, "cache_read": 300}},
+            {"position": 3, "user": "and test it", "timestamp": ts("09:30") + "Z",
+             "usage": {"input": 1, "output": 2, "cache_read": 3}}],
+        "/t/b.jsonl": [{"position": 1, "user": "clone work", "timestamp": ts("13:00") + "Z",
+                        "usage": None}]}
+    status = [{"type": "life", "id": 2, "instance": "cca_dev", "ts": ts("08:59"),
+               "data": {"action": "created", "by": "cca_manager"}},
+              {"type": "status", "id": 3, "instance": "cca_dev", "ts": ts("09:05"),
+               "data": {"status": "listening", "context": "tool:Bash"}},
+              {"type": "status", "id": 4, "instance": "cca_dev", "ts": ts("09:29"),
+               "data": {"status": "blocked", "context": "approval", "detail": "git push"}}]
+    msgs = [{"type": "message", "id": 9, "instance": "cca_dev", "ts": ts("09:10"),
+             "data": {"from": "cca_dev", "delivered_to": ["agent_review"], "intent": "request",
+                      "text": "please review"}}]
+    lines = lambda rows: "\n".join(json.dumps(r) for r in rows)
+    return {"FAKE_AGENTS": json.dumps(running), "FAKE_TRANSCRIPTS": json.dumps(transcripts),
+            "FAKE_EVENTS_STOPPED": lines([stopped]), "FAKE_EVENTS_STATUS": lines(status),
+            "FAKE_EVENTS_MESSAGE": lines(msgs),
+            "FAKE_CLAUDE_OUT": "# Day review\n## Problems\n1. **[high] Waited on approval**\n"}
 
 
 class ReviewSession(unittest.TestCase):
@@ -51,7 +106,7 @@ class ReviewSession(unittest.TestCase):
         self.hcom_dir = os.path.join(d, "hcomdir")
         os.makedirs(self.bin)
         os.makedirs(self.log)
-        for tool in ("hcom", "claude"):
+        for tool in ("hcom", "claude", "agy"):
             path = os.path.join(self.bin, tool)
             with open(path, "w") as f:
                 f.write(FAKE)
@@ -230,6 +285,70 @@ class ReviewSession(unittest.TestCase):
         r = self.run_script("zeta")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("no running agent zeta", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.log, "claude.jsonl")))
+
+    def test_day_review_on_agy_dumps_all_sessions_of_the_day(self):
+        r = self.run_script("cca_dev", "--day", DAY, "--cli", "agy", extra_env=day_env())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        report = r.stdout.strip()
+        self.assertIn(f"cca_dev-day-{DAY}-", report)
+        (agy,) = self.calls("agy")
+        self.assertEqual(agy["argv"][:3], ["--model", "gemini-4-neon-medium", "-p"])
+        outdir = os.path.join(self.hcom_dir, "tmp", "session-reviews")
+        self.assertEqual(agy["cwd"], outdir)
+        dump = report[:-len(".md")] + "-dump.md"
+        self.assertIn(os.path.basename(dump), agy["argv"][3])
+        self.assertIn("- cca_dev (claude, stopped 12:00): exchanges 2-3", agy["argv"][3])
+        with open(dump) as f:
+            text = f.read()
+        self.assertEqual(os.stat(dump).st_mode & 0o777, 0o600)
+        # Exchange 1 is from another day: not rendered, not counted.
+        self.assertIn("RENDERED /t/a.jsonl 2-3", text)
+        self.assertIn("RENDERED /t/b.jsonl 1-1", text)
+        self.assertNotIn("/t/o.jsonl", text)
+        self.assertIn("| cca_dev | claude | stopped 12:00 | 2 | 303 | 0 | 11 | 22 |", text)
+        self.assertIn("| cca_dev_2 | codex | running | 1 | 0 | ", text)  # no usage: estimated
+        self.assertIn("| **total** |  |  | 3 | 303 | ", text)
+        self.assertIn("09:00:00 cca_dev #2 prompt: fix the bug", text)
+        self.assertIn("09:10:00 msg cca_dev -> agent_review [request] #9: please review", text)
+        self.assertIn("09:29:00 GAP 19 min (state before: cca_dev listening tool:Bash)", text)
+        self.assertIn("09:29:00 cca_dev BLOCKED approval git push", text)
+        self.assertIn("13:00:00 GAP 210 min (state before: cca_dev blocked)", text)
+        participants = [c["argv"] for c in self.calls("hcom") if "message" in c["argv"]][0]
+        self.assertIn("cca_dev_2", participants)
+        msg = self.calls("hcom")[-1]["stdin"]
+        self.assertIn(f"Day review of agent cca_dev and clones for {DAY} (2 sessions)", msg)
+        self.assertIn("1 finding; top: [high] Waited on approval", msg)
+        self.assertIn("Dump (tokens, timeline, transcripts): " + dump, msg)
+
+    def test_day_review_inlines_rules_notes_and_memory(self):
+        bundle = os.path.join(self.tmp.name, "bundle")
+        os.makedirs(os.path.join(bundle, "MEMORY"))
+        for name, body in (("NOTES.md", "note line"), ("MEMORY/topic.md", "memory line")):
+            with open(os.path.join(bundle, name), "w") as f:
+                f.write(body)
+        os.makedirs(os.path.join(self.tmp.name, "p"))
+        env = day_env()
+        env["FAKE_EVENTS_STOPPED"] = env["FAKE_EVENTS_STOPPED"].replace(
+            '"/p"', json.dumps(os.path.join(self.tmp.name, "p")))
+        env["FAKE_SHOW"] = f"name: cca_dev\nbundle: {bundle}\nSOUL rule line"
+        r = self.run_script("cca_dev", "--day", DAY, extra_env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.calls("claude")[0]["argv"][:3], ["-p", "--model", "haiku"])
+        with open(r.stdout.strip()[:-len(".md")] + "-dump.md") as f:
+            text = f.read()
+        for line in ("SOUL rule line", "note line", "memory line"):
+            self.assertIn(line, text)
+
+    def test_agy_needs_day_and_day_needs_sessions(self):
+        r = self.run_script("luna", "--cli", "agy")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--cli agy needs --day", r.stderr)
+        r = self.run_script("zeta", "--day", DAY, extra_env={**day_env(), "FAKE_EVENTS_STOPPED": "",
+                                                            "FAKE_AGENTS": "[]"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn(f"no sessions of zeta or its clones on {DAY}", r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.log, "agy.jsonl")))
         self.assertFalse(os.path.exists(os.path.join(self.log, "claude.jsonl")))
 
 

@@ -36,6 +36,21 @@ selection `HCOM_AGENTS_FILE` and `HCOM_AGENT_CATALOGS`), and none of the caller 
 (`CLAUDECODE`, `CLAUDE_ENV_FILE`, `CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`,
 `CODEX_SESSION_ID`), so they never act as the caller or the reviewed agent. The review times
 out after 30 minutes; the report file is owner-only (it quotes the transcript).
+
+`hcom run review-session NAME --day YYYY-MM-DD [--cli claude|agy]` reviews a whole local day
+instead, to find where the agent lost time and tokens and which lines of its SOUL.md, NOTES.md
+or MEMORY cause it. It collects every session of NAME and its clones (`NAME_*`): stopped ones
+from the `stopped` life events' snapshots (created before the day's end, stopped after its
+start) and running ones from `hcom list`, keeps only exchanges with a timestamp in that day,
+and writes one owner-only `<report stem>-dump.md`: token totals per session and in total,
+summed from the usage records of `hcom transcript --path FILE --detailed --json` (`estimated` =
+characters / 4 for a CLI without them); a timeline of prompts, hcom messages, lifecycle events,
+blocked approvals and gaps over 10 minutes with the status before each gap; the rule files
+named above plus all `MEMORY/**/*.md` of the bundle, inlined; and each session's
+`--detailed --full` transcript. The model only reads that dump. `--cli agy` runs
+`agy --model gemini-4-neon-medium -p` (1M context; `--model` overrides) in the report
+directory and needs `--day`. The coach message also names the dump. Day reviews time out
+after 60 minutes.
 Tests: `python3 -I contrib/review-session/test_review_session.py`.
 
 ## approval-review
