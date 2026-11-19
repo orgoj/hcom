@@ -341,6 +341,16 @@ mod host_label {
             //    leaves `name_set` false so the next tick retries. The styled
             //    label stays on `pane.rename`; this only sets the plain name
             //    field, so the two don't clobber each other.
+            //    A name herdr's rule rejects would be retried forever; skip it
+            //    once. hcom targets herdr panes by pane_id, not by this name.
+            if !self.name_set && !name.is_empty() && !herdr_accepts_agent_name(name) {
+                crate::log::log_info(
+                    "host_label",
+                    "agent_rename_skipped",
+                    &format!("herdr rejects agent name '{name}' (1-32 of [a-z0-9_-])"),
+                );
+                self.name_set = true;
+            }
             if !self.name_set
                 && (herdr_knows_tool || self.last_reported_state.is_some())
                 && !name.is_empty()
@@ -428,6 +438,16 @@ mod host_label {
             self.seq = self.seq.saturating_add(1).max(now_ns);
             self.seq
         }
+    }
+
+    /// herdr's agent name rule: a lowercase letter, then lowercase letters,
+    /// digits, `-` or `_`, 1-32 characters in all.
+    fn herdr_accepts_agent_name(name: &str) -> bool {
+        name.len() <= 32
+            && name.starts_with(|c: char| c.is_ascii_lowercase())
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
     }
 
     /// Map an hcom status constant to a herdr `pane_agent_state` value.
@@ -805,6 +825,52 @@ mod host_label {
                 classify_response("   \n"),
                 Err(SocketError::Unreachable(_))
             ));
+        }
+
+        #[test]
+        fn herdr_agent_name_rule() {
+            assert!(herdr_accepts_agent_name("luna"));
+            assert!(herdr_accepts_agent_name(&"a".repeat(32)));
+            assert!(herdr_accepts_agent_name("agent_review-cca_278"));
+            assert!(!herdr_accepts_agent_name(
+                "agent_architect_killbottleneck_228"
+            ));
+            assert!(!herdr_accepts_agent_name("Luna"));
+            assert!(!herdr_accepts_agent_name("1luna"));
+            assert!(!herdr_accepts_agent_name("lu.na"));
+        }
+
+        /// A name herdr would reject is never sent, so it is not retried
+        /// every tick (TASK-129).
+        #[cfg(unix)]
+        #[test]
+        #[serial]
+        fn rejected_agent_name_is_not_sent_to_herdr() {
+            let (dir, _hcom_dir, _home, _guard) = crate::hooks::test_helpers::isolated_test_env();
+            let socket = dir.path().join("herdr.sock");
+            let server = serve_responses(
+                socket.clone(),
+                vec![
+                    r#"{"result":{"type":"pane_renamed"}}"#,
+                    r#"{"result":{"type":"metadata_reported"}}"#,
+                ],
+            );
+            while !socket.exists() {
+                std::thread::yield_now();
+            }
+
+            let db = crate::db::HcomDb::open().unwrap();
+            let mut label = socket_backend(&socket);
+            let name = "agent_architect_killbottleneck_228";
+            label.sync(&db, name, ST_LISTENING, "claude");
+            label.sync(&db, name, ST_LISTENING, "claude");
+            assert!(label.name_set);
+
+            let requests = server.join().unwrap();
+            assert_eq!(
+                request_methods(&requests),
+                vec!["pane.rename", "pane.report_metadata"]
+            );
         }
 
         #[cfg(unix)]
