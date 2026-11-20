@@ -1848,12 +1848,29 @@ impl HcomDashboardApp {
         }
     }
 
-    fn idle_column_shown(&self) -> bool {
-        if self.state.columns.is_empty() {
-            DEFAULT_COLUMNS.contains(&"idle")
+    /// The shown table columns; without `idle_classifier` never `idle`.
+    pub fn table_columns(&self) -> Vec<String> {
+        let columns: Vec<String> = if self.state.columns.is_empty() {
+            DEFAULT_COLUMNS.iter().map(|s| s.to_string()).collect()
         } else {
-            self.state.columns.iter().any(|c| c == "idle")
-        }
+            self.state.columns.clone()
+        };
+        columns
+            .into_iter()
+            .filter(|c| self.config.idle_classifier || c != "idle")
+            .collect()
+    }
+
+    /// The Columns dialog list; without `idle_classifier` no `idle` entry.
+    pub fn column_choices(&self) -> Vec<(String, bool)> {
+        crate::table_data::column_choices(&self.table_columns(), &self.table_rows)
+            .into_iter()
+            .filter(|(c, _)| self.config.idle_classifier || c != "idle")
+            .collect()
+    }
+
+    fn idle_column_shown(&self) -> bool {
+        self.table_columns().iter().any(|c| c == "idle")
     }
 
     /// Follow the listening periods of the loaded rows; a period that lasted
@@ -2018,11 +2035,7 @@ impl HcomDashboardApp {
     }
 
     fn render_table(&mut self, ui: &mut egui::Ui, rows: &[TableRow], search: SearchKeys) {
-        let columns = if !self.state.columns.is_empty() {
-            self.state.columns.clone()
-        } else {
-            DEFAULT_COLUMNS.iter().map(|s| s.to_string()).collect()
-        };
+        let columns = self.table_columns();
 
         let target_of = |row: &TableRow| {
             if !row.instance.is_empty() {
@@ -2586,6 +2599,10 @@ impl HcomDashboardApp {
         } else {
             REPORT_FIELDS.to_vec()
         };
+        let fields: Vec<&str> = fields
+            .into_iter()
+            .filter(|f| self.config.idle_classifier || *f != "idle")
+            .collect();
 
         ui.push_id("report_scroll_container", |ui| {
             egui::ScrollArea::both()
@@ -5890,15 +5907,7 @@ impl eframe::App for HcomDashboardApp {
                     .on_hover_text("Choose the table columns and their order")
                     .clicked()
                 {
-                    let shown: Vec<String> = if self.state.columns.is_empty() {
-                        DEFAULT_COLUMNS.iter().map(|s| s.to_string()).collect()
-                    } else {
-                        self.state.columns.clone()
-                    };
-                    self.columns_dialog = Some((
-                        crate::table_data::column_choices(&shown, &self.table_rows),
-                        0,
-                    ));
+                    self.columns_dialog = Some((self.column_choices(), 0));
                 }
 
                 // Last, so a progress text never shifts other top-bar items.

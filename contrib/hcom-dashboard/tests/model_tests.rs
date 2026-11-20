@@ -6879,7 +6879,10 @@ fn test_idle_column_queues_listening_periods_only_while_shown() {
 
     let dir = tempfile::tempdir().unwrap();
     let mut app = HcomDashboardApp::new_for_test(
-        DashboardConfig::default(),
+        DashboardConfig {
+            idle_classifier: true,
+            ..DashboardConfig::default()
+        },
         DashboardState::default(),
         dir.path().to_path_buf(),
     );
@@ -6894,6 +6897,9 @@ fn test_idle_column_queues_listening_periods_only_while_shown() {
         row("short", "listening", 3),
         row("busy", "active", 30),
     ];
+    // Opt-in: default columns include Idle and the dialog offers it.
+    assert!(app.table_columns().iter().any(|c| c == "idle"));
+    assert!(app.column_choices().iter().any(|(c, _)| c == "idle"));
     // Hidden Idle column: periods are followed, nothing is queued.
     app.state.columns = vec!["agent".into()];
     app.update_idle(1000);
@@ -6904,6 +6910,33 @@ fn test_idle_column_queues_listening_periods_only_while_shown() {
     app.update_idle(1000);
     let idle: Vec<&str> = app.table_rows.iter().map(|r| r.idle.as_str()).collect();
     assert_eq!(idle, vec!["…", "", ""]);
+}
+
+#[test]
+fn test_idle_classifier_off_by_default_hides_column_and_queues_nothing() {
+    use hcom_dashboard::app::HcomDashboardApp;
+    use hcom_dashboard::config::{DashboardConfig, DashboardState};
+    use hcom_dashboard::table_data::TableRow;
+
+    let config: DashboardConfig = serde_json::from_str("{}").unwrap();
+    assert!(!config.idle_classifier);
+    let dir = tempfile::tempdir().unwrap();
+    let mut app =
+        HcomDashboardApp::new_for_test(config, DashboardState::default(), dir.path().to_path_buf());
+    app.table_rows = vec![TableRow {
+        instance: "long".into(),
+        status: "listening".into(),
+        since_seconds: Some(30),
+        ..Default::default()
+    }];
+    // Even a saved column choice with Idle does not show or queue it.
+    app.state.columns = vec!["agent".into(), "idle".into()];
+    assert_eq!(app.table_columns(), vec!["agent".to_string()]);
+    assert!(!app.column_choices().iter().any(|(c, _)| c == "idle"));
+    app.update_idle(1000);
+    assert!(app.table_rows.iter().all(|r| r.idle.is_empty()));
+    assert!(app.idle_periods.values().all(|p| p.value.is_none()));
+    assert!(app.idle_job.is_none());
 }
 
 /// App with one agent `worker_1` (table row with `dir`), Manual layout,

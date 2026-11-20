@@ -51,6 +51,9 @@ pub struct DashboardConfig {
     pub stats_seconds: u64,
     #[serde(default = "default_idle_seconds")]
     pub idle_seconds: u64,
+    /// Opt-in Idle column (runs `idle_check.py`); off = column not offered.
+    #[serde(default)]
+    pub idle_classifier: bool,
     #[serde(default)]
     pub open_with: Vec<OpenWithAction>,
     #[serde(default)]
@@ -175,6 +178,7 @@ impl Default for DashboardConfig {
             refresh_seconds: default_refresh_seconds(),
             stats_seconds: default_stats_seconds(),
             idle_seconds: default_idle_seconds(),
+            idle_classifier: false,
             open_with: Vec::new(),
             commands: Vec::new(),
             toolbar_breaks: Vec::new(),
